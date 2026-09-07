@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agenda Docente</title>
+    <meta name="description" content="Assistente digitale e calendario per docenti con gestione classi, schede alunni, diario note riservate per GLO/colloqui e analisi intelligente delle circolari" />
+    <meta property="og:title" content="Agenda Docente" />
+    <meta property="og:description" content="Assistente digitale e calendario per docenti con gestione classi, schede alunni, diario note riservate per GLO/colloqui e analisi intelligente delle circolari" />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#047857" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="AgendaDoc" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="alternate icon" href="/favicon.ico" />
+    <script>
+      (function () {
+        const _origConsoleError = console.error;
+        console.error = function (...args) {
+          if (
+            typeof args[0] === "string" &&
+            (args[0].includes("[vite] failed to connect to websocket") ||
+              args[0].includes("[vite] connect() failed") ||
+              args[0].startsWith("[vite]"))
+          ) {
+            console.debug(...args);
+            return;
+          }
+          _origConsoleError.apply(console, args);
+        };
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
