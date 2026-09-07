@@ -1,3 +1,4 @@
+import { localDateISO } from "./utils/dates";
 import React, { useState, useEffect } from "react";
 import {
   CalendarEvent,
@@ -303,7 +304,7 @@ export default function App() {
 
   const handleDeleteExtractedItem = (circularId: string, item: ExtractedItem) => {
     storage.deleteExtractedItemFromCircular(circularId, item.tempId);
-    storage.deleteEventMatchingExtractedItem(item);
+    storage.deleteEventMatchingExtractedItem(item, circularId);
     setCirculars(storage.getCirculars());
     setEvents(storage.getEvents());
     showToast("Riga estrapolata eliminata dalla circolare.");
@@ -455,7 +456,7 @@ export default function App() {
   };
 
   // Stats for badges
-  const todayIso = new Date().toISOString().slice(0, 10);
+  const todayIso = localDateISO();
   const todayEventsCount = events.filter((e) => e.date === todayIso && !e.completed).length;
   const pendingDeadlinesCount = events.filter(
     (e) => (e.category === "scadenza" || e.category === "promemoria") && !e.completed

@@ -1,3 +1,4 @@
+import { extractedItemError } from "../utils/circularParser";
 import React, { useState } from "react";
 import {
   FileText,
@@ -80,13 +81,13 @@ export const CircularsArchiveView: React.FC<CircularsArchiveViewProps> = ({
     const items = circ.extractedItems || [];
     totalExtracted += items.length;
     items.forEach((it) => {
-      const inPlan = isCommitmentInEvents(it, events);
+      const inPlan = isCommitmentInEvents(it, events, circ.id);
       if (inPlan) {
         totalInPlanning++;
       } else {
-        if (it.relevance === "VERDE" || it.relevance === "GIALLO") {
+        if (!extractedItemError(it) && (it.relevance === "VERDE" || it.relevance === "GIALLO")) {
           totalMissingRelevant++;
-          allUnsyncedRelevantEvents.push(convertExtractedItemToEvent(it, circ.title));
+          allUnsyncedRelevantEvents.push(convertExtractedItemToEvent(it, circ.title, circ.id));
         }
       }
     });
@@ -105,8 +106,8 @@ export const CircularsArchiveView: React.FC<CircularsArchiveViewProps> = ({
   const handleSyncCircular = (circ: CircularDocument, onlyRelevant: boolean = true) => {
     const items = circ.extractedItems || [];
     const missingItems = items.filter((it) => {
-      const inPlan = isCommitmentInEvents(it, events);
-      if (inPlan) return false;
+      const inPlan = isCommitmentInEvents(it, events, circ.id);
+      if (inPlan || extractedItemError(it)) return false;
       if (onlyRelevant) {
         return it.relevance === "VERDE" || it.relevance === "GIALLO";
       }
@@ -115,7 +116,7 @@ export const CircularsArchiveView: React.FC<CircularsArchiveViewProps> = ({
 
     if (missingItems.length === 0) return;
 
-    const newEvents = missingItems.map((it) => convertExtractedItemToEvent(it, circ.title));
+    const newEvents = missingItems.map((it) => convertExtractedItemToEvent(it, circ.title, circ.id));
     onAddEventsToPlanning(
       newEvents,
       `${newEvents.length} impegni della circolare "${circ.title}" aggiunti al planning!`
@@ -123,8 +124,9 @@ export const CircularsArchiveView: React.FC<CircularsArchiveViewProps> = ({
   };
 
   // Add a single commitment to planning
-  const handleAddSingleItem = (it: ExtractedItem, circTitle: string) => {
-    const ev = convertExtractedItemToEvent(it, circTitle);
+  const handleAddSingleItem = (it: ExtractedItem, circTitle: string, circularId: string) => {
+    if (extractedItemError(it)) return;
+    const ev = convertExtractedItemToEvent(it, circTitle, circularId);
     onAddEventsToPlanning([ev], `Impegno "${it.title}" aggiunto al tuo planning!`);
   };
 
@@ -230,14 +232,14 @@ export const CircularsArchiveView: React.FC<CircularsArchiveViewProps> = ({
             const activeFilter = activeFilterByCircId[circ.id] || "ALL";
 
             // Count in planning
-            const inPlanningCount = items.filter((it) => isCommitmentInEvents(it, events)).length;
+            const inPlanningCount = items.filter((it) => isCommitmentInEvents(it, events, circ.id)).length;
             const relevantItems = items.filter((it) => it.relevance === "VERDE" || it.relevance === "GIALLO");
-            const unsyncedRelevantCount = relevantItems.filter((it) => !isCommitmentInEvents(it, events)).length;
+            const unsyncedRelevantCount = relevantItems.filter((it) => !isCommitmentInEvents(it, events, circ.id)).length;
             const allInPlanning = relevantItems.length > 0 && unsyncedRelevantCount === 0;
 
             // Filtered items
             const filteredItems = items.filter((it) => {
-              const inPlan = isCommitmentInEvents(it, events);
+              const inPlan = isCommitmentInEvents(it, events, circ.id);
               if (activeFilter === "RELEVANT") return it.relevance === "VERDE" || it.relevance === "GIALLO";
               if (activeFilter === "UNSYNCED") return !inPlan;
               return true;
@@ -415,7 +417,7 @@ export const CircularsArchiveView: React.FC<CircularsArchiveViewProps> = ({
                     ) : (
                       <div className="space-y-2.5">
                         {filteredItems.map((it) => {
-                          const inPlan = isCommitmentInEvents(it, events);
+                          const inPlan = isCommitmentInEvents(it, events, circ.id);
                           const isVerde = it.relevance === "VERDE";
                           const isGiallo = it.relevance === "GIALLO";
                           const isRosso = it.relevance === "ROSSO";
@@ -471,7 +473,7 @@ export const CircularsArchiveView: React.FC<CircularsArchiveViewProps> = ({
                                   </span>
                                   <span className="flex items-center font-medium">
                                     <Clock className="w-3.5 h-3.5 mr-1 text-stone-400" />
-                                    {it.isDeadline ? "Scadenza" : `${it.startTime || "15:00"} - ${it.endTime || "16:30"}`}
+                                    {it.isDeadline ? "Scadenza" : `${it.startTime || "da definire"} - ${it.endTime || "da definire"}`}
                                   </span>
                                   {it.location && (
                                     <span className="flex items-center text-stone-500">
@@ -513,7 +515,9 @@ export const CircularsArchiveView: React.FC<CircularsArchiveViewProps> = ({
                                       Non nel planning
                                     </span>
                                     <button
-                                      onClick={() => handleAddSingleItem(it, circ.title)}
+                                      disabled={!!extractedItemError(it)}
+                                      title={extractedItemError(it) || undefined}
+                                      onClick={() => handleAddSingleItem(it, circ.title, circ.id)}
                                       className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-bold transition-colors shadow-2xs flex items-center"
                                     >
                                       <Plus className="w-3.5 h-3.5 mr-1" />

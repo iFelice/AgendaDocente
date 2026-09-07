@@ -1,3 +1,4 @@
+import { nextDateISO } from "../utils/dates";
 import { CalendarEvent } from "../types";
 
 export interface GoogleCalendarApiEvent {
@@ -44,7 +45,7 @@ export const toGoogleCalendarPayload = (event: CalendarEvent): GoogleCalendarApi
 
   if (event.isAllDay || (!event.startTime && !event.endTime)) {
     payload.start = { date: event.date };
-    payload.end = { date: event.date };
+    payload.end = { date: nextDateISO(event.date) };
   } else {
     const startStr = event.startTime || "08:00";
     let endStr = event.endTime || "";
@@ -197,7 +198,7 @@ export const getGoogleCalendarWebUrl = (event: CalendarEvent): string => {
   const cleanDate = event.date.replace(/-/g, "");
   let datesParam = "";
   if (event.isAllDay || (!event.startTime && !event.endTime)) {
-    datesParam = `${cleanDate}/${cleanDate}`;
+    datesParam = `${cleanDate}/${nextDateISO(event.date).replace(/-/g, "")}`;
   } else {
     const startHour = (event.startTime || "08:00").replace(":", "") + "00";
     let endHour = "";
@@ -250,7 +251,7 @@ export const downloadIcsCalendar = (events: CalendarEvent[], filename = "agenda_
     const cleanDate = ev.date.replace(/-/g, "");
     if (ev.isAllDay || (!ev.startTime && !ev.endTime)) {
       lines.push(`DTSTART;VALUE=DATE:${cleanDate}`);
-      lines.push(`DTEND;VALUE=DATE:${cleanDate}`);
+      lines.push(`DTEND;VALUE=DATE:${nextDateISO(ev.date).replace(/-/g, "")}`);
     } else {
       const sH = (ev.startTime || "08:00").replace(":", "");
       const eH = (ev.endTime || "09:00").replace(":", "");

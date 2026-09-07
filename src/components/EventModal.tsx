@@ -1,3 +1,5 @@
+import { eventDateError } from "../utils/dates";
+import { localDateISO } from "../utils/dates";
 import React, { useState, useEffect } from "react";
 import { Clock, MapPin, X, Calendar, BookOpen, AlertCircle, Trash2 } from "lucide-react";
 import { CalendarEvent, EventCategory, TeacherProfile } from "../types";
@@ -42,9 +44,10 @@ export const EventModal: React.FC<EventModalProps> = ({
   isGoogleConnected = false,
   googleUserEmail,
 }) => {
+  const [validationError, setValidationError] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [category, setCategory] = useState<EventCategory>("consiglio_classe");
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(localDateISO());
   const [startTime, setStartTime] = useState("15:00");
   const [endTime, setEndTime] = useState("16:30");
   const [isAllDay, setIsAllDay] = useState(false);
@@ -56,6 +59,7 @@ export const EventModal: React.FC<EventModalProps> = ({
   const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
 
   useEffect(() => {
+    setValidationError(null);
     setIsConfirmingDelete(false);
     if (eventToEdit) {
       setTitle(eventToEdit.title);
@@ -72,7 +76,7 @@ export const EventModal: React.FC<EventModalProps> = ({
     } else if (initialEventData) {
       setTitle(initialEventData.title || "");
       setCategory(initialEventData.category || "glo");
-      setDate(initialEventData.date || initialDate || new Date().toISOString().slice(0, 10));
+      setDate(initialEventData.date || initialDate || localDateISO());
       setStartTime(initialEventData.startTime || "15:00");
       setEndTime(initialEventData.endTime || "16:30");
       setIsAllDay(!!initialEventData.isAllDay);
@@ -84,7 +88,7 @@ export const EventModal: React.FC<EventModalProps> = ({
     } else {
       setTitle("");
       setCategory("consiglio_classe");
-      setDate(initialDate || new Date().toISOString().slice(0, 10));
+      setDate(initialDate || localDateISO());
       setStartTime("15:00");
       setEndTime("16:30");
       setIsAllDay(false);
@@ -102,7 +106,10 @@ export const EventModal: React.FC<EventModalProps> = ({
     e.preventDefault();
     if (!title.trim()) return;
 
+    const error = eventDateError({ date, startTime, endTime, isAllDay });
+    if (error) { setValidationError(error); return; }
     const newEvent: CalendarEvent = {
+      ...eventToEdit,
       id: eventToEdit ? eventToEdit.id : `ev-${Date.now()}`,
       title: title.trim(),
       category,
@@ -219,6 +226,7 @@ export const EventModal: React.FC<EventModalProps> = ({
             </div>
           </div>
 
+          {validationError && <p role="alert" className="text-sm text-rose-700">{validationError}</p>}
           {/* Times */}
           {!isAllDay && (
             <div className="grid grid-cols-2 gap-3">

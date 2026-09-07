@@ -18,3 +18,10 @@ View your app in AI Studio: https://ai.studio/apps/2e37b872-8dc7-413d-b0e7-96e00
 2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
 3. Run the app:
    `npm run dev`
+
+
+## Verifica delle correzioni prioritarie
+
+Con Node.js 24: `npm test`, `npm run lint` e `npm run build`.
+
+Vedi [comportamenti, compatibilità dei backup e limiti](docs/priority-fixes.md).

@@ -1,3 +1,4 @@
+import { localDateISO } from "../utils/dates";
 import React, { useState } from "react";
 import {
   AlertTriangle,
@@ -30,7 +31,7 @@ export const DeadlinesView: React.FC<DeadlinesViewProps> = ({
   const [filter, setFilter] = useState<"pending" | "completed" | "all">("pending");
   const [confirmingDeleteEventId, setConfirmingDeleteEventId] = useState<string | null>(null);
 
-  const todayIso = new Date().toISOString().slice(0, 10);
+  const todayIso = localDateISO();
 
   // Filter deadlines, PEI commitments, and reminders
   const allDeadlines = events.filter(

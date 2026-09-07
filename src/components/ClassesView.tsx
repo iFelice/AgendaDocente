@@ -1,3 +1,4 @@
+import { localDateISO } from "../utils/dates";
 import React, { useState, useMemo } from "react";
 import {
   Users,
@@ -122,7 +123,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
   const [showClearAllConfirm, setShowClearAllConfirm] = useState(false);
 
   // New Note Form inside Student Detail
-  const [newNoteDate, setNewNoteDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [newNoteDate, setNewNoteDate] = useState(() => localDateISO());
   const [newNoteCategory, setNewNoteCategory] = useState<StudentNoteCategory>("osservazione");
   const [newNoteTitle, setNewNoteTitle] = useState("");
   const [newNoteContent, setNewNoteContent] = useState("");
@@ -296,7 +297,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
       title: `G.L.O. - ${student.fullName} (Classe ${student.className})`,
       category: "glo",
       className: student.className,
-      date: student.gloDate || new Date().toISOString().slice(0, 10),
+      date: student.gloDate || localDateISO(),
       startTime: "15:00",
       endTime: "16:30",
       notes: `Convocazione Gruppo di Lavoro Operativo per ${student.fullName}. Équipe specialistica: ${student.specialists || "ASL/Educatore"}.`,
@@ -311,7 +312,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
       title: `Colloquio con ${parent} (${student.fullName} - ${student.className})`,
       category: "ricevimento_genitori",
       className: student.className,
-      date: new Date().toISOString().slice(0, 10),
+      date: localDateISO(),
       startTime: "11:15",
       endTime: "12:00",
       notes: `Ricevimento genitori per ${student.fullName}. Recapito: ${student.contactParents?.phone || "N/D"}. Note genitore: ${student.contactParents?.notes || ""}`,

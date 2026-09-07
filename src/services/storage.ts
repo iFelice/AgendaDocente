@@ -1,3 +1,5 @@
+import { linkLegacyCircularEvents } from "../utils/circularLinks";
+import { localDateISO } from "../utils/dates";
 import {
   CalendarEvent,
   CircularDocument,
@@ -11,7 +13,8 @@ import {
   TimetableType,
 } from "../types";
 import { getCurrentSchoolYear } from "../utils/schoolYear";
-import { clientSideLocalParser, SAMPLE_CIRCULARS } from "./aiService";
+import { validateBackup, restoreBackupValues, recoverBackupRestore } from "./backup";
+import { extractedItemError } from "../utils/circularParser";
 
 export function getSchoolLevelLabel(level?: SchoolLevel): string {
   switch (level) {
@@ -637,7 +640,7 @@ export const DEFAULT_PROVISIONAL_TIMETABLE: TimetableSlot[] = [
 function getIsoDateOffset(daysOffset: number): string {
   const d = new Date();
   d.setDate(d.getDate() + daysOffset);
-  return d.toISOString().slice(0, 10);
+  return localDateISO(d);
 }
 
 // Initial calendar events for Docente di Sostegno (inizio anno scolastico)
@@ -714,6 +717,7 @@ export const DEFAULT_EVENTS: CalendarEvent[] = [
 export const storage = {
   // PROFILE
   getProfile(): TeacherProfile {
+    recoverBackupRestore();
     try {
       const raw = localStorage.getItem(STORAGE_KEYS.PROFILE);
       if (!raw) {
@@ -915,7 +919,17 @@ export const storage = {
         this.saveEvents(DEFAULT_EVENTS);
         return DEFAULT_EVENTS;
       }
-      return JSON.parse(raw);
+      const events: CalendarEvent[] = JSON.parse(raw);
+      try {
+        const circulars: CircularDocument[] = JSON.parse(localStorage.getItem(STORAGE_KEYS.CIRCULARS) || '[]');
+        if (!Array.isArray(circulars)) return events;
+        const linked = linkLegacyCircularEvents(events, circulars);
+        if (linked.some((event, i) => event !== events[i])) this.saveEvents(linked);
+        return linked;
+      } catch {
+        // A corrupt archive or a failed migration must not replace valid events with demo data.
+        return events;
+      }
     } catch {
       return DEFAULT_EVENTS;
     }
@@ -957,9 +971,10 @@ export const storage = {
       // Avoid duplicate matching same title and date and time
       const duplicate = list.find(
         (existing) =>
-          existing.title === ev.title &&
-          existing.date === ev.date &&
-          existing.startTime === ev.startTime
+          existing.id === ev.id ||
+          (ev.sourceCircularId && existing.sourceCircularId === ev.sourceCircularId && existing.sourceItemId === ev.sourceItemId) ||
+          (!ev.sourceCircularId && !existing.sourceCircularId && existing.sourceType === ev.sourceType &&
+            existing.title === ev.title && existing.date === ev.date && existing.startTime === ev.startTime && existing.className === ev.className)
       );
       if (!duplicate) {
         list.push(ev);
@@ -975,30 +990,6 @@ export const storage = {
     try {
       const raw = localStorage.getItem(STORAGE_KEYS.CIRCULARS);
       let list: CircularDocument[] = raw ? JSON.parse(raw) : [];
-
-      // Auto-heal / backfill extractedItems for circulars that didn't save them previously
-      let updated = false;
-      const profile = this.getProfile();
-      for (const circ of list) {
-        if (!circ.extractedItems || circ.extractedItems.length === 0) {
-          const matchSample = SAMPLE_CIRCULARS.find(
-            (s) => s.title === circ.title || s.title.includes(circ.title) || circ.title.includes(s.title)
-          );
-          const textToParse = matchSample ? matchSample.text : (circ.rawText || "");
-          if (textToParse && textToParse.trim().length > 10) {
-            const parsed = clientSideLocalParser(textToParse, profile);
-            if (parsed && parsed.length > 0) {
-              circ.extractedItems = parsed;
-              circ.extractedCount = parsed.length;
-              circ.relevantCount = parsed.filter((i) => i.relevance === "VERDE" || i.relevance === "GIALLO").length;
-              updated = true;
-            }
-          }
-        }
-      }
-      if (updated) {
-        localStorage.setItem(STORAGE_KEYS.CIRCULARS, JSON.stringify(list));
-      }
 
       return list;
     } catch {
@@ -1045,20 +1036,12 @@ export const storage = {
     }
   },
 
-  deleteEventMatchingExtractedItem(item: ExtractedItem): boolean {
+  deleteEventMatchingExtractedItem(item: ExtractedItem, circularId: string): boolean {
     const events = this.getEvents();
-    const idx = events.findIndex(
-      (e) =>
-        e.date === item.date &&
-        (e.title.trim().toLowerCase() === item.title.trim().toLowerCase() ||
-          (e.startTime === item.startTime && e.date === item.date && Math.abs(e.title.length - item.title.length) < 15))
-    );
-    if (idx >= 0) {
-      events.splice(idx, 1);
-      this.saveEvents(events);
-      return true;
-    }
-    return false;
+    const remaining = events.filter(e => !(e.sourceType === 'circolare' && e.sourceCircularId === circularId && e.sourceItemId === item.tempId));
+    if (remaining.length === events.length) return false;
+    this.saveEvents(remaining);
+    return true;
   },
 
   /**
@@ -1078,8 +1061,8 @@ export const storage = {
       return true;
     });
 
-    const newEvents: CalendarEvent[] = itemsToImport.map((it) =>
-      convertExtractedItemToEvent(it, target.title)
+    const newEvents: CalendarEvent[] = itemsToImport.filter(it => !extractedItemError(it)).map((it) =>
+      convertExtractedItemToEvent(it, target.title, target.id)
     );
 
     const added = this.bulkAddEvents(newEvents);
@@ -1149,31 +1132,35 @@ export const storage = {
 
   // BACKUP & RESTORE
   exportDataBackup(): string {
-    const data = {
-      version: 2,
-      exportedAt: new Date().toISOString(),
-      profile: this.getProfile(),
-      timetable: this.getTimetable(),
-      events: this.getEvents(),
-      circulars: this.getCirculars(),
-      students: this.getStudents(),
-    };
-    return JSON.stringify(data, null, 2);
+    return JSON.stringify({
+      version: 3, exportedAt: new Date().toISOString(), profile: this.getProfile(),
+      definitiveTimetable: this.getDefinitiveTimetable(), provisionalTimetable: this.getProvisionalTimetable(),
+      timetableMode: this.getTimetableMode(), onboardingCompleted: this.hasCompletedOnboarding(),
+      events: this.getEvents(), circulars: this.getCirculars(), students: this.getStudents(),
+    }, null, 2);
   },
 
   importDataBackup(jsonString: string): boolean {
     try {
-      const data = JSON.parse(jsonString);
-      if (data.profile) this.saveProfile(data.profile);
-      if (data.timetable) this.saveTimetable(data.timetable);
-      if (data.events) this.saveEvents(data.events);
-      if (data.students) this.saveStudents(data.students);
-      if (data.circulars) {
-        localStorage.setItem(STORAGE_KEYS.CIRCULARS, JSON.stringify(data.circulars));
+      const data: unknown = JSON.parse(jsonString);
+      validateBackup(data);
+      const values: Record<string, string> = {
+        [STORAGE_KEYS.PROFILE]: JSON.stringify(data.profile),
+        [STORAGE_KEYS.EVENTS]: JSON.stringify(data.events),
+        [STORAGE_KEYS.CIRCULARS]: JSON.stringify(data.circulars),
+        [STORAGE_KEYS.STUDENTS]: JSON.stringify(data.students),
+        [STORAGE_KEYS.TIMETABLE]: JSON.stringify(data.version === 3 ? data.definitiveTimetable : data.timetable),
+      };
+      if (data.version === 3) {
+        values[STORAGE_KEYS.TIMETABLE_PROVISIONAL] = JSON.stringify(data.provisionalTimetable);
+        values[STORAGE_KEYS.TIMETABLE_MODE] = data.timetableMode;
+        values[STORAGE_KEYS.ONBOARDING_COMPLETED] = String(data.onboardingCompleted);
       }
+      // v2 did not include a second timetable or mode: preserve those existing settings.
+      restoreBackupValues(values);
       return true;
     } catch (e) {
-      console.warn("Failed to restore backup:", e);
+      console.warn("Ripristino non completato:", e);
       return false;
     }
   },
@@ -1205,48 +1192,22 @@ export const storage = {
 };
 
 export function convertExtractedItemToEvent(
-  it: ExtractedItem,
-  sourceCircularTitle: string
+  it: ExtractedItem, sourceCircularTitle: string, sourceCircularId: string
 ): CalendarEvent {
+  const error = extractedItemError(it);
+  if (error) throw new Error(error);
   return {
-    id: `ev-circ-${it.tempId || Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-    title: it.title,
-    category: it.category,
-    date: it.date,
-    startTime: it.startTime || "15:00",
-    endTime: it.endTime || "16:30",
-    isAllDay: it.isDeadline ? true : false,
-    className: it.className || undefined,
-    subject: it.subject || undefined,
-    location: it.location || undefined,
-    notes: it.notes || it.relevanceReason,
-    sourceType: "circolare",
-    sourceCircularTitle: sourceCircularTitle,
+    id: `ev-circ-${sourceCircularId}-${it.tempId}`,
+    title: it.title, category: it.category, date: it.date,
+    startTime: it.startTime || undefined, endTime: it.endTime || undefined,
+    isAllDay: !!it.isDeadline && !it.startTime,
+    className: it.className || undefined, subject: it.subject || undefined,
+    location: it.location || undefined, notes: it.notes || it.relevanceReason,
+    sourceType: 'circolare', sourceCircularTitle, sourceCircularId, sourceItemId: it.tempId,
     completed: false,
   };
 }
 
-export function isCommitmentInEvents(item: ExtractedItem, events: CalendarEvent[]): boolean {
-  return events.some((ev) => {
-    // Exact date match
-    if (ev.date !== item.date) return false;
-
-    // Matching title (cleaned)
-    const normEv = ev.title.trim().toLowerCase();
-    const normIt = item.title.trim().toLowerCase();
-    if (normEv === normIt) return true;
-    if (normEv.includes(normIt) || normIt.includes(normEv)) {
-      if (item.startTime && ev.startTime) {
-        return item.startTime.slice(0, 2) === ev.startTime.slice(0, 2);
-      }
-      return true;
-    }
-
-    // Matching class and start time
-    if (item.className && ev.className && item.className.toUpperCase() === ev.className.toUpperCase()) {
-      if (item.startTime && ev.startTime && item.startTime === ev.startTime) return true;
-    }
-
-    return false;
-  });
+export function isCommitmentInEvents(item: ExtractedItem, events: CalendarEvent[], circularId: string): boolean {
+  return events.some(ev => ev.sourceType === 'circolare' && ev.sourceCircularId === circularId && ev.sourceItemId === item.tempId);
 }

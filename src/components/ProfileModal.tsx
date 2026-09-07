@@ -1,3 +1,4 @@
+import { localDateISO } from "../utils/dates";
 import React, { useState, useEffect } from "react";
 import {
   Download,
@@ -218,7 +219,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `backup_agenda_docente_${new Date().toISOString().slice(0, 10)}.json`;
+    link.download = `backup_agenda_docente_${localDateISO()}.json`;
     link.click();
     URL.revokeObjectURL(url);
   };
@@ -232,10 +233,11 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
     reader.onload = () => {
       const ok = storage.importDataBackup(reader.result as string);
       if (ok) {
-        setImportMessage("Backup ripristinato con successo! I dati sono stati ricaricati.");
+        const legacy = JSON.parse(reader.result as string).version === 2;
+        setImportMessage(legacy ? "Backup precedente ripristinato: contiene un solo orario, salvato come definitivo. Orario provvisorio e modalità attuali sono stati conservati." : "Backup ripristinato: entrambi gli orari, modalità e dati sono stati ricaricati.");
         onDataImported();
       } else {
-        setImportMessage("Errore: il file di backup non è valido.");
+        setImportMessage("Ripristino non riuscito: verifica il file e lo spazio disponibile. I dati precedenti sono stati conservati.");
       }
     };
     reader.readAsText(file);

@@ -1,0 +1,186 @@
+import { test, beforeEach } from 'node:test';
+import assert from 'node:assert/strict';
+import { localDateISO, nextDateISO, isValidDate, eventDateError } from '../src/utils/dates';
+import { parseCircularText, normalizeExtractedItems, extractedItemError } from '../src/utils/circularParser';
+import { evaluateItemRelevance, detectSubjects } from '../src/utils/circularRelevance';
+import { analyzeCircular } from '../src/services/aiService';
+import { storage, convertExtractedItemToEvent, isCommitmentInEvents } from '../src/services/storage';
+import { recoverBackupRestore } from '../src/services/backup';
+import { linkLegacyCircularEvents } from '../src/utils/circularLinks';
+import { toGoogleCalendarPayload, getGoogleCalendarWebUrl, downloadIcsCalendar } from '../src/services/googleCalendarService';
+import type { TeacherProfile, ExtractedItem, CalendarEvent, TimetableSlot, CircularDocument } from '../src/types';
+
+const profile: TeacherProfile = { id:'teacher', fullName:'Docente test', schoolName:'Scuola test', schoolYear:'2027/2028', schoolLevel:'ssig', primarySubjects:['Scienze motorie'], classes:['1A','2E','3B'], campuses:['Centrale'], roles:[] };
+const item: ExtractedItem = { tempId:'item-1', title:'Consiglio 1A', category:'consiglio_classe', date:'2027-09-14', startTime:'15:00', endTime:'16:00', className:'1A', relevance:'VERDE', relevanceReason:'Classe assegnata', selectedForImport:true };
+const doc: CircularDocument = { id:'circ-1', title:'Circolare test', fileName:'test.txt', fileType:'text', uploadDate:'2027-09-01', extractedCount:1, relevantCount:1, extractedItems:[item] };
+const slot: TimetableSlot = { id:'def', dayOfWeek:1, periodNumber:1, startTime:'08:00',endTime:'09:00',subject:'Scienze motorie',className:'1A' };
+const event: CalendarEvent = { id:'manual', title:'Riunione privata', category:'personale', date:item.date, startTime:item.startTime, endTime:item.endTime, isAllDay:false, sourceType:'manuale' };
+let memory: Map<string,string>;
+let failKey: string | undefined;
+beforeEach(() => {
+  memory = new Map(); failKey = undefined;
+  Object.defineProperty(globalThis, 'localStorage', { configurable:true, value:{
+    getItem:(k:string)=>memory.get(k) ?? null,
+    setItem:(k:string,v:string)=>{ if(k===failKey){failKey=undefined;throw new Error('QuotaExceededError');} memory.set(k,String(v)); },
+    removeItem:(k:string)=>memory.delete(k),
+  }});
+  storage.saveProfile(profile);storage.saveEvents([]);storage.saveStudents([]);
+  storage.saveDefinitiveTimetable([slot]);storage.saveProvisionalTimetable([{...slot,id:'prov',startTime:'09:00',endTime:'10:00'}]);
+  storage.setTimetableMode('provvisorio');storage.setOnboardingCompleted(true);
+});
+
+test('civil days stay correct at Rome midnight, summer and winter',()=>{
+  assert.equal(localDateISO(new Date(2026,8,14)), '2026-09-14');
+  assert.equal(localDateISO(new Date(2026,0,14)), '2026-01-14');
+  assert.equal(localDateISO(new Date(2026,8,14,0,1)), '2026-09-14');
+});
+test('next day handles year, leap day and DST transitions',()=>{
+  assert.equal(nextDateISO('2026-12-31'),'2027-01-01');
+  assert.equal(nextDateISO('2028-02-28'),'2028-02-29');
+  assert.equal(nextDateISO('2026-03-29'),'2026-03-30');
+  assert.equal(isValidDate('2027-02-29'),false);
+});
+test('manual event intervals reject missing, equal and reversed times',()=>{
+  assert.ok(eventDateError({...event,endTime:'14:00'}));
+  assert.ok(eventDateError({...event,endTime:'15:00'}));
+  assert.ok(eventDateError({...event,endTime:undefined}));
+  assert.equal(eventDateError({...event,isAllDay:true}),null);
+});
+for(const date of ['14/09/2027','14.09.2027','14-09-2027','14 settembre 2027']) test(`parser accepts ${date}`,()=>{
+  const [x]=parseCircularText(`${date} Collegio docenti 15:00-17:00`,profile);
+  assert.equal(x.date,'2027-09-14');assert.equal(x.startTime,'15:00');assert.equal(x.endTime,'17:00');
+  assert.equal(x.title,'Collegio docenti');assert.equal(x.selectedForImport,true);
+});
+test('no document-specific injected events or locations',()=>{
+  assert.deepEqual(parseCircularText('Documento aggiornato il 08/09/2027',profile),[]);
+  const [x]=parseCircularText('14/10/2027 Aggiornamento classi intermedie 14:00-15:00',profile);
+  assert.equal(x.startTime,'14:00');assert.equal(x.endTime,'15:00');assert.equal(x.location,'');
+});
+test('yearless dates follow school year on both sides of January',()=>{
+  const x=parseCircularText('14/09 Collegio docenti 15:00-17:00\n14/01 Collegio docenti 15:00-17:00',profile);
+  assert.deepEqual(x.map(i=>i.date),['2027-09-14','2028-01-14']);
+});
+test('dotted clocks are not dates; header date applies to following rows',()=>{
+  const x=parseCircularText('14/09/2027\nCollegio docenti 09.00-10.00\nConsiglio 1A 10.00-11.00',profile);
+  assert.equal(x.length,2);assert.ok(x.every(i=>i.date==='2027-09-14'));
+  assert.equal(x[1].startTime,'10:00');
+});
+test('missing or invalid dates and hours remain uncertain and unselected',()=>{
+  for(const text of ['Collegio docenti','31/02/2027 Collegio docenti 15:00-17:00','14/09/2027 Collegio docenti']){
+    const [x]=parseCircularText(text,profile);assert.equal(x.selectedForImport,false);assert.ok(extractedItemError(x));
+  }
+});
+test('cancelled meeting is not added as an event',()=>assert.deepEqual(parseCircularText('14/09/2027 Consiglio 1A annullato 15:00-16:00',profile),[]));
+test('cloud normalization never supplies default times or school locations',()=>{
+  const [x]=normalizeExtractedItems([{title:'Collegio docenti',date:'2027-09-14',category:'collegio_docenti'}],profile);
+  assert.equal(x.startTime,undefined);assert.equal(x.endTime,undefined);assert.equal(x.location,'');assert.equal(x.selectedForImport,false);
+});
+test('class plus subject matches the original specification',()=>{
+  const inputs=['1A - Italiano','1A - Matematica','1A - Scienze motorie','1B - Italiano','2E - Scienze motorie','3C - Inglese','3B - Scienze motorie'];
+  assert.deepEqual(inputs.map(title=>evaluateItemRelevance({title},profile).relevance),['ROSSO','ROSSO','VERDE','ROSSO','VERDE','ROSSO','VERDE']);
+});
+test('foreign departments cannot become green through school level',()=>{
+  assert.equal(evaluateItemRelevance({title:'Dipartimento Matematica SSIG'},profile).relevance,'ROSSO');
+  assert.equal(evaluateItemRelevance({title:'Dipartimenti SSIG'},profile).relevance,'GIALLO');
+});
+test('subject aliases and explicit unknown subjects are respected',()=>{
+  assert.deepEqual(detectSubjects('Educazione fisica'),['scienze motorie']);
+  assert.deepEqual(detectSubjects('Scienze motorie'),['scienze motorie']);
+  assert.equal(evaluateItemRelevance({title:'1A',subject:'Diritto'},profile).relevance,'ROSSO');
+});
+test('school level and reserved roles restrict even matching classes',()=>{
+  assert.equal(evaluateItemRelevance({title:'Primaria Consiglio 1A'},profile).relevance,'ROSSO');
+  assert.equal(evaluateItemRelevance({title:'Staff riunione 1A'},profile).relevance,'ROSSO');
+  assert.equal(evaluateItemRelevance({title:'Tutti i docenti: collegio'},profile).relevance,'VERDE');
+  assert.equal(evaluateItemRelevance({title:'1A attività facoltativa'},profile).relevance,'GIALLO');
+});
+test('PDF offline is a failed analysis, not successful empty extraction',async()=>{
+  const previous=globalThis.fetch;globalThis.fetch=async()=>{throw new Error('offline')};
+  try { const result=await analyzeCircular({imageBase64:'test',mimeType:'application/pdf',profile});assert.equal(result.success,false);assert.match(result.error!,/online/); }
+  finally{globalThis.fetch=previous;}
+});
+test('text remains usable offline',async()=>{
+  const previous=globalThis.fetch;globalThis.fetch=async()=>{throw new Error('offline')};
+  try{const result=await analyzeCircular({text:'14/09/2027 Collegio docenti 15:00-17:00',profile});assert.equal(result.success,true);assert.equal(result.items.length,1);}
+  finally{globalThis.fetch=previous;}
+});
+test('circular cancellation leaves unrelated manual events intact',()=>{
+  storage.saveEvents([event]);assert.equal(storage.deleteEventMatchingExtractedItem(item,doc.id),false);assert.equal(storage.getEvents()[0].id,'manual');
+});
+test('stable links survive edits and target only the correct circular',()=>{
+  const linked=convertExtractedItemToEvent(item,doc.title,doc.id);
+  const other=convertExtractedItemToEvent(item,'Other','circ-other');
+  storage.saveEvents([event,{...linked,title:'Modified title'},other]);
+  assert.equal(isCommitmentInEvents(item,storage.getEvents(),doc.id),true);
+  assert.equal(storage.deleteEventMatchingExtractedItem(item,doc.id),true);
+  assert.deepEqual(storage.getEvents().map(e=>e.id),[event.id,other.id]);
+});
+test('reimporting one circular item is idempotent without losing unrelated events',()=>{
+  storage.saveEvents([event]);const linked=convertExtractedItemToEvent(item,doc.title,doc.id);
+  assert.equal(storage.bulkAddEvents([linked]),1);assert.equal(storage.bulkAddEvents([linked]),0);assert.equal(storage.getEvents().length,2);
+});
+test('incomplete extracted events cannot be converted using invented times',()=>{
+  assert.throws(()=>convertExtractedItemToEvent({...item,startTime:undefined},doc.title,doc.id));
+});
+test('legacy links require exact unique document and item, never a manual event',()=>{
+  const old={...event,title:item.title,sourceType:'circolare' as const,sourceCircularTitle:doc.title,className:'1A'};
+  assert.equal(linkLegacyCircularEvents([old],[doc])[0].sourceCircularId,doc.id);
+  assert.equal(linkLegacyCircularEvents([old],[doc,{...doc,id:'ambiguous'}])[0].sourceCircularId,undefined);
+  assert.equal(linkLegacyCircularEvents([event],[doc])[0].sourceCircularId,undefined);
+});
+test('v3 backup round-trips both timetables, mode and onboarding',()=>{
+  const backup=storage.exportDataBackup();storage.saveDefinitiveTimetable([]);storage.saveProvisionalTimetable([]);storage.setTimetableMode('auto');storage.setOnboardingCompleted(false);
+  assert.equal(storage.importDataBackup(backup),true);
+  assert.equal(storage.getDefinitiveTimetable()[0].id,'def');assert.equal(storage.getProvisionalTimetable()[0].id,'prov');
+  assert.equal(storage.getTimetableMode(),'provvisorio');assert.equal(storage.hasCompletedOnboarding(),true);
+});
+test('v2 backups remain readable without erasing the existing second timetable',()=>{
+  const v3=JSON.parse(storage.exportDataBackup());const {definitiveTimetable,provisionalTimetable,timetableMode,onboardingCompleted,...base}=v3;
+  assert.equal(storage.importDataBackup(JSON.stringify({...base,version:2,timetable:[{...slot,id:'legacy'}]})),true);
+  assert.equal(storage.getDefinitiveTimetable()[0].id,'legacy');assert.equal(storage.getProvisionalTimetable()[0].id,'prov');
+});
+test('malformed and nested invalid backups do not touch any data',()=>{
+  for(const mutate of [(b:any)=>({}), (b:any)=>({...b,version:99}), (b:any)=>({...b,students:[{id:'x',fullName:'X',className:'1A',notes:[null]}]}), (b:any)=>({...b,profile:{...b.profile,roles:'bad'}})]){
+    const valid=JSON.parse(storage.exportDataBackup());const before=[...memory];
+    assert.equal(storage.importDataBackup(JSON.stringify(mutate(valid))),false);assert.deepEqual([...memory],before);
+  }
+});
+test('write failure during restore rolls back previous contents',()=>{
+  const b=JSON.parse(storage.exportDataBackup());const before=new Map(memory);b.profile.fullName='Changed';b.events=[event];
+  failKey='agedoc_events_v2';assert.equal(storage.importDataBackup(JSON.stringify(b)),false);assert.deepEqual(memory,before);
+});
+test('interrupted restore journal is recovered on startup',()=>{
+  const original=memory.get('agedoc_teacher_profile_v2')!;
+  memory.set('agedoc_restore_journal_v1',JSON.stringify({'agedoc_teacher_profile_v2':original}));
+  memory.set('agedoc_teacher_profile_v2',JSON.stringify({...profile,fullName:'Interrupted change'}));
+  recoverBackupRestore();assert.equal(storage.getProfile().fullName,profile.fullName);assert.equal(memory.has('agedoc_restore_journal_v1'),false);
+});
+test('reading circulars never substitutes demo text for the original',()=>{
+  storage.saveCircular({...doc,title:'Impegni di settembre',rawText:'08/09/2027',extractedItems:[]});
+  assert.deepEqual(storage.getCirculars()[0].extractedItems,[]);
+});
+test('all-day exports use exclusive next-day end in API and link',()=>{
+  const allDay={...event,date:'2026-12-31',isAllDay:true};
+  assert.equal(toGoogleCalendarPayload(allDay).end.date,'2027-01-01');
+  assert.match(getGoogleCalendarWebUrl(allDay),/20261231\/20270101/);
+});
+
+test('ICS preserves exclusive end across year boundary',async()=>{
+  let captured: Blob | undefined;
+  const oldCreate=URL.createObjectURL;const oldRevoke=URL.revokeObjectURL;
+  const oldDocument=Object.getOwnPropertyDescriptor(globalThis,'document');
+  URL.createObjectURL=(blob:Blob)=>{captured=blob;return 'blob:test';};URL.revokeObjectURL=()=>{};
+  Object.defineProperty(globalThis,'document',{configurable:true,value:{createElement:()=>({click(){}}),body:{appendChild(){},removeChild(){}}}});
+  try { downloadIcsCalendar([{...event,date:'2026-12-31',isAllDay:true}]); assert.match(await captured!.text(),/DTEND;VALUE=DATE:20270101/); }
+  finally {URL.createObjectURL=oldCreate;URL.revokeObjectURL=oldRevoke;if(oldDocument)Object.defineProperty(globalThis,'document',oldDocument);else delete (globalThis as any).document;}
+});
+test('compound teacher subjects and explicit chosen location are supported',()=>{
+  assert.equal(evaluateItemRelevance({title:'Dipartimento Matematica'},{...profile,primarySubjects:['Matematica e Scienze']}).relevance,'VERDE');
+  assert.equal(normalizeExtractedItems([item],profile,'Sede scelta')[0].location,'Sede scelta');
+});
+test('default demo data can be backed up and restored by the new validator',()=>{
+  memory.clear();const backup=storage.exportDataBackup();assert.equal(storage.importDataBackup(backup),true);
+});
+test('corrupt circular archive does not replace valid manual events',()=>{
+  storage.saveEvents([event]);memory.set('agedoc_circulars_v2','not json');assert.deepEqual(storage.getEvents(),[event]);
+});

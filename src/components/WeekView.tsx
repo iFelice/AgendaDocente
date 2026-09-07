@@ -1,3 +1,4 @@
+import { localDateISO } from "../utils/dates";
 import React, { useState, useEffect } from "react";
 import {
   ChevronLeft,
@@ -85,7 +86,7 @@ export const WeekView: React.FC<WeekViewProps> = ({
 
         // Se la data bersaglio è Sabato 5 settembre (o weekend) e Sabato non è mostrato (SSIG),
         // o in base alla regola di weekend, punta a Lunedì 7 settembre
-        const shouldRollWeekend = !includeSaturday || target.getDay() === 6 || target.getDay() === 0;
+        const shouldRollWeekend = (!includeSaturday && target.getDay() === 6) || target.getDay() === 0;
         const targetMonday = getReferenceMonday(target, shouldRollWeekend);
         const baseMonday = getReferenceMonday(new Date(), true);
 
@@ -113,9 +114,9 @@ export const WeekView: React.FC<WeekViewProps> = ({
   const days = Array.from({ length: daysCount }, (_, i) => {
     const d = new Date(monday);
     d.setDate(monday.getDate() + i);
-    const iso = d.toISOString().slice(0, 10);
+    const iso = localDateISO(d);
     const dayOfWeek = (i + 1) as 1 | 2 | 3 | 4 | 5 | 6;
-    const isToday = new Date().toISOString().slice(0, 10) === iso;
+    const isToday = localDateISO() === iso;
     const isTarget = targetDateIso === iso;
     const dayName = new Intl.DateTimeFormat("it-IT", { weekday: "short" }).format(d);
     const dayNum = d.getDate();

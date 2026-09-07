@@ -1,4 +1,7 @@
-import React, { useState } from "react";
+import { convertExtractedItemToEvent } from "../services/storage";
+import { extractedItemError } from "../utils/circularParser";
+import { localDateISO } from "../utils/dates";
+import React, { useState, useEffect, useRef } from "react";
 import {
   AlertCircle,
   Check,
@@ -51,14 +54,21 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [extractedItems, setExtractedItems] = useState<ExtractedItem[]>([]);
   const [analysisSource, setAnalysisSource] = useState<string>("");
-  const [defaultLocation, setDefaultLocation] = useState<string>(
-    profile.campuses && profile.campuses.length > 0 ? profile.campuses[0] : "Sede Centrale"
-  );
+  const [defaultLocation, setDefaultLocation] = useState<string>("");
   const [relevanceFilter, setRelevanceFilter] = useState<"ALL_RELEVANT" | "VERDE" | "GIALLO" | "ROSSO" | "ALL">(
     "ALL_RELEVANT"
   );
   const [showRawSnippets, setShowRawSnippets] = useState<boolean>(false);
   const [selectionWarning, setSelectionWarning] = useState<string | null>(null);
+
+  const inputRevision = useRef(0);
+  const [isReadingFile, setIsReadingFile] = useState(false);
+  useEffect(() => {
+    inputRevision.current++;
+    setStep('input'); setCircularText(''); setFileName(''); setDefaultLocation('');
+    setFileBase64(undefined); setFileMimeType(undefined); setExtractedItems([]);
+    setAnalysisError(null); setSelectionWarning(null); setIsAnalyzing(false); setIsReadingFile(false);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -67,12 +77,18 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
 
+    const revision = ++inputRevision.current;
+    setCircularText(''); setFileBase64(undefined); setFileMimeType(undefined);
+    setIsReadingFile(true);
     setFileName(file.name);
     setAnalysisError(null);
 
     const reader = new FileReader();
+    reader.onerror = () => { if (revision === inputRevision.current) { setIsReadingFile(false); setAnalysisError('Impossibile leggere il file.'); } };
+    reader.onloadend = () => { if (revision === inputRevision.current) setIsReadingFile(false); };
     if (file.type.startsWith("image/") || file.type === "application/pdf") {
       reader.onload = () => {
+        if (revision !== inputRevision.current) return;
         const resultStr = reader.result as string;
         // Strip data:url prefix for raw base64
         const base64Data = resultStr.split(",")[1];
@@ -83,6 +99,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     } else {
       // Text file
       reader.onload = () => {
+        if (revision !== inputRevision.current) return;
         setCircularText(reader.result as string);
       };
       reader.readAsText(file);
@@ -91,6 +108,8 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
 
   // Select a preset sample
   const handleSelectSample = (sample: typeof SAMPLE_CIRCULARS[0]) => {
+    inputRevision.current++;
+    setIsReadingFile(false);
     setCircularText(sample.text);
     setFileName(sample.title);
     setFileBase64(undefined);
@@ -105,6 +124,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       return;
     }
 
+    const revision = ++inputRevision.current;
     setIsAnalyzing(true);
     setAnalysisError(null);
 
@@ -114,9 +134,10 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
         imageBase64: fileBase64,
         mimeType: fileMimeType,
         profile,
-        defaultLocation: defaultLocation.trim() || profile.campuses?.[0] || "Sede Centrale",
+        defaultLocation: defaultLocation.trim() || undefined,
       });
 
+      if (revision !== inputRevision.current) return;
       if (!result.success && (!result.items || result.items.length === 0)) {
         throw new Error(result.error || "Impossibile analizzare il documento.");
       }
@@ -126,9 +147,10 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       setStep("results");
     } catch (err: any) {
       console.warn("Avviso analisi circolare:", err?.message || err);
+      if (revision !== inputRevision.current) return;
       setAnalysisError(err.message || "Errore durante l'analisi della circolare.");
     } finally {
-      setIsAnalyzing(false);
+      if (revision === inputRevision.current) setIsAnalyzing(false);
     }
   };
 
@@ -203,27 +225,15 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     }
     setSelectionWarning(null);
 
-    const newEvents: CalendarEvent[] = selected.map((it) => ({
-      id: `ev-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-      title: it.title,
-      category: it.category,
-      date: it.date,
-      startTime: it.startTime || "15:00",
-      endTime: it.endTime || "16:30",
-      isAllDay: it.isDeadline ? true : false,
-      className: it.className || undefined,
-      subject: it.subject || undefined,
-      location: it.location || undefined,
-      notes: it.notes || it.relevanceReason,
-      sourceType: "circolare",
-      sourceCircularTitle: fileName || "Circolare importata",
-      completed: false,
-    }));
+    const invalid = selected.find(it => extractedItemError(it));
+    if (invalid) { setSelectionWarning(`${invalid.title}: ${extractedItemError(invalid)}`); return; }
+    const circularId = `circ-${crypto.randomUUID()}`;
+    const newEvents = selected.map(it => convertExtractedItemToEvent(it, fileName || 'Circolare importata', circularId));
 
     const docMeta: CircularDocument = {
-      id: `circ-${Date.now()}`,
+      id: circularId,
       title: fileName || "Circolare del " + new Date().toLocaleDateString("it-IT"),
-      uploadDate: new Date().toISOString().slice(0, 10),
+      uploadDate: localDateISO(),
       fileType: fileBase64 ? (fileMimeType?.includes("pdf") ? "pdf" : "image") : "text",
       fileName: fileName || "testo_incollato.txt",
       rawText: circularText || undefined,
@@ -277,7 +287,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                     </div>
                     <div className="text-stone-600 leading-relaxed">
                       Grado: <strong className="uppercase text-stone-900">{profile.schoolLevel || "SSIG"}</strong>.
-                      Impegni generali (<strong className="text-stone-900">Docenti: TUTTI</strong> o grado <strong className="text-stone-900 uppercase">{profile.schoolLevel || "SSIG"}</strong>) e impegni delle tue classi sono classificati in <strong className="text-emerald-700 font-bold">VERDE</strong>.
+                      Il filtro confronta classi, materie, ordine scolastico e destinatari. Le attività ambigue rimangono da verificare; date e orari mancanti vanno completati prima dell'importazione.
                     </div>
                   </div>
                 </div>
@@ -311,7 +321,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                   <div className="space-y-1">
                     <label htmlFor="analyzer-default-location" className="font-medium text-stone-700 flex items-center space-x-1">
                       <MapPin className="w-3.5 h-3.5 text-stone-500" />
-                      <span>Luogo predefinito per impegni senza sede:</span>
+                      <span>Sede facoltativa per impegni senza luogo:</span>
                     </label>
                     <div className="flex items-center space-x-2">
                       <input
@@ -319,7 +329,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                         type="text"
                         value={defaultLocation}
                         onChange={(e) => setDefaultLocation(e.target.value)}
-                        placeholder="es. Sede Centrale / Bonifazi"
+                        placeholder="Lascia vuoto se non conosci la sede"
                         className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs text-stone-900 focus:outline-hidden focus:ring-1 focus:ring-emerald-600"
                       />
                       {profile.campuses && profile.campuses.length > 1 && (
@@ -370,7 +380,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                   Carica File (PDF / Immagine)
                 </button>
                 <button
-                  onClick={() => setInputMode("text")}
+                  onClick={() => { inputRevision.current++; setIsReadingFile(false); setFileBase64(undefined); setFileMimeType(undefined); setInputMode("text"); }}
                   className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
                     inputMode === "text"
                       ? "bg-amber-100 text-amber-900 font-bold"
@@ -477,7 +487,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
               <div className="flex justify-end pt-2">
                 <button
                   id="btn-run-analysis"
-                  disabled={isAnalyzing || (!circularText.trim() && !fileBase64)}
+                  disabled={isAnalyzing || isReadingFile || (!circularText.trim() && !fileBase64)}
                   onClick={handleRunAnalysis}
                   className="px-6 py-3 rounded-xl bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white font-bold text-sm shadow-md transition-all flex items-center space-x-2"
                 >
@@ -700,14 +710,14 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                                   <span className="text-stone-500 font-medium">Orario:</span>
                                   <input
                                     type="time"
-                                    value={item.startTime || "15:00"}
+                                    value={item.startTime || ""}
                                     onChange={(e) => updateItemField(item.tempId, "startTime", e.target.value)}
                                     className="p-1 border border-stone-200 rounded-md text-xs w-20"
                                   />
                                   <span>-</span>
                                   <input
                                     type="time"
-                                    value={item.endTime || "16:30"}
+                                    value={item.endTime || ""}
                                     onChange={(e) => updateItemField(item.tempId, "endTime", e.target.value)}
                                     className="p-1 border border-stone-200 rounded-md text-xs w-20"
                                   />
@@ -725,6 +735,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                                 </div>
                               </div>
 
+                              {extractedItemError(item) && <p className="text-xs text-amber-800" role="status">{extractedItemError(item)}</p>}
                               {/* Relevance Reason */}
                               <div className="text-xs text-stone-600 bg-stone-50 p-2 rounded-md border border-stone-100">
                                 <span className="font-semibold text-stone-700">Motivo pertinenza: </span>

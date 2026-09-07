@@ -1,3 +1,4 @@
+import { localDateISO } from "../utils/dates";
 import React, { useState, useEffect } from "react";
 import { ChevronLeft, ChevronRight, Clock, MapPin, Plus, FileText, Trash2, Calendar } from "lucide-react";
 import { CalendarEvent } from "../types";
@@ -21,7 +22,7 @@ export const MonthView: React.FC<MonthViewProps> = ({
 }) => {
   const [currentDate, setCurrentDate] = useState<Date>(new Date());
   const [selectedDateIso, setSelectedDateIso] = useState<string>(
-    new Date().toISOString().slice(0, 10)
+    localDateISO()
   );
   const [filterCircularsOnly, setFilterCircularsOnly] = useState<boolean>(false);
   const [confirmingDeleteEventId, setConfirmingDeleteEventId] = useState<string | null>(null);
@@ -61,7 +62,7 @@ export const MonthView: React.FC<MonthViewProps> = ({
   const resetToToday = () => {
     const today = new Date();
     setCurrentDate(today);
-    setSelectedDateIso(today.toISOString().slice(0, 10));
+    setSelectedDateIso(localDateISO(today));
   };
 
   const circularEventsCount = events.filter((e) => e.sourceType === "circolare").length;
@@ -79,7 +80,7 @@ export const MonthView: React.FC<MonthViewProps> = ({
     const prevDate = new Date(year, month - 1, dNum);
     daysArray.push({
       dayNum: dNum,
-      iso: prevDate.toISOString().slice(0, 10),
+      iso: localDateISO(prevDate),
       isCurrentMonth: false,
     });
   }
@@ -89,7 +90,7 @@ export const MonthView: React.FC<MonthViewProps> = ({
     const d = new Date(year, month, i);
     daysArray.push({
       dayNum: i,
-      iso: d.toISOString().slice(0, 10),
+      iso: localDateISO(d),
       isCurrentMonth: true,
     });
   }
@@ -100,12 +101,12 @@ export const MonthView: React.FC<MonthViewProps> = ({
     const d = new Date(year, month + 1, i);
     daysArray.push({
       dayNum: i,
-      iso: d.toISOString().slice(0, 10),
+      iso: localDateISO(d),
       isCurrentMonth: false,
     });
   }
 
-  const todayIso = new Date().toISOString().slice(0, 10);
+  const todayIso = localDateISO();
 
   // Selected date events
   const selectedEvents = events
