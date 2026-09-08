@@ -1,3 +1,4 @@
+import { usePersistenceAction } from "../hooks/usePersistenceAction";
 import { localDateISO } from "../utils/dates";
 import React, { useState, useMemo } from "react";
 import {
@@ -37,9 +38,9 @@ import {
 interface ClassesViewProps {
   profile: TeacherProfile;
   students: Student[];
-  onSaveStudent: (student: Student) => void;
+  onSaveStudent: (student: Student) => void | false | Promise<void | false>;
   onDeleteStudent: (studentId: string) => void;
-  onAddNote: (studentId: string, note: StudentNote) => void;
+  onAddNote: (studentId: string, note: StudentNote) => void | false | Promise<void | false>;
   onDeleteNote: (studentId: string, noteId: string) => void;
   onScheduleEvent: (prefill: Partial<CalendarEvent>) => void;
   onDeleteMultipleStudents?: (studentIds: string[]) => void;
@@ -105,6 +106,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
   onReassignStudentsClass,
   onClearAllStudents,
 }) => {
+  const save = usePersistenceAction();
   // Filters
   const [selectedClass, setSelectedClass] = useState<string>("TUTTE");
   const [filterType, setFilterType] = useState<"tutti" | "sostegno" | "dsa_bes" | "con_note">("tutti");
@@ -258,11 +260,11 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
     setIsEditModalOpen(true);
   };
 
-  const handleSaveStudentSubmit = (e: React.FormEvent) => {
+  const handleSaveStudentSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!studentToEdit || !studentToEdit.fullName.trim()) return;
 
-    onSaveStudent(studentToEdit);
+    if (!await save.run(() => onSaveStudent(studentToEdit))) return;
     setIsEditModalOpen(false);
 
     // If currently open in detail drawer, update state
@@ -272,7 +274,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
   };
 
   // Add note handler
-  const handleAddNoteSubmit = (e: React.FormEvent) => {
+  const handleAddNoteSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeDetailStudent || !newNoteContent.trim()) return;
 
@@ -286,7 +288,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
       createdAt: new Date().toISOString(),
     };
 
-    onAddNote(activeDetailStudent.id, note);
+    if (!await save.run(() => onAddNote(activeDetailStudent.id, note))) return;
     setNewNoteTitle("");
     setNewNoteContent("");
   };
@@ -327,7 +329,8 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
 
   return (
     <div className="space-y-6 pb-12">
-      {/* Header Banner */}
+      {save.error && <p role="alert" className="p-3 text-sm text-rose-700">{save.error}</p>}
+        {/* Header Banner */}
       <div className="bg-white rounded-2xl p-5 sm:p-6 border border-stone-200 shadow-xs">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="space-y-1">
@@ -978,6 +981,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
                   onSubmit={handleAddNoteSubmit}
                   className="bg-purple-50/50 rounded-2xl p-4 border border-purple-200/80 space-y-3"
                 >
+              {save.error && <p role="alert" className="text-sm text-rose-700">{save.error}</p>}
                   <div className="flex items-center space-x-2">
                     <Plus className="w-4 h-4 text-purple-700 font-bold" />
                     <span className="text-xs font-bold text-purple-900 uppercase tracking-wide">
@@ -1046,7 +1050,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
 
                   <div className="flex justify-end">
                     <button
-                      type="submit"
+                      type="submit" disabled={save.pending}
                       className="px-4 py-2 bg-purple-700 hover:bg-purple-800 text-white rounded-xl text-xs font-semibold transition-colors shadow-xs"
                     >
                       Salva Nota nel Diario
@@ -1154,6 +1158,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
             </div>
 
             <form onSubmit={handleSaveStudentSubmit} className="p-6 space-y-4 max-h-[80vh] overflow-y-auto">
+              {save.error && <p role="alert" className="text-sm text-rose-700">{save.error}</p>}
               {/* Dati Anagrafici */}
               <div className="space-y-3">
                 <h3 className="text-xs font-bold text-stone-400 uppercase tracking-wider">
@@ -1448,7 +1453,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
                   Annulla
                 </button>
                 <button
-                  type="submit"
+                  type="submit" disabled={save.pending}
                   className="px-5 py-2 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold rounded-xl transition-colors shadow-xs"
                 >
                   Salva Scheda Alunno

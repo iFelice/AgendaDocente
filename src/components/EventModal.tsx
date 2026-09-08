@@ -1,3 +1,4 @@
+import { usePersistenceAction } from "../hooks/usePersistenceAction";
 import { isGoogleSyncEnabled } from "../services/googleCalendarService";
 import { eventDateError } from "../utils/dates";
 import { localDateISO } from "../utils/dates";
@@ -12,7 +13,7 @@ interface EventModalProps {
   initialDate?: string;
   initialEventData?: Partial<CalendarEvent> | null;
   profile: TeacherProfile;
-  onSave: (event: CalendarEvent) => void;
+  onSave: (event: CalendarEvent) => void | false | Promise<void | false>;
   onDelete?: (id: string) => void;
   isGoogleConnected?: boolean;
   googleUserEmail?: string;
@@ -52,6 +53,7 @@ export const EventModal: React.FC<EventModalProps> = ({
   isGoogleConnected = false,
   googleUserEmail,
 }) => {
+  const save = usePersistenceAction();
   const [validationError, setValidationError] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [category, setCategory] = useState<EventCategory>("consiglio_classe");
@@ -106,7 +108,7 @@ export const EventModal: React.FC<EventModalProps> = ({
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
 
@@ -131,7 +133,7 @@ export const EventModal: React.FC<EventModalProps> = ({
       syncedWithGoogle: syncWithGoogle,
     };
 
-    onSave(newEvent);
+    if (!await save.run(() => onSave(newEvent))) return;
     onClose();
   };
 
@@ -170,7 +172,8 @@ export const EventModal: React.FC<EventModalProps> = ({
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4 mt-4 text-xs">
-          {/* Category Chips */}
+          {save.error && <p role="alert" className="p-3 text-sm text-rose-700">{save.error}</p>}
+        {/* Category Chips */}
           <div>
             <label className="block font-semibold text-stone-700 mb-1.5">Tipologia Impegno</label>
             <div className="flex flex-wrap gap-1.5">
@@ -387,7 +390,7 @@ export const EventModal: React.FC<EventModalProps> = ({
                 Annulla
               </button>
               <button
-                type="submit"
+                type="submit" disabled={save.pending}
                 className="px-5 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg shadow-xs transition-colors"
               >
                 Salva Impegno

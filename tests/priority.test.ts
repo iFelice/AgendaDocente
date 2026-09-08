@@ -1,3 +1,6 @@
+import 'fake-indexeddb/auto';
+import { database } from '../src/services/db';
+import { initializeStorage } from '../src/services/storage';
 import { getEventModalTimeFields } from "../src/components/EventModal";
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -18,16 +21,18 @@ const slot: TimetableSlot = { id:'def', dayOfWeek:1, periodNumber:1, startTime:'
 const event: CalendarEvent = { id:'manual', title:'Riunione privata', category:'personale', date:item.date, startTime:item.startTime, endTime:item.endTime, isAllDay:false, sourceType:'manuale' };
 let memory: Map<string,string>;
 let failKey: string | undefined;
-beforeEach(() => {
+beforeEach(async () => {
   memory = new Map(); failKey = undefined;
   Object.defineProperty(globalThis, 'localStorage', { configurable:true, value:{
+    get length(){return memory.size;}, key:(i:number)=>[...memory.keys()][i] ?? null,
     getItem:(k:string)=>memory.get(k) ?? null,
     setItem:(k:string,v:string)=>{ if(k===failKey){failKey=undefined;throw new Error('QuotaExceededError');} memory.set(k,String(v)); },
     removeItem:(k:string)=>memory.delete(k),
   }});
-  storage.saveProfile(profile);storage.saveEvents([]);storage.saveStudents([]);
-  storage.saveDefinitiveTimetable([slot]);storage.saveProvisionalTimetable([{...slot,id:'prov',startTime:'09:00',endTime:'10:00'}]);
-  storage.setTimetableMode('provvisorio');storage.setOnboardingCompleted(true);
+  database.close(); await database.delete(); await initializeStorage();
+  (await storage.saveProfile(profile));(await storage.saveEvents([]));(await storage.saveStudents([]));
+  (await storage.saveDefinitiveTimetable([slot]));(await storage.saveProvisionalTimetable([{...slot,id:'prov',startTime:'09:00',endTime:'10:00'}]));
+  (await storage.setTimetableMode('provvisorio'));(await storage.setOnboardingCompleted(true));
 });
 
 test('civil days stay correct at Rome midnight, summer and winter',()=>{
@@ -105,20 +110,20 @@ test('text remains usable offline',async()=>{
   try{const result=await analyzeCircular({text:'14/09/2027 Collegio docenti 15:00-17:00',profile});assert.equal(result.success,true);assert.equal(result.items.length,1);}
   finally{globalThis.fetch=previous;}
 });
-test('circular cancellation leaves unrelated manual events intact',()=>{
-  storage.saveEvents([event]);assert.equal(storage.deleteEventMatchingExtractedItem(item,doc.id),false);assert.equal(storage.getEvents()[0].id,'manual');
+test('circular cancellation leaves unrelated manual events intact',async ()=>{
+  (await storage.saveEvents([event]));assert.equal((await storage.deleteEventMatchingExtractedItem(item,doc.id)),false);assert.equal((await storage.getEvents())[0].id,'manual');
 });
-test('stable links survive edits and target only the correct circular',()=>{
+test('stable links survive edits and target only the correct circular',async ()=>{
   const linked=convertExtractedItemToEvent(item,doc.title,doc.id);
   const other=convertExtractedItemToEvent(item,'Other','circ-other');
-  storage.saveEvents([event,{...linked,title:'Modified title'},other]);
-  assert.equal(isCommitmentInEvents(item,storage.getEvents(),doc.id),true);
-  assert.equal(storage.deleteEventMatchingExtractedItem(item,doc.id),true);
-  assert.deepEqual(storage.getEvents().map(e=>e.id),[event.id,other.id]);
+  (await storage.saveEvents([event,{...linked,title:'Modified title'},other]));
+  assert.equal(isCommitmentInEvents(item,(await storage.getEvents()),doc.id),true);
+  assert.equal((await storage.deleteEventMatchingExtractedItem(item,doc.id)),true);
+  assert.deepEqual((await storage.getEvents()).map(e=>e.id),[event.id,other.id]);
 });
-test('reimporting one circular item is idempotent without losing unrelated events',()=>{
-  storage.saveEvents([event]);const linked=convertExtractedItemToEvent(item,doc.title,doc.id);
-  assert.equal(storage.bulkAddEvents([linked]),1);assert.equal(storage.bulkAddEvents([linked]),0);assert.equal(storage.getEvents().length,2);
+test('reimporting one circular item is idempotent without losing unrelated events',async ()=>{
+  (await storage.saveEvents([event]));const linked=convertExtractedItemToEvent(item,doc.title,doc.id);
+  assert.equal((await storage.bulkAddEvents([linked])),1);assert.equal((await storage.bulkAddEvents([linked])),0);assert.equal((await storage.getEvents()).length,2);
 });
 test('incomplete extracted events cannot be converted using invented times',()=>{
   assert.throws(()=>convertExtractedItemToEvent({...item,startTime:undefined},doc.title,doc.id));
@@ -129,36 +134,40 @@ test('legacy links require exact unique document and item, never a manual event'
   assert.equal(linkLegacyCircularEvents([old],[doc,{...doc,id:'ambiguous'}])[0].sourceCircularId,undefined);
   assert.equal(linkLegacyCircularEvents([event],[doc])[0].sourceCircularId,undefined);
 });
-test('v3 backup round-trips both timetables, mode and onboarding',()=>{
-  const backup=storage.exportDataBackup();storage.saveDefinitiveTimetable([]);storage.saveProvisionalTimetable([]);storage.setTimetableMode('auto');storage.setOnboardingCompleted(false);
-  assert.equal(storage.importDataBackup(backup),true);
-  assert.equal(storage.getDefinitiveTimetable()[0].id,'def');assert.equal(storage.getProvisionalTimetable()[0].id,'prov');
-  assert.equal(storage.getTimetableMode(),'provvisorio');assert.equal(storage.hasCompletedOnboarding(),true);
+test('v3 backup round-trips both timetables, mode and onboarding',async ()=>{
+  const backup=(await storage.exportDataBackup());(await storage.saveDefinitiveTimetable([]));(await storage.saveProvisionalTimetable([]));(await storage.setTimetableMode('auto'));(await storage.setOnboardingCompleted(false));
+  assert.equal((await storage.importDataBackup(backup)),true);
+  assert.equal((await storage.getDefinitiveTimetable())[0].id,'def');assert.equal((await storage.getProvisionalTimetable())[0].id,'prov');
+  assert.equal((await storage.getTimetableMode()),'provvisorio');assert.equal((await storage.hasCompletedOnboarding()),true);
 });
-test('v2 backups remain readable without erasing the existing second timetable',()=>{
-  const v3=JSON.parse(storage.exportDataBackup());const {definitiveTimetable,provisionalTimetable,timetableMode,onboardingCompleted,...base}=v3;
-  assert.equal(storage.importDataBackup(JSON.stringify({...base,version:2,timetable:[{...slot,id:'legacy'}]})),true);
-  assert.equal(storage.getDefinitiveTimetable()[0].id,'legacy');assert.equal(storage.getProvisionalTimetable()[0].id,'prov');
+test('v2 backups remain readable without erasing the existing second timetable',async ()=>{
+  const v3=JSON.parse((await storage.exportDataBackup()));const {definitiveTimetable,provisionalTimetable,timetableMode,onboardingCompleted,...base}=v3;
+  assert.equal((await storage.importDataBackup(JSON.stringify({...base,version:2,timetable:[{...slot,id:'legacy'}]}))),true);
+  assert.equal((await storage.getDefinitiveTimetable())[0].id,'legacy');assert.equal((await storage.getProvisionalTimetable())[0].id,'prov');
 });
-test('malformed and nested invalid backups do not touch any data',()=>{
+test('malformed and nested invalid backups do not touch any data',async ()=>{
   for(const mutate of [(b:any)=>({}), (b:any)=>({...b,version:99}), (b:any)=>({...b,students:[{id:'x',fullName:'X',className:'1A',notes:[null]}]}), (b:any)=>({...b,profile:{...b.profile,roles:'bad'}})]){
-    const valid=JSON.parse(storage.exportDataBackup());const before=[...memory];
-    assert.equal(storage.importDataBackup(JSON.stringify(mutate(valid))),false);assert.deepEqual([...memory],before);
+    const valid=JSON.parse((await storage.exportDataBackup()));const before=await database.readSnapshot();
+    assert.equal((await storage.importDataBackup(JSON.stringify(mutate(valid)))),false);assert.deepEqual(await database.readSnapshot(),before);
   }
 });
-test('write failure during restore rolls back previous contents',()=>{
-  const b=JSON.parse(storage.exportDataBackup());const before=new Map(memory);b.profile.fullName='Changed';b.events=[event];
-  failKey='agedoc_events_v2';assert.equal(storage.importDataBackup(JSON.stringify(b)),false);assert.deepEqual(memory,before);
+test('write failure during restore rolls back previous contents',async ()=>{
+  const b=JSON.parse((await storage.exportDataBackup()));const before=await database.readSnapshot();b.profile.fullName='Changed';b.events=[event];
+  const fail = () => { throw new Error('QuotaExceededError'); };
+  database.table('events').hook('creating', fail);
+  try { assert.equal((await storage.importDataBackup(JSON.stringify(b))),false); }
+  finally { database.table('events').hook('creating').unsubscribe(fail); }
+  assert.deepEqual(await database.readSnapshot(),before);
 });
-test('interrupted restore journal is recovered on startup',()=>{
-  const original=memory.get('agedoc_teacher_profile_v2')!;
+test('interrupted restore journal is recovered on startup',async ()=>{
+  const original=JSON.stringify(profile);
   memory.set('agedoc_restore_journal_v1',JSON.stringify({'agedoc_teacher_profile_v2':original}));
   memory.set('agedoc_teacher_profile_v2',JSON.stringify({...profile,fullName:'Interrupted change'}));
-  recoverBackupRestore();assert.equal(storage.getProfile().fullName,profile.fullName);assert.equal(memory.has('agedoc_restore_journal_v1'),false);
+  recoverBackupRestore();assert.equal((await storage.getProfile()).fullName,profile.fullName);assert.equal(memory.has('agedoc_restore_journal_v1'),false);
 });
-test('reading circulars never substitutes demo text for the original',()=>{
-  storage.saveCircular({...doc,title:'Impegni di settembre',rawText:'08/09/2027',extractedItems:[]});
-  assert.deepEqual(storage.getCirculars()[0].extractedItems,[]);
+test('reading circulars never substitutes demo text for the original',async ()=>{
+  (await storage.saveCircular({...doc,title:'Impegni di settembre',rawText:'08/09/2027',extractedItems:[]}));
+  assert.deepEqual((await storage.getCirculars())[0].extractedItems,[]);
 });
 test('all-day exports use exclusive next-day end in API and link',()=>{
   const allDay={...event,date:'2026-12-31',isAllDay:true};
@@ -179,11 +188,11 @@ test('compound teacher subjects and explicit chosen location are supported',()=>
   assert.equal(evaluateItemRelevance({title:'Dipartimento Matematica'},{...profile,primarySubjects:['Matematica e Scienze']}).relevance,'VERDE');
   assert.equal(normalizeExtractedItems([item],profile,'Sede scelta')[0].location,'Sede scelta');
 });
-test('default demo data can be backed up and restored by the new validator',()=>{
-  memory.clear();const backup=storage.exportDataBackup();assert.equal(storage.importDataBackup(backup),true);
+test('default demo data can be backed up and restored by the new validator',async ()=>{
+  memory.clear();database.close();await database.delete();await initializeStorage();const backup=(await storage.exportDataBackup());assert.equal((await storage.importDataBackup(backup)),true);
 });
-test('corrupt circular archive does not replace valid manual events',()=>{
-  storage.saveEvents([event]);memory.set('agedoc_circulars_v2','not json');assert.deepEqual(storage.getEvents(),[event]);
+test('corrupt circular archive does not replace valid manual events',async ()=>{
+  (await storage.saveEvents([event]));memory.set('agedoc_circulars_v2','not json');assert.deepEqual((await storage.getEvents()),[event]);
 });
 
 const invalidIntervals: Array<[string, Partial<CalendarEvent>]> = [
@@ -217,39 +226,39 @@ for (const [label, times] of invalidIntervals) {
   });
 }
 
-function backupForVersion(version: 2 | 3) {
-  const data = JSON.parse(storage.exportDataBackup());
+async function backupForVersion(version: 2 | 3) {
+  const data = JSON.parse((await storage.exportDataBackup()));
   if (version === 3) return data;
   const { definitiveTimetable, provisionalTimetable, timetableMode, onboardingCompleted, ...common } = data;
   return { ...common, version: 2, timetable: definitiveTimetable };
 }
 
 for (const version of [2, 3] as const) {
-  test(`v${version} backups reject missing, malformed or non-increasing event times without writes`, () => {
+  test(`v${version} backups reject missing, malformed or non-increasing event times without writes`, async () => {
     for (const [, times] of invalidIntervals) {
-      const data = backupForVersion(version);
+      const data = (await backupForVersion(version));
       data.events = [{ ...event, ...times }];
-      const before = new Map(memory);
-      assert.equal(storage.importDataBackup(JSON.stringify(data)), false);
-      assert.deepEqual(memory, before);
+      const before = await database.readSnapshot();
+      assert.equal((await storage.importDataBackup(JSON.stringify(data))), false);
+      assert.deepEqual(await database.readSnapshot(), before);
     }
   });
-  test(`v${version} backups accept an all-day event without any times`, () => {
-    const data = backupForVersion(version);
+  test(`v${version} backups accept an all-day event without any times`, async () => {
+    const data = (await backupForVersion(version));
     data.events = [{ ...event, isAllDay: true, startTime: undefined, endTime: undefined }];
-    assert.equal(storage.importDataBackup(JSON.stringify(data)), true);
-    assert.equal(storage.getEvents()[0].isAllDay, true);
-    assert.equal(storage.getEvents()[0].startTime, undefined);
-    assert.equal(storage.getEvents()[0].endTime, undefined);
+    assert.equal((await storage.importDataBackup(JSON.stringify(data))), true);
+    assert.equal((await storage.getEvents())[0].isAllDay, true);
+    assert.equal((await storage.getEvents())[0].startTime, undefined);
+    assert.equal((await storage.getEvents())[0].endTime, undefined);
   });
-  test(`v${version} timetables reject equal and reversed intervals without writes`, () => {
+  test(`v${version} timetables reject equal and reversed intervals without writes`, async () => {
     const keys = version === 2 ? ['timetable'] : ['definitiveTimetable', 'provisionalTimetable'];
     for (const key of keys) for (const endTime of ['08:00', '07:59']) {
-      const data = backupForVersion(version);
+      const data = (await backupForVersion(version));
       data[key] = [{ ...slot, endTime }];
-      const before = new Map(memory);
-      assert.equal(storage.importDataBackup(JSON.stringify(data)), false);
-      assert.deepEqual(memory, before);
+      const before = await database.readSnapshot();
+      assert.equal((await storage.importDataBackup(JSON.stringify(data))), false);
+      assert.deepEqual(await database.readSnapshot(), before);
     }
   });
 }
@@ -321,16 +330,37 @@ test('manual defaults remain available but cannot overwrite provided values', ()
   assert.deepEqual(getEventModalTimeFields({ isAllDay: true }), { startTime: '', endTime: '', location: '' });
 });
 
-test('syncCircularCommitments defaults to VERDE/GIALLO and skips ROSSO', () => {
+test('syncCircularCommitments defaults to VERDE/GIALLO and skips ROSSO', async () => {
   const items: ExtractedItem[] = ['VERDE', 'GIALLO', 'ROSSO'].map((relevance, i) => ({
     ...item, tempId: `color-${i}`, title: `Impegno ${i}`, relevance: relevance as ExtractedItem['relevance'],
     // Selection flags must not bypass the relevance filter.
     selectedForImport: relevance === 'ROSSO',
   }));
-  storage.saveCircular({ ...doc, extractedItems: items });
-  assert.equal(storage.syncCircularCommitments(doc.id), 2);
-  assert.deepEqual(storage.getEvents().map(e => e.sourceItemId), ['color-0', 'color-1']);
-  assert.equal(storage.syncCircularCommitments(doc.id), 0);
-  assert.equal(storage.syncCircularCommitments(doc.id, false), 1);
-  assert.equal(storage.getEvents().at(-1)!.sourceItemId, 'color-2');
+  (await storage.saveCircular({ ...doc, extractedItems: items }));
+  assert.equal((await storage.syncCircularCommitments(doc.id)), 2);
+  assert.deepEqual((await storage.getEvents()).map(e => e.sourceItemId), ['color-0', 'color-1']);
+  assert.equal((await storage.syncCircularCommitments(doc.id)), 0);
+  assert.equal((await storage.syncCircularCommitments(doc.id, false)), 1);
+  assert.equal((await storage.getEvents()).at(-1)!.sourceItemId, 'color-2');
+});
+
+test('concurrent event and note writes retain both changes',async()=>{
+  await Promise.all([storage.saveEvent({...event,id:'first'}),storage.saveEvent({...event,id:'second'})]);
+  assert.deepEqual((await storage.getEvents()).map(e=>e.id),['first','second']);
+  const student={id:'test-student',fullName:'Studente',className:'1A',notes:[]};await storage.saveStudent(student);
+  const note={id:'n1',date:'2027-09-01',category:'didattica' as const,title:'Nota',content:'Testo',createdAt:'2027-09-01T09:00:00Z'};
+  await Promise.all([storage.addStudentNote(student.id,note),storage.addStudentNote(student.id,{...note,id:'n2'})]);
+  assert.deepEqual(new Set((await storage.getStudents())[0].notes.map(n=>n.id)),new Set(['n1','n2']));
+});
+
+test('all local operations and backup roundtrip work with network unavailable',async()=>{
+  const original=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw new Error('Offline');};
+  try {
+    await storage.saveProfile({...profile,fullName:'Offline'});await storage.saveEvent(event);await storage.saveCircular(doc);
+    await storage.saveTimetableSlot({...slot,id:'offline'},'provvisorio');
+    await storage.saveStudent({id:'offline',fullName:'Studente',className:'1A',notes:[]});
+    await storage.addStudentNote('offline',{id:'note',date:'2027-09-01',category:'didattica',title:'Nota',content:'Offline',createdAt:'2027-09-01T09:00:00Z'});
+    const before=await database.readSnapshot(), backup=await storage.exportDataBackup();await storage.deleteEvent(event.id);
+    assert.equal(await storage.importDataBackup(backup),true);assert.deepEqual(await database.readSnapshot(),before);assert.equal(calls,0);
+  }finally{globalThis.fetch=original;}
 });

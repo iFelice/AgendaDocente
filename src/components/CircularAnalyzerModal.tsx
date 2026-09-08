@@ -1,3 +1,4 @@
+import { usePersistenceAction } from "../hooks/usePersistenceAction";
 import { convertExtractedItemToEvent } from "../services/storage";
 import { extractedItemError } from "../utils/circularParser";
 import { localDateISO } from "../utils/dates";
@@ -35,7 +36,7 @@ interface CircularAnalyzerModalProps {
   isOpen: boolean;
   onClose: () => void;
   profile: TeacherProfile;
-  onImportEvents: (events: CalendarEvent[], docMeta: CircularDocument) => void;
+  onImportEvents: (events: CalendarEvent[], docMeta: CircularDocument) => void | false | Promise<void | false>;
 }
 
 export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
@@ -44,6 +45,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   profile,
   onImportEvents,
 }) => {
+  const save = usePersistenceAction();
   const [step, setStep] = useState<"input" | "results">("input");
   const [inputMode, setInputMode] = useState<"file" | "text" | "samples">("samples");
   const [circularText, setCircularText] = useState<string>("");
@@ -217,7 +219,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   };
 
   // Final confirmation: convert selected ExtractedItems to CalendarEvent
-  const handleConfirmImport = () => {
+  const handleConfirmImport = async () => {
     const selected = extractedItems.filter((i) => i.selectedForImport);
     if (selected.length === 0) {
       setSelectionWarning("Seleziona almeno un impegno prima di confermare l'importazione oppure clicca su 'Seleziona pertinenti'.");
@@ -242,13 +244,14 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       extractedItems: extractedItems,
     };
 
-    onImportEvents(newEvents, docMeta);
+    if (!await save.run(() => onImportEvents(newEvents, docMeta))) return;
     onClose();
   };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-stone-950/50 backdrop-blur-xs">
       <div className="bg-white rounded-2xl max-w-4xl w-full max-h-[92vh] shadow-2xl border border-stone-200 flex flex-col overflow-hidden animate-in fade-in zoom-in-95">
+        {save.error && <p role="alert" className="p-3 text-sm text-rose-700">{save.error}</p>}
         {/* Modal Top Bar */}
         <div className="p-4 sm:p-5 border-b border-stone-200 flex items-center justify-between bg-stone-50">
           <div className="flex items-center space-x-3">

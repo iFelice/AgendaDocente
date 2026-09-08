@@ -1,3 +1,4 @@
+import { usePersistenceAction } from "../hooks/usePersistenceAction";
 import React, { useState } from "react";
 import {
   Clock,
@@ -24,7 +25,7 @@ interface TimetableEditorProps {
   timetableMode: TimetableMode;
   activeType: TimetableType;
   isDefinitiveCompiled: boolean;
-  onSaveSlot: (slot: TimetableSlot, type: TimetableType) => void;
+  onSaveSlot: (slot: TimetableSlot, type: TimetableType) => void | false | Promise<void | false>;
   onDeleteSlot: (id: string, type: TimetableType) => void;
   onSetTimetableMode: (mode: TimetableMode) => void;
   onCopyProvisionalToDefinitive: () => void;
@@ -53,6 +54,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   onResetProvisional,
   onResetDefinitive,
 }) => {
+  const save = usePersistenceAction();
   // If definitive is not compiled, default tab to provisional
   const [activeTab, setActiveTab] = useState<TimetableType>(
     !isDefinitiveCompiled ? "provvisorio" : "definitivo"
@@ -109,17 +111,18 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
     setIsModalOpen(true);
   };
 
-  const handleFormSubmit = (e: React.FormEvent) => {
+  const handleFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingSlot) return;
-    onSaveSlot(editingSlot, activeTab);
+    if (!await save.run(() => onSaveSlot(editingSlot, activeTab))) return;
     setIsModalOpen(false);
     setEditingSlot(null);
   };
 
   return (
     <div className="space-y-6 pb-12">
-      {/* Header with Title & Mode Selector */}
+      {save.error && <p role="alert" className="p-3 text-sm text-rose-700">{save.error}</p>}
+        {/* Header with Title & Mode Selector */}
       <div className="bg-white rounded-xl p-5 border border-stone-200 shadow-xs flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
         <div>
           <span className="text-xs font-semibold text-emerald-800 uppercase tracking-wider">
@@ -542,6 +545,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
             </div>
 
             <form onSubmit={handleFormSubmit} className="space-y-4 mt-4 text-xs">
+              {save.error && <p role="alert" className="text-sm text-rose-700">{save.error}</p>}
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block font-medium text-stone-700 mb-1">Giorno della settimana</label>
@@ -678,7 +682,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                     Annulla
                   </button>
                   <button
-                    type="submit"
+                    type="submit" disabled={save.pending}
                     className={`px-4 py-2 text-xs font-semibold text-white rounded-lg shadow-xs transition-colors ${
                       activeTab === "provvisorio"
                         ? "bg-amber-700 hover:bg-amber-800"

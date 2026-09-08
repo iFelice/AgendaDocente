@@ -1,3 +1,4 @@
+import { usePersistenceAction } from "../hooks/usePersistenceAction";
 import { localDateISO } from "../utils/dates";
 import React, { useState, useEffect } from "react";
 import {
@@ -31,7 +32,7 @@ interface ProfileModalProps {
   isOpen: boolean;
   onClose: () => void;
   profile: TeacherProfile;
-  onSaveProfile: (updatedProfile: TeacherProfile) => void;
+  onSaveProfile: (updatedProfile: TeacherProfile) => void | false | Promise<void | false>;
   onDataImported: () => void;
   onOpenTutorial?: () => void;
   googleUser?: FirebaseUser | null;
@@ -58,6 +59,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   onSyncAllToGoogle,
   initialTab = "profilo",
 }) => {
+  const save = usePersistenceAction();
   const [activeTab, setActiveTab] = useState<"profilo" | "backup" | "google">(initialTab);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -192,7 +194,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   };
 
   // Save profile
-  const handleSave = (e: React.FormEvent) => {
+  const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     const updated: TeacherProfile = {
       ...profile,
@@ -208,13 +210,15 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
       isSupportTeacher,
       assignedStudents,
     };
-    onSaveProfile(updated);
+    if (!await save.run(() => onSaveProfile(updated))) return;
     onClose();
   };
 
   // Backup Export
-  const handleExportBackup = () => {
-    const jsonStr = storage.exportDataBackup();
+  const handleExportBackup = async () => {
+    let jsonStr: string;
+    try { jsonStr = await storage.exportDataBackup(); }
+    catch { setImportMessage("Esportazione non riuscita: impossibile leggere l’archivio locale. Nessun file parziale è stato scaricato."); return; }
     const blob = new Blob([jsonStr], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -230,12 +234,12 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = () => {
-      const ok = storage.importDataBackup(reader.result as string);
+    reader.onload = async () => {
+      const ok = (await storage.importDataBackup(reader.result as string));
       if (ok) {
         const legacy = JSON.parse(reader.result as string).version === 2;
         setImportMessage(legacy ? "Backup precedente ripristinato: contiene un solo orario, salvato come definitivo. Orario provvisorio e modalità attuali sono stati conservati." : "Backup ripristinato: entrambi gli orari, modalità e dati sono stati ricaricati.");
-        onDataImported();
+        await onDataImported();
       } else {
         setImportMessage("Ripristino non riuscito: verifica il file e lo spazio disponibile. I dati precedenti sono stati conservati.");
       }
@@ -246,6 +250,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-950/40 backdrop-blur-xs">
       <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] shadow-2xl border border-stone-200 flex flex-col overflow-hidden animate-in fade-in zoom-in-95">
+        {save.error && <p role="alert" className="p-3 text-sm text-rose-700">{save.error}</p>}
         {/* Header */}
         <div className="p-4 sm:p-5 border-b border-stone-200 flex items-center justify-between bg-stone-50">
           <div className="flex items-center space-x-3">
@@ -691,7 +696,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
 
               <div className="flex justify-end pt-3">
                 <button
-                  type="submit"
+                  type="submit" disabled={save.pending}
                   className="px-5 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl shadow-xs"
                 >
                   Salva Modifiche Profilo

@@ -53,17 +53,17 @@ export function validateBackup(data: unknown): asserts data is Record<string, an
 
 const JOURNAL = 'agedoc_restore_journal_v1';
 /** An interrupted multi-key restore rolls back at the next application startup. */
-export function recoverBackupRestore(): void {
-  const raw = localStorage.getItem(JOURNAL);
+export function recoverBackupRestore(legacy: Pick<Storage, "getItem" | "setItem" | "removeItem"> = localStorage): void {
+  const raw = legacy.getItem(JOURNAL);
   if (!raw) return;
   const previous: Record<string, string | null> = JSON.parse(raw);
   for (const [key, value] of Object.entries(previous)) {
     if (!key.startsWith('agedoc_') || key === JOURNAL || !(value === null || typeof value === 'string')) throw new Error('Registro ripristino non valido.');
   }
   for (const [key, value] of Object.entries(previous)) {
-    if (value === null) localStorage.removeItem(key); else localStorage.setItem(key, value);
+    if (value === null) legacy.removeItem(key); else legacy.setItem(key, value);
   }
-  localStorage.removeItem(JOURNAL);
+  legacy.removeItem(JOURNAL);
 }
 
 export function restoreBackupValues(values: Record<string, string>): void {
