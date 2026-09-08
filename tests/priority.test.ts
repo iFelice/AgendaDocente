@@ -1,3 +1,4 @@
+import { getEventModalTimeFields } from "../src/components/EventModal";
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { localDateISO, nextDateISO, isValidDate, eventDateError } from '../src/utils/dates';
@@ -7,7 +8,7 @@ import { analyzeCircular } from '../src/services/aiService';
 import { storage, convertExtractedItemToEvent, isCommitmentInEvents } from '../src/services/storage';
 import { recoverBackupRestore } from '../src/services/backup';
 import { linkLegacyCircularEvents } from '../src/utils/circularLinks';
-import { toGoogleCalendarPayload, getGoogleCalendarWebUrl, downloadIcsCalendar } from '../src/services/googleCalendarService';
+import { createGoogleCalendarEvent, updateGoogleCalendarEvent, toGoogleCalendarPayload, getGoogleCalendarWebUrl, downloadIcsCalendar } from '../src/services/googleCalendarService';
 import type { TeacherProfile, ExtractedItem, CalendarEvent, TimetableSlot, CircularDocument } from '../src/types';
 
 const profile: TeacherProfile = { id:'teacher', fullName:'Docente test', schoolName:'Scuola test', schoolYear:'2027/2028', schoolLevel:'ssig', primarySubjects:['Scienze motorie'], classes:['1A','2E','3B'], campuses:['Centrale'], roles:[] };
@@ -183,4 +184,153 @@ test('default demo data can be backed up and restored by the new validator',()=>
 });
 test('corrupt circular archive does not replace valid manual events',()=>{
   storage.saveEvents([event]);memory.set('agedoc_circulars_v2','not json');assert.deepEqual(storage.getEvents(),[event]);
+});
+
+const invalidIntervals: Array<[string, Partial<CalendarEvent>]> = [
+  ['both times absent', { startTime: undefined, endTime: undefined }],
+  ['start absent', { startTime: undefined }],
+  ['end absent', { endTime: undefined }],
+  ['empty start', { startTime: '' }],
+  ['empty end', { endTime: '' }],
+  ['invalid start', { startTime: '24:00' }],
+  ['invalid end', { endTime: '16:99' }],
+  ['equal times', { endTime: '15:00' }],
+  ['reversed times', { endTime: '14:59' }],
+];
+
+for (const [label, times] of invalidIntervals) {
+  test(`API payload, web link and ICS reject ${label}`, async () => {
+    const invalid = { ...event, ...times };
+    const error = /Impossibile esportare/;
+    assert.throws(() => toGoogleCalendarPayload(invalid), error);
+    assert.throws(() => getGoogleCalendarWebUrl(invalid), error);
+    // A valid preceding event must not cause a partial download.
+    assert.throws(() => downloadIcsCalendar([event, invalid]), error);
+    let apiCalls = 0;
+    const previous = globalThis.fetch;
+    globalThis.fetch = async () => { apiCalls++; throw new Error('Unexpected network request'); };
+    try {
+      await assert.rejects(createGoogleCalendarEvent('test-token', invalid), error);
+      await assert.rejects(updateGoogleCalendarEvent('test-token', 'remote-id', invalid), error);
+      assert.equal(apiCalls, 0);
+    } finally { globalThis.fetch = previous; }
+  });
+}
+
+function backupForVersion(version: 2 | 3) {
+  const data = JSON.parse(storage.exportDataBackup());
+  if (version === 3) return data;
+  const { definitiveTimetable, provisionalTimetable, timetableMode, onboardingCompleted, ...common } = data;
+  return { ...common, version: 2, timetable: definitiveTimetable };
+}
+
+for (const version of [2, 3] as const) {
+  test(`v${version} backups reject missing, malformed or non-increasing event times without writes`, () => {
+    for (const [, times] of invalidIntervals) {
+      const data = backupForVersion(version);
+      data.events = [{ ...event, ...times }];
+      const before = new Map(memory);
+      assert.equal(storage.importDataBackup(JSON.stringify(data)), false);
+      assert.deepEqual(memory, before);
+    }
+  });
+  test(`v${version} backups accept an all-day event without any times`, () => {
+    const data = backupForVersion(version);
+    data.events = [{ ...event, isAllDay: true, startTime: undefined, endTime: undefined }];
+    assert.equal(storage.importDataBackup(JSON.stringify(data)), true);
+    assert.equal(storage.getEvents()[0].isAllDay, true);
+    assert.equal(storage.getEvents()[0].startTime, undefined);
+    assert.equal(storage.getEvents()[0].endTime, undefined);
+  });
+  test(`v${version} timetables reject equal and reversed intervals without writes`, () => {
+    const keys = version === 2 ? ['timetable'] : ['definitiveTimetable', 'provisionalTimetable'];
+    for (const key of keys) for (const endTime of ['08:00', '07:59']) {
+      const data = backupForVersion(version);
+      data[key] = [{ ...slot, endTime }];
+      const before = new Map(memory);
+      assert.equal(storage.importDataBackup(JSON.stringify(data)), false);
+      assert.deepEqual(memory, before);
+    }
+  });
+}
+
+test('all-day exports do not require times and keep exclusive end date', async () => {
+  const allDay = { ...event, date: '2026-12-31', isAllDay: true, startTime: undefined, endTime: undefined };
+  assert.deepEqual(toGoogleCalendarPayload(allDay).start, { date: '2026-12-31' });
+  assert.deepEqual(toGoogleCalendarPayload(allDay).end, { date: '2027-01-01' });
+  assert.match(getGoogleCalendarWebUrl(allDay), /dates=20261231\/20270101/);
+  let captured: Blob | undefined;
+  const oldCreate = URL.createObjectURL, oldRevoke = URL.revokeObjectURL;
+  const oldDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  URL.createObjectURL = (blob: Blob) => { captured = blob; return 'blob:test'; };
+  URL.revokeObjectURL = () => {};
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: {
+    createElement: () => ({ click() {} }), body: { appendChild() {}, removeChild() {} },
+  } });
+  try {
+    downloadIcsCalendar([allDay, event]);
+    const content = await captured!.text();
+    assert.match(content, /DTSTART;VALUE=DATE:20261231/);
+    assert.match(content, /DTEND;VALUE=DATE:20270101/);
+    assert.match(content, /DTSTART:20270914T150000/);
+    assert.match(content, /DTEND:20270914T160000/);
+  } finally {
+    URL.createObjectURL = oldCreate; URL.revokeObjectURL = oldRevoke;
+    if (oldDocument) Object.defineProperty(globalThis, 'document', oldDocument);
+    else delete (globalThis as any).document;
+  }
+});
+
+test('valid timed exports preserve the exact interval without a default duration', () => {
+  const shortEvent = { ...event, startTime: '22:50', endTime: '23:05' };
+  const payload = toGoogleCalendarPayload(shortEvent);
+  assert.equal(payload.start.dateTime, `${event.date}T22:50:00`);
+  assert.equal(payload.end.dateTime, `${event.date}T23:05:00`);
+  assert.match(getGoogleCalendarWebUrl(shortEvent), /20270914T225000\/20270914T230500/);
+});
+
+test('editing an incomplete event keeps missing times and location blank', () => {
+  for (const source of [
+    { ...event, startTime: undefined, endTime: undefined, location: undefined },
+    { ...event, sourceType: 'circolare' as const, startTime: undefined, endTime: undefined, location: undefined },
+  ]) {
+    const fields = getEventModalTimeFields(source);
+    assert.deepEqual(fields, { startTime: '', endTime: '', location: '' });
+    assert.ok(eventDateError({ ...source, ...fields }));
+  }
+});
+
+test('prefilled circular data never gains absent start, end or location', () => {
+  for (const source of [
+    { sourceType: 'circolare' as const, date: event.date, startTime: '14:10' },
+    { sourceType: 'circolare' as const, date: event.date, endTime: '17:20' },
+    {},
+  ]) {
+    const fields = getEventModalTimeFields(source);
+    assert.equal(fields.startTime, source.startTime ?? '');
+    assert.equal(fields.endTime, source.endTime ?? '');
+    assert.equal(fields.location, '');
+    assert.ok(eventDateError({ date: event.date, ...fields, isAllDay: false }));
+  }
+});
+
+test('manual defaults remain available but cannot overwrite provided values', () => {
+  assert.deepEqual(getEventModalTimeFields(), { startTime: '15:00', endTime: '16:30', location: 'Sede Centrale' });
+  const existing = { startTime: '10:15', endTime: '10:45', location: 'Aula 4' };
+  assert.deepEqual(getEventModalTimeFields(existing), existing);
+  assert.deepEqual(getEventModalTimeFields({ isAllDay: true }), { startTime: '', endTime: '', location: '' });
+});
+
+test('syncCircularCommitments defaults to VERDE/GIALLO and skips ROSSO', () => {
+  const items: ExtractedItem[] = ['VERDE', 'GIALLO', 'ROSSO'].map((relevance, i) => ({
+    ...item, tempId: `color-${i}`, title: `Impegno ${i}`, relevance: relevance as ExtractedItem['relevance'],
+    // Selection flags must not bypass the relevance filter.
+    selectedForImport: relevance === 'ROSSO',
+  }));
+  storage.saveCircular({ ...doc, extractedItems: items });
+  assert.equal(storage.syncCircularCommitments(doc.id), 2);
+  assert.deepEqual(storage.getEvents().map(e => e.sourceItemId), ['color-0', 'color-1']);
+  assert.equal(storage.syncCircularCommitments(doc.id), 0);
+  assert.equal(storage.syncCircularCommitments(doc.id, false), 1);
+  assert.equal(storage.getEvents().at(-1)!.sourceItemId, 'color-2');
 });

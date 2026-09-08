@@ -1047,7 +1047,7 @@ export const storage = {
   /**
    * Syncs commitments from a circular into the calendar planning
    */
-  syncCircularCommitments(circularId: string, onlyRelevant: boolean = false): number {
+  syncCircularCommitments(circularId: string, onlyRelevant: boolean = true): number {
     const circulars = this.getCirculars();
     const target = circulars.find((c) => c.id === circularId);
     if (!target || !target.extractedItems || target.extractedItems.length === 0) {

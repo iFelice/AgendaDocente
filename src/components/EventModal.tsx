@@ -32,6 +32,13 @@ const CATEGORIES: { id: EventCategory; label: string }[] = [
   { id: "personale", label: "Personale" },
 ];
 
+/** Defaults are only suggestions for a new manual event, never replacements for source data. */
+export function getEventModalTimeFields(source?: Partial<CalendarEvent> | null) {
+  return source
+    ? { startTime: source.startTime ?? "", endTime: source.endTime ?? "", location: source.location ?? "" }
+    : { startTime: "15:00", endTime: "16:30", location: "Sede Centrale" };
+}
+
 export const EventModal: React.FC<EventModalProps> = ({
   isOpen,
   onClose,
@@ -48,53 +55,49 @@ export const EventModal: React.FC<EventModalProps> = ({
   const [title, setTitle] = useState("");
   const [category, setCategory] = useState<EventCategory>("consiglio_classe");
   const [date, setDate] = useState(localDateISO());
-  const [startTime, setStartTime] = useState("15:00");
-  const [endTime, setEndTime] = useState("16:30");
+  const initialTimeFields = getEventModalTimeFields(eventToEdit ?? initialEventData);
+  const [startTime, setStartTime] = useState(initialTimeFields.startTime);
+  const [endTime, setEndTime] = useState(initialTimeFields.endTime);
   const [isAllDay, setIsAllDay] = useState(false);
   const [className, setClassName] = useState("");
   const [subject, setSubject] = useState("");
-  const [location, setLocation] = useState("");
+  const [location, setLocation] = useState(initialTimeFields.location);
   const [notes, setNotes] = useState("");
   const [syncWithGoogle, setSyncWithGoogle] = useState(false);
   const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
 
   useEffect(() => {
+    const timeFields = getEventModalTimeFields(eventToEdit ?? initialEventData);
+    setStartTime(timeFields.startTime);
+    setEndTime(timeFields.endTime);
+    setLocation(timeFields.location);
     setValidationError(null);
     setIsConfirmingDelete(false);
     if (eventToEdit) {
       setTitle(eventToEdit.title);
       setCategory(eventToEdit.category);
       setDate(eventToEdit.date);
-      setStartTime(eventToEdit.startTime || "15:00");
-      setEndTime(eventToEdit.endTime || "16:30");
       setIsAllDay(!!eventToEdit.isAllDay);
       setClassName(eventToEdit.className || "");
       setSubject(eventToEdit.subject || "");
-      setLocation(eventToEdit.location || "");
       setNotes(eventToEdit.notes || "");
       setSyncWithGoogle(!!eventToEdit.googleEventId || !!eventToEdit.syncedWithGoogle);
     } else if (initialEventData) {
       setTitle(initialEventData.title || "");
       setCategory(initialEventData.category || "glo");
       setDate(initialEventData.date || initialDate || localDateISO());
-      setStartTime(initialEventData.startTime || "15:00");
-      setEndTime(initialEventData.endTime || "16:30");
       setIsAllDay(!!initialEventData.isAllDay);
       setClassName(initialEventData.className || profile.classes[0] || "1A");
       setSubject(initialEventData.subject || profile.primarySubjects[0] || "");
-      setLocation(initialEventData.location || "Sede Centrale");
       setNotes(initialEventData.notes || "");
       setSyncWithGoogle(isGoogleConnected);
     } else {
       setTitle("");
       setCategory("consiglio_classe");
       setDate(initialDate || localDateISO());
-      setStartTime("15:00");
-      setEndTime("16:30");
       setIsAllDay(false);
       setClassName(profile.classes[0] || "1A");
       setSubject(profile.primarySubjects[0] || "");
-      setLocation("Sede Centrale");
       setNotes("");
       setSyncWithGoogle(isGoogleConnected);
     }

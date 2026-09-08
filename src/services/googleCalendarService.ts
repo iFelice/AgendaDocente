@@ -1,4 +1,4 @@
-import { nextDateISO } from "../utils/dates";
+import { nextDateISO, eventDateError } from "../utils/dates";
 import { CalendarEvent } from "../types";
 
 export interface GoogleCalendarApiEvent {
@@ -20,10 +20,16 @@ export interface GoogleCalendarApiEvent {
 
 const CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3/calendars/primary/events";
 
+function validateExportEvent(event: CalendarEvent): void {
+  const error = eventDateError(event);
+  if (error) throw new Error(`Impossibile esportare "${event.title}": ${error}`);
+}
+
 /**
  * Transforms an Agenda Docente CalendarEvent into a Google Calendar API format
  */
 export const toGoogleCalendarPayload = (event: CalendarEvent): GoogleCalendarApiEvent => {
+  validateExportEvent(event);
   const timeZone = "Europe/Rome";
   const categoryLabel = event.category.toUpperCase().replace(/_/g, " ");
 
@@ -43,18 +49,12 @@ export const toGoogleCalendarPayload = (event: CalendarEvent): GoogleCalendarApi
     end: {},
   };
 
-  if (event.isAllDay || (!event.startTime && !event.endTime)) {
+  if (event.isAllDay) {
     payload.start = { date: event.date };
     payload.end = { date: nextDateISO(event.date) };
   } else {
-    const startStr = event.startTime || "08:00";
-    let endStr = event.endTime || "";
-    if (!endStr) {
-      // Default duration 1 hour
-      const [h, m] = startStr.split(":").map(Number);
-      const endH = String(Math.min(h + 1, 23)).padStart(2, "0");
-      endStr = `${endH}:${String(m).padStart(2, "0")}`;
-    }
+    const startStr = event.startTime;
+    const endStr = event.endTime;
 
     payload.start = {
       dateTime: `${event.date}T${startStr}:00`,
@@ -182,6 +182,7 @@ export const listGoogleCalendarEvents = async (
  * Generates an official Google Calendar 1-click web URL to add an event without requiring any OAuth scopes
  */
 export const getGoogleCalendarWebUrl = (event: CalendarEvent): string => {
+  validateExportEvent(event);
   const title = encodeURIComponent(event.title);
   const location = event.location ? encodeURIComponent(event.location) : "";
   const details = encodeURIComponent(
@@ -197,18 +198,11 @@ export const getGoogleCalendarWebUrl = (event: CalendarEvent): string => {
 
   const cleanDate = event.date.replace(/-/g, "");
   let datesParam = "";
-  if (event.isAllDay || (!event.startTime && !event.endTime)) {
+  if (event.isAllDay) {
     datesParam = `${cleanDate}/${nextDateISO(event.date).replace(/-/g, "")}`;
   } else {
-    const startHour = (event.startTime || "08:00").replace(":", "") + "00";
-    let endHour = "";
-    if (event.endTime) {
-      endHour = event.endTime.replace(":", "") + "00";
-    } else {
-      const [h, m] = (event.startTime || "08:00").split(":").map(Number);
-      const endH = String(Math.min(h + 1, 23)).padStart(2, "0");
-      endHour = `${endH}${String(m).padStart(2, "0")}00`;
-    }
+    const startHour = event.startTime!.replace(":", "") + "00";
+    const endHour = event.endTime!.replace(":", "") + "00";
     datesParam = `${cleanDate}T${startHour}/${cleanDate}T${endHour}`;
   }
 
@@ -223,6 +217,8 @@ export const getGoogleCalendarWebUrl = (event: CalendarEvent): string => {
  * into Google Calendar, Apple Calendar, or Outlook without any OAuth verification.
  */
 export const downloadIcsCalendar = (events: CalendarEvent[], filename = "agenda_docente.ics") => {
+  // Validate the entire collection before creating or downloading a file.
+  events.forEach(validateExportEvent);
   const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`);
   const now = new Date();
   const dtstamp = `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}T${pad(
@@ -249,12 +245,12 @@ export const downloadIcsCalendar = (events: CalendarEvent[], filename = "agenda_
     lines.push(`SUMMARY:${escapeIcs(ev.title)}`);
 
     const cleanDate = ev.date.replace(/-/g, "");
-    if (ev.isAllDay || (!ev.startTime && !ev.endTime)) {
+    if (ev.isAllDay) {
       lines.push(`DTSTART;VALUE=DATE:${cleanDate}`);
       lines.push(`DTEND;VALUE=DATE:${nextDateISO(ev.date).replace(/-/g, "")}`);
     } else {
-      const sH = (ev.startTime || "08:00").replace(":", "");
-      const eH = (ev.endTime || "09:00").replace(":", "");
+      const sH = ev.startTime!.replace(":", "");
+      const eH = ev.endTime!.replace(":", "");
       lines.push(`DTSTART:${cleanDate}T${sH}00`);
       lines.push(`DTEND:${cleanDate}T${eH}00`);
     }

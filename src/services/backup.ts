@@ -1,4 +1,4 @@
-import { isValidDate, isValidTime } from '../utils/dates';
+import { isValidDate, isValidTime, eventDateError } from '../utils/dates';
 
 const record = (v: unknown): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v);
 const strings = (v: unknown) => Array.isArray(v) && v.every(x => typeof x === 'string');
@@ -19,7 +19,7 @@ function item(v: unknown): boolean {
 }
 function timetable(v: unknown): boolean {
   return list(v, s => Number.isInteger(s.dayOfWeek) && s.dayOfWeek >= 1 && s.dayOfWeek <= 6 && Number.isInteger(s.periodNumber)
-    && s.periodNumber > 0 && isValidTime(s.startTime) && isValidTime(s.endTime) && text(s.subject) && text(s.className)
+    && s.periodNumber > 0 && isValidTime(s.startTime) && isValidTime(s.endTime) && s.endTime > s.startTime && text(s.subject) && text(s.className)
     && ['classroom','campus','color'].every(k => optional(s[k], text)) && optional(s.isProvisional, bool));
 }
 
@@ -33,7 +33,7 @@ export function validateBackup(data: unknown): asserts data is Record<string, an
     || !optional(p.assignedStudents,strings) || !optional(p.isSupportTeacher,bool)
     || !optional(p.googleCalendarLinked,bool) || !optional(p.email,text) || !optional(p.googleCalendarAccount,text)
     || !optional(p.schoolLevel,v => ['infanzia','primaria','ssig','ssiig'].includes(v as string))) throw new Error('Profilo nel backup non valido.');
-  if (!list(data.events, e => required(e.title) && isValidDate(e.date) && bool(e.isAllDay) && categories.includes(e.category)
+  if (!list(data.events, e => required(e.title) && isValidDate(e.date) && bool(e.isAllDay) && eventDateError({ date: e.date, isAllDay: e.isAllDay, startTime: e.startTime, endTime: e.endTime }) === null && categories.includes(e.category)
     && ['manuale','circolare','orario','google_calendar'].includes(e.sourceType)
     && ['startTime','endTime','className','subject','location','notes','sourceCircularTitle','sourceCircularId','sourceItemId','googleEventId'].every(k => optional(e[k],text))
     && optional(e.completed,bool) && optional(e.syncedWithGoogle,bool) && optional(e.reminderMinutesBefore,number))) throw new Error('Eventi nel backup non validi.');
