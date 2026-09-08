@@ -987,15 +987,15 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                       </div>
                       <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-center">
                         <div className="text-lg font-bold text-emerald-800">
-                          {events.filter((e) => e.googleEventId || e.syncedWithGoogle).length}
+                          {events.filter((e) => e.syncedWithGoogle === true).length}
                         </div>
-                        <div className="text-[11px] text-emerald-700 font-medium mt-0.5">Già Sincronizzati</div>
+                        <div className="text-[11px] text-emerald-700 font-medium mt-0.5">Sync abilitata</div>
                       </div>
                       <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-center">
                         <div className="text-lg font-bold text-amber-800">
-                          {events.filter((e) => !e.googleEventId && !e.syncedWithGoogle).length}
+                          {events.filter((e) => e.syncedWithGoogle !== true).length}
                         </div>
-                        <div className="text-[11px] text-amber-700 font-medium mt-0.5">Da Sincronizzare</div>
+                        <div className="text-[11px] text-amber-700 font-medium mt-0.5">Solo locali / Sync disattivata</div>
                       </div>
                     </div>
 
@@ -1007,7 +1007,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                           <div>
                             <h5 className="font-bold text-xs">Conferma Sincronizzazione Google Calendar</h5>
                             <p className="text-xs text-blue-800 mt-0.5 leading-relaxed">
-                              Stai per esportare e sincronizzare <strong>{events.length} impegni</strong> sul tuo
+                              Stai per esportare e sincronizzare <strong>{events.filter(e => e.syncedWithGoogle === true).length} impegni con sincronizzazione abilitata</strong> sul tuo
                               Google Calendar associato all'account <strong>{googleUser.email}</strong>.
                               Vuoi procedere?
                             </p>
@@ -1056,7 +1056,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                       <div className="pt-1 flex flex-col sm:flex-row gap-2">
                         <button
                           type="button"
-                          disabled={isSyncing || events.length === 0}
+                          disabled={isSyncing || !events.some(e => e.syncedWithGoogle === true)}
                           onClick={() => setShowSyncConfirm(true)}
                           className="flex-1 inline-flex items-center justify-center space-x-2 px-4 py-2.5 bg-emerald-700 hover:bg-emerald-800 disabled:bg-stone-300 disabled:cursor-not-allowed text-white font-bold rounded-xl shadow-xs transition-colors cursor-pointer text-xs"
                         >

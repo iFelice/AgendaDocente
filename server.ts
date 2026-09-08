@@ -1,3 +1,4 @@
+import { circularAnalysisGuards, analysisErrorHandler } from "./server/circularAnalysisGuard";
 import express from "express";
 import { parseCircularText, normalizeExtractedItems } from "./src/utils/circularParser";
 import http from "http";
@@ -6,10 +7,10 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { createServer as createViteServer } from "vite";
 
 
-const app = express();
+export const app = express();
 const PORT = 3000;
 
-app.use(express.json({ limit: "30mb" }));
+
 
 // Lazy Gemini client helper
 let aiClient: GoogleGenAI | null = null;
@@ -33,23 +34,19 @@ function getGeminiClient(): GoogleGenAI | null {
 app.get("/api/health", (req, res) => {
   res.json({
     status: "ok",
-    hasApiKey: !!process.env.GEMINI_API_KEY,
     timestamp: new Date().toISOString(),
   });
 });
 
-app.post("/api/analyze-circular", async (req, res) => {
+app.post("/api/analyze-circular", ...circularAnalysisGuards(), async (req, res) => {
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(), 45_000);
+  const abort = () => controller.abort();
+  res.once("close", abort);
   try {
     const { text, imageBase64, mimeType, profile, defaultLocation } = req.body;
 
-    const teacherProfile = profile || {
-      fullName: "Docente",
-      schoolLevel: "ssig",
-      primarySubjects: ["Scienze motorie"],
-      classes: ["1A", "2E", "3B"],
-      campuses: ["Centrale"],
-      roles: [],
-    };
+    const teacherProfile = profile;
 
     const effectiveCampus = defaultLocation || undefined;
 
@@ -62,7 +59,7 @@ app.post("/api/analyze-circular", async (req, res) => {
       return res.json({
         success: true,
         source: "local-heuristic",
-        message: "Elaborazione eseguita con parser testuale sul server (servizio AI non configurato)",
+        message: "Elaborazione eseguita con parser testuale sul server (servizio AI non disponibile)",
         items: fallbackItems,
       });
     }
@@ -133,13 +130,15 @@ Restituisci soltanto l'array JSON richiesto.`;
     let succeeded = false;
 
     for (const model of candidateModels) {
-      if (succeeded) break;
+      if (succeeded || controller.signal.aborted) break;
       for (let attempt = 1; attempt <= 2; attempt++) {
         try {
           const response = await ai.models.generateContent({
             model,
             contents,
             config: {
+              abortSignal: controller.signal,
+              httpOptions: { timeout: 20_000 },
               systemInstruction,
               temperature: 0.1,
               responseMimeType: "application/json",
@@ -160,7 +159,8 @@ Restituisci soltanto l'array JSON richiesto.`;
             errMsg.includes("high demand") ||
             errMsg.includes("RESOURCE_EXHAUSTED");
 
-          console.warn(`[AI Circolari] Modello ${model} (tentativo ${attempt}/2): ${isHighDemand ? "picco di carico temporaneo (503/429)" : errMsg}`);
+          console.warn("[AI Circolari] Tentativo cloud non riuscito.");
+          if (controller.signal.aborted) break;
 
           if (isHighDemand && attempt < 2) {
             await new Promise((resolve) => setTimeout(resolve, 500));
@@ -190,10 +190,14 @@ Restituisci soltanto l'array JSON richiesto.`;
         : undefined,
     });
   } catch (error: any) {
-    console.warn("Analisi circolare non riuscita:", error?.message);
+    console.warn("Analisi circolare non riuscita.");
     return res.status(500).json({ success: false, items: [], error: "Analisi non riuscita. Riprova o incolla il testo del documento." });
+  } finally {
+    clearTimeout(deadline);
+    res.off("close", abort);
   }
 });
+app.use("/api/analyze-circular", analysisErrorHandler);
 
 // Production & Vite Development integration
 async function startServer() {
@@ -221,4 +225,4 @@ async function startServer() {
   });
 }
 
-startServer();
+if (process.argv[1] && ["server.ts", "server.cjs"].includes(path.basename(process.argv[1]))) void startServer();

@@ -286,3 +286,36 @@ export const downloadIcsCalendar = (events: CalendarEvent[], filename = "agenda_
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
 };
+
+/** Only an explicit per-event opt-in grants permission to send data to Google. */
+export const isGoogleSyncEnabled = (event: Pick<CalendarEvent, 'syncedWithGoogle'>): boolean =>
+  event.syncedWithGoogle === true;
+
+export async function syncOptedInGoogleEvents(
+  token: string,
+  eventIds: string[],
+  readEvent: (id: string) => CalendarEvent | undefined,
+  saveEvent: (event: CalendarEvent) => void,
+): Promise<{ syncedCount: number; errorCount: number }> {
+  let syncedCount = 0, errorCount = 0;
+  for (const id of new Set(eventIds)) {
+    // Re-read before each request: consent may have changed while a previous request was running.
+    const event = readEvent(id);
+    if (!event || !isGoogleSyncEnabled(event)) continue;
+    try {
+      if (event.googleEventId) {
+        await updateGoogleCalendarEvent(token, event.googleEventId, event);
+      } else {
+        const googleEventId = await createGoogleCalendarEvent(token, event);
+        const latest = readEvent(id);
+        // Preserve a revoked consent and any edits made during the request; never resurrect a deleted event.
+        if (latest && !latest.googleEventId) saveEvent({ ...latest, googleEventId });
+      }
+      syncedCount++;
+    } catch {
+      // Do not log event titles, notes, tokens or API response bodies.
+      errorCount++;
+    }
+  }
+  return { syncedCount, errorCount };
+}

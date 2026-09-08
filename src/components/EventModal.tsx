@@ -1,3 +1,4 @@
+import { isGoogleSyncEnabled } from "../services/googleCalendarService";
 import { eventDateError } from "../utils/dates";
 import { localDateISO } from "../utils/dates";
 import React, { useState, useEffect } from "react";
@@ -81,7 +82,7 @@ export const EventModal: React.FC<EventModalProps> = ({
       setClassName(eventToEdit.className || "");
       setSubject(eventToEdit.subject || "");
       setNotes(eventToEdit.notes || "");
-      setSyncWithGoogle(!!eventToEdit.googleEventId || !!eventToEdit.syncedWithGoogle);
+      setSyncWithGoogle(isGoogleSyncEnabled(eventToEdit));
     } else if (initialEventData) {
       setTitle(initialEventData.title || "");
       setCategory(initialEventData.category || "glo");
@@ -90,7 +91,7 @@ export const EventModal: React.FC<EventModalProps> = ({
       setClassName(initialEventData.className || profile.classes[0] || "1A");
       setSubject(initialEventData.subject || profile.primarySubjects[0] || "");
       setNotes(initialEventData.notes || "");
-      setSyncWithGoogle(isGoogleConnected);
+      setSyncWithGoogle(isGoogleSyncEnabled(initialEventData));
     } else {
       setTitle("");
       setCategory("consiglio_classe");
@@ -99,7 +100,7 @@ export const EventModal: React.FC<EventModalProps> = ({
       setClassName(profile.classes[0] || "1A");
       setSubject(profile.primarySubjects[0] || "");
       setNotes("");
-      setSyncWithGoogle(isGoogleConnected);
+      setSyncWithGoogle(false);
     }
   }, [eventToEdit, initialDate, initialEventData, profile, isOpen, isGoogleConnected]);
 
@@ -230,6 +231,9 @@ export const EventModal: React.FC<EventModalProps> = ({
           </div>
 
           {validationError && <p role="alert" className="text-sm text-rose-700">{validationError}</p>}
+          {eventToEdit?.googleEventId && !syncWithGoogle && (
+            <p className="text-xs text-stone-600">Sincronizzazione disattivata: la copia su Google resta disponibile e non verrà aggiornata o eliminata da questa agenda.</p>
+          )}
           {/* Times */}
           {!isAllDay && (
             <div className="grid grid-cols-2 gap-3">
@@ -305,7 +309,7 @@ export const EventModal: React.FC<EventModalProps> = ({
           </div>
 
           {/* Google Calendar Sync Option */}
-          {isGoogleConnected && (
+          {(isGoogleConnected || !!eventToEdit?.googleEventId || syncWithGoogle) && (
             <div className="p-3 rounded-xl bg-blue-50/70 border border-blue-200 flex items-center justify-between">
               <div className="flex items-center space-x-2.5">
                 <div className="w-5 h-5 flex-shrink-0">

@@ -36,8 +36,8 @@ import {
   isUserCancellationError,
 } from "./services/googleAuth";
 import {
-  createGoogleCalendarEvent,
-  updateGoogleCalendarEvent,
+  isGoogleSyncEnabled,
+  syncOptedInGoogleEvents,
   deleteGoogleCalendarEvent,
 } from "./services/googleCalendarService";
 
@@ -162,30 +162,13 @@ export default function App() {
     if (!token) {
       throw new Error("Effettua prima l'accesso con il tuo account istituzionale Google.");
     }
-    const currentEvents = storage.getEvents();
-    let synced = 0;
-    let errors = 0;
-
-    for (const ev of currentEvents) {
-      try {
-        if (ev.googleEventId) {
-          await updateGoogleCalendarEvent(token, ev.googleEventId, ev);
-          synced++;
-        } else {
-          const gId = await createGoogleCalendarEvent(token, ev);
-          ev.googleEventId = gId;
-          ev.syncedWithGoogle = true;
-          storage.saveEvent(ev);
-          synced++;
-        }
-      } catch (e) {
-        console.error("Errore sincronizzazione evento:", ev.title, e);
-        errors++;
-      }
-    }
-
+    const result = await syncOptedInGoogleEvents(
+      token, storage.getEvents().map(event => event.id),
+      id => storage.getEvents().find(event => event.id === id),
+      event => storage.saveEvent(event),
+    );
     setEvents(storage.getEvents());
-    return { syncedCount: synced, errorCount: errors };
+    return result;
   };
 
   const handleNavigateToPlanning = (
@@ -318,28 +301,16 @@ export default function App() {
 
     // If sync with Google is requested and we have an access token
     const token = googleAccessToken || getAccessToken();
-    if (event.syncedWithGoogle && token) {
-      try {
-        if (event.googleEventId) {
-          await updateGoogleCalendarEvent(token, event.googleEventId, event);
-          showToast("Impegno salvato e sincronizzato su Google Calendar.");
-        } else {
-          const gId = await createGoogleCalendarEvent(token, event);
-          const updatedEvent: CalendarEvent = {
-            ...event,
-            googleEventId: gId,
-            syncedWithGoogle: true,
-          };
-          storage.saveEvent(updatedEvent);
-          setEvents(storage.getEvents());
-          showToast("Impegno salvato e aggiunto su Google Calendar.");
-        }
-        return;
-      } catch (err: any) {
-        console.error("Errore sincronizzazione Google Calendar:", err);
-        showToast("Impegno salvato in locale (errore sync Google Calendar).");
-        return;
-      }
+    if (isGoogleSyncEnabled(event) && token) {
+      const result = await syncOptedInGoogleEvents(
+        token, [event.id],
+        id => storage.getEvents().find(current => current.id === id),
+        current => storage.saveEvent(current),
+      );
+      setEvents(storage.getEvents());
+      showToast(result.errorCount ? "Impegno salvato in locale (errore sync Google Calendar)."
+        : result.syncedCount ? "Impegno salvato e sincronizzato su Google Calendar." : "Impegno salvato in locale.");
+      return;
     }
 
     showToast("Impegno salvato con successo.");
@@ -348,7 +319,7 @@ export default function App() {
   const handleDeleteEvent = async (id: string) => {
     const ev = events.find((e) => e.id === id);
     const token = googleAccessToken || getAccessToken();
-    if (ev?.googleEventId && token) {
+    if (ev?.googleEventId && isGoogleSyncEnabled(ev) && token) {
       try {
         await deleteGoogleCalendarEvent(token, ev.googleEventId);
       } catch (err) {

@@ -483,6 +483,10 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                 </div>
               )}
 
+              <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                <strong>Analisi AI nel cloud.</strong> Avviando l’analisi, il PDF o l’immagine può essere inviato a Google Gemini per estrarre gli impegni. Il server dell’app non salva il file su disco. Evita documenti con dati personali non necessari.
+                <p className="mt-1">Anche il testo può essere analizzato nel cloud; se il servizio non è disponibile, resta attivo il parser testuale locale.</p>
+              </div>
               {/* Action */}
               <div className="flex justify-end pt-2">
                 <button
@@ -499,7 +503,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                   ) : (
                     <>
                       <Sparkles className="w-4 h-4" />
-                      <span>Avvia Analisi & Filtraggio</span>
+                      <span>{fileBase64 ? "Analizza documento nel cloud" : "Avvia Analisi & Filtraggio"}</span>
                     </>
                   )}
                 </button>
