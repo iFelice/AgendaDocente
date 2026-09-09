@@ -4,7 +4,6 @@ import {
   Clock,
   MapPin,
   Plus,
-  RotateCcw,
   Trash2,
   BookOpen,
   Calendar,
@@ -31,11 +30,6 @@ interface TimetableEditorProps {
   onCopyProvisionalToDefinitive: () => void;
   onCopyDefinitiveToProvisional: () => void;
   onClearTimetable: (type: TimetableType) => void;
-  onResetProvisional: () => void;
-  onResetDefinitive: () => void;
-  // Optional legacy props
-  timetable?: TimetableSlot[];
-  onResetTimetable?: () => void;
 }
 
 export const TimetableEditor: React.FC<TimetableEditorProps> = ({
@@ -51,8 +45,6 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   onCopyProvisionalToDefinitive,
   onCopyDefinitiveToProvisional,
   onClearTimetable,
-  onResetProvisional,
-  onResetDefinitive,
 }) => {
   const save = usePersistenceAction();
   const editBaseline = useRef<TimetableSlot | undefined>(undefined);
@@ -63,7 +55,6 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   const [editingSlot, setEditingSlot] = useState<TimetableSlot | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
-  const [showResetConfirm, setShowResetConfirm] = useState(false);
 
   // Per i docenti SSIG, "inclusi sabato" viene impostato di default senza spunta
   const isSsig = profile?.schoolLevel === "ssig";
@@ -99,10 +90,10 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
       periodNumber: periodNum,
       startTime: periodConf?.defaultStart || "08:15",
       endTime: periodConf?.defaultEnd || "09:10",
-      subject: profile.primarySubjects[0] || "Scienze motorie",
-      className: profile.classes[0] || "1A",
-      classroom: "Palestra",
-      campus: profile.campuses[0] || "Centrale",
+      subject: profile.primarySubjects[0] || "",
+      className: profile.classes[0] || "",
+      classroom: "",
+      campus: profile.campuses[0] || "",
       isProvisional: activeTab === "provvisorio",
     });
     setIsModalOpen(true);
@@ -309,13 +300,6 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
               <Copy className="w-3.5 h-3.5 mr-1" />
               <span>Copia da Provvisorio</span>
             </button>
-            <button
-              type="button"
-              onClick={() => onResetDefinitive()}
-              className="px-3 py-1.5 bg-white border border-stone-300 hover:bg-stone-100 text-stone-800 text-xs font-semibold rounded-lg transition-colors"
-            >
-              Carica standard 18h
-            </button>
           </div>
         </div>
       )}
@@ -399,40 +383,6 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
             </button>
           )}
 
-          {/* Reset demo */}
-          {showResetConfirm ? (
-            <div className="flex items-center space-x-1.5 bg-emerald-50 border border-emerald-200 px-2 py-1 rounded-lg">
-              <span className="text-xs font-semibold text-emerald-800">Caricare demo?</span>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowResetConfirm(false);
-                  if (activeTab === "provvisorio") onResetProvisional();
-                  else onResetDefinitive();
-                }}
-                className="px-2 py-0.5 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold rounded"
-              >
-                Sì
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowResetConfirm(false)}
-                className="px-2 py-0.5 bg-white border border-stone-300 text-stone-700 text-xs rounded"
-              >
-                No
-              </button>
-            </div>
-          ) : (
-            <button
-              type="button"
-              onClick={() => setShowResetConfirm(true)}
-              className="px-2.5 py-1.5 text-xs font-medium text-stone-600 hover:bg-stone-100 rounded-lg border border-stone-200 transition-colors flex items-center"
-              title="Ripristina orario demo predefinito"
-            >
-              <RotateCcw className="w-3.5 h-3.5 mr-1" />
-              <span>Demo</span>
-            </button>
-          )}
         </div>
       </div>
 

@@ -1,1 +1,50 @@
 @import "tailwindcss";
+
+/*
+ * Week planner responsiveness (fluid, never tied to specific phone models):
+ * - below 768px: days are full-width-ish horizontal cards with scroll snap; only the strip
+ *   scrolls horizontally, never the page;
+ * - 768px-1023px (tablet): two readable columns;
+ * - from 1024px: every visible day fits side by side (5 or 6 columns), like before.
+ */
+.week-scroller {
+  display: flex;
+  gap: 0.75rem;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x proximity;
+  scroll-padding-inline: 0.5rem;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 0.5rem;
+  scrollbar-width: thin;
+}
+.week-day-card {
+  flex: 0 0 min(82vw, 360px);
+  scroll-snap-align: start;
+  min-height: 26rem;
+}
+@media (min-width: 768px) {
+  .week-scroller {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    overflow-x: visible;
+    scroll-snap-type: none;
+  }
+  .week-day-card {
+    flex: 1 1 auto;
+    width: auto;
+  }
+}
+@media (min-width: 1024px) {
+  .week-scroller {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (min-width: 1120px) {
+  .week-scroller {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+  .week-scroller[data-days='6'] {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+}

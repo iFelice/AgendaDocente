@@ -188,12 +188,13 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   const countGiallo = extractedItems.filter((i) => i.relevance === "GIALLO").length;
   const countRosso = extractedItems.filter((i) => i.relevance === "ROSSO").length;
 
-  // Bulk selection helpers
+  // Bulk selection helpers. Invalid rows (missing or end<=start intervals) are never
+  // auto-selected: times must come from the document, not from a default or a neighbour.
   const handleSelectAllRelevant = () => {
     setExtractedItems((prev) =>
       prev.map((it) => ({
         ...it,
-        selectedForImport: it.relevance === "VERDE" || it.relevance === "GIALLO",
+        selectedForImport: (it.relevance === "VERDE" || it.relevance === "GIALLO") && !extractedItemError(it),
       }))
     );
     setSelectionWarning(null);

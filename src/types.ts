@@ -15,10 +15,40 @@ export type EventCategory =
 
 export type SchoolLevel = "infanzia" | "primaria" | "ssig" | "ssiig";
 
+/**
+ * Ruoli reali assegnabili da un docente. Il tipo "docente di sostegno" NON implica
+ * automaticamente altri ruoli (GLI, coordinatoriecc.): ogni ruolo aggiuntivo deriva
+ * esclusivamente dalla scelta esplicita dell'utente.
+ */
+export const TEACHER_ROLE_KINDS = [
+  "coordinatore",
+  "segretario",
+  "tutor",
+  "referente",
+  "docente_sostegno",
+  "referente_inclusione",
+  "membro_gli",
+  "animatore_digitale",
+  "team_digitale",
+  "referente_bes_dsa",
+  "referente_bullismo",
+  "referente_orientamento",
+  "referente_uscite_viaggi",
+  "collaboratore_dirigente",
+  "altro",
+] as const;
+
+export type TeacherRoleKind = (typeof TEACHER_ROLE_KINDS)[number];
+
+/** Roles whose meaning is bound to one or more specific classes. */
+export const CLASS_BOUND_ROLE_KINDS: TeacherRoleKind[] = ["coordinatore", "segretario", "tutor", "referente_bes_dsa", "referente_orientamento"];
+
 export interface TeacherRole {
-  role: "coordinatore" | "segretario" | "tutor" | "referente" | "docente_sostegno" | "referente_inclusione" | "membro_gli";
+  role: TeacherRoleKind;
   targetClass?: string;
   description?: string;
+  /** Free-text label used with role === "altro" (custom role chosen by the teacher). */
+  label?: string;
 }
 
 export interface TeacherProfile {
@@ -75,6 +105,8 @@ export interface CalendarEvent {
   reminderMinutesBefore?: number;
   googleEventId?: string;
   syncedWithGoogle?: boolean;
+  /** Wall-clock stamp maintained by the storage layer; used by account sync conflict checks. */
+  updatedAt?: string;
 }
 
 export type RelevanceLevel = "VERDE" | "GIALLO" | "ROSSO";
@@ -107,6 +139,8 @@ export interface CircularDocument {
   extractedCount: number;
   relevantCount: number;
   extractedItems?: ExtractedItem[];
+  /** Wall-clock stamp maintained by the storage layer; used by account sync conflict checks. */
+  updatedAt?: string;
 }
 
 export type StudentNoteCategory =

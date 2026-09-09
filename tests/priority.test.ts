@@ -188,7 +188,7 @@ test('compound teacher subjects and explicit chosen location are supported',()=>
   assert.equal(evaluateItemRelevance({title:'Dipartimento Matematica'},{...profile,primarySubjects:['Matematica e Scienze']}).relevance,'VERDE');
   assert.equal(normalizeExtractedItems([item],profile,'Sede scelta')[0].location,'Sede scelta');
 });
-test('default demo data can be backed up and restored by the new validator',async ()=>{
+test('a legacy demo-seeded installation can be backed up and restored by the new validator',async ()=>{
   memory.clear();database.close();await database.delete();await initializeStorage();const backup=(await storage.exportDataBackup());assert.equal((await storage.importDataBackup(backup)),true);
 });
 test('corrupt circular archive does not replace valid manual events',async ()=>{

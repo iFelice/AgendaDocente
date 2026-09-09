@@ -11,8 +11,8 @@ import { firebaseOptions } from "./firebaseConfig";
 
 // Initialize Firebase only once
 const config = firebaseOptions(import.meta.env || {});
-const app = config ? (getApps().length === 0 ? initializeApp(config) : getApp()) : null;
-export const auth = app ? getAuth(app) : null;
+export const firebaseApp = config ? (getApps().length === 0 ? initializeApp(config) : getApp()) : null;
+export const auth = firebaseApp ? getAuth(firebaseApp) : null;
 
 // Calendar writes use the primary (owned) calendar; identity scopes alone cannot authorize them.
 // The OAuth consent screen must allow this scope for the configured beta testers.

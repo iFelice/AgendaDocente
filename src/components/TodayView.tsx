@@ -1,9 +1,11 @@
-import { localDateISO } from "../utils/dates";
+import { addDaysISO, civilDayOfWeek, civilTimetableDay, localDateISO, parseCivilDate } from "../utils/dates";
 import React from "react";
 import {
   BookOpen,
   Calendar,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Circle,
   Clock,
   MapPin,
@@ -15,6 +17,41 @@ import {
   Trash2,
 } from "lucide-react";
 import { CalendarEvent, TeacherProfile, TimetableSlot } from "../types";
+
+/**
+ * Pure day selector for the "Oggi" view: everything is computed from the *selected civil
+ * date*, never from a UTC instant. Lessons follow the weekday of the selected date and
+ * events/deadlines are the ones recorded for that exact day.
+ */
+export function selectDayAgenda(
+  selectedIso: string,
+  timetable: TimetableSlot[],
+  events: CalendarEvent[]
+) {
+  const todayIso = localDateISO();
+  const weekday = civilDayOfWeek(selectedIso); // 0 = Sunday … 6 = Saturday
+  const timetableDay = civilTimetableDay(selectedIso);
+  const lessons = timetableDay
+    ? timetable.filter((slot) => slot.dayOfWeek === timetableDay).sort((a, b) => a.periodNumber - b.periodNumber)
+    : [];
+  const dayEvents = events
+    .filter((e) => e.date === selectedIso && !e.completed)
+    .sort((a, b) => (a.startTime || "00:00").localeCompare(b.startTime || "00:00"));
+  const isDeadlineLike = (e: CalendarEvent) => e.category === "scadenza" || e.category === "promemoria" || e.category === "pei";
+  const pending = events.filter((e) => isDeadlineLike(e) && !e.completed).sort((a, b) => a.date.localeCompare(b.date));
+  const dayDeadlines = pending.filter((e) => e.date === selectedIso);
+  const nextDeadlines = pending.filter((e) => e.date > selectedIso).slice(0, 3);
+  const formattedDate = new Intl.DateTimeFormat("it-IT", { weekday: "long", day: "numeric", month: "long", year: "numeric" }).format(parseCivilDate(selectedIso));
+  return {
+    isToday: selectedIso === todayIso,
+    isWeekend: weekday === 0 || weekday === 6,
+    lessons,
+    dayEvents,
+    dayDeadlines,
+    nextDeadlines,
+    displayDate: formattedDate.charAt(0).toUpperCase() + formattedDate.slice(1),
+  };
+}
 
 interface TodayViewProps {
   profile: TeacherProfile;
@@ -45,38 +82,21 @@ export const TodayView: React.FC<TodayViewProps> = ({
   onNavigateToTimetable,
 }) => {
   const [confirmingDeleteEventId, setConfirmingDeleteEventId] = React.useState<string | null>(null);
-  const now = new Date();
-  const todayIso = localDateISO(now);
-  // In JS, 0 is Sunday, 1 is Monday, ... 6 is Saturday
-  const currentDayOfWeek = now.getDay() === 0 ? 7 : (now.getDay() as 1 | 2 | 3 | 4 | 5 | 6);
+  // Selected civil date (defaults to the real today). Navigation is day-by-day and must
+  // survive month/year/weekend crossings because it works on local Date parts, never UTC.
+  const [selectedIso, setSelectedIso] = React.useState<string>(() => localDateISO());
+  const todayIso = localDateISO();
 
-  // Italian date formatter
-  const formattedDate = new Intl.DateTimeFormat("it-IT", {
-    weekday: "long",
-    day: "numeric",
-    month: "long",
-    year: "numeric",
-  }).format(now);
-
-  // Capitalize first letter of weekday
-  const displayDate = formattedDate.charAt(0).toUpperCase() + formattedDate.slice(1);
-
-  // Lessons today from timetable
-  const todayLessons = timetable
-    .filter((slot) => slot.dayOfWeek === currentDayOfWeek)
-    .sort((a, b) => a.periodNumber - b.periodNumber);
-
-  // Events today from calendar
-  const todayEvents = events
-    .filter((e) => e.date === todayIso && !e.completed)
-    .sort((a, b) => (a.startTime || "00:00").localeCompare(b.startTime || "00:00"));
-
-  // Deadlines today or pending (including PEI)
-  const todayDeadlines = events
-    .filter((e) => e.category === "scadenza" || e.category === "promemoria" || e.category === "pei")
-    .sort((a, b) => a.date.localeCompare(b.date));
-
-  const pendingDeadlines = todayDeadlines.filter((d) => !d.completed);
+  const {
+    isToday,
+    isWeekend,
+    lessons: todayLessons,
+    dayEvents: todayEvents,
+    dayDeadlines,
+    nextDeadlines,
+    displayDate,
+  } = selectDayAgenda(selectedIso, timetable, events);
+  const isFutureDay = selectedIso > todayIso;
 
   const getCategoryColor = (category: string) => {
     switch (category) {
@@ -130,38 +150,86 @@ export const TodayView: React.FC<TodayViewProps> = ({
 
   return (
     <div className="space-y-6 pb-12">
-      {/* Header Banner */}
-      <div className="bg-white rounded-xl p-5 border border-stone-200 shadow-xs flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <span className="text-xs font-semibold text-emerald-800 uppercase tracking-wider">
-            Panoramica della Giornata
-          </span>
-          <h1 className="text-2xl font-bold text-stone-900 mt-0.5">{displayDate}</h1>
-          <p className="text-sm text-stone-500 mt-1">
-            {todayLessons.length > 0
-              ? `${todayLessons.length} ore di lezione in programma`
-              : "Nessuna lezione curricolare prevista per oggi"}
-            {todayEvents.length > 0 && ` • ${todayEvents.length} impegni/riunioni`}
-          </p>
+      {/* Header Banner with day navigation (works on mobile and desktop) */}
+      <div className="bg-white rounded-xl p-4 sm:p-5 border border-stone-200 shadow-xs flex flex-col gap-3">
+        <div className="flex items-start justify-between gap-2 flex-wrap">
+          <div className="min-w-0">
+            <span className="text-xs font-semibold text-emerald-800 uppercase tracking-wider flex items-center gap-2">
+              Panoramica della Giornata
+              {isToday ? (
+                <span className="px-1.5 py-0.5 rounded-md bg-emerald-100 text-emerald-800 text-[10px] font-bold normal-case tracking-normal">Oggi</span>
+              ) : (
+                <span className="px-1.5 py-0.5 rounded-md bg-stone-100 text-stone-600 text-[10px] font-bold normal-case tracking-normal">
+                  {isFutureDay ? "Giorno futuro" : "Giorno passato"}
+                </span>
+              )}
+            </span>
+            <h1 className="text-lg sm:text-2xl font-bold text-stone-900 mt-0.5 break-words">{displayDate}</h1>
+            <p className="text-sm text-stone-500 mt-1">
+              {todayLessons.length > 0
+                ? `${todayLessons.length} ore di lezione in programma`
+                : "Nessuna lezione curricolare prevista"}
+              {todayEvents.length > 0 && ` • ${todayEvents.length} impegni/riunioni`}
+            </p>
+          </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <button
-            id="today-quick-add"
-            onClick={() => onOpenNewEvent(todayIso)}
-            className="inline-flex items-center px-3 py-2 text-sm font-medium rounded-lg text-emerald-800 bg-emerald-50 hover:bg-emerald-100 transition-colors border border-emerald-200"
-          >
-            <Plus className="w-4 h-4 mr-1.5" />
-            Aggiungi per oggi
-          </button>
-          <button
-            id="today-quick-scan"
-            onClick={onOpenCircularModal}
-            className="inline-flex items-center px-3 py-2 text-sm font-medium rounded-lg text-amber-800 bg-amber-50 hover:bg-amber-100 transition-colors border border-amber-200"
-          >
-            <Sparkles className="w-4 h-4 mr-1.5 text-amber-600" />
-            Importa circolare
-          </button>
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div className="flex items-center gap-1" role="group" aria-label="Navigazione del giorno">
+            <button
+              id="today-previous-day"
+              type="button"
+              onClick={() => setSelectedIso((iso) => addDaysISO(iso, -1))}
+              className="p-2 rounded-lg border border-stone-200 hover:bg-stone-50 text-stone-600 transition-colors"
+              title="Giorno precedente"
+              aria-label="Giorno precedente"
+            >
+              <ChevronLeft className="w-5 h-5" />
+            </button>
+            <button
+              id="today-back-to-today"
+              type="button"
+              onClick={() => setSelectedIso(todayIso)}
+              disabled={isToday}
+              className={`px-3 py-2 rounded-lg border text-xs font-semibold transition-colors ${
+                isToday
+                  ? "border-stone-100 bg-stone-50 text-stone-400 cursor-default"
+                  : "border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100"
+              }`}
+              title="Torna alla data corrente"
+            >
+              Oggi
+            </button>
+            <button
+              id="today-next-day"
+              type="button"
+              onClick={() => setSelectedIso((iso) => addDaysISO(iso, 1))}
+              className="p-2 rounded-lg border border-stone-200 hover:bg-stone-50 text-stone-600 transition-colors"
+              title="Giorno successivo"
+              aria-label="Giorno successivo"
+            >
+              <ChevronRight className="w-5 h-5" />
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              id="today-quick-add"
+              onClick={() => onOpenNewEvent(selectedIso)}
+              className="inline-flex items-center px-3 py-2 text-sm font-medium rounded-lg text-emerald-800 bg-emerald-50 hover:bg-emerald-100 transition-colors border border-emerald-200"
+            >
+              <Plus className="w-4 h-4 mr-1.5" />
+              Aggiungi{isToday ? " per oggi" : ""}
+            </button>
+            <button
+              id="today-quick-scan"
+              onClick={onOpenCircularModal}
+              className="inline-flex items-center px-3 py-2 text-sm font-medium rounded-lg text-amber-800 bg-amber-50 hover:bg-amber-100 transition-colors border border-amber-200"
+            >
+              <Sparkles className="w-4 h-4 mr-1.5 text-amber-600" />
+              Importa circolare
+            </button>
+          </div>
         </div>
       </div>
 
@@ -174,7 +242,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
             <div className="p-4 border-b border-stone-100 flex items-center justify-between bg-stone-50/70">
               <div className="flex items-center space-x-2">
                 <BookOpen className="w-5 h-5 text-emerald-700" />
-                <h2 className="text-base font-semibold text-stone-900">Lezioni Curricolari di Oggi</h2>
+                <h2 className="text-base font-semibold text-stone-900">Lezioni Curricolari{isToday ? " di Oggi" : " del Giorno"}</h2>
                 {isProvisionalTimetable && (
                   <span className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
                     🕒 Orario Provvisorio
@@ -197,8 +265,8 @@ export const TodayView: React.FC<TodayViewProps> = ({
               {todayLessons.length === 0 ? (
                 <div className="py-8 text-center space-y-2">
                   <p className="text-sm text-stone-600 font-medium">
-                    {now.getDay() === 6 || now.getDay() === 0
-                      ? "Fine settimana: nessuna lezione curricolare per oggi."
+                    {isWeekend
+                      ? "Fine settimana: nessuna lezione curricolare prevista."
                       : "Nessuna lezione inserita per questo giorno della settimana."}
                   </p>
                   <p className="text-xs text-stone-400">
@@ -207,7 +275,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
                   {onNavigateToPlanning && (
                     <button
                       type="button"
-                      onClick={() => onNavigateToPlanning(todayIso, "settimana")}
+                      onClick={() => onNavigateToPlanning(selectedIso, "settimana")}
                       className="mt-2 inline-flex items-center px-3 py-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 rounded-lg border border-emerald-200 transition-colors"
                     >
                       <Calendar className="w-3.5 h-3.5 mr-1 text-emerald-700" />
@@ -286,10 +354,10 @@ export const TodayView: React.FC<TodayViewProps> = ({
             <div className="p-4 border-b border-stone-100 flex items-center justify-between bg-stone-50/70">
               <div className="flex items-center space-x-2">
                 <Calendar className="w-5 h-5 text-purple-700" />
-                <h2 className="text-base font-semibold text-stone-900">Impegni & Riunioni</h2>
+                <h2 className="text-base font-semibold text-stone-900">Impegni & Riunioni{isToday ? "" : " del giorno selezionato"}</h2>
               </div>
               <button
-                onClick={() => onOpenNewEvent(todayIso)}
+                onClick={() => onOpenNewEvent(selectedIso)}
                 className="text-xs font-semibold text-emerald-700 hover:text-emerald-800 flex items-center"
               >
                 <Plus className="w-3.5 h-3.5 mr-1" />
@@ -300,7 +368,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
             <div className="p-4">
               {todayEvents.length === 0 ? (
                 <div className="py-8 text-center">
-                  <p className="text-sm text-stone-500">Nessun impegno registrato per oggi.</p>
+                  <p className="text-sm text-stone-500">Nessun impegno registrato per questa data.</p>
                   <p className="text-xs text-stone-400 mt-1">I consigli di classe o le riunioni appariranno qui quando inseriti.</p>
                 </div>
               ) : (
@@ -396,7 +464,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
 
         {/* Right Col: Deadlines & Quick Reference */}
         <div className="space-y-6">
-          {/* Active Deadlines */}
+          {/* Deadlines of the selected day, then the nearest upcoming ones */}
           <div className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-hidden">
             <div className="p-4 border-b border-stone-100 flex items-center justify-between bg-stone-50/70">
               <div className="flex items-center space-x-2">
@@ -404,21 +472,21 @@ export const TodayView: React.FC<TodayViewProps> = ({
                 <h2 className="text-base font-semibold text-stone-900">Scadenze & Adempimenti</h2>
               </div>
               <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 font-medium">
-                {pendingDeadlines.length} in sospeso
+                {dayDeadlines.length} {isToday ? "oggi" : "del giorno"}
               </span>
             </div>
 
             <div className="p-4">
-              {pendingDeadlines.length === 0 ? (
+              {dayDeadlines.length === 0 && nextDeadlines.length === 0 ? (
                 <div className="py-6 text-center text-stone-400 text-xs">
-                  Nessuna scadenza imminente in sospeso. Ottimo lavoro!
+                  Nessuna scadenza in sospeso per questa data. Ottimo lavoro!
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {pendingDeadlines.slice(0, 5).map((d) => (
+                  {dayDeadlines.map((d) => (
                     <div
                       key={d.id}
-                      className="p-3 rounded-lg border border-stone-200 hover:border-amber-300 transition-colors bg-stone-50/40 space-y-1.5"
+                      className="p-3 rounded-lg border border-amber-300 bg-amber-50/60 space-y-1.5"
                     >
                       <div className="flex items-start justify-between gap-2">
                         <button
@@ -436,6 +504,31 @@ export const TodayView: React.FC<TodayViewProps> = ({
                       </div>
                     </div>
                   ))}
+                  {dayDeadlines.length === 0 && nextDeadlines.length > 0 && (
+                    <p className="text-[11px] text-stone-400 font-medium px-1">Nessuna scadenza in questa data. Prossime:</p>
+                  )}
+                  {dayDeadlines.length === 0 &&
+                    nextDeadlines.map((d) => (
+                      <div
+                        key={d.id}
+                        className="p-3 rounded-lg border border-stone-200 hover:border-amber-300 transition-colors bg-stone-50/40 space-y-1.5"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <button
+                            onClick={() => onToggleComplete(d.id)}
+                            className="flex items-start space-x-2 text-left"
+                          >
+                            <Circle className="w-4 h-4 text-stone-400 mt-0.5 flex-shrink-0 hover:text-emerald-600 transition-colors" />
+                            <span className="text-xs font-semibold text-stone-900 leading-snug">{d.title}</span>
+                          </button>
+                        </div>
+
+                        <div className="flex items-center justify-between text-[11px] text-stone-500 pl-6">
+                          <span>Data limite: {d.date}</span>
+                          {d.location && <span className="truncate max-w-[120px]">{d.location}</span>}
+                        </div>
+                      </div>
+                    ))}
                 </div>
               )}
             </div>
@@ -449,7 +542,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
             </div>
             <p className="text-xs text-amber-800 leading-relaxed">
               Non ricopiare a mano gli orari dei consigli o le date del collegio. Carica il PDF o scatta una foto: l'app seleziona
-              solo gli impegni per le tue classi (1A, 2E, 3B).
+              solo gli impegni pertinenti alle tue classi e al tuo grado.
             </p>
             <button
               onClick={onOpenCircularModal}

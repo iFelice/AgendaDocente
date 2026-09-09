@@ -1,0 +1,65 @@
+import { database, type LocalData } from "../db";
+import type { SyncableSnapshot } from "./types";
+import type { LocalApply, SyncStore } from "./engine";
+import { liveQuery } from "dexie";
+
+/**
+ * Bridges the sync engine to the local-first store. IndexedDB (Dexie) stays the single
+ * source of truth for the app; this adapter only commits whole collections atomically.
+ */
+export function createStoreAdapter(): SyncStore {
+  return {
+    mode: () => database.mode,
+    readSnapshot: () => database.readSnapshot(),
+    async readMeta(key: string) {
+      const row = await database.table("metadata").get(key);
+      return row?.value;
+    },
+    async writeMeta(key: string, value: unknown) {
+      await database.table("metadata").put({ key, value });
+    },
+    async applyLocal(changes: LocalApply) {
+      const full = changes.fullRestore;
+      const state = changes.localApplyState ?? {};
+      await database.atomic(async () => {
+        const write = async <K extends keyof LocalData>(name: K, value: LocalData[K]) => database.write(name, value);
+        if (full) {
+          await applySnapshot(full);
+          return;
+        }
+        if ("profile" in state) await write("profile", state.profile as LocalData["profile"]);
+        if ("students" in state) await write("students", state.students as LocalData["students"]);
+        if ("definitiveTimetable" in state) await write("definitiveTimetable", state.definitiveTimetable as LocalData["definitiveTimetable"]);
+        if ("provisionalTimetable" in state) await write("provisionalTimetable", state.provisionalTimetable as LocalData["provisionalTimetable"]);
+        if ("settings" in state) {
+          const settings = state.settings as { timetableMode?: LocalData["timetableMode"]; onboardingCompleted?: boolean };
+          if (settings?.timetableMode) await write("timetableMode", settings.timetableMode);
+          if (typeof settings?.onboardingCompleted === "boolean") await write("onboardingCompleted", settings.onboardingCompleted);
+        }
+        if (changes.localEvents) await write("events", changes.localEvents);
+        if (changes.localCirculars) await write("circulars", changes.localCirculars);
+      });
+    },
+  };
+}
+
+async function applySnapshot(snapshot: SyncableSnapshot): Promise<void> {
+  await database.restore(snapshot);
+}
+
+/**
+ * Emits on every committed local change (any table, including metadata bookkeeping rows).
+ * The engine debounces and its plans are hash-guarded, so its own metadata writes cannot
+ * loop: a no-op plan never rewrites the state.
+ */
+export function observeLocalCommits(onCommit: () => void): () => void {
+  let initial = true;
+  const subscription = liveQuery(() => database.readSnapshot()).subscribe({
+    next: () => {
+      if (initial) { initial = false; return; }
+      onCommit();
+    },
+    error: () => { /* a broken observer must never surface as a data error */ },
+  });
+  return () => subscription.unsubscribe();
+}

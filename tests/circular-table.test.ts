@@ -46,6 +46,52 @@ test('dotted civil date in excerpt is not a clock interval',()=>{
  const [item]=normalizeExtractedItems([{title:'SSIG Riunione',date:'2026-09-07',rawSnippet:'07.09.2026 SSIG Riunione 09:00-12:00'}],profile);
  assert.equal(item.startTime,'09:00');assert.equal(item.endTime,'12:00');
 });
+test('vertically merged ORARI cell serves every row of the shared-date block',()=>{
+ // Synthetic layout of the real 04/09/2026 beta table (no school document, no personal data):
+ // one date anchor, two recipients (PRIMARIA + SSIG) and a single ORARI cell "09.00-12.00" merged vertically.
+ const merged=['04/09/2026','PRIMARIA','FORMAZIONE CLASSI / PREDISPOSIZIONE AMBIENTI DIDATTICI SISTO','SSIG','AGGIORNAMENTO CLASSI INTERMEDIE','(nuovi ingressi, nulla osta, acquisizione nuova documentazione)','composizione spontanea BONIFAZI','09.00-12.00'].join('\n');
+ const items=parseCircularText(merged,profile);
+ assert.equal(items.length,2);
+ const ssig=items.find(i=>/SSIG/.test(i.title))!, primaria=items.find(i=>/PRIMARIA/.test(i.title))!;
+ assert.equal(ssig.date,'2026-09-04');assert.equal(primaria.date,'2026-09-04');
+ // The merged interval is visible in BOTH rows…
+ assert.deepEqual([ssig.startTime,ssig.endTime],['09:00','12:00']);
+ assert.deepEqual([primaria.startTime,primaria.endTime],['09:00','12:00']);
+ // …and the never-reproducible wrong value stays absent.
+ for(const item of items){
+  assert.notEqual(item.startTime,'12:30');assert.notEqual(item.endTime,'12:30');
+  assert.ok(!item.startTime||!item.endTime||item.endTime>item.startTime);
+ }
+ // Extract-first: SSIG keeps the shared time even though Primaria is filtered out by relevance.
+ assert.equal(primaria.relevance,'ROSSO');assert.notEqual(ssig.relevance,'ROSSO');
+});
+test('a merged ORARI cell never leaks past a date anchor nor into rows with their own time',()=>{
+ const leaked=['04/09/2026','SSIG','AGGIORNAMENTO CLASSI INTERMEDIE','09.00-12.00','07/09/2026','PRIMARIA','RICEVIMENTO GENITORI','12.30'].join('\n');
+ const items=parseCircularText(leaked,profile);
+ const ssig=items.find(i=>/AGGIORNAMENTO/.test(i.title))!;
+ const nextDay=items.find(i=>/RICEVIMENTO/.test(i.title))!;
+ assert.deepEqual([ssig.date,ssig.startTime,ssig.endTime],['2026-09-04','09:00','12:00']);
+ // The following band must not receive the previous merged interval, nor a full-day collapse.
+ assert.equal(nextDay.date,'2026-09-07');assert.equal(nextDay.endTime,undefined);
+ if(nextDay.startTime!==undefined)assert.ok(!nextDay.endTime||nextDay.endTime>nextDay.startTime);
+ // A row that already owns its inline interval is visually outside the merged cell.
+ const mixed=['04/09/2026','PRIMARIA | INTERCLASSE | 11:00-13:00','SSIG','AGGIORNAMENTO CLASSI INTERMEDIE','09.00-12.00'].join('\n');
+ const [ownInterval,mergedRow]=parseCircularText(mixed,profile);
+ assert.deepEqual([ownInterval.startTime,ownInterval.endTime],['11:00','13:00']);
+ assert.deepEqual([mergedRow.startTime,mergedRow.endTime],['09:00','12:00']);
+});
+test('equal or reversed model intervals are discarded, never shown nor auto-selected',()=>{
+ for(const times of [{startTime:'12:30',endTime:'12:30'},{startTime:'12:00',endTime:'09:00'}]){
+  // Without any row-local time evidence the fabricated interval cannot survive normalization.
+  const [item]=normalizeExtractedItems([{title:'Riunione SSIG',category:'riunione',date:'2026-09-04',...times,notes:'SSIG'}],profile);
+  assert.equal(item.startTime,undefined);assert.equal(item.endTime,undefined);assert.equal(item.selectedForImport,false);
+  const [withSnippet]=normalizeExtractedItems([{title:'AGGIORNAMENTO CLASSI INTERMEDIE',category:'formazione',date:'2026-09-04',...times,rawSnippet:'SSIG AGGIORNAMENTO CLASSI INTERMEDIE | 09.00-12.00',notes:'SSIG'}],profile);
+  assert.deepEqual([withSnippet.startTime,withSnippet.endTime],['09:00','12:00']);
+ }
+ // Snippet without any readable interval: the model time is unsupported evidence.
+ const [noEvidence]=normalizeExtractedItems([{title:'AGGIORNAMENTO CLASSI INTERMEDIE',date:'2026-09-04',startTime:'12:30',endTime:'12:30',rawSnippet:'SSIG AGGIORNAMENTO CLASSI INTERMEDIE'}],profile);
+ assert.equal(noEvidence.startTime,undefined);assert.equal(noEvidence.endTime,undefined);
+});
 test('ready examples removed while real upload/text and archive entry remain',async()=>{
  const modal=await readFile('src/components/CircularAnalyzerModal.tsx','utf8');
  assert.doesNotMatch(modal,/SAMPLE_CIRCULARS|samples|Esempi Pronti/);

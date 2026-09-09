@@ -22,12 +22,16 @@ import {
   Check,
 } from "lucide-react";
 import { User as FirebaseUser } from "firebase/auth";
-import { TeacherProfile, TeacherRole, SchoolLevel, CalendarEvent } from "../types";
+import { TeacherProfile, TeacherRole, TeacherRoleKind, TEACHER_ROLE_KINDS, SchoolLevel, CalendarEvent } from "../types";
+import { ROLE_LABELS, roleDisplayName } from "../utils/teacherRoles";
+import { formatPersonDisplayName } from "../utils/names";
 import { storage } from "../services/storage";
 import { getCurrentSchoolYear, getSuggestedSchoolYears } from "../utils/schoolYear";
 import { GoogleSignInButton } from "./GoogleSignInButton";
 import { isUserCancellationError } from "../services/googleAuth";
 import { downloadIcsCalendar } from "../services/googleCalendarService";
+import type { SyncStatus } from "../services/sync/types";
+import { CloudSync } from "./CloudSyncCard";
 
 interface ProfileModalProps {
   isOpen: boolean;
@@ -42,6 +46,10 @@ interface ProfileModalProps {
   onGoogleLogout?: () => Promise<void>;
   events?: CalendarEvent[];
   onSyncAllToGoogle?: () => Promise<{ syncedCount: number; errorCount: number }>;
+  accountSyncStatus?: SyncStatus;
+  onSyncNow?: () => void;
+  onSyncToggle?: (enabled: boolean) => void;
+  onSyncResolve?: (choice: "local" | "remote") => void;
   initialTab?: "profilo" | "backup" | "google";
 }
 
@@ -58,6 +66,10 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   onGoogleLogout,
   events = [],
   onSyncAllToGoogle,
+  accountSyncStatus,
+  onSyncNow,
+  onSyncToggle,
+  onSyncResolve,
   initialTab = "profilo",
 }) => {
   const save = usePersistenceAction();
@@ -98,33 +110,14 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   const [newClassInput, setNewClassInput] = useState("");
   const [newCampusInput, setNewCampusInput] = useState("");
 
-  const [newRoleType, setNewRoleType] = useState<
-    "docente_sostegno" | "referente_inclusione" | "membro_gli" | "coordinatore" | "referente" | "tutor" | "segretario"
-  >("docente_sostegno");
+  const [newRoleType, setNewRoleType] = useState<TeacherRoleKind>("coordinatore");
   const [newRoleClass, setNewRoleClass] = useState("");
   const [newRoleDesc, setNewRoleDesc] = useState("");
+  const [newRoleLabel, setNewRoleLabel] = useState("");
 
   const [importMessage, setImportMessage] = useState<string | null>(null);
 
   if (!isOpen) return null;
-
-  const handleApplySupportPreset = () => {
-    setFullName("Prof. Andrea Conti");
-    setSchoolName("Istituto Comprensivo / SSIG");
-    setSchoolLevel("ssig");
-    setPrimarySubjects(["Attività di Sostegno", "Sostegno Didattico"]);
-    setClasses(["1A", "2E"]);
-    setCampuses(["Sede Centrale"]);
-    setIsSupportTeacher(true);
-    setAssignedStudents([
-      "Studente M.R. (Classe 2E, 9 ore - PEI differenziato)",
-      "Studente L.B. (Classe 1A, 9 ore - PEI ordinario)",
-    ]);
-    setRoles([
-      { role: "docente_sostegno", description: "Docente specializzato per il sostegno didattico" },
-      { role: "membro_gli", description: "Gruppo di Lavoro per l'Inclusione (GLI)" },
-    ]);
-  };
 
   // Add subject tag
   const handleAddSubject = () => {
@@ -166,19 +159,23 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
     setCampuses(campuses.filter((item) => item !== c));
   };
 
-  // Add role
+  // Add role (a role is stored only when explicitly chosen; nothing is ever auto-assigned)
   const handleAddRole = () => {
-    if (!newRoleDesc.trim() && !newRoleClass.trim()) return;
+    const isCustom = newRoleType === "altro";
+    if (isCustom && !newRoleLabel.trim()) return;
+    if (!isCustom && !newRoleDesc.trim() && !newRoleClass.trim() && roles.some(r => r.role === newRoleType)) return;
     setRoles([
       ...roles,
       {
         role: newRoleType,
         targetClass: newRoleClass.trim().toUpperCase() || undefined,
-        description: newRoleDesc.trim() || `${newRoleType} ${newRoleClass.trim().toUpperCase()}`,
+        ...(isCustom ? { label: newRoleLabel.trim() } : {}),
+        description: newRoleDesc.trim() || (isCustom ? newRoleLabel.trim() : ROLE_LABELS[newRoleType]),
       },
     ]);
     setNewRoleDesc("");
     setNewRoleClass("");
+    setNewRoleLabel("");
   };
 
   const handleRemoveRole = (index: number) => {
@@ -341,14 +338,6 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                     />
                     <span>Attivo</span>
                   </label>
-                  <button
-                    type="button"
-                    onClick={handleApplySupportPreset}
-                    className="px-2.5 py-1 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-lg text-[11px] transition-colors shadow-xs"
-                    title="Carica dati demo realistici per Docente di Sostegno"
-                  >
-                    Carica Preset Sostegno
-                  </button>
                 </div>
               </div>
 
@@ -635,9 +624,8 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                   {roles.map((r, i) => (
                     <div key={i} className="flex items-center justify-between p-2 rounded-lg bg-white border border-stone-200">
                       <div>
-                        <span className="font-bold text-stone-900 capitalize mr-2">{r.role}</span>
-                        {r.targetClass && <span className="text-purple-700 font-bold mr-2">Classe {r.targetClass}</span>}
-                        <span className="text-stone-500">{r.description}</span>
+                        <span className="font-bold text-stone-900 mr-2">{roleDisplayName(r)}</span>
+                        <span className="text-stone-500">{r.role === "altro" ? "" : r.description !== ROLE_LABELS[r.role] ? r.description : ""}</span>
                       </div>
                       <button
                         type="button"
@@ -653,16 +641,13 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                 <div className="flex flex-wrap items-center gap-2 pt-2">
                   <select
                     value={newRoleType}
-                    onChange={(e) => setNewRoleType(e.target.value as any)}
+                    onChange={(e) => setNewRoleType(e.target.value as TeacherRoleKind)}
                     className="p-1.5 border border-stone-300 rounded-lg text-xs"
+                    aria-label="Tipo di ruolo aggiuntivo"
                   >
-                    <option value="docente_sostegno">Docente di Sostegno</option>
-                    <option value="referente_inclusione">Referente Inclusione / BES</option>
-                    <option value="membro_gli">Membro GLI (Inclusione)</option>
-                    <option value="coordinatore">Coordinatore</option>
-                    <option value="segretario">Segretario verbalizzante</option>
-                    <option value="referente">Referente di progetto</option>
-                    <option value="tutor">Tutor PCTO</option>
+                    {TEACHER_ROLE_KINDS.map(kind => (
+                      <option key={kind} value={kind}>{ROLE_LABELS[kind]}</option>
+                    ))}
                   </select>
                   <input
                     type="text"
@@ -671,6 +656,16 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                     placeholder="Classe (es. 2E)"
                     className="p-1.5 border border-stone-300 rounded-lg text-xs w-28 uppercase"
                   />
+                  {newRoleType === "altro" && (
+                    <input
+                      type="text"
+                      value={newRoleLabel}
+                      onChange={(e) => setNewRoleLabel(e.target.value)}
+                      placeholder="Nome del ruolo personalizzato"
+                      className="p-1.5 border border-stone-300 rounded-lg text-xs flex-1 min-w-[140px]"
+                      aria-label="Ruolo personalizzato"
+                    />
+                  )}
                   <input
                     type="text"
                     value={newRoleDesc}
@@ -907,7 +902,8 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                           type="button"
                           onClick={() => {
                             if (googleUser.email) setEmail(googleUser.email);
-                            if (googleUser.displayName) setFullName(googleUser.displayName);
+                            // "felice manganiello" from Google must display as "Felice Manganiello".
+                            if (googleUser.displayName) setFullName(formatPersonDisplayName(googleUser.displayName));
                             setSyncStatus({
                               message: "Dati profilo aggiornati con l'account Google! Ricorda di salvare.",
                               isError: false,
@@ -961,6 +957,13 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                       </div>
                     </div>
                   )}
+
+                  <CloudSync
+                    status={accountSyncStatus}
+                    onSyncNow={onSyncNow}
+                    onToggle={onSyncToggle}
+                    onResolve={onSyncResolve}
+                  />
 
                   {/* Google Calendar Sync Section */}
                   <div className="p-5 rounded-2xl border border-stone-200 bg-white space-y-4">

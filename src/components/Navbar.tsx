@@ -91,7 +91,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 </span>
               </div>
               <p className="text-xs text-stone-500 line-clamp-1">
-                {profile.fullName} • {profile.schoolLevel === "ssig" ? "Secondaria I Grado (SSIG)" : profile.schoolLevel === "primaria" ? "Scuola Primaria" : profile.schoolLevel === "ssiig" ? "Secondaria II Grado" : "SSIG"} • {profile.schoolName} ({profile.classes.join(", ")})
+                {profile.fullName || "Configura il tuo profilo"} • {profile.schoolLevel === "ssig" ? "Secondaria I Grado (SSIG)" : profile.schoolLevel === "primaria" ? "Scuola Primaria" : profile.schoolLevel === "ssiig" ? "Secondaria II Grado" : "SSIG"}{profile.schoolName ? ` • ${profile.schoolName}` : ""}{profile.classes.length > 0 ? ` (${profile.classes.join(", ")})` : ""}
               </p>
             </div>
           </div>

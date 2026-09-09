@@ -1,0 +1,29 @@
+rules_version = '2';
+
+// Agenda Docente — account sync security rules (deploy with: firebase deploy --only firestore:rules).
+// Every path lives under users/{uid}; the Firebase Auth uid is the only logical key, so one
+// teacher can never read or write another teacher's data. Client SDK only ever uses the
+// PUBLIC Firebase web config (no secrets); these rules are the actual access boundary.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function owner() {
+      return request.auth != null && request.auth.uid == uid;
+    }
+    // Keep each document comfortably below Firestore's 1 MiB hard limit.
+    function withinSizeLimit() {
+      return request.resource.data.size().hashCode().abs() < 1000000;
+    }
+
+    match /users/{uid}/{document=**} {
+      allow read: if owner();
+      allow create, update: if owner() && withinSizeLimit();
+      allow delete: if owner();
+    }
+
+    // Deny anything outside the per-account namespace outright.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

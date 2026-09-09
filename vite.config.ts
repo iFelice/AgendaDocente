@@ -45,6 +45,9 @@ export default defineConfig(() => {
         },
         workbox: {
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+          // Remove stale precaches on activation so updates actually take effect offline
+          // (user data lives in IndexedDB/localStorage, never in these caches: no wipe risk).
+          cleanupOutdatedCaches: true,
           navigateFallback: '/index.html',
           navigateFallbackDenylist: [/^\/api(?:\/|$)/],
         },
@@ -59,6 +62,11 @@ export default defineConfig(() => {
       },
     },
     server: {
+      // Bind all interfaces so the app is reachable from the sandbox/live preview.
+      host: '0.0.0.0',
+      // Dev-only host guard: the preview hostname changes per session; production is
+      // served by server.ts (express static), which has no such check.
+      allowedHosts: true as const,
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',

@@ -30,6 +30,7 @@ import { EventModal } from "./components/EventModal";
 const ProfileModal = lazy(() => import("./components/ProfileModal").then(module => ({default: module.ProfileModal})));
 const OnboardingModal = lazy(() => import("./components/OnboardingModal").then(module => ({default: module.OnboardingModal})));
 import { OfflineIndicator } from "./components/OfflineIndicator";
+import { formatPersonDisplayName, isPlaceholderFullName } from "./utils/names";
 import { CheckCircle2, AlertCircle } from "lucide-react";
 import { User as FirebaseUser } from "firebase/auth";
 import {
@@ -43,6 +44,9 @@ import {
   isGoogleSyncEnabled,
   syncOptedInGoogleEvents,
 } from "./services/googleCalendarService";
+import { accountSync } from "./services/sync/accountSync";
+import type { SyncStatus } from "./services/sync/types";
+import { usePWAUpdates } from "./hooks/usePWAUpdates";
 
 export default function App({ initialData }: { initialData: LocalData }) {
   const [profile, setProfile] = useState<TeacherProfile>(() => initialData.profile);
@@ -147,6 +151,18 @@ export default function App({ initialData }: { initialData: LocalData }) {
     };
   }, []);
 
+  // Account sync (multi-device): IndexedDB stays local-first; Firestore mirrors the account
+  // keyed by uid. It starts/stops with the authenticated user and never blocks the app.
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>(accountSync.getStatus());
+  useEffect(() => accountSync.subscribe(setSyncStatus), []);
+  useEffect(() => {
+    if (googleUser) accountSync.startSession(googleUser.uid);
+    else accountSync.stopSession();
+  }, [googleUser?.uid]);
+
+  // Service-worker update availability for the installed PWA (explicit, never surprise reloads).
+  const pwaUpdate = usePWAUpdates();
+
   const handleGoogleLogin = async () => {
     try {
       const result = await signInWithGoogle();
@@ -154,13 +170,13 @@ export default function App({ initialData }: { initialData: LocalData }) {
         setGoogleUser(result.user);
         setGoogleAccessToken(result.accessToken);
         const email = result.user.email || "";
+        // Google display names arrive inconsistently cased ("felice manganiello"); normalize
+        // the view only when there is no real name yet (empty or old placeholder/seed names).
+        const displayName = result.user.displayName ? formatPersonDisplayName(result.user.displayName) : "";
         const updated = {
           ...profile,
           email: email || profile.email,
-          fullName:
-            profile.fullName === "Prof. Mario Rossi" && result.user.displayName
-              ? result.user.displayName
-              : profile.fullName,
+          fullName: displayName && isPlaceholderFullName(profile.fullName) ? displayName : profile.fullName,
           googleCalendarLinked: true,
           googleCalendarAccount: email,
         };
@@ -305,18 +321,6 @@ export default function App({ initialData }: { initialData: LocalData }) {
         ? "Orario definitivo azzerato (ora l'app mostra di default l'orario provvisorio)."
         : "Orario provvisorio azzerato."
     );
-  });
-
-  const handleResetProvisionalTimetable = withPersistenceFeedback(async () => {
-    await storage.resetProvisionalTimetable();
-
-    showToast("Orario provvisorio demo ripristinato.");
-  });
-
-  const handleResetDefinitiveTimetable = withPersistenceFeedback(async () => {
-    await storage.resetDefinitiveTimetable();
-
-    showToast("Orario definitivo standard (18 ore) caricato.");
   });
 
   const handleDeleteExtractedItem = withPersistenceFeedback(async (circularId: string, item: ExtractedItem) => {
@@ -582,8 +586,6 @@ export default function App({ initialData }: { initialData: LocalData }) {
             onCopyProvisionalToDefinitive={handleCopyProvisionalToDefinitive}
             onCopyDefinitiveToProvisional={handleCopyDefinitiveToProvisional}
             onClearTimetable={handleClearTimetable}
-            onResetProvisional={handleResetProvisionalTimetable}
-            onResetDefinitive={handleResetDefinitiveTimetable}
           />
         )}
 
@@ -643,6 +645,10 @@ export default function App({ initialData }: { initialData: LocalData }) {
         onGoogleLogout={handleGoogleLogout}
         events={events}
         onSyncAllToGoogle={handleSyncAllToGoogle}
+        accountSyncStatus={syncStatus}
+        onSyncNow={() => void accountSync.syncNow()}
+        onSyncToggle={(enabled) => void accountSync.setEnabled(enabled)}
+        onSyncResolve={(choice) => void accountSync.resolveConflict(choice)}
         initialTab={profileInitialTab}
       />
       )}
@@ -658,6 +664,21 @@ export default function App({ initialData }: { initialData: LocalData }) {
       />
       )}
 
+      {pwaUpdate.updateAvailable && (
+        <div
+          role="status"
+          className="fixed bottom-20 left-1/2 z-[80] w-[calc(100vw-2rem)] max-w-md -translate-x-1/2 rounded-xl border border-amber-300 bg-white px-4 py-3 shadow-lg flex items-center gap-3"
+        >
+          <span className="text-sm font-semibold text-amber-900 flex-1">È disponibile una nuova versione</span>
+          <button
+            type="button"
+            onClick={pwaUpdate.applyUpdate}
+            className="px-3 py-1.5 rounded-lg bg-amber-600 text-white text-xs font-bold shadow-xs hover:bg-amber-700"
+          >
+            Aggiorna adesso
+          </button>
+        </div>
+      )}
       <OfflineIndicator />
     </div>
     </Suspense>

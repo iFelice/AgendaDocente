@@ -163,8 +163,8 @@ export const WeekView: React.FC<WeekViewProps> = ({
   return (
     <div className="space-y-4 pb-12">
       {/* Top Controls */}
-      <div className="bg-white rounded-xl p-4 border border-stone-200 shadow-xs flex flex-col sm:flex-row items-center justify-between gap-3">
-        <div className="flex items-center space-x-2">
+      <div className="bg-white rounded-xl p-4 border border-stone-200 shadow-xs flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+        <div className="flex items-center gap-2 flex-wrap min-w-0">
           <button
             onClick={() => setCurrentWeekOffset((prev) => prev - 1)}
             className="p-1.5 rounded-lg border border-stone-200 hover:bg-stone-50 text-stone-600 transition-colors"
@@ -185,7 +185,7 @@ export const WeekView: React.FC<WeekViewProps> = ({
           >
             <ChevronRight className="w-5 h-5" />
           </button>
-          <span className="text-sm font-semibold text-stone-800 ml-2">
+          <span className="text-sm font-semibold text-stone-800 ml-1 min-w-0 break-words">
             Settimana dal {days[0].label} al {days[days.length - 1].label}
           </span>
           {isWeekendToday && currentWeekOffset === 0 && (
@@ -204,7 +204,7 @@ export const WeekView: React.FC<WeekViewProps> = ({
           )}
         </div>
 
-        <div className="flex items-center space-x-3">
+        <div className="flex items-center gap-3 flex-wrap justify-between sm:justify-end">
           {circularEventsCount > 0 && (
             <div className="flex items-center space-x-1 bg-stone-100 p-0.5 rounded-lg text-xs">
               <button
@@ -244,8 +244,8 @@ export const WeekView: React.FC<WeekViewProps> = ({
         </div>
       </div>
 
-      {/* Week Grid */}
-      <div className={`grid grid-cols-1 md:grid-cols-3 ${includeSaturday ? "lg:grid-cols-6" : "lg:grid-cols-5"} gap-3`}>
+      {/* Week Grid: horizontal snap cards on phones, multi-column grid as soon as width allows */}
+      <div className="week-scroller" data-days={daysCount}>
         {days.map((day) => {
           // Lessons for this day of week
           const dayLessons = timetable
@@ -263,7 +263,7 @@ export const WeekView: React.FC<WeekViewProps> = ({
           return (
             <div
               key={day.iso}
-              className={`rounded-xl border flex flex-col min-h-[480px] bg-white transition-all shadow-2xs ${
+              className={`week-day-card rounded-xl border flex flex-col bg-white transition-all shadow-2xs ${
                 day.isTarget
                   ? "border-amber-500 ring-2 ring-amber-500/40"
                   : day.isToday
@@ -430,6 +430,7 @@ export const WeekView: React.FC<WeekViewProps> = ({
           );
         })}
       </div>
+      <p className="md:hidden text-[10px] text-stone-400 text-center -mt-2">Scorri lateralmente per vedere tutti i giorni della settimana &rarr;</p>
     </div>
   );
 };
