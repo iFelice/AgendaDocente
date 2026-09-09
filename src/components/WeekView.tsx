@@ -12,6 +12,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { CalendarEvent, TeacherProfile, TimetableSlot } from "../types";
+import { coTeachingSummary } from "../utils/coTeaching";
 
 interface WeekViewProps {
   profile?: TeacherProfile;
@@ -316,7 +317,7 @@ export const WeekView: React.FC<WeekViewProps> = ({
                           key={slot.id}
                           className="p-1.5 rounded-lg border border-emerald-100 bg-emerald-50/40 text-xs flex items-center justify-between"
                         >
-                          <div>
+                          <div className="min-w-0">
                             <div className="flex items-center space-x-1.5">
                               <span className="font-bold text-emerald-950">{slot.periodNumber}ª</span>
                               <span className="font-semibold text-stone-900">{slot.className}</span>
@@ -324,6 +325,14 @@ export const WeekView: React.FC<WeekViewProps> = ({
                             <span className="text-[10px] text-stone-500 block truncate max-w-[110px]">
                               {slot.startTime}-{slot.endTime} • {slot.classroom || slot.subject}
                             </span>
+                            {coTeachingSummary(slot) && (
+                              <span
+                                className="block truncate text-[10px] text-emerald-800 leading-tight"
+                                title={coTeachingSummary(slot) ?? undefined}
+                              >
+                                {coTeachingSummary(slot)}
+                              </span>
+                            )}
                           </div>
                         </div>
                       ))}

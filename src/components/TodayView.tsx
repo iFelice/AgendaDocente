@@ -17,6 +17,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { CalendarEvent, TeacherProfile, TimetableSlot } from "../types";
+import { coTeachingSummary } from "../utils/coTeaching";
 
 /**
  * Pure day selector for the "Oggi" view: everything is computed from the *selected civil
@@ -314,6 +315,14 @@ export const TodayView: React.FC<TodayViewProps> = ({
                               </>
                             )}
                           </div>
+                          {coTeachingSummary(slot) && (
+                            <div
+                              className="mt-1 inline-flex items-center max-w-full text-[11px] leading-snug text-emerald-900 bg-emerald-50 border border-emerald-200 rounded-md px-1.5 py-0.5"
+                              title={coTeachingSummary(slot) ?? undefined}
+                            >
+                              <span className="truncate">{coTeachingSummary(slot)}</span>
+                            </div>
+                          )}
                         </div>
                       </div>
 

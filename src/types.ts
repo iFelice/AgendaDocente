@@ -97,6 +97,22 @@ export interface TimetableSlot {
   campus?: string;
   color?: string;
   isProvisional?: boolean;
+  /**
+   * Compresenza (docente di sostegno): materie curricolari seguite durante l'ora.
+   * Più materie sono possibili perché un'ora può coinvolgere più discipline/docenti.
+   * Opzionale: i TimetableSlot preesistenti senza questo campo restano validi.
+   */
+  coTeachingSubjects?: string[];
+  /**
+   * Compresenza (docente di sostegno): altri docenti di sostegno presenti nell'ora.
+   * Nomi normalizzati "Nome Cognome"; opzionale e multipli.
+   */
+  coSupportTeachers?: string[];
+  /**
+   * Compresenza (docente curricolare): docenti di sostegno presenti nell'ora.
+   * Opzionale: nessuno, uno o più docenti.
+   */
+  supportTeachers?: string[];
 }
 
 export interface CalendarEvent {

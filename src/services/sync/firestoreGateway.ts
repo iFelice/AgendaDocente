@@ -10,7 +10,7 @@ import {
 } from "firebase/firestore";
 import type { FirebaseApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
-import type { ItemsCollection, RemoteItem, RemoteStateDoc, StateDocName, SyncGateway } from "./types";
+import type { ItemsCollection, RemoteItem, StateDocName, SyncGateway } from "./types";
 
 /** Firestore single-document hard limit is 1 MiB; keep a safety margin for metadata. */
 export const CLOUD_DOC_BYTE_LIMIT = 900_000;
@@ -41,10 +41,13 @@ export function createFirestoreGateway(app: FirebaseApp | null, getUid: () => st
   };
 
   return {
-    async readState(name: StateDocName): Promise<RemoteStateDoc | null> {
+    async readState(name: StateDocName): Promise<unknown> {
       const snapshot = await getDoc(doc(database(), `users/${uid()}/state`, name));
       if (!snapshot.exists()) return null;
-      return snapshot.data() as RemoteStateDoc;
+      // RAW document, no cast: a legacy/malformed cloud document must never be
+      // mistaken for valid remote state. Runtime validation happens in the engine
+      // via classifyRemoteStateDoc (src/services/sync/remoteSchema.ts).
+      return snapshot.data();
     },
     async writeState(name: StateDocName, payload: unknown): Promise<{ updatedAt: string }> {
       const updatedAt = new Date().toISOString();

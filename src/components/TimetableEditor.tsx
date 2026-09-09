@@ -32,6 +32,25 @@ import {
   normalizeClassName,
   areSlotsMatchingAuto,
 } from "../utils/timeSlots";
+import { MultiChipInput } from "./MultiChipInput";
+import { collectKnownTeacherNames, coTeachingSummary, pruneCoTeachingFields } from "../utils/coTeaching";
+
+/** Common curricular subjects offered as co-teaching suggestions (free text always allowed). */
+const CO_TEACHING_SUBJECT_SUGGESTIONS = [
+  "Italiano",
+  "Matematica",
+  "Scienze",
+  "Inglese",
+  "Educazione fisica",
+  "Storia",
+  "Geografia",
+  "Arte e immagine",
+  "Tecnologia",
+  "Musica",
+  "Religione",
+  "Francese",
+  "Spagnolo",
+];
 
 interface TimetableEditorProps {
   profile: TeacherProfile;
@@ -126,6 +145,18 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   // Per i docenti SSIG, "inclusi sabato" viene impostato di default senza spunta
   const isSsig = profile?.schoolLevel === "ssig";
   const [includeSaturday, setIncludeSaturday] = useState<boolean>(!isSsig);
+
+  // Co-teaching (compresenza): suggestions from the profile and names already used in the
+  // timetables. A future school directory can replace these sources without migrations.
+  const isSupportTeacher = profile?.isSupportTeacher === true;
+  const coTeachingSubjectSuggestions = [
+    ...CO_TEACHING_SUBJECT_SUGGESTIONS,
+    ...(profile.primarySubjects || []).filter(s => !/sostegno/i.test(s)),
+  ].filter((s, i, arr) => arr.indexOf(s) === i);
+  const knownTeacherNames = useMemo(
+    () => collectKnownTeacherNames(definitiveTimetable, provisionalTimetable),
+    [definitiveTimetable, provisionalTimetable]
+  );
 
   const currentSlots =
     activeTab === "provvisorio" ? provisionalTimetable : definitiveTimetable;
@@ -258,7 +289,9 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
       setClassAddError("Seleziona o aggiungi una classe.");
       return;
     }
-    if (!await save.run(() => onSaveSlot(editingSlot, activeTab, editBaseline.current))) return;
+    // Co-teaching fields are optional: drop the empty ones so saved slots stay clean.
+    const slot = pruneCoTeachingFields(editingSlot);
+    if (!await save.run(() => onSaveSlot(slot, activeTab, editBaseline.current))) return;
     setIsModalOpen(false);
     setEditingSlot(null);
   };
@@ -849,6 +882,14 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                               <span className="font-medium text-stone-800 text-[11px] block truncate mt-0.5">
                                 {slot.subject}
                               </span>
+                              {coTeachingSummary(slot) && (
+                                <span
+                                  className="block truncate text-[10px] text-emerald-800 leading-tight mt-0.5"
+                                  title={coTeachingSummary(slot) ?? undefined}
+                                >
+                                  {coTeachingSummary(slot)}
+                                </span>
+                              )}
                             </div>
                             <div className="flex items-center space-x-1 text-[10px] text-stone-500 truncate mt-1">
                               <MapPin className="w-3 h-3 text-stone-400 flex-shrink-0" />
@@ -1073,7 +1114,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                     onChange={(e) =>
                       setEditingSlot({ ...editingSlot, subject: e.target.value })
                     }
-                    placeholder="es. Scienze motorie, Matematica, Sostegno"
+                    placeholder={isSupportTeacher ? "es. Sostegno" : "es. Scienze motorie, Matematica"}
                     className="w-full p-2.5 border border-stone-300 rounded-lg text-xs min-h-[42px]"
                   />
                   {profile.primarySubjects && profile.primarySubjects.length > 0 && (
@@ -1094,6 +1135,71 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                     </div>
                   )}
                 </div>
+              </div>
+
+              {/* Co-teaching (compresenza) — optional, role-aware */}
+              <div className="p-3 rounded-xl border border-stone-200 bg-stone-50/70 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold text-stone-700 uppercase tracking-wide">
+                    Compresenza
+                  </span>
+                  <span className="text-[10px] text-stone-400">Facoltativo</span>
+                </div>
+
+                {isSupportTeacher ? (
+                  <>
+                    <div>
+                      <label className="block font-medium text-stone-700 mb-1">
+                        Materia/e in compresenza
+                      </label>
+                      <p className="text-[10px] text-stone-400 mb-1.5">
+                        Le discipline curricolari seguite durante l'ora di sostegno. Puoi indicarne più di una.
+                      </p>
+                      <MultiChipInput
+                        values={editingSlot.coTeachingSubjects ?? []}
+                        onChange={(values) => setEditingSlot({ ...editingSlot, coTeachingSubjects: values })}
+                        suggestions={coTeachingSubjectSuggestions}
+                        placeholder="es. Matematica, Italiano…"
+                        addLabel="Aggiungi materia"
+                        normalize={(raw) => raw.replace(/\s+/g, " ").trim()}
+                        emptyHint="Nessuna materia in compresenza."
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-medium text-stone-700 mb-1">
+                        Altri docenti di sostegno presenti
+                      </label>
+                      <p className="text-[10px] text-stone-400 mb-1.5">
+                        Nomi dei colleghi di sostegno nell'ora, anche più di uno.
+                      </p>
+                      <MultiChipInput
+                        values={editingSlot.coSupportTeachers ?? []}
+                        onChange={(values) => setEditingSlot({ ...editingSlot, coSupportTeachers: values })}
+                        suggestions={knownTeacherNames}
+                        placeholder="es. Maria Rossi…"
+                        addLabel="Aggiungi docente"
+                        emptyHint="Nessun altro docente di sostegno."
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <div>
+                    <label className="block font-medium text-stone-700 mb-1">
+                      Docente/i di sostegno in compresenza
+                    </label>
+                    <p className="text-[10px] text-stone-400 mb-1.5">
+                      Il docente di sostegno presente nell'ora, se c'è. Puoi lasciare vuoto.
+                    </p>
+                    <MultiChipInput
+                      values={editingSlot.supportTeachers ?? []}
+                      onChange={(values) => setEditingSlot({ ...editingSlot, supportTeachers: values })}
+                      suggestions={knownTeacherNames}
+                      placeholder="es. Maria Rossi…"
+                      addLabel="Aggiungi docente"
+                      emptyHint="Nessun docente di sostegno in compresenza."
+                    />
+                  </div>
+                )}
               </div>
 
               {/* Start Time & End Time */}
