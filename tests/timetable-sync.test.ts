@@ -21,6 +21,7 @@ import type {
   SyncableSnapshot,
   StateDocName,
 } from '../src/services/sync/types';
+import { sanitizeFirestorePayload } from '../src/services/sync/firestoreGateway';
 import type { TeacherProfile, TimetableSlot, TimeSlotConfig } from '../src/types';
 import React from 'react';
 import { create, act } from 'react-test-renderer';
@@ -630,4 +631,276 @@ test('TimetableEditor renders class dropdown from profile, handles + Aggiungi cl
   assert.equal(savedSlot.startTime, '07:50');
   assert.equal(savedSlot.endTime, '08:50');
 });
+
+function findButtonWithText(root: any, text: string) {
+  return root.findAllByType('button').find((node: any) => {
+    if (node.props.title && node.props.title.includes(text)) return true;
+    const textNodes = node.findAll((n: any) =>
+      (typeof n.children === 'string' && n.children.includes(text)) ||
+      (Array.isArray(n.children) && n.children.some((c: any) => typeof c === 'string' && c.includes(text)))
+    );
+    return textNodes.length > 0;
+  });
+}
+
+// =========================================================================
+// 10. REGRESSION TESTS: AUTOMATIC REGENERATION, FIRST ACCESS & ERROR HANDLING
+// =========================================================================
+
+test('first access with timeSlotConfig absent displays setup wizard and direct save persists 07:50 + 6 + 60', async () => {
+  let savedConfig: TimeSlotConfig | undefined;
+  const testProfile = profileWith({ classes: ['1A'] });
+
+  let renderer: any;
+  await act(async () => {
+    renderer = create(
+      React.createElement(TimetableEditor, {
+        profile: testProfile,
+        definitiveTimetable: [],
+        provisionalTimetable: [],
+        timetableMode: 'auto',
+        activeType: 'provvisorio',
+        isDefinitiveCompiled: false,
+        timeSlotConfig: undefined, // absent
+        onSaveSlot: () => {},
+        onDeleteSlot: () => {},
+        onSetTimetableMode: () => {},
+        onCopyProvisionalToDefinitive: () => {},
+        onCopyDefinitiveToProvisional: () => {},
+        onClearTimetable: () => {},
+        onSaveProfile: () => {},
+        onSaveTimeSlotConfig: async (c: TimeSlotConfig) => {
+          savedConfig = c;
+          return;
+        },
+      })
+    );
+  });
+
+  // Verify setup wizard is displayed
+  const wizardTitle = renderer.root.find((el: any) =>
+    el.type === 'h1' && el.children && el.children.includes('Configura la scansione oraria della tua scuola')
+  );
+  assert.ok(wizardTitle, 'Setup wizard must be displayed on first access');
+
+  // Verify confirm button is present
+  const confirmBtn = findButtonWithText(renderer.root, 'Conferma Scansione');
+  assert.ok(confirmBtn, 'Confirm button must be present in wizard');
+
+  // Click confirm directly without needing any regeneration button
+  await act(async () => {
+    await confirmBtn.props.onClick();
+  });
+
+  assert.ok(savedConfig, 'onSaveTimeSlotConfig must have been called');
+  assert.equal(savedConfig.firstHourStartTime, '07:50');
+  assert.equal(savedConfig.periodsPerDay, 6);
+  assert.equal(savedConfig.standardDurationMinutes, 60);
+  assert.equal(savedConfig.customSlots?.length, 6);
+  assert.equal(savedConfig.customSlots![0].startTime, '07:50');
+  assert.equal(savedConfig.customSlots![0].endTime, '08:50');
+  assert.equal(savedConfig.customSlots![5].startTime, '12:50');
+  assert.equal(savedConfig.customSlots![5].endTime, '13:50');
+});
+
+test('changing base parameters (07:50 to 08:00) in drawer automatically updates preview and saves new slots', async () => {
+  let savedConfig: TimeSlotConfig | undefined;
+  const testProfile = profileWith({ classes: ['1A'] });
+
+  let renderer: any;
+  await act(async () => {
+    renderer = create(
+      React.createElement(TimetableEditor, {
+        profile: testProfile,
+        definitiveTimetable: [],
+        provisionalTimetable: [],
+        timetableMode: 'auto',
+        activeType: 'provvisorio',
+        isDefinitiveCompiled: false,
+        timeSlotConfig: customFasceConfig,
+        onSaveSlot: () => {},
+        onDeleteSlot: () => {},
+        onSetTimetableMode: () => {},
+        onCopyProvisionalToDefinitive: () => {},
+        onCopyDefinitiveToProvisional: () => {},
+        onClearTimetable: () => {},
+        onSaveProfile: () => {},
+        onSaveTimeSlotConfig: async (c: TimeSlotConfig) => {
+          savedConfig = c;
+          return;
+        },
+      })
+    );
+  });
+
+  // Open the "Fasce Orarie" drawer
+  const fasceBtn = findButtonWithText(renderer.root, 'Fasce Orarie');
+  assert.ok(fasceBtn);
+
+  await act(async () => {
+    fasceBtn.props.onClick();
+  });
+
+  // Find the firstHour input inside the drawer
+  const timeInput = renderer.root.find((el: any) =>
+    el.type === 'input' && el.props.type === 'time' && el.props.value === '07:50'
+  );
+  assert.ok(timeInput);
+
+  // Change from 07:50 to 08:00
+  await act(async () => {
+    timeInput.props.onChange({ target: { value: '08:00' } });
+  });
+
+  // Save directly without clicking any "Rigenera" button
+  const saveBtn = findButtonWithText(renderer.root, 'Salva Fasce Orarie');
+  assert.ok(saveBtn);
+
+  await act(async () => {
+    await saveBtn.props.onClick();
+  });
+
+  assert.ok(savedConfig);
+  assert.equal(savedConfig.firstHourStartTime, '08:00');
+  assert.equal(savedConfig.customSlots?.length, 6);
+  assert.equal(savedConfig.customSlots![0].startTime, '08:00');
+  assert.equal(savedConfig.customSlots![0].endTime, '09:00');
+  assert.equal(savedConfig.customSlots![5].startTime, '13:00');
+  assert.equal(savedConfig.customSlots![5].endTime, '14:00');
+});
+
+test('advanced customization: manually editing a slot switches to custom mode and preserves changes', async () => {
+  let savedConfig: TimeSlotConfig | undefined;
+  const testProfile = profileWith({ classes: ['1A'] });
+
+  let renderer: any;
+  await act(async () => {
+    renderer = create(
+      React.createElement(TimetableEditor, {
+        profile: testProfile,
+        definitiveTimetable: [],
+        provisionalTimetable: [],
+        timetableMode: 'auto',
+        activeType: 'provvisorio',
+        isDefinitiveCompiled: false,
+        timeSlotConfig: customFasceConfig,
+        onSaveSlot: () => {},
+        onDeleteSlot: () => {},
+        onSetTimetableMode: () => {},
+        onCopyProvisionalToDefinitive: () => {},
+        onCopyDefinitiveToProvisional: () => {},
+        onClearTimetable: () => {},
+        onSaveProfile: () => {},
+        onSaveTimeSlotConfig: async (c: TimeSlotConfig) => {
+          savedConfig = c;
+          return;
+        },
+      })
+    );
+  });
+
+  // Open drawer
+  const fasceBtn = findButtonWithText(renderer.root, 'Fasce Orarie');
+  await act(async () => { fasceBtn.props.onClick(); });
+
+  // Open advanced customization accordion
+  const advBtn = findButtonWithText(renderer.root, 'Personalizzazione avanzata');
+  await act(async () => { advBtn.props.onClick(); });
+
+  // Find the inputs for time in the drawer:
+  // index 0 is firstHourTime ("07:50")
+  // index 1: Slot 1 start ("07:50"), index 2: Slot 1 end ("08:50")
+  // index 3: Slot 2 start ("08:50"), index 4: Slot 2 end ("09:50")
+  // index 5: Slot 3 start ("09:50"), index 6: Slot 3 end ("10:50")
+  const timeInputs = renderer.root.findAllByType('input').filter((i: any) => i.props.type === 'time');
+  assert.ok(timeInputs.length >= 7);
+  const slot3Start = timeInputs[5];
+  assert.equal(slot3Start.props.value, '09:50');
+
+  await act(async () => {
+    slot3Start.props.onChange({ target: { value: '10:05' } });
+  });
+
+  // Click Save
+  const saveBtn = findButtonWithText(renderer.root, 'Salva Fasce Orarie');
+  await act(async () => { await saveBtn.props.onClick(); });
+
+  assert.ok(savedConfig);
+  assert.equal(savedConfig.customSlots?.[2].startTime, '10:05');
+});
+
+test('onSaveTimeSlotConfig returning false keeps drawer open and displays error alert', async () => {
+  const testProfile = profileWith({ classes: ['1A'] });
+
+  let renderer: any;
+  await act(async () => {
+    renderer = create(
+      React.createElement(TimetableEditor, {
+        profile: testProfile,
+        definitiveTimetable: [],
+        provisionalTimetable: [],
+        timetableMode: 'auto',
+        activeType: 'provvisorio',
+        isDefinitiveCompiled: false,
+        timeSlotConfig: customFasceConfig,
+        onSaveSlot: () => {},
+        onDeleteSlot: () => {},
+        onSetTimetableMode: () => {},
+        onCopyProvisionalToDefinitive: () => {},
+        onCopyDefinitiveToProvisional: () => {},
+        onClearTimetable: () => {},
+        onSaveProfile: () => {},
+        onSaveTimeSlotConfig: async () => false, // returns false on failure
+      })
+    );
+  });
+
+  // Open drawer
+  const fasceBtn = findButtonWithText(renderer.root, 'Fasce Orarie');
+  await act(async () => { fasceBtn.props.onClick(); });
+
+  // Click Save
+  const saveBtn = findButtonWithText(renderer.root, 'Salva Fasce Orarie');
+  await act(async () => { await saveBtn.props.onClick(); });
+
+  // Modal must still be open
+  const modalHeader = renderer.root.find((el: any) =>
+    el.type === 'h3' && el.children && el.children.includes('Configurazione Fasce Orarie')
+  );
+  assert.ok(modalHeader, 'Drawer must stay open when save returns false');
+
+  // Alert must be visible
+  const alertBox = renderer.root.find((el: any) => el.props.role === 'alert');
+  assert.ok(alertBox, 'Error alert must be rendered');
+});
+
+test('sanitizeFirestorePayload handles TimetableSlot with undefined optional fields and preserves array payload', () => {
+  const slotWithUndefined: TimetableSlot = {
+    id: 'tt-undef',
+    dayOfWeek: 2,
+    periodNumber: 2,
+    startTime: '08:50',
+    endTime: '09:50',
+    subject: 'Matematica',
+    className: '1A',
+    classroom: undefined,
+    campus: undefined,
+    isProvisional: undefined,
+  };
+
+  const sanitized = sanitizeFirestorePayload([slotWithUndefined]);
+  assert.ok(Array.isArray(sanitized));
+  assert.equal(sanitized.length, 1);
+  assert.equal(sanitized[0].id, 'tt-undef');
+  assert.equal(sanitized[0].className, '1A');
+  assert.equal(sanitized[0].classroom, undefined);
+  assert.equal('classroom' in sanitized[0], false);
+  // JSON stringification is valid and contains no undefined
+  const json = JSON.stringify(sanitized);
+  assert.ok(!json.includes('undefined'));
+  const reparsed = JSON.parse(json);
+  assert.equal(reparsed[0].id, 'tt-undef');
+  assert.equal(reparsed[0].startTime, '08:50');
+});
+
 

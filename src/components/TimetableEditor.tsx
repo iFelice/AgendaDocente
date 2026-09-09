@@ -15,6 +15,8 @@ import {
   Sliders,
   ChevronDown,
   ChevronUp,
+  Sparkles,
+  RotateCcw,
 } from "lucide-react";
 import {
   TeacherProfile,
@@ -28,6 +30,7 @@ import {
   generateDefaultPeriodSlots,
   getEffectivePeriodSlots,
   normalizeClassName,
+  areSlotsMatchingAuto,
 } from "../utils/timeSlots";
 
 interface TimetableEditorProps {
@@ -78,6 +81,8 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   onSaveTimeSlotConfig,
 }) => {
   const save = usePersistenceAction();
+  const slotConfigSave = usePersistenceAction();
+  const initialSetupSave = usePersistenceAction();
   const editBaseline = useRef<TimetableSlot | undefined>(undefined);
 
   // If definitive is not compiled, default tab to provisional
@@ -88,12 +93,17 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
 
-  // Class selection state
+  // Class selection state in slot modal
   const [isAddingNewClass, setIsAddingNewClass] = useState(false);
   const [newClassNameInput, setNewClassNameInput] = useState("");
   const [classAddError, setClassAddError] = useState<string | null>(null);
 
-  // Time slot settings modal/drawer
+  // First-use setup state (when timeSlotConfig is not configured)
+  const [initFirstHour, setInitFirstHour] = useState("07:50");
+  const [initPeriodsCount, setInitPeriodsCount] = useState(6);
+  const [initDuration, setInitDuration] = useState(60);
+
+  // Time slot settings modal/drawer state
   const [isSlotConfigOpen, setIsSlotConfigOpen] = useState(false);
   const [firstHourTime, setFirstHourTime] = useState(
     timeSlotConfig?.firstHourStartTime || "07:50"
@@ -107,6 +117,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   const [customSlotsDraft, setCustomSlotsDraft] = useState(
     () => getEffectivePeriodSlots(timeSlotConfig)
   );
+  const [isCustomMode, setIsCustomMode] = useState(false);
   const [showAdvancedSlots, setShowAdvancedSlots] = useState(false);
 
   // Mobile selected day filter for compact view
@@ -140,8 +151,8 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   const handleOpenAdd = (day: 1 | 2 | 3 | 4 | 5 | 6, periodNum: number) => {
     const periodConf = periods.find((p) => p.periodNumber === periodNum) || periods[0] || {
       periodNumber: 1,
-      startTime: "08:15",
-      endTime: "09:10",
+      startTime: "07:50",
+      endTime: "08:50",
     };
     editBaseline.current = undefined;
     setIsAddingNewClass(false);
@@ -255,38 +266,228 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   // Open config drawer and sync draft state
   const handleOpenSlotConfig = () => {
     const effective = getEffectivePeriodSlots(timeSlotConfig);
-    setFirstHourTime(timeSlotConfig?.firstHourStartTime || effective[0]?.startTime || "07:50");
-    setPeriodsCount(timeSlotConfig?.periodsPerDay || effective.length || 6);
-    setPeriodDuration(timeSlotConfig?.standardDurationMinutes || 60);
+    const start = timeSlotConfig?.firstHourStartTime || effective[0]?.startTime || "07:50";
+    const count = timeSlotConfig?.periodsPerDay || effective.length || 6;
+    const duration = timeSlotConfig?.standardDurationMinutes || 60;
+    const hasCustomSlots = Boolean(
+      timeSlotConfig?.customSlots &&
+      timeSlotConfig.customSlots.length > 0 &&
+      !areSlotsMatchingAuto(timeSlotConfig.customSlots, start, count, duration)
+    );
+
+    setFirstHourTime(start);
+    setPeriodsCount(count);
+    setPeriodDuration(duration);
     setCustomSlotsDraft(effective);
+    setIsCustomMode(hasCustomSlots);
     setIsSlotConfigOpen(true);
   };
 
-  // Generate standard slots from firstHourTime, periodsCount, periodDuration
-  const handleAutoGenerateSlots = () => {
-    const generated = generateDefaultPeriodSlots(
-      firstHourTime,
-      periodsCount,
-      periodDuration
-    );
-    setCustomSlotsDraft(generated);
+  // Automatically regenerate slots when base parameters change (if in auto mode)
+  const handleFirstHourChange = (newStart: string) => {
+    setFirstHourTime(newStart);
+    if (!isCustomMode) {
+      const generated = generateDefaultPeriodSlots(newStart, periodsCount, periodDuration);
+      setCustomSlotsDraft(generated);
+    }
   };
 
-  // Save the new slot config
+  const handlePeriodsCountChange = (newCount: number) => {
+    const safeCount = Math.max(1, Math.min(12, newCount || 1));
+    setPeriodsCount(safeCount);
+    if (!isCustomMode) {
+      const generated = generateDefaultPeriodSlots(firstHourTime, safeCount, periodDuration);
+      setCustomSlotsDraft(generated);
+    }
+  };
+
+  const handleDurationChange = (newDuration: number) => {
+    const safeDuration = Math.max(15, Math.min(180, newDuration || 60));
+    setPeriodDuration(safeDuration);
+    if (!isCustomMode) {
+      const generated = generateDefaultPeriodSlots(firstHourTime, periodsCount, safeDuration);
+      setCustomSlotsDraft(generated);
+    }
+  };
+
+  // Reset to auto generation from base parameters
+  const handleResetToAuto = () => {
+    const generated = generateDefaultPeriodSlots(firstHourTime, periodsCount, periodDuration);
+    setCustomSlotsDraft(generated);
+    setIsCustomMode(false);
+  };
+
+  // Save the new slot config with persistence action
   const handleSaveSlotConfig = async () => {
+    const effectiveSlots = isCustomMode
+      ? customSlotsDraft
+      : generateDefaultPeriodSlots(firstHourTime, periodsCount, periodDuration);
+
     const newConfig: TimeSlotConfig = {
       firstHourStartTime: firstHourTime,
-      periodsPerDay: periodsCount,
+      periodsPerDay: effectiveSlots.length,
       standardDurationMinutes: periodDuration,
-      customSlots: customSlotsDraft,
+      customSlots: effectiveSlots,
     };
 
-    if (onSaveTimeSlotConfig) {
-      await onSaveTimeSlotConfig(newConfig);
+    const ok = await slotConfigSave.run(async (): Promise<false | void> => {
+      if (onSaveTimeSlotConfig) {
+        const res = await onSaveTimeSlotConfig(newConfig);
+        if (res === false) return false;
+      }
+    });
+
+    if (ok) {
+      setIsSlotConfigOpen(false);
     }
-    setIsSlotConfigOpen(false);
   };
 
+  // Handle first-time setup confirmation
+  const handleConfirmInitialSetup = async () => {
+    const generated = generateDefaultPeriodSlots(
+      initFirstHour,
+      initPeriodsCount,
+      initDuration
+    );
+
+    const newConfig: TimeSlotConfig = {
+      firstHourStartTime: initFirstHour,
+      periodsPerDay: initPeriodsCount,
+      standardDurationMinutes: initDuration,
+      customSlots: generated,
+    };
+
+    await initialSetupSave.run(async (): Promise<false | void> => {
+      if (onSaveTimeSlotConfig) {
+        const res = await onSaveTimeSlotConfig(newConfig);
+        if (res === false) return false;
+      }
+    });
+  };
+
+  // =========================================================================
+  // FIRST ACCESS SETUP WIZARD (When timeSlotConfig is not yet configured)
+  // =========================================================================
+  if (!timeSlotConfig) {
+    const initialPreviewSlots = generateDefaultPeriodSlots(
+      initFirstHour,
+      initPeriodsCount,
+      initDuration
+    );
+
+    return (
+      <div className="max-w-3xl mx-auto py-8 px-4 space-y-6 animate-in fade-in">
+        <div className="bg-white rounded-2xl p-6 sm:p-8 border border-stone-200 shadow-sm space-y-6">
+          <div className="flex items-start space-x-3.5 border-b border-stone-100 pb-5">
+            <div className="p-3 bg-emerald-100 text-emerald-800 rounded-xl">
+              <Sliders className="w-6 h-6" />
+            </div>
+            <div>
+              <span className="text-xs font-bold text-emerald-800 uppercase tracking-wider">
+                Primo Accesso Orario
+              </span>
+              <h1 className="text-xl sm:text-2xl font-bold text-stone-900 mt-0.5">
+                Configura la scansione oraria della tua scuola
+              </h1>
+              <p className="text-xs sm:text-sm text-stone-600 mt-1">
+                Imposta l'ora di inizio della prima ora, il numero di ore al giorno e la durata standard. Le fasce generate verranno applicate alla griglia dell'orario.
+              </p>
+            </div>
+          </div>
+
+          {initialSetupSave.error && (
+            <p role="alert" className="p-3 text-xs text-rose-700 bg-rose-50 rounded-xl border border-rose-200">
+              {initialSetupSave.error}
+            </p>
+          )}
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 p-4 bg-stone-50 rounded-xl border border-stone-200">
+            <div>
+              <label className="block font-bold text-stone-800 text-xs mb-1.5">
+                Inizio 1ª Ora
+              </label>
+              <input
+                type="time"
+                value={initFirstHour}
+                onChange={(e) => setInitFirstHour(e.target.value)}
+                className="w-full p-2.5 border border-stone-300 rounded-lg text-xs font-mono bg-white text-stone-900 min-h-[42px]"
+              />
+            </div>
+
+            <div>
+              <label className="block font-bold text-stone-800 text-xs mb-1.5">
+                Nº Ore Giornaliere
+              </label>
+              <input
+                type="number"
+                min="1"
+                max="10"
+                value={initPeriodsCount}
+                onChange={(e) => setInitPeriodsCount(Math.max(1, Math.min(10, Number(e.target.value) || 1)))}
+                className="w-full p-2.5 border border-stone-300 rounded-lg text-xs bg-white text-stone-900 min-h-[42px]"
+              />
+            </div>
+
+            <div>
+              <label className="block font-bold text-stone-800 text-xs mb-1.5">
+                Durata (minuti)
+              </label>
+              <input
+                type="number"
+                min="30"
+                max="120"
+                step="5"
+                value={initDuration}
+                onChange={(e) => setInitDuration(Math.max(15, Math.min(180, Number(e.target.value) || 60)))}
+                className="w-full p-2.5 border border-stone-300 rounded-lg text-xs bg-white text-stone-900 min-h-[42px]"
+              />
+            </div>
+          </div>
+
+          {/* Real-time preview of generated period slots */}
+          <div className="bg-emerald-50/70 rounded-xl p-4 border border-emerald-200 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="font-bold text-xs text-emerald-950">
+                Anteprima scansione oraria ({initialPreviewSlots.length} ore):
+              </span>
+              <span className="text-[11px] font-medium text-emerald-800">
+                Calcolata automaticamente
+              </span>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-1">
+              {initialPreviewSlots.map((s) => (
+                <div
+                  key={s.periodNumber}
+                  className="p-2 bg-white border border-emerald-300 rounded-lg text-center"
+                >
+                  <div className="font-bold text-xs text-emerald-950">{s.label}</div>
+                  <div className="text-[11px] text-stone-600 font-mono mt-0.5">
+                    {s.startTime} – {s.endTime}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex justify-end pt-2">
+            <button
+              type="button"
+              disabled={initialSetupSave.pending}
+              onClick={() => void handleConfirmInitialSetup()}
+              className="w-full sm:w-auto px-6 py-3 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold rounded-xl shadow-xs transition-colors flex items-center justify-center space-x-2 min-h-[44px]"
+            >
+              <Check className="w-4 h-4" />
+              <span>Conferma Scansione e Inizia a Compilare</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // =========================================================================
+  // MAIN TIMETABLE VIEW (When timeSlotConfig is configured)
+  // =========================================================================
   return (
     <div className="space-y-6 pb-12 max-w-full overflow-x-hidden">
       {save.error && (
@@ -548,7 +749,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
         </div>
       </div>
 
-      {/* Mobile Day Filter Tabs (visible on small screens for easy navigation) */}
+      {/* Mobile Day Filter Tabs */}
       <div className="flex sm:hidden overflow-x-auto pb-1 gap-1.5 text-xs">
         <button
           type="button"
@@ -577,7 +778,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
         ))}
       </div>
 
-      {/* Timetable Matrix Table (Scrollable on mobile without body overflow) */}
+      {/* Timetable Matrix Table */}
       <div className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-x-auto max-w-full">
         <table className="w-full text-left border-collapse min-w-[620px]">
           <thead>
@@ -895,7 +1096,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                 </div>
               </div>
 
-              {/* Start Time & End Time (Derived automatically, still editable for custom cases) */}
+              {/* Start Time & End Time */}
               <div className="grid grid-cols-2 gap-3 pt-1">
                 <div>
                   <label className="block font-medium text-stone-700 mb-1">
@@ -1031,8 +1232,14 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
             </div>
 
             <div className="space-y-4 mt-4 text-xs">
+              {slotConfigSave.error && (
+                <p role="alert" className="p-3 text-xs text-rose-700 bg-rose-50 rounded-xl border border-rose-200">
+                  {slotConfigSave.error}
+                </p>
+              )}
+
               <p className="text-stone-600 leading-relaxed">
-                Imposta i parametri della scansione oraria della scuola per generare automaticamente le fasce delle lezioni.
+                Modifica i parametri base per rigenerare all'istante le fasce delle lezioni, oppure personalizza singolarmente gli orari.
               </p>
 
               {/* Generator Parameters */}
@@ -1044,8 +1251,8 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                   <input
                     type="time"
                     value={firstHourTime}
-                    onChange={(e) => setFirstHourTime(e.target.value)}
-                    className="w-full p-2 border border-stone-300 rounded-lg text-xs font-mono bg-white"
+                    onChange={(e) => handleFirstHourChange(e.target.value)}
+                    className="w-full p-2 border border-stone-300 rounded-lg text-xs font-mono bg-white text-stone-900"
                   />
                 </div>
 
@@ -1058,8 +1265,8 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                     min="1"
                     max="10"
                     value={periodsCount}
-                    onChange={(e) => setPeriodsCount(Number(e.target.value))}
-                    className="w-full p-2 border border-stone-300 rounded-lg text-xs bg-white"
+                    onChange={(e) => handlePeriodsCountChange(Number(e.target.value))}
+                    className="w-full p-2 border border-stone-300 rounded-lg text-xs bg-white text-stone-900"
                   />
                 </div>
 
@@ -1073,20 +1280,40 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                     max="120"
                     step="5"
                     value={periodDuration}
-                    onChange={(e) => setPeriodDuration(Number(e.target.value))}
-                    className="w-full p-2 border border-stone-300 rounded-lg text-xs bg-white"
+                    onChange={(e) => handleDurationChange(Number(e.target.value))}
+                    className="w-full p-2 border border-stone-300 rounded-lg text-xs bg-white text-stone-900"
                   />
                 </div>
               </div>
 
-              <div className="flex justify-end">
-                <button
-                  type="button"
-                  onClick={handleAutoGenerateSlots}
-                  className="px-3 py-1.5 bg-stone-200 hover:bg-stone-300 text-stone-800 rounded-lg text-xs font-semibold transition-colors"
-                >
-                  ⚡ Rigenera fasce automatiche ({firstHourTime} • {periodsCount} ore da {periodDuration}m)
-                </button>
+              {/* Mode Status Pill */}
+              <div className="flex items-center justify-between p-2 bg-stone-50 rounded-lg border border-stone-200">
+                <div className="flex items-center space-x-2">
+                  <span
+                    className={`w-2 h-2 rounded-full ${
+                      isCustomMode ? "bg-amber-500" : "bg-emerald-500"
+                    }`}
+                  />
+                  <span className="font-semibold text-stone-700 text-[11px]">
+                    Modalità:{" "}
+                    <strong>
+                      {isCustomMode
+                        ? "Personalizzata (modifiche manuali attive)"
+                        : "Automatica (aggiornamento istantaneo)"}
+                    </strong>
+                  </span>
+                </div>
+                {isCustomMode && (
+                  <button
+                    type="button"
+                    onClick={handleResetToAuto}
+                    className="px-2 py-1 bg-white hover:bg-stone-100 text-stone-700 border border-stone-200 rounded text-[11px] font-semibold flex items-center space-x-1"
+                    title="Rigenera da parametri base"
+                  >
+                    <RotateCcw className="w-3 h-3 text-emerald-700" />
+                    <span>Reimposta Auto</span>
+                  </button>
+                )}
               </div>
 
               {/* Advanced Customization Toggle */}
@@ -1107,7 +1334,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                 {showAdvancedSlots && (
                   <div className="mt-2 space-y-2 max-h-56 overflow-y-auto pr-1">
                     <p className="text-[11px] text-stone-500 mb-2">
-                      Puoi modificare manualmente l'inizio e la fine di ciascuna ora per gestire ricreazioni, intervalli o ore ridotte.
+                      Modificando una singola ora passerai in modalità personalizzata per gestire intervalli o orari non uniformi.
                     </p>
                     {customSlotsDraft.map((slot, index) => (
                       <div
@@ -1122,6 +1349,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                           value={slot.startTime}
                           onChange={(e) => {
                             const val = e.target.value;
+                            setIsCustomMode(true);
                             setCustomSlotsDraft((prev) =>
                               prev.map((s, i) =>
                                 i === index ? { ...s, startTime: val } : s
@@ -1136,6 +1364,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                           value={slot.endTime}
                           onChange={(e) => {
                             const val = e.target.value;
+                            setIsCustomMode(true);
                             setCustomSlotsDraft((prev) =>
                               prev.map((s, i) =>
                                 i === index ? { ...s, endTime: val } : s
@@ -1147,6 +1376,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                         <button
                           type="button"
                           onClick={() => {
+                            setIsCustomMode(true);
                             setCustomSlotsDraft((prev) =>
                               prev
                                 .filter((_, i) => i !== index)
@@ -1164,6 +1394,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                     <button
                       type="button"
                       onClick={() => {
+                        setIsCustomMode(true);
                         const nextNum = customSlotsDraft.length + 1;
                         const lastSlot = customSlotsDraft[customSlotsDraft.length - 1];
                         const start = lastSlot ? lastSlot.endTime : "08:00";
@@ -1215,6 +1446,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                 </button>
                 <button
                   type="button"
+                  disabled={slotConfigSave.pending}
                   onClick={() => void handleSaveSlotConfig()}
                   className="px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold rounded-lg shadow-xs transition-colors min-h-[42px]"
                 >

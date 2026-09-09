@@ -25,18 +25,18 @@ export function addMinutesToTime(timeStr: string, minutes: number): string {
 
 /**
  * Generates standard continuous period slots based on:
- * - firstHourStartTime (e.g. "07:50" or "08:00")
- * - periodsPerDay (e.g. 6)
- * - durationMinutes (e.g. 60)
+ * - firstHourStartTime (default "07:50")
+ * - periodsPerDay (default 6)
+ * - durationMinutes (default 60)
  */
 export function generateDefaultPeriodSlots(
-  firstHourStartTime: string = "08:15",
+  firstHourStartTime: string = "07:50",
   periodsPerDay: number = 6,
   durationMinutes: number = 60
 ): PeriodSlot[] {
   const count = Math.max(1, Math.min(12, Math.floor(periodsPerDay) || 6));
   const duration = Math.max(1, Math.floor(durationMinutes) || 60);
-  let currentStart = firstHourStartTime || "08:15";
+  let currentStart = firstHourStartTime || "07:50";
   const slots: PeriodSlot[] = [];
 
   for (let i = 1; i <= count; i++) {
@@ -53,21 +53,34 @@ export function generateDefaultPeriodSlots(
   return slots;
 }
 
-export const DEFAULT_PERIOD_SLOTS: PeriodSlot[] = [
-  { periodNumber: 1, label: "1ª Ora", startTime: "08:15", endTime: "09:10" },
-  { periodNumber: 2, label: "2ª Ora", startTime: "09:10", endTime: "10:05" },
-  { periodNumber: 3, label: "3ª Ora", startTime: "10:15", endTime: "11:10" },
-  { periodNumber: 4, label: "4ª Ora", startTime: "11:15", endTime: "12:10" },
-  { periodNumber: 5, label: "5ª Ora", startTime: "12:15", endTime: "13:10" },
-  { periodNumber: 6, label: "6ª Ora", startTime: "13:10", endTime: "14:05" },
-];
+export const DEFAULT_PERIOD_SLOTS: PeriodSlot[] = generateDefaultPeriodSlots("07:50", 6, 60);
 
 export const DEFAULT_TIME_SLOT_CONFIG: TimeSlotConfig = {
-  firstHourStartTime: "08:15",
+  firstHourStartTime: "07:50",
   periodsPerDay: 6,
   standardDurationMinutes: 60,
   customSlots: DEFAULT_PERIOD_SLOTS,
 };
+
+/**
+ * Checks if a given array of slots exactly matches the auto-generated slots
+ * for the specified parameters.
+ */
+export function areSlotsMatchingAuto(
+  slots: PeriodSlot[],
+  firstHourStartTime: string = "07:50",
+  periodsPerDay: number = 6,
+  durationMinutes: number = 60
+): boolean {
+  const auto = generateDefaultPeriodSlots(firstHourStartTime, periodsPerDay, durationMinutes);
+  if (!slots || slots.length !== auto.length) return false;
+  return slots.every(
+    (s, i) =>
+      s.periodNumber === auto[i].periodNumber &&
+      s.startTime === auto[i].startTime &&
+      s.endTime === auto[i].endTime
+  );
+}
 
 /**
  * Returns the effective list of period slots from a TimeSlotConfig.
@@ -89,7 +102,7 @@ export function getEffectivePeriodSlots(config?: TimeSlotConfig): PeriodSlot[] {
   }
 
   return generateDefaultPeriodSlots(
-    config.firstHourStartTime || "08:15",
+    config.firstHourStartTime || "07:50",
     config.periodsPerDay || 6,
     config.standardDurationMinutes || 60
   );
