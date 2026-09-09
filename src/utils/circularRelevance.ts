@@ -126,6 +126,9 @@ const normalizeSubject = (s: string) => {
   return Object.keys(SUBJECT_ALIASES).find(key => SUBJECT_ALIASES[key].includes(lower)) || lower;
 };
 
+// Generic organizational wording is not an explicit subject restriction.
+export const isGenericSubject = (value: string): boolean => /^(?:tutt[ei](?: le| i)? (?:materie|discipline|docenti)|(?:programmazione )?(?:generale )?per materia|generale|materie|discipline|nessuna|non specificat[oa])$/i.test(value.trim());
+
 export function detectSubjects(text: string, profile?: TeacherProfile): string[] {
   let remaining = text.toLowerCase();
   const result = new Set<string>();
@@ -171,7 +174,7 @@ export function evaluateItemRelevance(
   if (grades.length && !userClasses.some(c => grades.includes(Number(c[0])))) return result('ROSSO', "Destinato a un altro anno di corso.");
 
   const subjects = detectSubjects(text, profile);
-  const explicitSubjects = (item.subject || '').split(/[,;]/).map(s => s.trim()).filter(Boolean).map(normalizeSubject);
+  const explicitSubjects = (item.subject || '').split(/[,;]/).map(s => s.trim()).filter(s => s && !isGenericSubject(s)).map(normalizeSubject);
   const targetedSubjects = explicitSubjects.length ? explicitSubjects : subjects;
   const ownSubjects = (profile.primarySubjects || []).flatMap(s => { const detected = detectSubjects(s); return detected.length ? detected : [normalizeSubject(s)]; });
   if (profile.isSupportTeacher) ownSubjects.push('sostegno');

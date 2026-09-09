@@ -31,7 +31,7 @@ import {
   RelevanceLevel,
   TeacherProfile,
 } from "../types";
-import { analyzeCircular, SAMPLE_CIRCULARS } from "../services/aiService";
+import { analyzeCircular } from "../services/aiService";
 
 interface CircularAnalyzerModalProps {
   isOpen: boolean;
@@ -48,7 +48,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
 }) => {
   const save = usePersistenceAction();
   const [step, setStep] = useState<"input" | "results">("input");
-  const [inputMode, setInputMode] = useState<"file" | "text" | "samples">("samples");
+  const [inputMode, setInputMode] = useState<"file" | "text">("file");
   const [circularText, setCircularText] = useState<string>("");
   const [fileName, setFileName] = useState<string>("");
   const [fileBase64, setFileBase64] = useState<string | undefined>();
@@ -111,17 +111,6 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       };
       reader.readAsText(file);
     }
-  };
-
-  // Select a preset sample
-  const handleSelectSample = (sample: typeof SAMPLE_CIRCULARS[0]) => {
-    inputRevision.current++;
-    setIsReadingFile(false);
-    setCircularText(sample.text);
-    setFileName(sample.title);
-    setFileBase64(undefined);
-    setFileMimeType(undefined);
-    setInputMode("text");
   };
 
   // Run the analysis
@@ -368,16 +357,6 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
               {/* Mode Switcher */}
               <div className="flex items-center space-x-2 border-b border-stone-200 pb-2">
                 <button
-                  onClick={() => setInputMode("samples")}
-                  className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
-                    inputMode === "samples"
-                      ? "bg-amber-100 text-amber-900 font-bold"
-                      : "text-stone-600 hover:bg-stone-100"
-                  }`}
-                >
-                  ⚡ Esempi Pronti (Test 1-Click)
-                </button>
-                <button
                   onClick={() => setInputMode("file")}
                   className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
                     inputMode === "file"
@@ -398,35 +377,6 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                   Incolla Testo Circolare
                 </button>
               </div>
-
-              {/* Content Mode 1: Pre-made realistic samples */}
-              {inputMode === "samples" && (
-                <div className="space-y-3">
-                  <div className="text-xs font-medium text-stone-600">
-                    Scegli una circolare scolastica realistica per collaudare il filtraggio:
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                    {SAMPLE_CIRCULARS.map((s, idx) => (
-                      <div
-                        key={idx}
-                        onClick={() => handleSelectSample(s)}
-                        className="p-4 rounded-xl border border-stone-200 hover:border-amber-400 hover:bg-amber-50/40 cursor-pointer transition-all space-y-2 group shadow-2xs"
-                      >
-                        <span className="text-[10px] font-bold uppercase tracking-wider text-amber-700 bg-amber-100 px-2 py-0.5 rounded-md">
-                          Esempio {idx + 1}
-                        </span>
-                        <h4 className="text-xs font-bold text-stone-900 group-hover:text-amber-950">
-                          {s.title}
-                        </h4>
-                        <p className="text-[11px] text-stone-500 line-clamp-2">{s.description}</p>
-                        <span className="text-[11px] font-semibold text-amber-700 block mt-2">
-                          Seleziona ed elabora &rarr;
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
 
               {/* Content Mode 2: File Upload (PDF, Photo) */}
               {inputMode === "file" && (
