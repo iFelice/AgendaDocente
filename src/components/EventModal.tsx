@@ -13,8 +13,8 @@ interface EventModalProps {
   initialDate?: string;
   initialEventData?: Partial<CalendarEvent> | null;
   profile: TeacherProfile;
-  onSave: (event: CalendarEvent) => void | false | Promise<void | false>;
-  onDelete?: (id: string) => void;
+  onSave: (event: CalendarEvent, expected?: CalendarEvent) => void | false | Promise<void | false>;
+  onDelete?: (id: string) => void | false | Promise<void | false>;
   isGoogleConnected?: boolean;
   googleUserEmail?: string;
 }
@@ -104,7 +104,7 @@ export const EventModal: React.FC<EventModalProps> = ({
       setNotes("");
       setSyncWithGoogle(false);
     }
-  }, [eventToEdit, initialDate, initialEventData, profile, isOpen, isGoogleConnected]);
+  }, [eventToEdit, initialDate, initialEventData, isOpen]);
 
   if (!isOpen) return null;
 
@@ -133,7 +133,7 @@ export const EventModal: React.FC<EventModalProps> = ({
       syncedWithGoogle: syncWithGoogle,
     };
 
-    if (!await save.run(() => onSave(newEvent))) return;
+    if (!await save.run(() => onSave(newEvent, eventToEdit ?? undefined))) return;
     onClose();
   };
 
@@ -361,8 +361,8 @@ export const EventModal: React.FC<EventModalProps> = ({
                   <span className="text-xs font-bold text-rose-900 pl-1">Eliminare davvero?</span>
                   <button
                     type="button"
-                    onClick={() => {
-                      onDelete(eventToEdit.id);
+                    onClick={async () => {
+                      if (!await save.run(() => onDelete(eventToEdit.id))) return;
                       setIsConfirmingDelete(false);
                       onClose();
                     }}

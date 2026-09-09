@@ -1,3 +1,4 @@
+import { usePersistenceAction } from "../hooks/usePersistenceAction";
 import { extractedItemError } from "../utils/circularParser";
 import React, { useState } from "react";
 import {
@@ -26,8 +27,8 @@ interface CircularsArchiveViewProps {
   events: CalendarEvent[];
   profile: TeacherProfile;
   onOpenCircularModal: () => void;
-  onDeleteCircular: (id: string) => void;
-  onDeleteExtractedItem?: (circularId: string, item: ExtractedItem) => void;
+  onDeleteCircular: (id: string) => void | false | Promise<void | false>;
+  onDeleteExtractedItem?: (circularId: string, item: ExtractedItem) => void | false | Promise<void | false>;
   onAddEventsToPlanning: (newEvents: CalendarEvent[], feedbackTitle?: string) => void;
   onNavigateToPlanning: (dateIso: string, view?: "oggi" | "settimana" | "mese") => void;
 }
@@ -41,6 +42,7 @@ export const CircularsArchiveView: React.FC<CircularsArchiveViewProps> = ({
   onAddEventsToPlanning,
   onNavigateToPlanning,
 }) => {
+  const save = usePersistenceAction();
   // Expanded state for circular cards (by default expand the first one if present)
   const [expandedCircularIds, setExpandedCircularIds] = useState<string[]>(
     circulars.length > 0 ? [circulars[0].id] : []
@@ -132,6 +134,7 @@ export const CircularsArchiveView: React.FC<CircularsArchiveViewProps> = ({
 
   return (
     <div className="space-y-6 pb-16 max-w-7xl mx-auto">
+      {save.error && <p role="alert" className="text-rose-700">{save.error}</p>}
       {/* Header */}
       <div className="bg-white rounded-xl p-5 border border-stone-200 shadow-2xs flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
@@ -560,6 +563,7 @@ export const CircularsArchiveView: React.FC<CircularsArchiveViewProps> = ({
             </div>
             <div>
               <h3 className="text-lg font-bold text-stone-900">Rimuovere questa circolare?</h3>
+              {save.error && <p role="alert" className="text-rose-700">{save.error}</p>}
               <p className="text-xs text-stone-500 mt-1">
                 Stai per eliminare dall'archivio: <span className="font-semibold text-stone-800">"{circularToDelete.title}"</span>.
                 Gli impegni già importati nel tuo calendario/planning non verranno cancellati.
@@ -573,8 +577,8 @@ export const CircularsArchiveView: React.FC<CircularsArchiveViewProps> = ({
                 Annulla
               </button>
               <button
-                onClick={() => {
-                  onDeleteCircular(circularToDelete.id);
+                onClick={async () => {
+                  if (!await save.run(() => onDeleteCircular(circularToDelete.id))) return;
                   setCircularToDelete(null);
                 }}
                 className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold shadow-xs"

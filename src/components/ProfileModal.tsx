@@ -1,6 +1,7 @@
+import { restoreAndRefresh } from "../services/restoreWorkflow";
 import { usePersistenceAction } from "../hooks/usePersistenceAction";
 import { localDateISO } from "../utils/dates";
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   Download,
   Plus,
@@ -32,8 +33,8 @@ interface ProfileModalProps {
   isOpen: boolean;
   onClose: () => void;
   profile: TeacherProfile;
-  onSaveProfile: (updatedProfile: TeacherProfile) => void | false | Promise<void | false>;
-  onDataImported: () => void;
+  onSaveProfile: (updatedProfile: TeacherProfile, expected?: TeacherProfile) => void | false | Promise<void | false>;
+  onDataImported: () => void | false | Promise<void | false>;
   onOpenTutorial?: () => void;
   googleUser?: FirebaseUser | null;
   googleAccessToken?: string | null;
@@ -60,6 +61,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   initialTab = "profilo",
 }) => {
   const save = usePersistenceAction();
+  const editBaseline = useRef(profile);
   const [activeTab, setActiveTab] = useState<"profilo" | "backup" | "google">(initialTab);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -210,7 +212,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
       isSupportTeacher,
       assignedStudents,
     };
-    if (!await save.run(() => onSaveProfile(updated))) return;
+    if (!await save.run(() => onSaveProfile(updated, editBaseline.current))) return;
     onClose();
   };
 
@@ -229,22 +231,14 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   };
 
   // Backup Import
-  const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const ok = (await storage.importDataBackup(reader.result as string));
-      if (ok) {
-        const legacy = JSON.parse(reader.result as string).version === 2;
-        setImportMessage(legacy ? "Backup precedente ripristinato: contiene un solo orario, salvato come definitivo. Orario provvisorio e modalità attuali sono stati conservati." : "Backup ripristinato: entrambi gli orari, modalità e dati sono stati ricaricati.");
-        await onDataImported();
-      } else {
-        setImportMessage("Ripristino non riuscito: verifica il file e lo spazio disponibile. I dati precedenti sono stati conservati.");
-      }
-    };
-    reader.readAsText(file);
+    await save.run(async () => {
+      const json = await file.text();
+      setImportMessage(await restoreAndRefresh(json, value => storage.importDataBackup(value), onDataImported));
+    });
   };
 
   return (
@@ -751,7 +745,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                   </div>
                   <label className="block w-full py-2 px-3 bg-stone-100 hover:bg-stone-200 text-stone-800 font-semibold rounded-lg text-center cursor-pointer transition-colors">
                     <span>Scegli File JSON...</span>
-                    <input type="file" accept=".json" onChange={handleImportFile} className="hidden" />
+                    <input type="file" disabled={save.pending} accept=".json" onChange={handleImportFile} className="hidden" />
                   </label>
                 </div>
               </div>

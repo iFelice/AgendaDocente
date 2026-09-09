@@ -1,5 +1,5 @@
 import { usePersistenceAction } from "../hooks/usePersistenceAction";
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import {
   Clock,
   MapPin,
@@ -25,8 +25,8 @@ interface TimetableEditorProps {
   timetableMode: TimetableMode;
   activeType: TimetableType;
   isDefinitiveCompiled: boolean;
-  onSaveSlot: (slot: TimetableSlot, type: TimetableType) => void | false | Promise<void | false>;
-  onDeleteSlot: (id: string, type: TimetableType) => void;
+  onSaveSlot: (slot: TimetableSlot, type: TimetableType, expected?: TimetableSlot) => void | false | Promise<void | false>;
+  onDeleteSlot: (id: string, type: TimetableType) => void | false | Promise<void | false>;
   onSetTimetableMode: (mode: TimetableMode) => void;
   onCopyProvisionalToDefinitive: () => void;
   onCopyDefinitiveToProvisional: () => void;
@@ -55,6 +55,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   onResetDefinitive,
 }) => {
   const save = usePersistenceAction();
+  const editBaseline = useRef<TimetableSlot | undefined>(undefined);
   // If definitive is not compiled, default tab to provisional
   const [activeTab, setActiveTab] = useState<TimetableType>(
     !isDefinitiveCompiled ? "provvisorio" : "definitivo"
@@ -91,6 +92,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
 
   const handleOpenAdd = (day: 1 | 2 | 3 | 4 | 5 | 6, periodNum: number) => {
     const periodConf = periods.find((p) => p.period === periodNum);
+    editBaseline.current = undefined;
     setEditingSlot({
       id: `tt-${Date.now()}`,
       dayOfWeek: day,
@@ -107,6 +109,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   };
 
   const handleEditSlot = (slot: TimetableSlot) => {
+    editBaseline.current = slot;
     setEditingSlot({ ...slot, isProvisional: activeTab === "provvisorio" });
     setIsModalOpen(true);
   };
@@ -114,7 +117,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   const handleFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingSlot) return;
-    if (!await save.run(() => onSaveSlot(editingSlot, activeTab))) return;
+    if (!await save.run(() => onSaveSlot(editingSlot, activeTab, editBaseline.current))) return;
     setIsModalOpen(false);
     setEditingSlot(null);
   };
@@ -660,8 +663,8 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                 {currentSlots.some((s) => s.id === editingSlot.id) ? (
                   <button
                     type="button"
-                    onClick={() => {
-                      onDeleteSlot(editingSlot.id, activeTab);
+                    onClick={async () => {
+                      if (!await save.run(() => onDeleteSlot(editingSlot.id, activeTab))) return;
                       setIsModalOpen(false);
                     }}
                     className="text-rose-600 hover:text-rose-800 text-xs font-semibold flex items-center"

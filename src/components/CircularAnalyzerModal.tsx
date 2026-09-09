@@ -1,3 +1,4 @@
+import { circularUploadError } from "../utils/circularUpload";
 import { usePersistenceAction } from "../hooks/usePersistenceAction";
 import { convertExtractedItemToEvent } from "../services/storage";
 import { extractedItemError } from "../utils/circularParser";
@@ -81,6 +82,8 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
 
     const revision = ++inputRevision.current;
     setCircularText(''); setFileBase64(undefined); setFileMimeType(undefined);
+    const fileError = circularUploadError(file);
+    if (fileError) { setIsReadingFile(false); setAnalysisError(fileError); return; }
     setIsReadingFile(true);
     setFileName(file.name);
     setAnalysisError(null);
@@ -102,7 +105,9 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       // Text file
       reader.onload = () => {
         if (revision !== inputRevision.current) return;
-        setCircularText(reader.result as string);
+        const text = reader.result as string;
+        if (text.length > 100_000) { setAnalysisError('Testo troppo lungo: massimo 100.000 caratteri.'); return; }
+        setCircularText(text);
       };
       reader.readAsText(file);
     }
@@ -440,7 +445,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                     <input
                       id="circular-file-input"
                       type="file"
-                      accept=".pdf,image/png,image/jpeg,image/webp"
+                      accept=".pdf,.txt,text/plain,image/png,image/jpeg,image/webp"
                       onChange={handleFileChange}
                       className="hidden"
                     />

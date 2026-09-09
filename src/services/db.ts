@@ -58,8 +58,11 @@ export class AgendaDatabase extends Dexie {
     super(name);
     this.version(1).stores(Object.fromEntries(stores.map(name => [name, name === 'metadata' ? '&key' : '&id,position'])));
   }
-  override close(): void {
-    super.close(); this.initialization = undefined; this.fallback = undefined; this.mode = 'uninitialized';
+  override close(options?: { disableAutoOpen: boolean }): void {
+    super.close(options);
+    // Dexie temporarily closes connections for the browser back/forward cache.
+    if (options?.disableAutoOpen === false) return;
+    this.initialization = undefined; this.fallback = undefined; this.mode = 'uninitialized';
   }
   private rows(name: string): Table<Row, string> { return this.table(name); }
   private meta(): Table<Meta, string> { return this.table('metadata'); }

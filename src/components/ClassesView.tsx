@@ -1,6 +1,6 @@
 import { usePersistenceAction } from "../hooks/usePersistenceAction";
 import { localDateISO } from "../utils/dates";
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useRef } from "react";
 import {
   Users,
   UserPlus,
@@ -38,12 +38,12 @@ import {
 interface ClassesViewProps {
   profile: TeacherProfile;
   students: Student[];
-  onSaveStudent: (student: Student) => void | false | Promise<void | false>;
-  onDeleteStudent: (studentId: string) => void;
+  onSaveStudent: (student: Student, expected?: Student) => void | false | Promise<void | false>;
+  onDeleteStudent: (studentId: string) => void | false | Promise<void | false>;
   onAddNote: (studentId: string, note: StudentNote) => void | false | Promise<void | false>;
-  onDeleteNote: (studentId: string, noteId: string) => void;
+  onDeleteNote: (studentId: string, noteId: string) => void | false | Promise<void | false>;
   onScheduleEvent: (prefill: Partial<CalendarEvent>) => void;
-  onDeleteMultipleStudents?: (studentIds: string[]) => void;
+  onDeleteMultipleStudents?: (studentIds: string[]) => void | false | Promise<void | false>;
   onReassignStudentsClass?: (studentIds: string[], targetClass: string) => void;
   onClearAllStudents?: () => void;
 }
@@ -107,6 +107,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
   onClearAllStudents,
 }) => {
   const save = usePersistenceAction();
+  const editBaseline = useRef<Student | undefined>(undefined);
   // Filters
   const [selectedClass, setSelectedClass] = useState<string>("TUTTE");
   const [filterType, setFilterType] = useState<"tutti" | "sostegno" | "dsa_bes" | "con_note">("tutti");
@@ -226,11 +227,12 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
   // Synchronize open detail modal when students list updates
   const activeDetailStudent = useMemo(() => {
     if (!selectedStudentForDetail) return null;
-    return students.find((s) => s.id === selectedStudentForDetail.id) || selectedStudentForDetail;
+    return students.find((s) => s.id === selectedStudentForDetail.id) || null;
   }, [students, selectedStudentForDetail]);
 
   // Handlers for Add/Edit
   const handleOpenAddStudent = () => {
+    editBaseline.current = undefined;
     setStudentToEdit({
       id: `stu-${Date.now()}`,
       fullName: "",
@@ -256,6 +258,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
   };
 
   const handleOpenEditStudent = (student: Student) => {
+    editBaseline.current = student;
     setStudentToEdit({ ...student });
     setIsEditModalOpen(true);
   };
@@ -264,7 +267,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
     e.preventDefault();
     if (!studentToEdit || !studentToEdit.fullName.trim()) return;
 
-    if (!await save.run(() => onSaveStudent(studentToEdit))) return;
+    if (!await save.run(() => onSaveStudent(studentToEdit, editBaseline.current))) return;
     setIsEditModalOpen(false);
 
     // If currently open in detail drawer, update state
@@ -631,9 +634,9 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
                         <span className="text-[11px] font-bold text-rose-800">Elimina?</span>
                         <button
                           type="button"
-                          onClick={(e) => {
+                          onClick={async (e) => {
                             e.stopPropagation();
-                            onDeleteStudent(student.id);
+                            if (!await save.run(() => onDeleteStudent(student.id))) return;
                             if (selectedStudentForDetail?.id === student.id) {
                               setSelectedStudentForDetail(null);
                             }
@@ -823,8 +826,8 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
                     <span className="text-white text-xs font-bold">Eliminare definitivamente?</span>
                     <button
                       type="button"
-                      onClick={() => {
-                        onDeleteStudent(activeDetailStudent.id);
+                      onClick={async () => {
+                        if (!await save.run(() => onDeleteStudent(activeDetailStudent.id))) return;
                         setSelectedStudentForDetail(null);
                         setStudentIdConfirmingDelete(null);
                       }}
@@ -1489,9 +1492,9 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => {
+                onClick={async () => {
                   const idToDelete = studentToDelete.id;
-                  onDeleteStudent(idToDelete);
+                  if (!await save.run(() => onDeleteStudent(idToDelete))) return;
                   if (selectedStudentForDetail?.id === idToDelete) {
                     setSelectedStudentForDetail(null);
                   }
@@ -1531,8 +1534,8 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  onDeleteNote(noteToDelete.studentId, noteToDelete.noteId);
+                onClick={async () => {
+                  if (!await save.run(() => onDeleteNote(noteToDelete.studentId, noteToDelete.noteId))) return;
                   setNoteToDelete(null);
                 }}
                 className="flex-1 py-2.5 bg-rose-600 hover:bg-rose-700 text-white font-semibold text-xs rounded-xl shadow-xs transition-colors"

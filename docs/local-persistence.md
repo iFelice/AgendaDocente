@@ -51,3 +51,7 @@ Le transazioni serializzano le modifiche, ma le viste di altre schede non si agg
 IndexedDB resta soggetto alle quote e alla cancellazione dei dati del browser. Non sostituisce un backup esterno. Nessun database cloud o invio di dati è richiesto dalle operazioni locali. Il bundle continua a generare l'avviso Vite oltre 500 kB; l'aggiunta di Dexie ne aumenta la dimensione.
 
 Esito finale: 94 test superati; `npm run lint` e `npm run build` riusciti. Il controllo automatico finale ha confermato che le dichiarazioni dei dati demo sono identiche al commit di partenza. Dipendenze aggiunte: Dexie 4.4.5 e fake-indexeddb 6.2.5 (solo sviluppo). Lockfile npm aggiunto e lockfile Bun aggiornato.
+
+## Aggiornamento beta successivo
+
+Le limitazioni su aggiornamento multi-tab, conflitti degli editor e bundle descritte sopra documentano il commit di migrazione. Per le correzioni successive, lo scope Calendar corretto e le verifiche offline vedere [beta-audit.md](beta-audit.md).

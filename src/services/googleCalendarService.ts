@@ -291,7 +291,7 @@ export const downloadIcsCalendar = (events: CalendarEvent[], filename = "agenda_
 export const isGoogleSyncEnabled = (event: Pick<CalendarEvent, 'syncedWithGoogle'>): boolean =>
   event.syncedWithGoogle === true;
 
-export async function syncOptedInGoogleEvents(
+async function syncGoogleEventsUnlocked(
   token: string,
   eventIds: string[],
   readEvent: (id: string) => CalendarEvent | undefined | Promise<CalendarEvent | undefined>,
@@ -318,4 +318,15 @@ export async function syncOptedInGoogleEvents(
     }
   }
   return { syncedCount, errorCount };
+}
+
+// Web Locks coordinate concurrent sync buttons across tabs. Older browsers still serialize within a tab.
+let pendingSync: Promise<unknown> = Promise.resolve();
+export function syncOptedInGoogleEvents(...args: Parameters<typeof syncGoogleEventsUnlocked>): ReturnType<typeof syncGoogleEventsUnlocked> {
+  if (typeof navigator !== 'undefined' && navigator.locks) {
+    return navigator.locks.request('agenda-docente-google-sync', () => syncGoogleEventsUnlocked(...args));
+  }
+  const result = pendingSync.then(() => syncGoogleEventsUnlocked(...args));
+  pendingSync = result.catch(() => undefined);
+  return result;
 }

@@ -1,3 +1,4 @@
+import { assertUnchanged } from "./persistenceErrors";
 import { linkLegacyCircularEvents } from "../utils/circularLinks";
 import { localDateISO } from "../utils/dates";
 import { CalendarEvent, CircularDocument, ExtractedItem, SchoolLevel, Student, StudentNote, TeacherProfile, TimetableMode, TimetableSlot, TimetableType, } from "../types";
@@ -703,8 +704,8 @@ export async function initializeStorage(legacy?: LegacyStorage): Promise<LocalDa
 export const storage = {
   // PROFILE
   async getProfile(): Promise<TeacherProfile> { return database.read("profile"); },
-  async saveProfile(profile: TeacherProfile): Promise<void> {
-    return database.atomic(async () => { return database.write("profile", profile); });
+  async saveProfile(profile: TeacherProfile, expected?: TeacherProfile): Promise<void> {
+    return database.atomic(async () => { assertUnchanged(await this.getProfile(), expected); return database.write("profile", profile); });
   },
   // TIMETABLE - DEFINITIVE & PROVISIONAL MANAGEMENT
   async getDefinitiveTimetable(): Promise<TimetableSlot[]> { return database.read("definitiveTimetable"); },
@@ -774,11 +775,12 @@ export const storage = {
       }
     });
   },
-  async saveTimetableSlot(slot: TimetableSlot, targetType: "definitivo" | "provvisorio" = "definitivo"): Promise<void> {
+  async saveTimetableSlot(slot: TimetableSlot, targetType: "definitivo" | "provvisorio" = "definitivo", expected?: TimetableSlot): Promise<void> {
     return database.atomic(async () => {
       if (targetType === "provvisorio") {
         const list = (await this.getProvisionalTimetable());
         const index = list.findIndex((s) => s.id === slot.id);
+        assertUnchanged(list[index], expected);
         if (index >= 0) {
           list[index] = { ...slot, isProvisional: true };
         }
@@ -790,6 +792,7 @@ export const storage = {
       else {
         const list = (await this.getDefinitiveTimetable());
         const index = list.findIndex((s) => s.id === slot.id);
+        assertUnchanged(list[index], expected);
         if (index >= 0) {
           list[index] = { ...slot, isProvisional: false };
         }
@@ -859,10 +862,11 @@ export const storage = {
   async saveEvents(events: CalendarEvent[]): Promise<void> {
     return database.atomic(async () => { return database.write("events", events); });
   },
-  async saveEvent(event: CalendarEvent): Promise<void> {
+  async saveEvent(event: CalendarEvent, expected?: CalendarEvent): Promise<void> {
     return database.atomic(async () => {
       const list = (await this.getEvents());
       const index = list.findIndex((e) => e.id === event.id);
+      assertUnchanged(list[index], expected);
       if (index >= 0) {
         list[index] = event;
       }
@@ -990,12 +994,17 @@ export const storage = {
   async saveStudents(students: Student[]): Promise<void> {
     return database.atomic(async () => { return database.write("students", students); });
   },
-  async saveStudent(student: Student): Promise<void> {
+  async saveStudent(student: Student, expected?: Student): Promise<void> {
     return database.atomic(async () => {
       const list = (await this.getStudents());
       const idx = list.findIndex((s) => s.id === student.id);
+      if (expected) {
+        const withoutNotes = (value?: Student) => value && {...value, notes:[], updatedAt:undefined};
+        assertUnchanged(withoutNotes(list[idx]), withoutNotes(expected));
+      }
       const updatedStudent = {
         ...student,
+        notes: idx >= 0 ? list[idx].notes : student.notes,
         updatedAt: new Date().toISOString(),
       };
       if (idx >= 0) {

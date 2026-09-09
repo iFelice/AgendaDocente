@@ -32,6 +32,7 @@
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.25.0",
     "fake-indexeddb": "^6.2.5",
+    "react-test-renderer": "^19.2.8",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",

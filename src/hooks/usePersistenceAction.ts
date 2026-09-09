@@ -1,3 +1,4 @@
+import { persistenceErrorMessage } from "../services/persistenceErrors";
 import { useRef, useState } from 'react';
 
 /** Keep form drafts open until a durable write succeeds, and reject duplicate submits. */
@@ -11,8 +12,8 @@ export function usePersistenceAction() {
     try {
       if (await operation() === false) throw new Error('Save failed');
       return true;
-    } catch {
-      setError('Salvataggio non completato. I dati inseriti restano qui: riprova dopo aver verificato l’archivio locale.');
+    } catch (error) {
+      setError(persistenceErrorMessage(error));
       return false;
     } finally { busy.current = false; setPending(false); }
   };
