@@ -1,5 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
+import { CLOUD_PATH_PATTERN } from '../src/services/sync/firestoreGateway';
 import { canonicalStringify, contentHash, isPristineLocal, planSync } from '../src/services/sync/merge';
 import { sanitizeError, SyncEngine, type LocalApply, type SyncStore } from '../src/services/sync/engine';
 import type { ItemsCollection, RemoteItem, RemoteSnapshot, SyncGateway, SyncStateV1, SyncableSnapshot } from '../src/services/sync/types';
@@ -335,4 +339,91 @@ test('error messages are sanitized and never leak raw SDK/network details', () =
   assert.match(sanitizeError(new Error('network error at https://firestore.googleapis.com/v1/projects/x')), /riproverà/i);
   const generic = sanitizeError(new Error('Internal assertion {secret: 42}'));
   assert.ok(!generic.includes('secret'));
+});
+
+// ---------- Web Locks behaviour (leader tab only) ----------
+
+test('the sync lock is a valid exclusive ifAvailable Web Lock: runs when granted, reschedules when busy, falls back when absent', async () => {
+  const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const install = (impl: unknown) => {
+    Object.defineProperty(globalThis, 'navigator', { value: impl, configurable: true, writable: true });
+  };
+  const buildEngine = (device: FakeDevice, cloud: FakeCloud, clock: { now: string }, counters: { scheduled: number }) => {
+    const engine = new SyncEngine({
+      gateway: () => cloud.gateway(),
+      uid: () => 'uid-1',
+      store: device.store,
+      now: () => clock.now,
+      // count re-scheduling requests (the busy path) without executing anything
+      schedule: () => { counters.scheduled++; return () => undefined; },
+    });
+    (engine as unknown as { session: string | null }).session = 'uid-1'; // logged-in state, without the async startup kick
+    return engine;
+  };
+  try {
+    const clock = { now: '2026-09-09T10:00:00.000Z' };
+    const cloud = makeFakeCloud(clock);
+    const device = makeDevice({ events: [event('e1')] });
+    const counters = { scheduled: 0 };
+    const engine = buildEngine(device, cloud, clock, counters);
+
+    // 1) Lock available: a *valid* request must be made and the cycle must run inside it.
+    const requests: { name: string; opts: Record<string, unknown> }[] = [];
+    install({ onLine: true, locks: { request: async (name: string, opts: any, cb: (lock: unknown) => unknown) => {
+      requests.push({ name, opts });
+      return cb({ name }); // grant the lock
+    } } });
+    await engine.syncNow();
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].name, 'agenda-docente-cloud-sync');
+    assert.equal(requests[0].opts.mode, 'exclusive', 'Web Locks only understands "exclusive"/"shared"');
+    assert.equal(requests[0].opts.ifAvailable, true, 'never queue a tab behind another forever');
+    assert.ok(cloud.writes > 0, 'cycle executed while holding the lock');
+
+    // 2) Lock held by another tab: this tab skips cleanly and reschedules (no throw, no writes).
+    const before = cloud.writes;
+    const waitingCounters = { scheduled: 0 };
+    const waitingEngine = buildEngine(device, cloud, clock, waitingCounters);
+    install({ onLine: true, locks: { request: async (_name: string, _opts: unknown, cb: (lock: unknown) => unknown) => cb(null) } });
+    await waitingEngine.syncNow();
+    assert.equal(cloud.writes, before, 'no cloud writes without the lock');
+    assert.equal(waitingCounters.scheduled, 1, 'a busy result must reschedule the cycle once');
+    assert.equal(waitingEngine.getStatus().phase === "error", false, 'a busy lock is not an error');
+
+    // 3) Browser without navigator.locks: direct execution, no error.
+    install({ onLine: true });
+    const after = cloud.writes;
+    const noLockDevice = makeDevice({ profile: profileWith({ fullName: 'Senza Lock' }) }); // no local events
+    const noLockCounters = { scheduled: 0 };
+    const noLockEngine = buildEngine(noLockDevice, cloud, clock, noLockCounters);
+    await noLockEngine.syncNow();
+    // the cycle really ran here (no locks API): the cloud event was pulled down locally
+    assert.deepEqual(noLockDevice.db.events.map(e => e.id), ['e1']);
+    assert.equal(noLockCounters.scheduled, 0, 'no lock, no "busy" rescheduling');
+    assert.equal(cloud.writes, after, 'a fresh diverged device must not silently write to the cloud');
+  } finally {
+    if (navigatorDescriptor) Object.defineProperty(globalThis, 'navigator', navigatorDescriptor);
+    else delete (globalThis as Record<string, unknown>).navigator;
+  }
+});
+
+// ---------- security rules: static consistency (no emulator in CI; the compiler check happens at deploy) ----------
+
+test('firestore.rules: owner-scoped namespace only, valid rule APIs, paths mirror the gateway', () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const rules = readFileSync(resolve(here, '../firestore.rules'), 'utf8');
+  assert.match(rules, /rules_version = '2';/);
+  assert.match(rules, /request\.auth != null && request\.auth\.uid == uid/); // total user separation
+  assert.doesNotMatch(rules, /size\(\)\.hashCode/, 'Firestore Rules have no document-size API; must not be faked');
+  assert.match(rules, /match \/users\/\{uid\}/);
+  for (const path of ['/state/{stateDoc}', '/events/{eventId}', '/circulars/{circularId}', '/conflicts/{conflictId}'])
+    assert.ok(rules.includes(path), `rules must scope ${path}`);
+  assert.ok(rules.indexOf('match /conflicts/') < rules.indexOf('allow update, delete: if false;'), 'conflict archives stay immutable');
+  assert.ok(rules.includes('allow read, write: if false;'), 'explicit deny outside the allowed subtree');
+  // everything the gateway can touch is inside the whitelisted shape...
+  for (const good of ['users/u_1/state/profile', 'users/u_1/settings'.replace('settings', 'state/settings'), 'users/u-1/events/ev-9', 'users/u-1/circulars/ci-9', 'users/u-1/conflicts/17-z'])
+    assert.match(good, CLOUD_PATH_PATTERN);
+  // ...and nothing else is.
+  for (const bad of ['users/u1', 'other/x', 'users/u1/admin/keys', 'users/u1/state/profile/x', 'users//state/profile', 'users/u1/events'])
+    assert.doesNotMatch(bad, CLOUD_PATH_PATTERN);
 });

@@ -183,7 +183,10 @@ export class SyncEngine {
       ? (navigator as unknown as { locks?: { request: (name: string, opts: unknown, cb: (lock: unknown) => Promise<unknown>) => Promise<unknown> } }).locks
       : undefined;
     if (!locks) return fn();
-    const result = await locks.request("agenda-docente-cloud-sync", { mode: "exact", ifAvailable: true }, async (lock) => {
+    // "exclusive" is the only non-shared mode of the Web Locks API (there is no "exact");
+    // ifAvailable keeps this tab from queueing behind another tab's cycle: the loser of the
+    // race simply reschedules instead of blocking.
+    const result = await locks.request("agenda-docente-cloud-sync", { mode: "exclusive", ifAvailable: true }, async (lock) => {
       if (!lock) return "busy";
       await fn();
       return "done";

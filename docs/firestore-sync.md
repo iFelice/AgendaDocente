@@ -60,12 +60,34 @@ volta sincronizza (`navigator.locks`, chiave `agenda-docente-cloud-sync`).
 La disconnessione Google ferma solo la sessione di sync (`stopSession`): **nessun dato locale
 viene toccato**. Il riavvio del mirror richiede ri-autenticazione.
 
-## Deploy / abilitazione (passo operativo esterno, non eseguibile da questo repo CI)
+## Deploy / abilitazione (passo operativo esterno, NON automatico al merge)
 
-1. `firebase deploy --only firestore:rules` con `firestore.rules` di questo repo.
-2. Indici: non necessari (solo letture per path document/collection sotto l'uid).
-3. La configurazione pubblica Firebase è quella già usata per l'auth (`VITE_FIREBASE_*`);
-   nessuna secret: **le rules sono il perimetro**.
+**Il merge di questo codice non rende operativa la sincronizzazione.** Dopo il merge, nel
+progetto Firebase `agenda-docente-3d33e` occorre:
+
+1. **creare/abilitare Cloud Firestore** nella console Firebase del progetto, se non esiste già;
+2. **scegliere la region** (consigliata `europe-west` per dati scolastici italiani; la scelta è
+   irreversibile per il database, valutare `nam5`/`eur3` solo se già usati da altri prodotti);
+3. **distribuire le regole**: `firebase deploy --only firestore:rules` dal repo (usa
+   `firestore.rules`, che limita tutto a `users/{uid}/...`);
+4. **mantenere Firebase Auth con provider Google** abilitato (è già la sessione usata dal
+   login: la sincronizzazione riusa la stessa `firebaseApp`, non serve un secondo progetto);
+5. **nessuna nuova variabile `VITE_*`** è necessaria salvo effettiva necessità tecnica: la
+   configurazione pubblica Firebase (`VITE_FIREBASE_*`) è già quella del login e non contiene
+   secret. Solo se in futuro si usasse un progetto separato per il sync andrebbero aggiunti
+   endpoint dedicati (valutandolo esplicitamente).
+
+Indici Firestore: non necessari (solo letture puntuali per path sotto l'uid).
+
+### Se Firestore NON è configurato o non è raggiungibile
+
+- l'app resta **local-first**: IndexedDB funziona normalmente;
+- il **login Google continua a funzionare** (Auth è indipendente dal sync);
+- Google Calendar, Gemini/Render, backup/import ed export restano invariati;
+- **la sincronizzazione Mac ↔ iPhone NON funziona**: l'engine resta in fase `disabled`/retry
+  senza mai bloccare l'UI e senza toccare i dati locali.
+
+## Note aggiuntive
 
 ## Gap noti e scelte documentate (per la beta)
 
