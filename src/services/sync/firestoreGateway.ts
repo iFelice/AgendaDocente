@@ -16,6 +16,11 @@ import type { ItemsCollection, RemoteItem, RemoteStateDoc, StateDocName, SyncGat
 export const CLOUD_DOC_BYTE_LIMIT = 900_000;
 const MAX_BATCH_OPS = 450;
 
+export function sanitizeFirestorePayload<T>(value: T): T {
+  if (value === undefined) return null as unknown as T;
+  return JSON.parse(JSON.stringify(value));
+}
+
 export function estimateBytes(value: unknown): number {
   try { return new TextEncoder().encode(JSON.stringify(value)).length; }
   catch { return Number.POSITIVE_INFINITY; }
@@ -43,8 +48,9 @@ export function createFirestoreGateway(app: FirebaseApp | null, getUid: () => st
     },
     async writeState(name: StateDocName, payload: unknown): Promise<{ updatedAt: string }> {
       const updatedAt = new Date().toISOString();
-      if (estimateBytes(payload) > CLOUD_DOC_BYTE_LIMIT) throw new Error(`"${name}" supera lo spazio cloud disponibile: resta salvato in locale.`);
-      await setDoc(doc(database(), `users/${uid()}/state`, name), { payload, updatedAt, schemaVersion: 1 });
+      const sanitized = sanitizeFirestorePayload(payload);
+      if (estimateBytes(sanitized) > CLOUD_DOC_BYTE_LIMIT) throw new Error(`"${name}" supera lo spazio cloud disponibile: resta salvato in locale.`);
+      await setDoc(doc(database(), `users/${uid()}/state`, name), { payload: sanitized, updatedAt, schemaVersion: 1 });
       return { updatedAt };
     },
     async listItems(collectionName: ItemsCollection): Promise<RemoteItem[]> {
@@ -56,10 +62,11 @@ export function createFirestoreGateway(app: FirebaseApp | null, getUid: () => st
         const chunk = entries.slice(offset, offset + MAX_BATCH_OPS);
         const batch = writeBatch(database());
         for (const { id, payload } of chunk) {
-          if (estimateBytes(payload) > CLOUD_DOC_BYTE_LIMIT) {
+          const sanitized = sanitizeFirestorePayload(payload);
+          if (estimateBytes(sanitized) > CLOUD_DOC_BYTE_LIMIT) {
             throw new Error("Un documento è troppo grande per il cloud: è stato conservato solo in locale.");
           }
-          batch.set(doc(database(), `users/${uid()}/${collectionName}`, id), { payload, updatedAt: new Date().toISOString() });
+          batch.set(doc(database(), `users/${uid()}/${collectionName}`, id), { payload: sanitized, updatedAt: new Date().toISOString() });
         }
         await batch.commit();
       }
@@ -73,10 +80,11 @@ export function createFirestoreGateway(app: FirebaseApp | null, getUid: () => st
     },
     async archiveConflict(kind: string, loser: unknown): Promise<void> {
       const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const sanitized = sanitizeFirestorePayload(loser);
       await setDoc(doc(database(), `users/${uid()}/conflicts`, id), {
         kind,
         createdAt: new Date().toISOString(),
-        payload: loser,
+        payload: sanitized,
       }, { merge: false });
     },
   };

@@ -32,9 +32,14 @@ export function createStoreAdapter(): SyncStore {
         if ("definitiveTimetable" in state) await write("definitiveTimetable", state.definitiveTimetable as LocalData["definitiveTimetable"]);
         if ("provisionalTimetable" in state) await write("provisionalTimetable", state.provisionalTimetable as LocalData["provisionalTimetable"]);
         if ("settings" in state) {
-          const settings = state.settings as { timetableMode?: LocalData["timetableMode"]; onboardingCompleted?: boolean };
+          const settings = state.settings as {
+            timetableMode?: LocalData["timetableMode"];
+            onboardingCompleted?: boolean;
+            timeSlotConfig?: LocalData["timeSlotConfig"];
+          };
           if (settings?.timetableMode) await write("timetableMode", settings.timetableMode);
           if (typeof settings?.onboardingCompleted === "boolean") await write("onboardingCompleted", settings.onboardingCompleted);
+          if (settings?.timeSlotConfig) await write("timeSlotConfig", settings.timeSlotConfig);
         }
         if (changes.localEvents) await write("events", changes.localEvents);
         if (changes.localCirculars) await write("circulars", changes.localCirculars);

@@ -215,9 +215,16 @@ export class SyncEngine {
     for (const name of STATE_DOC_NAMES) {
       const track = detection.state[name];
       const hash = contentHash(localPayload(snapshot, name));
-      if (track && track.lastSyncedLocalHash !== hash && track.lastDetectedHash !== hash) {
-        track.localChangedAt = nowIso;
-        track.lastDetectedHash = hash;
+      if (track) {
+        if (track.lastSyncedLocalHash !== hash) {
+          if (track.lastDetectedHash !== hash || !track.localChangedAt) {
+            track.localChangedAt = nowIso;
+            track.lastDetectedHash = hash;
+          }
+        } else {
+          delete track.localChangedAt;
+          delete track.lastDetectedHash;
+        }
       }
     }
     for (const coll of ITEMS_COLLECTIONS) {
@@ -278,9 +285,9 @@ export class SyncEngine {
     const stateWrites = Object.entries(plan.stateWrites).filter(([name]) => !plan.needsResolution.includes(name as StateDocName))
       .filter((([name, payload]) => !(name === "profile" && !String((payload as { fullName?: string })?.fullName ?? "").trim() && !remote.state.profile)));
     for (const [name, payload] of stateWrites) {
-      await gateway.writeState(name as StateDocName, payload);
+      const res = await gateway.writeState(name as StateDocName, payload);
       const track = plan.nextState.state[name as StateDocName];
-      if (track) track.remoteUpdatedAt = nowIso;
+      if (track) track.remoteUpdatedAt = res?.updatedAt || nowIso;
     }
 
     await this.persistState(detectionJson, plan.nextState);
@@ -301,7 +308,13 @@ export class SyncEngine {
 }
 
 function localPayload(snapshot: SyncableSnapshot, name: StateDocName): unknown {
-  if (name === "settings") return { timetableMode: snapshot.timetableMode, onboardingCompleted: snapshot.onboardingCompleted };
+  if (name === "settings") {
+    return {
+      timetableMode: snapshot.timetableMode,
+      onboardingCompleted: snapshot.onboardingCompleted,
+      ...(snapshot.timeSlotConfig ? { timeSlotConfig: snapshot.timeSlotConfig } : {}),
+    };
+  }
   return (snapshot as unknown as Record<string, unknown>)[name];
 }
 

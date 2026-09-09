@@ -11,6 +11,7 @@ import {
   Student,
   StudentNote,
   TeacherProfile,
+  TimeSlotConfig,
   TimetableMode,
   TimetableSlot,
   TimetableType,
@@ -58,6 +59,9 @@ export default function App({ initialData }: { initialData: LocalData }) {
   );
   const [timetableMode, setTimetableMode] = useState<TimetableMode>(() =>
     initialData.timetableMode
+  );
+  const [timeSlotConfig, setTimeSlotConfig] = useState<TimeSlotConfig | undefined>(() =>
+    initialData.timeSlotConfig
   );
   const [events, setEvents] = useState<CalendarEvent[]>(() => initialData.events);
   const [circulars, setCirculars] = useState<CircularDocument[]>(() => initialData.circulars);
@@ -117,6 +121,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
     setDefinitiveTimetable(previous => retainEqual(previous, data.definitiveTimetable));
     setProvisionalTimetable(previous => retainEqual(previous, data.provisionalTimetable));
     setTimetableMode(data.timetableMode);
+    setTimeSlotConfig(previous => retainEqual(previous, data.timeSlotConfig));
     setEvents(previous => retainEqual(previous, data.events));
     setCirculars(previous => retainEqual(previous, data.circulars));
     setStudents(previous => retainEqual(previous, data.students));
@@ -282,6 +287,11 @@ export default function App({ initialData }: { initialData: LocalData }) {
         ? "Ora salvata nell'orario provvisorio."
         : "Ora salvata nell'orario definitivo."
     );
+  });
+
+  const handleSaveTimeSlotConfig = withPersistenceFeedback(async (config: TimeSlotConfig) => {
+    await storage.saveTimeSlotConfig(config);
+    showToast("Fasce orarie aggiornate.");
   });
 
   const handleDeleteTimetableSlot = withPersistenceFeedback(async (id: string, type: TimetableType) => {
@@ -580,12 +590,15 @@ export default function App({ initialData }: { initialData: LocalData }) {
             timetableMode={timetableMode}
             activeType={activeTimetableInfo.activeType}
             isDefinitiveCompiled={isDefinitiveCompiled}
+            timeSlotConfig={timeSlotConfig}
             onSaveSlot={handleSaveTimetableSlot}
             onDeleteSlot={handleDeleteTimetableSlot}
             onSetTimetableMode={handleSetTimetableMode}
             onCopyProvisionalToDefinitive={handleCopyProvisionalToDefinitive}
             onCopyDefinitiveToProvisional={handleCopyDefinitiveToProvisional}
             onClearTimetable={handleClearTimetable}
+            onSaveProfile={handleSaveProfile}
+            onSaveTimeSlotConfig={handleSaveTimeSlotConfig}
           />
         )}
 

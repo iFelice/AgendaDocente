@@ -1,4 +1,4 @@
-import type { CalendarEvent, CircularDocument } from "../../types";
+import type { CalendarEvent, CircularDocument, TeacherProfile, TimetableSlot, TimeSlotConfig } from "../../types";
 import type {
   ItemsCollection,
   RemoteItem,
@@ -32,7 +32,11 @@ export function contentHash(value: unknown): string {
 
 export const statePayload = (snapshot: SyncableSnapshot, name: StateDocName): unknown =>
   name === "settings"
-    ? { timetableMode: snapshot.timetableMode, onboardingCompleted: snapshot.onboardingCompleted }
+    ? {
+        timetableMode: snapshot.timetableMode,
+        onboardingCompleted: snapshot.onboardingCompleted,
+        ...(snapshot.timeSlotConfig ? { timeSlotConfig: snapshot.timeSlotConfig } : {}),
+      }
     : snapshot[name];
 
 export interface PlanContext {
@@ -92,7 +96,13 @@ const remoteHasData = (remote: RemoteSnapshot): boolean =>
   STATE_DOC_NAMES.some(n => remote.state[n]) || ITEMS_COLLECTIONS.some(c => (remote.items[c] || []).length > 0);
 
 /** Re-derive a full local snapshot from remote copies, tolerating partial remote trees. */
-export function snapshotFromRemote(remote: RemoteSnapshot): Partial<Record<StateDocName, unknown>> & { events?: CalendarEvent[]; circulars?: CircularDocument[] } {
+export function snapshotFromRemote(remote: RemoteSnapshot): Partial<Record<StateDocName, unknown>> & {
+  events?: CalendarEvent[];
+  circulars?: CircularDocument[];
+  timetableMode?: "auto" | "provvisorio" | "definitivo";
+  onboardingCompleted?: boolean;
+  timeSlotConfig?: TimeSlotConfig;
+} {
   const out: any = {};
   for (const name of STATE_DOC_NAMES) {
     const doc = remote.state[name];
@@ -382,7 +392,17 @@ function removeLocalRow(plan: SyncPlan, coll: ItemsCollection, id: string) {
 
 function buildFullRestore(snapshot: SyncableSnapshot, remote: RemoteSnapshot): SyncableSnapshot {
   const fromRemote = snapshotFromRemote(remote);
-  const merged = { ...snapshot, ...fromRemote } as SyncableSnapshot;
+  const merged = {
+    ...snapshot,
+    ...fromRemote,
+    definitiveTimetable: Array.isArray(fromRemote.definitiveTimetable) ? fromRemote.definitiveTimetable : snapshot.definitiveTimetable,
+    provisionalTimetable: Array.isArray(fromRemote.provisionalTimetable) ? fromRemote.provisionalTimetable : snapshot.provisionalTimetable,
+    students: Array.isArray(fromRemote.students) ? fromRemote.students : snapshot.students,
+    profile: fromRemote.profile ? (fromRemote.profile as TeacherProfile) : snapshot.profile,
+    timetableMode: fromRemote.timetableMode ?? snapshot.timetableMode ?? "auto",
+    onboardingCompleted: typeof fromRemote.onboardingCompleted === "boolean" ? fromRemote.onboardingCompleted : snapshot.onboardingCompleted,
+    timeSlotConfig: fromRemote.timeSlotConfig ?? snapshot.timeSlotConfig,
+  } as SyncableSnapshot;
   // Missing remote collections on a partial cloud snapshot stay as the (empty) local values.
   return merged;
 }
