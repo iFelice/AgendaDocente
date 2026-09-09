@@ -7,11 +7,12 @@ import {
   onAuthStateChanged,
   User,
 } from "firebase/auth";
-import firebaseConfig from "../../firebase-applet-config.json";
+import { firebaseOptions } from "./firebaseConfig";
 
 // Initialize Firebase only once
-const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
-export const auth = getAuth(app);
+const config = firebaseOptions(import.meta.env || {});
+const app = config ? (getApps().length === 0 ? initializeApp(config) : getApp()) : null;
+export const auth = app ? getAuth(app) : null;
 
 // Calendar writes use the primary (owned) calendar; identity scopes alone cannot authorize them.
 // The OAuth consent screen must allow this scope for the configured beta testers.
@@ -52,6 +53,7 @@ export const initAuth = (
   onAuthSuccess?: (user: User, token: string | null) => void,
   onAuthFailure?: () => void
 ) => {
+  if (!auth) { onAuthFailure?.(); return () => {}; }
   return onAuthStateChanged(auth, async (user: User | null) => {
     cachedUser = user;
     if (user) {
@@ -71,6 +73,7 @@ export const signInWithGoogle = async (): Promise<{
   user: User;
   accessToken: string;
 } | null> => {
+  if (!auth) throw new Error("Accesso Google non configurato. Puoi continuare a usare l’agenda locale.");
   try {
     isSigningIn = true;
     const result = await signInWithPopup(auth, provider);
@@ -108,12 +111,12 @@ export const setAccessToken = (token: string | null) => {
 };
 
 export const getCachedUser = (): User | null => {
-  return cachedUser || auth.currentUser;
+  return cachedUser || auth?.currentUser || null;
 };
 
 export const signOutFromGoogle = async (): Promise<void> => {
   try {
-    await firebaseSignOut(auth);
+    if (auth) await firebaseSignOut(auth);
   } finally {
     cachedAccessToken = null;
     cachedUser = null;
