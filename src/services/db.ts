@@ -57,6 +57,7 @@ export class AgendaDatabase extends Dexie {
   mode: 'indexeddb' | 'legacy-readonly' | 'uninitialized' = 'uninitialized';
   private fallback?: LocalData;
   private initialization?: Promise<void>;
+  private commitListeners = new Set<() => void>();
   constructor(name = 'agenda-docente') {
     super(name);
     this.version(1).stores(Object.fromEntries(stores.map(name => [name, name === 'metadata' ? '&key' : '&id,position'])));
@@ -69,6 +70,22 @@ export class AgendaDatabase extends Dexie {
   }
   private rows(name: string): Table<Row, string> { return this.table(name); }
   private meta(): Table<Meta, string> { return this.table('metadata'); }
+
+  /**
+   * Explicit, same-tab notification fired once after every successfully committed outermost
+   * write transaction. It complements Dexie liveQuery (which is cross-tab but commit-timing
+   * dependent) so application commits — storage.saveTimetableSlot & co. — reliably reach the
+   * account-sync scheduler. Listeners must never throw into the commit path.
+   */
+  onCommit(listener: () => void): () => void {
+    this.commitListeners.add(listener);
+    return () => { this.commitListeners.delete(listener); };
+  }
+  private notifyCommit(): void {
+    for (const listener of [...this.commitListeners]) {
+      try { listener(); } catch { /* a listener must never break a committed transaction */ }
+    }
+  }
 
   async initialize(seed: LocalData, legacy?: LegacyStorage): Promise<void> {
     if (this.initialization) return this.initialization;
@@ -105,6 +122,7 @@ export class AgendaDatabase extends Dexie {
       });
       this.fallback = undefined;
       this.mode = 'indexeddb';
+      this.notifyCommit();
     } catch (error) {
       // Explicit read-only recovery, never write an old snapshot back into IndexedDB.
       // It may be older than the last DB changes; the UI says so and offers export.
@@ -173,12 +191,15 @@ export class AgendaDatabase extends Dexie {
     this.requireReady();
     if (this.fallback) throw new Error('Copia legacy in sola lettura: ripristina l’accesso a IndexedDB prima di modificare i dati.');
     const nested = Dexie.currentTransaction?.db === this;
-    return this.transaction('rw', stores, async () => {
+    const result = await this.transaction('rw', stores, async () => {
       const result = await operation();
       // Validate once at the outer commit boundary, so a bad edit cannot make the next startup unreadable.
       if (!nested) validateBackup({version:3,...await this.readSnapshot()});
       return result;
     });
+    // Only the outermost, actually committed transaction notifies (never nested/aborted ones).
+    if (!nested) this.notifyCommit();
+    return result;
   }
   async restore(data: LocalData): Promise<void> {
     validateBackup({version:3,...data});

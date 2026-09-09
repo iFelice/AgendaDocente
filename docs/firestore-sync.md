@@ -55,6 +55,48 @@ modifica locale rilevata). Per ogni collezione:
 Anti-loop: ogni piano è hash-guardato (contenuto identico = nessun write) e un solo tab alla
 volta sincronizza (`navigator.locks`, chiave `agenda-docente-cloud-sync`).
 
+## Validazione runtime e riparazione dei documenti legacy (`src/services/sync/remoteSchema.ts`)
+
+I documenti Firestore sono **input non fidato**: un cast TypeScript (`data() as RemoteStateDoc`)
+non è una validazione. Una versione precedente dell'app ha scritto documenti `state/*` con una
+forma incompatibile — quella osservata davvero in produzione (2026-09-09):
+
+```
+users/{uid}/state/provisionalTimetable = {
+  payload: { schemaVersion: 1, updatedAt: "2026-09-09T17:47:36.312Z" },   // nessun orario!
+  updatedAt: "...",
+  schemaVersion: 1,
+}
+```
+
+Ogni documento remoto viene quindi classificato a runtime (mai con un cast), con validazione
+**semantica per tipo** (payload = array di `TimetableSlot` validi per gli orari — inclusi i
+nuovi campi di compresenza —, profilo plausibile, impostazioni coerenti, array per gli alunni):
+
+- **valido** — formato attuale `{ payload, updatedAt, schemaVersion: 1 }` con payload valido;
+- **legacy recuperabile** — wrapper malformato (schemaVersion/updatedAt mancanti, doppio
+  wrapping, documento-payload diretto) ma con payload reale estraibile e valido: entra nel
+  merge normalmente e il documento cloud viene **riscritto nel formato attuale** anche se il
+  contenuto non cambia (timestamp mancanti → epoca, così non vincono mai un LWW);
+- **invalido/irrecuperabile** — payload inutilizzabile (incluso il "payload di soli metadati"
+  sopra, che NON è un orario: un orario vuoto è `[]`): viene trattato come **assente**.
+
+Per un documento invalido: mai applicato in locale, mai vincente nei conflitti, mai sovrascritto
+dai dati inventati. L'originale viene conservato in `users/{uid}/conflicts` con kind
+`legacy-state:<name>` (una sola volta per dispositivo, per hash in `archivedLegacyHash`); se il
+locale ha dati validi il documento remoto viene riscritto nel formato corretto; se anche il
+locale è vuoto la sezione viene **segnalata** in `SyncStatus.notices` senza inventare nulla.
+I test di regressione del caso reale sono in `tests/legacy-firestore-repair.test.ts`.
+
+## Diagnostica utente
+
+La card di sincronizzazione (`CloudSyncCard`) mostra: ultima sincronizzazione riuscita, stato
+(sincronizzato / in corso / offline / errore / conflitto / disattivata), pulsante
+"Sincronizza ora", messaggi d'errore comprensibili e — senza mai esporre token o contenuti dei
+documenti — ultimo tentativo, sezioni sincronizzate nell'ultimo ciclo e note di riparazione
+legacy. Un minimo di diagnostica (timestamp di successo, sezioni, note) persiste in IndexedDB
+(`sync:diagnostics`) per sopravvivere al riavvio.
+
 ## Logout
 
 La disconnessione Google ferma solo la sessione di sync (`stopSession`): **nessun dato locale
@@ -104,3 +146,10 @@ Indici Firestore: non necessari (solo letture puntuali per path sotto l'uid).
 - Nessun realtime `onSnapshot` (pull su: avvio, focus tab, `online`, commit locali): più
   semplice, niente loop, convergenza comunque < 2s dal focus della pagina.
 - Documenti > ~900 KB vengono rifiutati e restano solo locali (backup JSON resta l'export completo).
+- **Trigger del sync dopo un commit IndexedDB**: oltre al `liveQuery` Dexie (cross-tab),
+  `AgendaDatabase.onCommit` notifica esplicitamente ogni transazione applicativa commit-ta
+  (vedi `src/services/db.ts` e `tests/sync-trigger.test.ts`): il percorso
+  `storage.saveTimetableSlot → commit → observeLocalCommits → scheduleSync → engine →
+  gateway.writeState` è coperto da test end-to-end senza chiamate artificiali a `syncNow`.
+  Le scritture bookkeeping del sync stesso (righe `metadata`) non passano da `atomic()` e non
+  generano notifiche esplicite; i piani hash-guardati impediscono i ping-pong.

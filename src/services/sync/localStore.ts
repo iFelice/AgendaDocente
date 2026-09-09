@@ -53,9 +53,19 @@ async function applySnapshot(snapshot: SyncableSnapshot): Promise<void> {
 }
 
 /**
- * Emits on every committed local change (any table, including metadata bookkeeping rows).
- * The engine debounces and its plans are hash-guarded, so its own metadata writes cannot
- * loop: a no-op plan never rewrites the state.
+ * Emits on every committed local change so the engine can schedule a sync cycle.
+ *
+ * Two independent signals, deliberately redundant:
+ *  1. database.onCommit — explicit, deterministic, fired by AgendaDatabase after every
+ *     successfully committed outermost write transaction (storage.saveTimetableSlot & co.).
+ *     This is the reliable same-tab trigger: liveQuery alone may miss commits depending on
+ *     browser/timing.
+ *  2. Dexie liveQuery — cross-tab: edits committed by another tab of the same browser fire
+ *     here (including the engine's own bookkeeping rows).
+ *
+ * The engine debounces and its plans are hash-guarded, so its own writes cannot loop:
+ * a no-op plan never rewrites anything, and metadata rows that do not change content are
+ * not persisted at all.
  */
 export function observeLocalCommits(onCommit: () => void): () => void {
   let initial = true;
@@ -66,5 +76,9 @@ export function observeLocalCommits(onCommit: () => void): () => void {
     },
     error: () => { /* a broken observer must never surface as a data error */ },
   });
-  return () => subscription.unsubscribe();
+  const detachExplicit = database.onCommit(onCommit);
+  return () => {
+    detachExplicit();
+    subscription.unsubscribe();
+  };
 }

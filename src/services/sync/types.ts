@@ -33,9 +33,7 @@ export interface RemoteStateDoc {
   payload: unknown;
   updatedAt: string;
   schemaVersion: 1;
-}
-
-export interface RemoteItem {
+}export interface RemoteItem {
   id: string;
   payload: unknown;
   updatedAt: string;
@@ -56,6 +54,8 @@ export interface StateTrack {
   localChangedAt?: string;
   /** updatedAt of the last confirmed remote copy (null: remote document absent). */
   remoteUpdatedAt: string | null;
+  /** Hash of a malformed/legacy remote document already preserved under conflicts/ (loop guard). */
+  archivedLegacyHash?: string;
 }
 export interface ItemsTrack {
   changedAt?: string;
@@ -80,10 +80,30 @@ export interface SyncStatus {
   lastSyncedAt?: string;
   /** Collections where this device and the cloud changed independently. */
   conflicts?: string[];
+  /** Beta diagnostics (no sensitive data): when the engine last attempted a cycle. */
+  lastAttemptAt?: string;
+  /** Beta diagnostics: which sections the last successful cycle actually synced (section names only). */
+  syncedSections?: string[];
+  /** Beta diagnostics: plain-language repair notes, e.g. legacy cloud documents archived/rewritten. */
+  notices?: string[];
+}
+
+/** Minimal per-account sync diagnostics persisted in IndexedDB (never document contents). */
+export interface SyncDiagnosticsV1 {
+  uid: string;
+  lastAttemptAt?: string;
+  lastSuccessAt?: string;
+  syncedSections?: string[];
+  notices?: string[];
 }
 
 export interface SyncGateway {
-  readState(name: StateDocName): Promise<RemoteStateDoc | null>;
+  /**
+   * Reads the RAW stored document (or null when absent). The gateway makes no promise
+   * about its shape: runtime schema validation lives in the engine (see remoteSchema.ts),
+   * so a legacy or malformed cloud document can never be mistaken for valid remote state.
+   */
+  readState(name: StateDocName): Promise<unknown>;
   writeState(name: StateDocName, payload: unknown): Promise<{ updatedAt: string }>;
   listItems(collectionName: ItemsCollection): Promise<RemoteItem[]>;
   writeItems(collectionName: ItemsCollection, entries: { id: string; payload: unknown }[]): Promise<void>;

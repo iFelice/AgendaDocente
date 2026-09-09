@@ -5,17 +5,21 @@ import type {
 import type {
   RemoteItem,
   RemoteSnapshot,
+  RemoteStateDoc,
   StateDocName,
+  SyncDiagnosticsV1,
   SyncGateway,
   SyncStateV1,
   SyncStatus,
   SyncableSnapshot,
 } from "./types";
-import { ITEMS_COLLECTIONS, STATE_DOC_NAMES } from "./types";
-import { contentHash, isPristineLocal, itemsDigest, planSync } from "./merge";
+import { ITEMS_COLLECTIONS, STATE_DOC_NAMES, type ItemsCollection } from "./types";
+import { contentHash, isPristineLocal, itemsDigest, planSync, type SyncPlan } from "./merge";
+import { classifyRemoteStateDoc } from "./remoteSchema";
 
 const META_STATE_KEY = "sync:state";
 const META_ENABLED_KEY = "sync:enabled";
+const META_DIAGNOSTICS_KEY = "sync:diagnostics";
 const DEBOUNCE_MS = 1500;
 const RETRY_BASE_MS = 30_000;
 const RETRY_MAX_MS = 15 * 60_000;
@@ -69,6 +73,12 @@ export class SyncEngine {
   private session: string | null = null;
   private detachers: (() => void)[] = [];
   private readonly now: () => string;
+  /** Beta diagnostics (in-memory): attempt/success stamps plus last cycle summary. */
+  private lastAttemptAt: string | undefined;
+  private lastSuccessAt: string | undefined;
+  private lastSyncedSections: string[] | undefined;
+  private lastNotices: string[] | undefined;
+  private lastPersistedDiagnosticsJson: string | null = null;
 
   constructor(private deps: SyncEngineDeps) {
     this.now = deps.now ?? (() => new Date().toISOString());
@@ -94,6 +104,7 @@ export class SyncEngine {
     void this.attach().then(async () => {
       const enabled = await this.isEnabled();
       this.publish({ enabled, activeUid: uid, phase: enabled ? "idle" : "disabled" });
+      await this.loadDiagnostics(uid);
       if (enabled) this.scheduleSync(0);
     });
   }
@@ -105,7 +116,12 @@ export class SyncEngine {
     this.detachers = [];
     if (this.stopDebounce) { this.stopDebounce(); this.stopDebounce = null; }
     if (this.stopRetry) { this.stopRetry(); this.stopRetry = null; }
-    this.publish({ phase: this.deps.gateway() ? "idle" : "disabled", activeUid: null, conflicts: undefined, message: undefined });
+    this.lastAttemptAt = undefined;
+    this.lastSuccessAt = undefined;
+    this.lastSyncedSections = undefined;
+    this.lastNotices = undefined;
+    this.lastPersistedDiagnosticsJson = null;
+    this.publish({ phase: this.deps.gateway() ? "idle" : "disabled", activeUid: null, conflicts: undefined, message: undefined, lastAttemptAt: undefined, syncedSections: undefined, notices: undefined });
   }
 
   private async attach() {
@@ -245,24 +261,58 @@ export class SyncEngine {
     if (detectionJson !== previousJson) await this.deps.store.writeMeta(META_STATE_KEY, detection);
 
     // 2. Fetch the remote tree. Any failure aborts the cycle before the first write.
-    this.publish({ phase: "syncing" });
+    this.lastAttemptAt = this.now();
+    this.publish({ phase: "syncing", lastAttemptAt: this.lastAttemptAt });
     const [stateResults, events, circulars] = await Promise.all([
       Promise.all(STATE_DOC_NAMES.map(name => gateway.readState(name))),
       gateway.listItems("events"),
       gateway.listItems("circulars"),
     ]);
+    // RUNTIME schema validation: cloud documents are untrusted input (older app versions wrote
+    // incompatible shapes). Legacy-but-recoverable documents are normalized; malformed ones are
+    // treated as absent so they can never be applied locally nor win a conflict.
+    const remoteRaw: Partial<Record<StateDocName, unknown>> = {};
+    const remoteLegacy: StateDocName[] = [];
+    const remoteInvalid: StateDocName[] = [];
+    const remoteState: Partial<Record<StateDocName, RemoteStateDoc | null>> = {};
+    STATE_DOC_NAMES.forEach((name, index) => {
+      const raw = stateResults[index] ?? null;
+      remoteRaw[name] = raw;
+      const verdict = classifyRemoteStateDoc(name, raw);
+      if (verdict.status === "valid" || verdict.status === "legacy") {
+        remoteState[name] = verdict.doc;
+        if (verdict.status === "legacy") remoteLegacy.push(name);
+      } else {
+        remoteState[name] = null;
+        if (verdict.status === "invalid") remoteInvalid.push(name);
+      }
+    });
     const remote: RemoteSnapshot = {
-      state: Object.fromEntries(STATE_DOC_NAMES.map((name, i) => [name, stateResults[i] ?? null])),
+      state: remoteState,
       items: { events, circulars },
     };
 
     // 3. Plan locally (pure), then execute both sides.
-    const plan = planSync({ uid, snapshot, remote, syncState: detection, nowIso, resolution: this.resolution });
+    const plan = planSync({
+      uid,
+      snapshot,
+      remote,
+      syncState: detection,
+      nowIso,
+      resolution: this.resolution,
+      remoteRaw,
+      remoteLegacy,
+      remoteInvalid,
+    });
 
     if (plan.fullRestore) {
       await this.deps.store.applyLocal({ fullRestore: plan.fullRestore });
+      // Even a wholesale restore must repair the cloud side: preserve legacy copies and
+      // rewrite malformed/recoverable documents in the current format.
+      const written = await this.executeCloudSide(plan, gateway, remote, nowIso);
       await this.persistState(detectionJson, plan.nextState);
       this.resolution = null;
+      this.finishCycleDiagnostics(plan, remote, written, nowIso);
       this.publish({ phase: "idle", conflicts: undefined, message: undefined });
       return;
     }
@@ -274,9 +324,25 @@ export class SyncEngine {
       await this.deps.store.applyLocal({ localApplyState, localEvents: plan.localEvents, localCirculars: plan.localCirculars });
     }
 
-    // Archive losing copies first: a conflict never destroys data silently.
-    for (const item of plan.archivedOnOverwrite) await gateway.archiveConflict(item.kind, item.loser);
+    const written = await this.executeCloudSide(plan, gateway, remote, nowIso);
 
+    await this.persistState(detectionJson, plan.nextState);
+    const hadResolution = this.resolution;
+    this.resolution = null;
+    this.finishCycleDiagnostics(plan, remote, written, nowIso);
+    if (plan.needsResolution.length && !hadResolution) {
+      this.publish({ phase: "awaiting-resolution", conflicts: plan.needsResolution, message: "Questo dispositivo e il cloud contengono modifiche indipendenti. Scegli quali dati conservare." });
+    } else {
+      this.publish({ phase: "idle", conflicts: undefined, message: undefined });
+    }
+  }
+
+  /**
+   * Executes the cloud side of a plan: conflict archives FIRST (nothing is silently destroyed),
+   * then item writes/deletes, then state document writes. Returns the state doc names written.
+   */
+  private async executeCloudSide(plan: SyncPlan, gateway: SyncGateway, remote: RemoteSnapshot, nowIso: string): Promise<StateDocName[]> {
+    for (const item of plan.archivedOnOverwrite) await gateway.archiveConflict(item.kind, item.loser);
     for (const coll of ITEMS_COLLECTIONS) {
       const entries = Object.entries(plan.remoteWrites[coll]);
       if (entries.length) await gateway.writeItems(coll, entries.map(([id, payload]) => ({ id, payload })));
@@ -284,20 +350,88 @@ export class SyncEngine {
     }
     const stateWrites = Object.entries(plan.stateWrites).filter(([name]) => !plan.needsResolution.includes(name as StateDocName))
       .filter((([name, payload]) => !(name === "profile" && !String((payload as { fullName?: string })?.fullName ?? "").trim() && !remote.state.profile)));
+    const written: StateDocName[] = [];
     for (const [name, payload] of stateWrites) {
       const res = await gateway.writeState(name as StateDocName, payload);
       const track = plan.nextState.state[name as StateDocName];
       if (track) track.remoteUpdatedAt = res?.updatedAt || nowIso;
+      written.push(name as StateDocName);
     }
+    return written;
+  }
 
-    await this.persistState(detectionJson, plan.nextState);
-    const hadResolution = this.resolution;
-    this.resolution = null;
-    if (plan.needsResolution.length && !hadResolution) {
-      this.publish({ phase: "awaiting-resolution", conflicts: plan.needsResolution, message: "Questo dispositivo e il cloud contengono modifiche indipendenti. Scegli quali dati conservare." });
+  /** Records beta diagnostics (sections touched, repair notices) for the UI. No document contents. */
+  private finishCycleDiagnostics(plan: SyncPlan, remote: RemoteSnapshot, written: StateDocName[], nowIso: string): void {
+    const sections = new Set<StateDocName | ItemsCollection>(written);
+    if (plan.fullRestore) {
+      for (const name of STATE_DOC_NAMES) if (remote.state[name]) sections.add(name);
+      if (remote.items.events.length) sections.add("events");
+      if (remote.items.circulars.length) sections.add("circulars");
     } else {
-      this.publish({ phase: "idle", conflicts: undefined, message: undefined });
+      for (const name of Object.keys(plan.localApplyState) as StateDocName[]) sections.add(name);
+      if (plan.localEvents) sections.add("events");
+      if (plan.localCirculars) sections.add("circulars");
+      if (Object.keys(plan.remoteWrites.events).length || plan.remoteDeletes.events.length) sections.add("events");
+      if (Object.keys(plan.remoteWrites.circulars).length || plan.remoteDeletes.circulars.length) sections.add("circulars");
     }
+    const notices: string[] = [];
+    const legacyArchived = plan.archivedOnOverwrite.filter(item => item.kind.startsWith("legacy-state:"));
+    const rewrittenLegacy = legacyArchived
+      .map(item => item.kind.replace("legacy-state:", "") as StateDocName)
+      .filter(name => !plan.unrecoverableRemote.includes(name));
+    if (rewrittenLegacy.length) {
+      notices.push(`Documenti cloud in formato legacy o non valido (${rewrittenLegacy.join(", ")}): copia originale conservata nei conflitti e documento riportato al formato attuale.`);
+    }
+    if (plan.unrecoverableRemote.length) {
+      notices.push(`Dati cloud non recuperabili per: ${plan.unrecoverableRemote.join(", ")}. La copia originale è conservata nei conflitti; nessun dato è stato inventato.`);
+    }
+    if (plan.changedSomething || plan.fullRestore) {
+      this.lastSuccessAt = nowIso;
+      this.lastSyncedSections = [...sections];
+      this.lastNotices = notices.length ? notices : undefined;
+      void this.persistDiagnostics();
+    } else if (notices.length) {
+      this.lastNotices = notices;
+    }
+    this.publish({
+      lastAttemptAt: this.lastAttemptAt,
+      lastSyncedAt: this.lastSuccessAt ?? this.status.lastSyncedAt,
+      syncedSections: this.lastSyncedSections,
+      notices: this.lastNotices,
+    });
+  }
+
+  /** Persists minimal diagnostics. Content-guarded: identical values never rewrite (loop guard). */
+  private async persistDiagnostics(): Promise<void> {
+    if (!this.session) return;
+    const diagnostics: SyncDiagnosticsV1 = {
+      uid: this.session,
+      lastSuccessAt: this.lastSuccessAt,
+      syncedSections: this.lastSyncedSections,
+      notices: this.lastNotices,
+    };
+    const json = JSON.stringify(diagnostics);
+    if (json === this.lastPersistedDiagnosticsJson) return;
+    this.lastPersistedDiagnosticsJson = json;
+    try {
+      await this.deps.store.writeMeta(META_DIAGNOSTICS_KEY, diagnostics);
+    } catch { /* diagnostics are best-effort and must never break a sync cycle */ }
+  }
+
+  private async loadDiagnostics(uid: string): Promise<void> {
+    try {
+      const raw = (await this.deps.store.readMeta(META_DIAGNOSTICS_KEY)) as SyncDiagnosticsV1 | null;
+      if (!raw || raw.uid !== uid) return;
+      this.lastSuccessAt = raw.lastSuccessAt;
+      this.lastSyncedSections = raw.syncedSections;
+      this.lastNotices = raw.notices;
+      this.lastPersistedDiagnosticsJson = JSON.stringify(raw);
+      this.publish({
+        ...(raw.lastSuccessAt && !this.status.lastSyncedAt ? { lastSyncedAt: raw.lastSuccessAt } : {}),
+        syncedSections: raw.syncedSections,
+        notices: raw.notices,
+      });
+    } catch { /* unreadable diagnostics are not an error */ }
   }
 
   /** Persist the post-cycle state, but only if it differs from what was just written mid-cycle. */

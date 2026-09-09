@@ -21,7 +21,8 @@ function item(v: unknown): boolean {
 function timetable(v: unknown): boolean {
   return list(v, s => Number.isInteger(s.dayOfWeek) && s.dayOfWeek >= 1 && s.dayOfWeek <= 6 && Number.isInteger(s.periodNumber)
     && s.periodNumber > 0 && isValidTime(s.startTime) && isValidTime(s.endTime) && s.endTime > s.startTime && text(s.subject) && text(s.className)
-    && ['classroom','campus','color'].every(k => optional(s[k], text)) && optional(s.isProvisional, bool));
+    && ['classroom','campus','color'].every(k => optional(s[k], text)) && optional(s.isProvisional, bool)
+    && ['coTeachingSubjects','coSupportTeachers','supportTeachers'].every(k => optional(s[k], strings)));
 }
 function periodSlotValidator(v: unknown): boolean {
   return record(v) && Number.isInteger(v.periodNumber) && v.periodNumber > 0

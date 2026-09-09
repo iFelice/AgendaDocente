@@ -48,6 +48,12 @@ export interface PlanContext {
   nowIso: string;
   /** Explicit user decision after an unresolved "both changed since install" conflict. */
   resolution?: "local" | "remote" | null;
+  /** Original (unvalidated) remote documents, kept for legacy archiving under conflicts/. */
+  remoteRaw?: Partial<Record<StateDocName, unknown>>;
+  /** State docs whose remote copy is legacy but recoverable (payload extracted and validated). */
+  remoteLegacy?: StateDocName[];
+  /** State docs whose remote copy is malformed/unrecoverable: they cannot win conflicts. */
+  remoteInvalid?: StateDocName[];
 }
 
 export interface SyncPlan {
@@ -64,6 +70,8 @@ export interface SyncPlan {
   needsResolution: StateDocName[];
   /** Remote copies preserved before a local-wins overwrite. Nothing is ever silently destroyed. */
   archivedOnOverwrite: { kind: string; loser: unknown }[];
+  /** Remote docs that are malformed AND have no valid local replacement: reported, never fabricated. */
+  unrecoverableRemote: StateDocName[];
   nextState: SyncStateV1;
   changedSomething: boolean;
 }
@@ -142,6 +150,7 @@ export function planSync(ctx: PlanContext): SyncPlan {
     stateWrites: {},
     needsResolution: [],
     archivedOnOverwrite: [],
+    unrecoverableRemote: [],
     nextState,
     changedSomething: false,
   };
@@ -151,12 +160,14 @@ export function planSync(ctx: PlanContext): SyncPlan {
     // New device (or cleared local data): adopt the cloud snapshot wholesale.
     plan.fullRestore = buildFullRestore(snapshot, remote);
     syncAllTracks(nextState, snapshot, remote, nowIso);
+    repairLegacyStateDocs(plan, ctx, nextState, snapshot);
     plan.changedSomething = true;
     return plan;
   }
   if (!syncState && resolution === "remote" && remoteKnown) {
     plan.fullRestore = buildFullRestore(snapshot, remote);
     syncAllTracks(nextState, snapshot, remote, nowIso);
+    repairLegacyStateDocs(plan, ctx, nextState, snapshot);
     plan.changedSomething = true;
     return plan;
   }
@@ -234,6 +245,9 @@ export function planSync(ctx: PlanContext): SyncPlan {
     }
     plan.changedSomething = true;
   }
+
+  // --- legacy / malformed remote state documents (classified by remoteSchema.ts) ---
+  repairLegacyStateDocs(plan, ctx, nextState, snapshot);
 
   // --- item collections (events / circulars): id-level three-way merge (union + LWW + mirrored deletions) ---
   for (const coll of ITEMS_COLLECTIONS) {
@@ -367,6 +381,55 @@ function localCollectionEmpty(snapshot: SyncableSnapshot, name: StateDocName): b
     case "provisionalTimetable": return snapshot.provisionalTimetable.length === 0;
     case "profile": return isPlaceholderFullName(snapshot.profile.fullName);
     case "settings": return !snapshot.onboardingCompleted;
+  }
+}
+
+/**
+ * Repairs legacy/malformed remote state documents (users/{uid}/state/*), never destructively:
+ *  - the original cloud copy is preserved under users/{uid}/conflicts (kind "legacy-state:<name>"),
+ *    once per device (hash-guarded through StateTrack.archivedLegacyHash);
+ *  - a malformed document is treated as absent by the merge (it can never win a conflict or be
+ *    applied locally); if the local side holds valid data the remote document is rewritten in the
+ *    current format; if the local side is empty too, nothing is fabricated — the section is
+ *    reported through plan.unrecoverableRemote instead;
+ *  - a legacy-but-recoverable document (payload extracted and validated) takes part in the merge
+ *    normally, and the cloud copy is rewritten in the correct format even when the content is
+ *    unchanged, so the malformed shape disappears from the account.
+ */
+function repairLegacyStateDocs(plan: SyncPlan, ctx: PlanContext, nextState: SyncStateV1, snapshot: SyncableSnapshot): void {
+  const invalid = new Set(ctx.remoteInvalid ?? []);
+  const legacy = new Set(ctx.remoteLegacy ?? []);
+  if (invalid.size === 0 && legacy.size === 0) return;
+  for (const name of STATE_DOC_NAMES) {
+    const raw = ctx.remoteRaw?.[name];
+    if (raw === undefined || raw === null) continue;
+    const track = (nextState.state[name] ??= {
+      lastSyncedLocalHash: contentHash(statePayload(snapshot, name)),
+      remoteUpdatedAt: null,
+    });
+    const rawHash = contentHash(raw);
+    if (track.archivedLegacyHash !== rawHash) {
+      plan.archivedOnOverwrite.push({ kind: `legacy-state:${name}`, loser: raw });
+      track.archivedLegacyHash = rawHash;
+      plan.changedSomething = true;
+    }
+    if (invalid.has(name)) {
+      if (localCollectionEmpty(snapshot, name)) {
+        // No valid local replacement: do not invent data and do not touch the remote document.
+        if (plan.stateWrites[name] !== undefined) delete plan.stateWrites[name];
+        if (!plan.unrecoverableRemote.includes(name)) plan.unrecoverableRemote.push(name);
+      } else if (plan.stateWrites[name] === undefined) {
+        // Local data is valid: rewrite the malformed remote document in the current format.
+        plan.stateWrites[name] = statePayload(snapshot, name);
+        plan.changedSomething = true;
+      }
+    } else if (legacy.has(name) && plan.stateWrites[name] === undefined && !plan.needsResolution.includes(name)) {
+      const recovered = ctx.remote.state[name]?.payload;
+      if (recovered !== undefined) {
+        plan.stateWrites[name] = recovered;
+        plan.changedSomething = true;
+      }
+    }
   }
 }
 
