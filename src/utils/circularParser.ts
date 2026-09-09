@@ -57,7 +57,9 @@ export function normalizeExtractedItems(input: unknown, profile: TeacherProfile,
       relevanceReason: str(raw.relevanceReason), selectedForImport: false,
     };
     // Only an excerpt containing this activity can provide row-local time evidence.
-    // Ambiguous excerpts never select a neighbouring interval by position.
+    // Ambiguous or evidence-free excerpts never keep a neighbouring interval by position:
+    // a vertically merged ORARI cell shown once is re-attached above only through the
+    // row excerpt, so an excerpt without exactly one interval cannot vouch for any time.
     const fold = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
     if (item.rawSnippet && fold(item.title) && fold(item.rawSnippet).includes(fold(item.title))) {
       const rowDate = extractDate(item.rawSnippet, profile);
@@ -67,9 +69,15 @@ export function normalizeExtractedItems(input: unknown, profile: TeacherProfile,
         const interval = intervals[0];
         item.startTime = `${interval[1].padStart(2, '0')}:${interval[2]}`;
         item.endTime = interval[3] ? `${interval[3].padStart(2, '0')}:${interval[4]}` : undefined;
-      } else if (intervals.length > 1) {
+      } else {
+        // Zero or multiple candidate intervals: the row cannot support a unique time.
         item.startTime = undefined; item.endTime = undefined;
       }
+    }
+    // Hard invariant: a closed interval with end <= start (e.g. a duplicated 12:30-12:30)
+    // is always treated as incomplete evidence, never as a usable — or auto-selectable — time.
+    if (item.startTime && item.endTime && item.endTime <= item.startTime) {
+      item.startTime = undefined; item.endTime = undefined;
     }
     const evaluation = evaluateItemRelevance(item, profile, location);
     Object.assign(item, { relevance: evaluation.relevance, relevanceReason: evaluation.relevanceReason, location: evaluation.location, className: evaluation.primaryClass || item.className });
@@ -78,19 +86,54 @@ export function normalizeExtractedItems(input: unknown, profile: TeacherProfile,
   });
 }
 
-/** Rejoin only explicit recipient/activity/time blocks, never inherit a time across rows. */
+/**
+ * Regroups flattened PDF table lines:
+ * - a recipient line (PRIMARIA/SSIG/…) absorbs its continuation lines until the next
+ *   recipient, a date anchor or a standalone time line;
+ * - a standalone time line (an ORARI cell without its own row text) is treated as a
+ *   vertically merged cell: it applies to *every* row currently waiting for an interval
+ *   inside the same date band, and to no other row. Rows that already carry an inline
+ *   interval are visually outside that merged cell and never receive it; a new date
+ *   anchor closes the band, so times are never inherited across dates.
+ */
 function tableLines(text: string): string[] {
   const lines = text.split('\n').map(l => l.trim().replace(/^[-•]\s+/, '')).filter(Boolean);
   const rows: string[] = [];
-  const recipient = /^(?:(?:docenti|destinatari)\s*[:|]?\s*)?(?:PRIMARIA|SSIG|SSIIG|INFANZIA)(?:\s*[/,]\s*(?:PRIMARIA|SSIG|SSIIG|INFANZIA))*$/i;
-  for (let i = 0; i < lines.length; i++) {
-    if (recipient.test(lines[i]) && lines[i + 1] && !recipient.test(lines[i + 1]) && !/^\d/.test(lines[i + 1])) {
-      let row = `${lines[i]} ${lines[++i]}`;
-      const next = lines[i + 1];
-      if (!timePattern.test(row) && next && new RegExp(`^(?:ore\\s*)?${timePattern.source}$`, 'i').test(next)) row += ` ${lines[++i]}`;
-      rows.push(row);
-    } else rows.push(lines[i]);
+  const waiters: number[] = [];
+  const recipient = /^(?:(?:docenti|destinatari)\s*[:|]?\s*)?(?:PRIMARIA|SSIG|SSIIG|INFANZIA)(?:\s*[/,|]\s*(?:PRIMARIA|SSIG|SSIIG|INFANZIA|DOCENTI))*$/i;
+  const standaloneTime = new RegExp(`^(?:ore\\s+)?${timePattern.source}$`, 'i');
+  const dateLike = /\b\d{1,2}[/.]\d{1,2}(?:[/.]\d{2,4})?\b|\b\d{1,2}\s+(?:gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre)\b/i;
+  const hasOwnInterval = (s: string) => new RegExp(timePattern.source, 'i').test(s);
+  let current: string[] | null = null;
+  const closeCurrent = () => {
+    if (!current) return;
+    const row = current.join(' ');
+    current = null;
+    rows.push(row);
+    if (!hasOwnInterval(row)) waiters.push(rows.length - 1);
+  };
+  for (const line of lines) {
+    const isTimeLine = standaloneTime.test(line);
+    // Only neutral description lines extend the recipient row. Any line that starts a new
+    // visual row (recipient prefix, table separator, own interval or date) closes it instead.
+    const isRowStart = recipient.test(line) || /PRIMARIA|SSIG|SSIIG|INFANZIA/i.test(line)
+      || line.includes('|') || (hasOwnInterval(line) && !isTimeLine) || dateLike.test(line);
+    if (current && !isRowStart) { current.push(line); continue; }
+    closeCurrent();
+    if (recipient.test(line)) { current = [line]; continue; }
+    if (isTimeLine) {
+      // One merged ORARI cell serves all rows visually contained in it.
+      if (waiters.length) {
+        for (const index of waiters) rows[index] = `${rows[index]} | ${line}`;
+        waiters.length = 0;
+      } else rows.push(line);
+      continue;
+    }
+    if (dateLike.test(line)) { waiters.length = 0; rows.push(line); continue; }
+    rows.push(line);
+    if (hasOwnInterval(line)) waiters.length = 0;
   }
+  closeCurrent();
   return rows;
 }
 

@@ -1,0 +1,66 @@
+rules_version = '2';
+
+// Agenda Docente — account sync security rules (deploy with: firebase deploy --only firestore:rules).
+//
+// Every synced document lives under users/{uid}; {uid} is the Firebase Auth uid, so one
+// teacher can never read or write another teacher's namespace. Client SDKs only ever carry
+// the PUBLIC Firebase web config (no secrets); these rules are the actual access boundary.
+//
+// The ~900 KB document guard is enforced client-side in src/services/sync/firestoreGateway.ts
+// (Security Rules have no document-size API); Firestore itself hard-rejects documents above
+// its 1 MiB limit regardless of rules.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // --- per-account sync namespace (mirrors exactly the paths used by createFirestoreGateway) ---
+    match /users/{uid} {
+      function isOwner() {
+        return request.auth != null && request.auth.uid == uid;
+      }
+      function syncedDocShape() {
+        // documents written by the app always look like { payload, updatedAt[, schemaVersion] }
+        return request.resource.data.keys().hasAll(['payload', 'updatedAt'])
+            && request.resource.data.keys().hasOnly(['payload', 'updatedAt', 'schemaVersion']);
+      }
+
+      // The account root document itself carries no data: deny.
+      allow read, write: if false;
+
+      match /state/{stateDoc} {
+        allow read: if isOwner();
+        allow create, update: if isOwner() && syncedDocShape()
+          && stateDoc in ['profile', 'settings', 'definitiveTimetable', 'provisionalTimetable', 'students'];
+        allow delete: if isOwner();
+      }
+
+      match /events/{eventId} {
+        allow read: if isOwner();
+        allow create, update: if isOwner() && syncedDocShape();
+        allow delete: if isOwner();
+      }
+
+      match /circulars/{circularId} {
+        allow read: if isOwner();
+        allow create, update: if isOwner() && syncedDocShape();
+        allow delete: if isOwner();
+      }
+
+      match /conflicts/{conflictId} {
+        // conflict archives: written once, kept for manual recovery — immutable by design
+        allow read: if isOwner();
+        allow create: if isOwner() && request.resource.data.keys().hasAll(['kind', 'createdAt', 'payload']);
+        allow update, delete: if false;
+      }
+
+      // Nothing else under the account (no arbitrary subcollections).
+      match /{document=**} {
+        allow read, write: if false;
+      }
+    }
+
+    // --- everything outside the per-account namespace is denied ---
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

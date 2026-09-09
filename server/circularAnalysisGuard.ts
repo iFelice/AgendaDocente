@@ -1,5 +1,6 @@
 import express, { type RequestHandler, type ErrorRequestHandler } from 'express';
 import { isIP } from 'node:net';
+import { TEACHER_ROLE_KINDS, type TeacherRoleKind } from '../src/types';
 
 export const ANALYSIS_LIMITS = { textChars: 100_000, fileBytes: 5 * 1024 * 1024, jsonBytes: 8 * 1024 * 1024 };
 const supportedFiles = ['application/pdf', 'image/png', 'image/jpeg', 'image/webp'];
@@ -28,8 +29,8 @@ export function validateAnalysisPayload(body: unknown): void {
     || !['email','googleCalendarAccount'].every(k => optional(p[k], v => text(v)))
     || !optional(p.googleCalendarLinked, v => typeof v === 'boolean')
     || !Array.isArray(p.roles) || p.roles.length > 30
-    || !p.roles.every(r => record(r) && ['coordinatore','segretario','tutor','referente','docente_sostegno','referente_inclusione','membro_gli'].includes(r.role as string)
-      && optional(r.targetClass, v => text(v)) && optional(r.description, v => text(v, 1000)))) return invalid();
+    || !p.roles.every(r => record(r) && TEACHER_ROLE_KINDS.includes(r.role as TeacherRoleKind)
+      && optional(r.targetClass, v => text(v)) && optional(r.description, v => text(v, 1000)) && optional(r.label, v => text(v)))) return invalid();
   const profileKeys = ['id','fullName','schoolName','schoolYear','primarySubjects','classes','campuses','schoolLevel','isSupportTeacher','assignedStudents','email','googleCalendarAccount','googleCalendarLinked','roles'];
   if (Object.keys(p).some(k => !profileKeys.includes(k))) return invalid();
   if (body.imageBase64 !== undefined) {

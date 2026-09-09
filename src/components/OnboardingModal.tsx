@@ -17,9 +17,12 @@ import {
   Zap,
   X,
 } from "lucide-react";
-import { SchoolLevel, TeacherProfile } from "../types";
+import { SchoolLevel, TeacherProfile, TeacherRole, TEACHER_ROLE_KINDS } from "../types";
 import { getCurrentSchoolYear, getSuggestedSchoolYears } from "../utils/schoolYear";
 import { signInWithGoogle, isUserCancellationError } from "../services/googleAuth";
+import { buildRolesFromChoices, ONBOARDING_ADDITIONAL_ROLES, ROLE_LABELS, roleDisplayName, type OnboardingRoleChoice } from "../utils/teacherRoles";
+import { formatPersonDisplayName, isPlaceholderFullName } from "../utils/names";
+import { CLASS_BOUND_ROLE_KINDS } from "../types";
 
 interface OnboardingModalProps {
   isOpen: boolean;
@@ -58,14 +61,10 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
 
   // Form State
   const [fullName, setFullName] = useState(
-    googleUser?.displayName || initialProfile.fullName || "Prof.ssa Laura Bianchi"
+    formatPersonDisplayName(googleUser?.displayName || (isPlaceholderFullName(initialProfile.fullName) ? "" : initialProfile.fullName))
   );
-  const [email, setEmail] = useState(
-    googleUser?.email || initialProfile.email || "laura.bianchi@scuola.edu.it"
-  );
-  const [schoolName, setSchoolName] = useState(
-    initialProfile.schoolName || "Istituto Superiore 'G. Galilei'"
-  );
+  const [email, setEmail] = useState(googleUser?.email || initialProfile.email || "");
+  const [schoolName, setSchoolName] = useState(initialProfile.schoolName || "");
   const [schoolLevel, setSchoolLevel] = useState<SchoolLevel>(initialProfile.schoolLevel || "ssig");
   const [campus, setCampus] = useState(initialProfile.campuses[0] || "Sede Centrale");
   const currentCalculatedSchoolYear = getCurrentSchoolYear();
@@ -76,17 +75,23 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
     return currentCalculatedSchoolYear;
   });
 
-  const [isSupportTeacher, setIsSupportTeacher] = useState(initialProfile.isSupportTeacher ?? true);
+  const [isSupportTeacher, setIsSupportTeacher] = useState(initialProfile.isSupportTeacher ?? false);
+  // Additional roles come ONLY from explicit user choice; the support/curricular type never
+  // auto-assigns anything (no implicit GLI, no automatic coordinatore).
+  const [additionalRoles, setAdditionalRoles] = useState<OnboardingRoleChoice[]>(() =>
+    (initialProfile.roles || [])
+      .filter((r) => r.role !== "docente_sostegno")
+      .map((r) => ({ role: r.role, ...(r.targetClass ? { targetClass: r.targetClass } : {}), ...(r.label ? { label: r.label } : {}) }))
+  );
+  const [customRoleLabel, setCustomRoleLabel] = useState("");
   const [primarySubjects, setPrimarySubjects] = useState<string[]>(
     initialProfile.primarySubjects.length > 0
       ? initialProfile.primarySubjects
-      : ["Attività di Sostegno", "Sostegno Didattico"]
+      : []
   );
   const [newSubjectInput, setNewSubjectInput] = useState("");
 
-  const [classes, setClasses] = useState<string[]>(
-    initialProfile.classes.length > 0 ? initialProfile.classes : ["1A", "2E"]
-  );
+  const [classes, setClasses] = useState<string[]>(initialProfile.classes.length > 0 ? initialProfile.classes : []);
   const [newClassInput, setNewClassInput] = useState("");
 
   // Google Login and connection state
@@ -104,7 +109,8 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
         setEmail(googleUser.email);
         setGoogleConnected(true);
         if (googleUser.displayName) {
-          setFullName(googleUser.displayName);
+          // Never overwrite a real, already-set name; only fill placeholders — always title-cased.
+          setFullName(prev => (isPlaceholderFullName(prev) ? formatPersonDisplayName(googleUser.displayName!) : prev));
         }
       } else if (initialProfile.email) {
         setEmail(initialProfile.email);
@@ -184,7 +190,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
         const userEmail = result.user.email || "";
         setEmail(userEmail);
         if (result.user.displayName) {
-          setFullName(result.user.displayName);
+          setFullName(formatPersonDisplayName(result.user.displayName));
         }
         setGoogleConnected(true);
         setLoginSuccessMessage(`Account selezionato: ${userEmail}`);
@@ -206,14 +212,6 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
     }
   };
 
-  // Demo Login Preset
-  const handleUseDemoAccount = () => {
-    setEmail("andrea.conti@scuola.edu.it");
-    setFullName("Prof. Andrea Conti");
-    setGoogleConnected(true);
-    setStep(2);
-  };
-
   const handleSkipLogin = () => {
     setGoogleConnected(false);
     setStep(2);
@@ -222,13 +220,29 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   // Support Mode Quick Presets
   const setSupportRole = (support: boolean) => {
     setIsSupportTeacher(support);
-    if (support) {
-      setPrimarySubjects(["Attività di Sostegno", "Sostegno Didattico"]);
-      if (classes.length === 0) setClasses(["1A", "2E"]);
-    } else {
-      setPrimarySubjects(["Italiano e Storia"]);
-      if (classes.length === 0) setClasses(["1A", "2A", "3B"]);
-    }
+    // Only pre-fills the subject suggestion when nothing was chosen yet; classes are never invented.
+    if (support) setPrimarySubjects(prev => prev.length > 0 ? prev : ["Attività di Sostegno", "Sostegno Didattico"]);
+  };
+
+  // Additional-role toggling (explicit user choices only)
+  const toggleAdditionalRole = (role: TeacherRole["role"]) => {
+    setAdditionalRoles(prev => {
+      const exists = prev.some(r => r.role === role);
+      if (exists) return prev.filter(r => r.role !== role);
+      return [...prev, { role }];
+    });
+  };
+  const updateRoleClass = (role: TeacherRole["role"], targetClass: string) => {
+    setAdditionalRoles(prev => prev.map(r => r.role === role ? { ...r, targetClass: targetClass.trim().toUpperCase() || undefined } : r));
+  };
+  const handleAddCustomRole = () => {
+    const label = customRoleLabel.trim();
+    if (!label) return;
+    setAdditionalRoles(prev => prev.some(r => r.role === "altro" && r.label === label) ? prev : [...prev, { role: "altro", label }]);
+    setCustomRoleLabel("");
+  };
+  const removeRoleChoice = (choice: OnboardingRoleChoice) => {
+    setAdditionalRoles(prev => prev.filter(r => !(r.role === choice.role && (r.label || "") === (choice.label || ""))));
   };
 
   const buildProfile = (): TeacherProfile => {
@@ -236,31 +250,16 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
       ...initialProfile,
       fullName: fullName.trim() || "Docente",
       email: email.trim() || undefined,
-      schoolName: schoolName.trim() || "Istituto Scolastico",
+      schoolName: schoolName.trim(),
       schoolLevel,
       schoolYear: schoolYear.trim() || getCurrentSchoolYear(),
-      primarySubjects: primarySubjects.length > 0 ? primarySubjects : ["Materia Principale"],
-      classes: classes.length > 0 ? classes : ["1A"],
-      campuses: [campus.trim() || "Sede Centrale"],
+      primarySubjects,
+      classes,
+      campuses: campus.trim() ? [campus.trim()] : [],
       isSupportTeacher,
       googleCalendarLinked: googleConnected,
-      roles: isSupportTeacher
-        ? [
-            {
-              role: "docente_sostegno",
-              description: "Docente specializzato per il sostegno didattico",
-            },
-            {
-              role: "membro_gli",
-              description: "Gruppo di Lavoro per l'Inclusione",
-            },
-          ]
-        : [
-            {
-              role: "coordinatore",
-              description: `Coordinatore di classe ${classes[0] || "1A"}`,
-            },
-          ],
+      // Roles derive exclusively from what the teacher selected in this wizard.
+      roles: buildRolesFromChoices({ isSupportTeacher, additionalRoles }),
     };
   };
 
@@ -376,7 +375,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                   />
                 </div>
 
-                <div className="flex flex-col sm:flex-row gap-2 pt-1">
+                <div className="flex flex-col gap-2 pt-1">
                   <button
                     type="button"
                     id="btn-onboarding-google-login"
@@ -418,15 +417,6 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                     )}
                   </button>
 
-                  <button
-                    type="button"
-                    disabled={isLoggingIn}
-                    onClick={handleUseDemoAccount}
-                    className="py-2.5 px-3 rounded-lg border border-emerald-300 bg-emerald-100/70 hover:bg-emerald-100 disabled:opacity-60 text-emerald-900 font-semibold text-xs transition-colors flex items-center justify-center space-x-1 cursor-pointer"
-                  >
-                    <Zap className="w-3.5 h-3.5 text-emerald-700" />
-                    <span>Usa Account Demo (@scuola.edu.it)</span>
-                  </button>
                 </div>
               </div>
 
@@ -655,6 +645,96 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                     </span>
                   )}
                 </div>
+              </div>
+
+              {/* RUOLI AGGIUNTIVI: scelti esclusivamente dal docente, mai dedotti dal tipo di cattedra */}
+              <div className="space-y-2 pt-1">
+                <label className="block text-xs font-semibold text-stone-700">
+                  Ruoli aggiuntivi (facoltativi)
+                </label>
+                <p className="text-[11px] text-stone-500">
+                  Seleziona solo i ruoli effettivamente ricoperti quest'anno. Essere docente di sostegno o curricolare
+                  non implica automaticamente altri incarichi.
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {ONBOARDING_ADDITIONAL_ROLES.map((kind) => {
+                    const isSelected = additionalRoles.some((r) => r.role === kind);
+                    return (
+                      <button
+                        key={kind}
+                        type="button"
+                        onClick={() => toggleAdditionalRole(kind)}
+                        className={`text-xs px-2.5 py-1 rounded-lg border font-medium transition-all ${
+                          isSelected
+                            ? "bg-emerald-700 text-white border-emerald-700 shadow-xs"
+                            : "bg-white text-stone-700 border-stone-200 hover:border-emerald-400"
+                        }`}
+                      >
+                        {isSelected ? `✓ ${ROLE_LABELS[kind]}` : `+ ${ROLE_LABELS[kind]}`}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Classi legate ai ruoli selezionati */}
+                {additionalRoles.filter((r) => CLASS_BOUND_ROLE_KINDS.includes(r.role)).map((r) => (
+                  <div key={`cls-${r.role}`} className="flex items-center gap-2 text-xs">
+                    <span className="text-stone-600 shrink-0">Classe per {ROLE_LABELS[r.role]}:</span>
+                    <input
+                      type="text"
+                      value={r.targetClass || ""}
+                      onChange={(e) => updateRoleClass(r.role, e.target.value)}
+                      placeholder="es. 2E"
+                      className="w-24 p-1.5 border border-stone-300 rounded-lg bg-white uppercase"
+                      aria-label={`Classe ${ROLE_LABELS[r.role]}`}
+                    />
+                  </div>
+                ))}
+
+                {/* Custom role */}
+                <div className="flex items-center space-x-2 pt-1">
+                  <input
+                    type="text"
+                    value={customRoleLabel}
+                    onChange={(e) => setCustomRoleLabel(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        handleAddCustomRole();
+                      }
+                    }}
+                    placeholder="Altro ruolo personalizzato (es. Referente Erasmus)..."
+                    className="flex-1 p-2 border border-stone-300 rounded-lg text-xs bg-white focus:ring-2 focus:ring-emerald-600 focus:border-emerald-600"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddCustomRole}
+                    className="px-3.5 py-2 bg-stone-800 hover:bg-stone-900 text-white rounded-lg text-xs font-semibold shadow-xs"
+                  >
+                    + Aggiungi
+                  </button>
+                </div>
+
+                {additionalRoles.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 pt-1">
+                    {additionalRoles.map((r, i) => (
+                      <span
+                        key={`${r.role}-${r.label || i}`}
+                        className="inline-flex items-center pl-2.5 pr-1.5 py-1 rounded-lg bg-emerald-100 text-emerald-950 text-xs font-medium border border-emerald-300 shadow-2xs"
+                      >
+                        <span>{roleDisplayName({ role: r.role, targetClass: r.targetClass, label: r.label })}</span>
+                        <button
+                          type="button"
+                          onClick={() => removeRoleChoice(r)}
+                          className="ml-1.5 p-0.5 rounded-md text-emerald-700 hover:text-rose-700 hover:bg-rose-100 transition-colors"
+                          aria-label={`Rimuovi ruolo ${ROLE_LABELS[r.role]}`}
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
 
               {/* Materie Selection */}
@@ -905,8 +985,13 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                 </div>
                 <div className="flex items-center justify-between border-b border-stone-200 pb-2">
                   <span className="text-stone-500">Profilo Operativo:</span>
-                  <span className="font-semibold text-emerald-800">
-                    {isSupportTeacher ? "Docente di Sostegno (GLO & PEI attivi)" : "Docente Disciplinare"}
+                  <span className="font-semibold text-emerald-800 text-right">
+                    {isSupportTeacher ? "Docente di Sostegno" : "Docente Curricolare"}
+                    {additionalRoles.length > 0 && (
+                      <span className="block text-[11px] font-medium text-stone-600 mt-0.5">
+                        {additionalRoles.map((r) => roleDisplayName({ role: r.role, targetClass: r.targetClass, label: r.label })).join(", ")}
+                      </span>
+                    )}
                   </span>
                 </div>
                 <div className="flex items-center justify-between border-b border-stone-200 pb-2">
@@ -950,14 +1035,14 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                 </div>
               </div>
 
-              {/* Concrete Test Trigger Callout */}
+              {/* Real first-circular CTA: no demo document exists or is faked. */}
               <div className="p-4 rounded-xl border-2 border-amber-300 bg-amber-50/80 space-y-2.5">
                 <div className="flex items-center space-x-2 text-amber-900 font-bold text-xs sm:text-sm">
                   <Sparkles className="w-4 h-4 text-amber-600 flex-shrink-0" />
-                  <span>Vuoi testare concretamente l'AI adesso?</span>
+                  <span>Hai già una circolare da importare?</span>
                 </div>
                 <p className="text-xs text-amber-800 leading-relaxed">
-                  Abbiamo preparato una circolare ministeriale realistica di inizio anno scolastico (Circolare n. 14 con scadenze PEI, GLO e convocazioni). Clicca qui sotto per provarla subito e vedere il semaforo in azione!
+                  Al termine della configurazione si apre l'Analizzatore Circolari: carica il PDF della tua scuola, scatta una foto o incolla il testo e vedrai il semaforo di pertinenza in azione. Nessun documento di esempio viene inventato.
                 </p>
 
                 <div className="pt-1">
@@ -967,7 +1052,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                     className="w-full py-2.5 px-4 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs transition-colors flex items-center justify-center space-x-2 shadow-xs"
                   >
                     <Sparkles className="w-4 h-4" />
-                    <span>Carica e Testa una Circolare Demo Ora</span>
+                    <span>Configura e apri l'Analizzatore Circolari</span>
                   </button>
                 </div>
               </div>

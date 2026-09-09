@@ -1,4 +1,5 @@
 import { isValidDate, isValidTime, eventDateError } from '../utils/dates';
+import { TEACHER_ROLE_KINDS } from '../types';
 
 const record = (v: unknown): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v);
 const strings = (v: unknown) => Array.isArray(v) && v.every(x => typeof x === 'string');
@@ -29,16 +30,16 @@ export function validateBackup(data: unknown): asserts data is Record<string, an
   const p = data.profile;
   if (!record(p) || !required(p.id) || !text(p.fullName) || !text(p.schoolName) || !/^\d{4}\/\d{4}$/.test(p.schoolYear)
     || !['primarySubjects','classes','campuses'].every(k => strings(p[k])) || !Array.isArray(p.roles)
-    || !p.roles.every(r => record(r) && ['coordinatore','segretario','tutor','referente','docente_sostegno','referente_inclusione','membro_gli'].includes(r.role) && optional(r.targetClass,text) && optional(r.description,text))
+    || !p.roles.every(r => record(r) && TEACHER_ROLE_KINDS.includes(r.role) && optional(r.targetClass,text) && optional(r.description,text) && optional(r.label,text))
     || !optional(p.assignedStudents,strings) || !optional(p.isSupportTeacher,bool)
     || !optional(p.googleCalendarLinked,bool) || !optional(p.email,text) || !optional(p.googleCalendarAccount,text)
     || !optional(p.schoolLevel,v => ['infanzia','primaria','ssig','ssiig'].includes(v as string))) throw new Error('Profilo nel backup non valido.');
   if (!list(data.events, e => required(e.title) && isValidDate(e.date) && bool(e.isAllDay) && eventDateError({ date: e.date, isAllDay: e.isAllDay, startTime: e.startTime, endTime: e.endTime }) === null && categories.includes(e.category)
     && ['manuale','circolare','orario','google_calendar'].includes(e.sourceType)
-    && ['startTime','endTime','className','subject','location','notes','sourceCircularTitle','sourceCircularId','sourceItemId','googleEventId'].every(k => optional(e[k],text))
+    && ['startTime','endTime','className','subject','location','notes','sourceCircularTitle','sourceCircularId','sourceItemId','googleEventId','updatedAt'].every(k => optional(e[k],text))
     && optional(e.completed,bool) && optional(e.syncedWithGoogle,bool) && optional(e.reminderMinutesBefore,number))) throw new Error('Eventi nel backup non validi.');
   if (!list(data.circulars, c => text(c.title) && isValidDate(c.uploadDate) && ['pdf','image','text'].includes(c.fileType) && text(c.fileName)
-    && number(c.extractedCount) && number(c.relevantCount) && optional(c.rawText,text)
+    && number(c.extractedCount) && number(c.relevantCount) && optional(c.rawText,text) && optional(c.updatedAt,text)
     && optional(c.extractedItems,v => Array.isArray(v) && v.every(item)))) throw new Error('Circolari nel backup non valide.');
   if (!list(data.students, s => text(s.fullName) && text(s.className) && Array.isArray(s.notes)
     && s.notes.every(n => record(n) && required(n.id) && isValidDate(n.date) && text(n.category) && text(n.title) && text(n.content) && text(n.createdAt))

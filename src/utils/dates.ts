@@ -3,6 +3,32 @@ export function localDateISO(date: Date = new Date()): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
+/** Build a local Date at civil noon: DST-safe, never UTC (see "Non usare UTC per le date civili"). */
+export function parseCivilDate(iso: string): Date {
+  if (!isValidDate(iso)) throw new Error("Data non valida");
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(y, m - 1, d, 12);
+}
+
+/** Shift a civil date by whole days. Crossing months and years stays in local time. */
+export function addDaysISO(iso: string, days: number): string {
+  const d = parseCivilDate(iso);
+  d.setDate(d.getDate() + days);
+  return localDateISO(d);
+}
+
+/** 0 = Sunday … 6 = Saturday, evaluated on the civil date itself (not on a UTC instant). */
+export function civilDayOfWeek(iso: string): number {
+  return parseCivilDate(iso).getDay();
+}
+
+/** Timetable weekday key used by AgendaDocente (1 = Monday … 6 = Saturday); Sunday has no lessons. */
+export function civilTimetableDay(iso: string): 1 | 2 | 3 | 4 | 5 | 6 | null {
+  const day = civilDayOfWeek(iso);
+  if (day === 0) return null;
+  return day as 1 | 2 | 3 | 4 | 5 | 6;
+}
+
 export function isValidDate(value: unknown): value is string {
   if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
   const [y, m, d] = value.split("-").map(Number);

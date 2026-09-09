@@ -15,6 +15,9 @@ const legacy = {length:0,key:()=>null,getItem:()=>null,setItem:()=>{},removeItem
 const seed=demoInstallation();
 function signal<T>() {let resolve!:(value:T)=>void;const promise=new Promise<T>(r=>resolve=r);return {promise,resolve};}
 async function until<T>(promise:Promise<T>):Promise<T> {let timer:ReturnType<typeof setTimeout>;try{return await Promise.race([promise,new Promise<T>((_,reject)=>{timer=setTimeout(()=>reject(new Error('Notification timeout')),1500);})]);}finally{clearTimeout(timer!);}}
+async function seedDemo(){ // tests that exercise editors against realistic content seed it explicitly: production installs start empty
+ await database.atomic(async()=>{for(const [name,value] of Object.entries(structuredClone(seed)))await database.write(name as any,value as any);});
+}
 async function pair(run:(writer:AgendaDatabase,reader:AgendaDatabase)=>Promise<void>){const name=`beta-${crypto.randomUUID()}`,writer=new AgendaDatabase(name),reader=new AgendaDatabase(name);try{await writer.initialize(seed,legacy);await reader.initialize(seed,legacy);await run(writer,reader);}finally{writer.close();reader.close();await writer.delete();}}
 
 test('multi-tab observer receives committed edits and deletions from another connection',async()=>pair(async(writer,reader)=>{
@@ -55,7 +58,7 @@ test('quota errors are understandable and preserve the previous DB snapshot',asy
 }));
 
 test('stale student editor retains newly added notes and rejects concurrently changed student details',async()=>{
- database.close();await database.delete();await initializeStorage(legacy);
+ database.close();await database.delete();await initializeStorage(legacy);await seedDemo();
  const baseline=(await storage.getStudents())[0];const note={...baseline.notes[0],id:'concurrent-note',content:'Other tab'};
  await storage.addStudentNote(baseline.id,note);await storage.saveStudent({...baseline,fullName:'Edited'},baseline);
  const latest=(await storage.getStudents())[0];assert.equal(latest.notes[0].id,note.id);
@@ -64,7 +67,7 @@ test('stale student editor retains newly added notes and rejects concurrently ch
 });
 
 test('stale event editors cannot overwrite edits or resurrect an event deleted in another tab',async()=>{
- database.close();await database.delete();await initializeStorage(legacy);
+ database.close();await database.delete();await initializeStorage(legacy);await seedDemo();
  const baseline=(await storage.getEvents())[0];await storage.saveEvent({...baseline,title:'Other tab'});
  await assert.rejects(storage.saveEvent({...baseline,title:'Stale'},baseline),/altra scheda/);
  await storage.deleteEvent(baseline.id);await assert.rejects(storage.saveEvent(baseline,baseline),/altra scheda/);
@@ -108,7 +111,7 @@ test('a committed restore with failed view refresh is never reported as a failed
 });
 
 test('local deletion failure leaves the remote event untouched; remote failure does not undo local deletion',async()=>{
- database.close();await database.delete();await initializeStorage(legacy);
+ database.close();await database.delete();await initializeStorage(legacy);await seedDemo();
  const event={...seed.events[0],googleEventId:'remote',syncedWithGoogle:true};await storage.saveEvent(event);
  const previous=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw new Error('Offline');};
  const fail=()=>{throw new DOMException('Full','QuotaExceededError');};database.table('events').hook('creating',fail);

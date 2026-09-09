@@ -167,7 +167,7 @@ export function evaluateItemRelevance(
     /\bssiig\b|secondaria di (?:secondo|ii|2[°º]?) grado/.test(lower) ? 'ssiig' : '',
   ].filter(Boolean);
   if (levels.length && profile.schoolLevel && !levels.includes(profile.schoolLevel)) return result('ROSSO', "Destinato a un altro ordine scolastico.");
-  if (/staff|collaboratori del dirigente/.test(lower) && !(profile.roles || []).some(r => /staff/i.test(r.description || ''))) return result('ROSSO', "Riservato allo staff di dirigenza.");
+  if (/staff|collaboratori del dirigente/.test(lower) && !(profile.roles || []).some(r => r.role === 'collaboratore_dirigente' || /staff|dirigent/i.test(`${r.description || ''} ${r.label || ''}`))) return result('ROSSO', "Riservato allo staff di dirigenza.");
   if (/riservat[oaie].*coordinator|soli coordinatori/.test(lower) && !(profile.roles || []).some(r => r.role === 'coordinatore' && (!r.targetClass || matched.includes(r.targetClass)))) return result('ROSSO', "Riservato ai coordinatori delle classi indicate.");
   if (detected.length && !matched.length) return result('ROSSO', `Destinato alle classi ${detected.join(', ')}, non assegnate al docente.`);
   const grades = extractGradesFromText(text);

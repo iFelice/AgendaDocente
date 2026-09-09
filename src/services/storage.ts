@@ -693,12 +693,97 @@ export const DEFAULT_EVENTS: CalendarEvent[] = [
   },
 ];
 
+/**
+ * Test fixture only: a full demo installation (fictional support teacher, students, events).
+ * Production installs NEVER seed this data; it is kept exclusively for tests and for the
+ * conservative one-time cleanup of rows that older beta versions used to insert.
+ */
 export function demoInstallation(): LocalData {
  return {profile:structuredClone(DEFAULT_PROFILE),events:structuredClone(DEFAULT_EVENTS),circulars:[],students:structuredClone(DEFAULT_STUDENTS),
  definitiveTimetable:[],provisionalTimetable:structuredClone(DEFAULT_PROVISIONAL_TIMETABLE),timetableMode:'auto',onboardingCompleted:false};
 }
+
+/** Placeholder profile for a fresh install: real values arrive through onboarding. */
+export function defaultTeacherProfile(): TeacherProfile {
+ return {
+  id:'teacher-local',
+  fullName:'',
+  schoolName:'',
+  schoolLevel:'ssig',
+  schoolYear:getCurrentSchoolYear(),
+  primarySubjects:[],
+  classes:[],
+  campuses:[],
+  roles:[],
+  googleCalendarLinked:false,
+ };
+}
+
+/** A new installation starts empty: no demo profile, students, events or lessons. */
+export function emptyInstallation(): LocalData {
+ return {profile:defaultTeacherProfile(),events:[],circulars:[],students:[],
+  definitiveTimetable:[],provisionalTimetable:[],timetableMode:'auto',onboardingCompleted:false};
+}
+
+const sameRecordExcept = (a: Record<string, any>, b: Record<string, any>, ignore: string[]) =>
+  JSON.stringify(Object.fromEntries(Object.entries(a).filter(([k]) => !ignore.includes(k))))
+  === JSON.stringify(Object.fromEntries(Object.entries(b).filter(([k]) => !ignore.includes(k))));
+
+/**
+ * One-time conservative removal of the pre-vacuum demo rows that older beta builds seeded.
+ * A row is deleted only while it is still byte-for-byte identical to the known seed
+ * (dates for events and student notes excluded, because those were install-relative);
+ * anything the teacher touched — including real events created manually — is preserved.
+ */
+export async function stripUnmodifiedSeedRows(): Promise<{removedEvents:number;removedStudents:number;removedSlots:number;profileReset:boolean}> {
+ const result={removedEvents:0,removedStudents:0,removedSlots:0,profileReset:false};
+ if(database.mode!=='indexeddb')return result;
+ await database.atomic(async()=>{
+  const seeds=(name:'events'|'students')=>structuredClone(name==='events'?DEFAULT_EVENTS:DEFAULT_STUDENTS);
+  const events=await storage.getEvents();
+  const eventSeeds=new Map(seeds('events').map(e=>[e.id,e] as [string, CalendarEvent]));
+  const keptEvents=events.filter(event=>{
+   const seed=eventSeeds.get(event.id);
+   // Only the exact fictional seed rows (never re-dated or edited copies) qualify for removal.
+   if(!seed||!sameRecordExcept(event as any,seed as any,['date','completed']))return true;
+   result.removedEvents++;return false;
+  });
+  if(keptEvents.length!==events.length)await storage.saveEvents(keptEvents);
+  const students=await storage.getStudents();
+  const studentSeeds=new Map(seeds('students').map(s=>[s.id,s] as [string, Student]));
+  const keptStudents=students.filter(student=>{
+   const seed=studentSeeds.get(student.id);
+   if(!seed||!sameRecordExcept({...student,notes:[] } as any,{...seed,notes:[]} as any,['updatedAt'])
+     ||student.notes.length!==seed.notes.length||JSON.stringify(student.notes)!==JSON.stringify(seed.notes))return true;
+   result.removedStudents++;return false;
+  });
+  if(keptStudents.length!==students.length)await storage.saveStudents(keptStudents);
+  for(const type of ['definitivo','provvisorio'] as const){
+   const slotSeeds=new Map(structuredClone(type==='definitivo'?DEFAULT_TIMETABLE:DEFAULT_PROVISIONAL_TIMETABLE).map(s=>[s.id,s] as [string, TimetableSlot]));
+   const slots=type==='definitivo'?await storage.getDefinitiveTimetable():await storage.getProvisionalTimetable();
+   const kept=slots.filter(slot=>{
+    const seed=slotSeeds.get(slot.id);
+    if(!seed||JSON.stringify(slot)!==JSON.stringify(seed))return true;
+    result.removedSlots++;return false;
+   });
+   if(kept.length!==slots.length){if(type==='definitivo')await storage.saveDefinitiveTimetable(kept);else await storage.saveProvisionalTimetable(kept);}
+  }
+  const profile=await storage.getProfile();
+  const onboardingCompleted=await database.read('onboardingCompleted');
+  if(!onboardingCompleted&&sameRecordExcept(profile as any,DEFAULT_PROFILE as any,['schoolYear'])){
+   await storage.saveProfile({...defaultTeacherProfile(),schoolYear:profile.schoolYear||defaultTeacherProfile().schoolYear,
+    email:profile.email,schoolLevel:profile.schoolLevel});
+   result.profileReset=true;
+  }
+ });
+ return result;
+}
+
 export async function initializeStorage(legacy?: LegacyStorage): Promise<LocalData> {
- await database.initialize(demoInstallation(),legacy);
+ await database.initialize(emptyInstallation(),legacy);
+ // Beta devices may already contain untouched demo rows: drop exactly those, atomically,
+ // before the UI renders, without ever touching real or edited data and without deleting the DB.
+ await stripUnmodifiedSeedRows();
  return database.readSnapshot();
 }
 export const storage = {
@@ -847,16 +932,6 @@ export const storage = {
       }
     });
   },
-  async resetProvisionalTimetable(): Promise<void> {
-    return database.atomic(async () => {
-      await this.saveProvisionalTimetable(DEFAULT_PROVISIONAL_TIMETABLE);
-    });
-  },
-  async resetDefinitiveTimetable(): Promise<void> {
-    return database.atomic(async () => {
-      await this.saveDefinitiveTimetable(DEFAULT_TIMETABLE);
-    });
-  },
   // EVENTS
   async getEvents(): Promise<CalendarEvent[]> { return database.read("events"); },
   async saveEvents(events: CalendarEvent[]): Promise<void> {
@@ -867,11 +942,13 @@ export const storage = {
       const list = (await this.getEvents());
       const index = list.findIndex((e) => e.id === event.id);
       assertUnchanged(list[index], expected);
+      // Local mutation clock used by account-sync conflict checks (never shown in the UI).
+      const stamped: CalendarEvent = {...event, updatedAt: new Date().toISOString()};
       if (index >= 0) {
-        list[index] = event;
+        list[index] = stamped;
       }
       else {
-        list.push(event);
+        list.push(stamped);
       }
       await this.saveEvents(list);
     });
@@ -888,6 +965,7 @@ export const storage = {
       const target = list.find((e) => e.id === id);
       if (target) {
         target.completed = !target.completed;
+        target.updatedAt = new Date().toISOString();
         await this.saveEvents(list);
       }
     });
@@ -918,11 +996,12 @@ export const storage = {
       const list = (await this.getCirculars());
       // Prevent exact duplicate id
       const existingIndex = list.findIndex((c) => c.id === doc.id);
+      const stamped: CircularDocument = { ...doc, updatedAt: new Date().toISOString() };
       if (existingIndex >= 0) {
-        list[existingIndex] = doc;
+        list[existingIndex] = stamped;
       }
       else {
-        list.unshift(doc);
+        list.unshift(stamped);
       }
       await database.write("circulars", list);
     });
@@ -931,11 +1010,12 @@ export const storage = {
     return database.atomic(async () => {
       const list = (await this.getCirculars());
       const idx = list.findIndex((c) => c.id === doc.id);
+      const stamped: CircularDocument = { ...doc, updatedAt: new Date().toISOString() };
       if (idx >= 0) {
-        list[idx] = doc;
+        list[idx] = stamped;
       }
       else {
-        list.unshift(doc);
+        list.unshift(stamped);
       }
       await database.write("circulars", list);
     });
