@@ -1,5 +1,5 @@
 import type { ExtractedItem, TeacherProfile, EventCategory } from "../types";
-import { evaluateItemRelevance, extractClassesFromText, detectSubjects } from "./circularRelevance";
+import { evaluateItemRelevance, extractClassesFromText, detectSubjects, isGenericSubject } from "./circularRelevance";
 import { eventDateError, isValidDate, isValidTime } from "./dates";
 
 const categories: EventCategory[] = ["lezione", "consiglio_classe", "collegio_docenti", "dipartimento", "dipartimento_sostegno", "glo", "pei", "riunione", "ricevimento_genitori", "formazione", "scadenza", "promemoria", "personale"];
@@ -50,12 +50,27 @@ export function normalizeExtractedItems(input: unknown, profile: TeacherProfile,
       category: categories.includes(raw.category) ? raw.category : 'riunione',
       date: isValidDate(raw.date) ? raw.date : '',
       startTime: time(raw.startTime), endTime: time(raw.endTime),
-      className: str(raw.className), subject: str(raw.subject), location: str(raw.location),
+      className: str(raw.className), subject: isGenericSubject(str(raw.subject)) ? "" : str(raw.subject), location: str(raw.location),
       notes: str(raw.notes), rawSnippet: str(raw.rawSnippet),
       isDeadline: raw.isDeadline === true || raw.category === 'scadenza',
       relevance: ['VERDE', 'GIALLO', 'ROSSO'].includes(raw.relevance) ? raw.relevance : 'GIALLO',
       relevanceReason: str(raw.relevanceReason), selectedForImport: false,
     };
+    // Only an excerpt containing this activity can provide row-local time evidence.
+    // Ambiguous excerpts never select a neighbouring interval by position.
+    const fold = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    if (item.rawSnippet && fold(item.title) && fold(item.rawSnippet).includes(fold(item.title))) {
+      const rowDate = extractDate(item.rawSnippet, profile);
+      const excerpt = rowDate ? item.rawSnippet.replace(rowDate.text, '') : item.rawSnippet;
+      const intervals = [...excerpt.matchAll(new RegExp(timePattern.source, 'gi'))];
+      if (intervals.length === 1) {
+        const interval = intervals[0];
+        item.startTime = `${interval[1].padStart(2, '0')}:${interval[2]}`;
+        item.endTime = interval[3] ? `${interval[3].padStart(2, '0')}:${interval[4]}` : undefined;
+      } else if (intervals.length > 1) {
+        item.startTime = undefined; item.endTime = undefined;
+      }
+    }
     const evaluation = evaluateItemRelevance(item, profile, location);
     Object.assign(item, { relevance: evaluation.relevance, relevanceReason: evaluation.relevanceReason, location: evaluation.location, className: evaluation.primaryClass || item.className });
     item.selectedForImport = evaluation.selectedForImport && !extractedItemError(item);
@@ -63,18 +78,34 @@ export function normalizeExtractedItems(input: unknown, profile: TeacherProfile,
   });
 }
 
+/** Rejoin only explicit recipient/activity/time blocks, never inherit a time across rows. */
+function tableLines(text: string): string[] {
+  const lines = text.split('\n').map(l => l.trim().replace(/^[-•]\s+/, '')).filter(Boolean);
+  const rows: string[] = [];
+  const recipient = /^(?:(?:docenti|destinatari)\s*[:|]?\s*)?(?:PRIMARIA|SSIG|SSIIG|INFANZIA)(?:\s*[/,]\s*(?:PRIMARIA|SSIG|SSIIG|INFANZIA))*$/i;
+  for (let i = 0; i < lines.length; i++) {
+    if (recipient.test(lines[i]) && lines[i + 1] && !recipient.test(lines[i + 1]) && !/^\d/.test(lines[i + 1])) {
+      let row = `${lines[i]} ${lines[++i]}`;
+      const next = lines[i + 1];
+      if (!timePattern.test(row) && next && new RegExp(`^(?:ore\\s*)?${timePattern.source}$`, 'i').test(next)) row += ` ${lines[++i]}`;
+      rows.push(row);
+    } else rows.push(lines[i]);
+  }
+  return rows;
+}
+
 /** Conservative text fallback. Complex table layout is left for human/cloud review. */
 export function parseCircularText(text: string, profile: TeacherProfile, location?: string): ExtractedItem[] {
   const items: Partial<ExtractedItem>[] = [];
   let currentDate = '';
-  for (const line of text.split('\n').map(l => l.trim()).filter(Boolean)) {
+  for (const line of tableLines(text)) {
     const foundDate = extractDate(line, profile);
     if (foundDate) currentDate = foundDate.date;
     const content = foundDate ? line.replace(foundDate.text, '').trim() : line;
     const time = timePattern.exec(content);
     const lower = content.toLowerCase();
     const classes = extractClassesFromText(content);
-    const activity = /collegio|consigl[io]|dipartiment|riunion|formazion|scadenz|\bentro\b|consegn|ricevimento|\bglo\b|\bpei\b|\bpdp\b|aggiornamento classi|sistemazione ambienti|predisposizione|commission|lezion|verific[ah]|interrogazion/i.test(content);
+    const activity = /collegio|consigl[io]|dipartiment|riunion|formazion|scadenz|\bentro\b|consegn|ricevimento|\bglo\b|\bpei\b|\bpdp\b|aggiornamento classi|sistemazione ambienti|predisposizione|programmazione|interclasse|commission|lezion|verific[ah]|interrogazion/i.test(content);
     if (!activity && !(time && classes.length)) continue;
     // An explicit cancellation is never proposed as a new event by this fallback.
     if (/annullat[oaie]|revocat[oaie]/i.test(content)) continue;

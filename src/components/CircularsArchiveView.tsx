@@ -224,7 +224,7 @@ export const CircularsArchiveView: React.FC<CircularsArchiveViewProps> = ({
             onClick={onOpenCircularModal}
             className="px-4 py-2.5 rounded-xl bg-emerald-700 text-white font-semibold text-xs hover:bg-emerald-800 shadow-xs"
           >
-            Prova una circolare di esempio
+            Carica una circolare
           </button>
         </div>
       ) : (
