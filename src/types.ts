@@ -69,6 +69,8 @@ export interface CalendarEvent {
   notes?: string;
   sourceType: "manuale" | "circolare" | "orario" | "google_calendar";
   sourceCircularTitle?: string;
+  sourceCircularId?: string;
+  sourceItemId?: string;
   completed?: boolean;
   reminderMinutesBefore?: number;
   googleEventId?: string;

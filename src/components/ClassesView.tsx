@@ -1,4 +1,6 @@
-import React, { useState, useMemo } from "react";
+import { usePersistenceAction } from "../hooks/usePersistenceAction";
+import { localDateISO } from "../utils/dates";
+import React, { useState, useMemo, useRef } from "react";
 import {
   Users,
   UserPlus,
@@ -36,12 +38,12 @@ import {
 interface ClassesViewProps {
   profile: TeacherProfile;
   students: Student[];
-  onSaveStudent: (student: Student) => void;
-  onDeleteStudent: (studentId: string) => void;
-  onAddNote: (studentId: string, note: StudentNote) => void;
-  onDeleteNote: (studentId: string, noteId: string) => void;
+  onSaveStudent: (student: Student, expected?: Student) => void | false | Promise<void | false>;
+  onDeleteStudent: (studentId: string) => void | false | Promise<void | false>;
+  onAddNote: (studentId: string, note: StudentNote) => void | false | Promise<void | false>;
+  onDeleteNote: (studentId: string, noteId: string) => void | false | Promise<void | false>;
   onScheduleEvent: (prefill: Partial<CalendarEvent>) => void;
-  onDeleteMultipleStudents?: (studentIds: string[]) => void;
+  onDeleteMultipleStudents?: (studentIds: string[]) => void | false | Promise<void | false>;
   onReassignStudentsClass?: (studentIds: string[], targetClass: string) => void;
   onClearAllStudents?: () => void;
 }
@@ -104,6 +106,8 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
   onReassignStudentsClass,
   onClearAllStudents,
 }) => {
+  const save = usePersistenceAction();
+  const editBaseline = useRef<Student | undefined>(undefined);
   // Filters
   const [selectedClass, setSelectedClass] = useState<string>("TUTTE");
   const [filterType, setFilterType] = useState<"tutti" | "sostegno" | "dsa_bes" | "con_note">("tutti");
@@ -122,7 +126,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
   const [showClearAllConfirm, setShowClearAllConfirm] = useState(false);
 
   // New Note Form inside Student Detail
-  const [newNoteDate, setNewNoteDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [newNoteDate, setNewNoteDate] = useState(() => localDateISO());
   const [newNoteCategory, setNewNoteCategory] = useState<StudentNoteCategory>("osservazione");
   const [newNoteTitle, setNewNoteTitle] = useState("");
   const [newNoteContent, setNewNoteContent] = useState("");
@@ -223,11 +227,12 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
   // Synchronize open detail modal when students list updates
   const activeDetailStudent = useMemo(() => {
     if (!selectedStudentForDetail) return null;
-    return students.find((s) => s.id === selectedStudentForDetail.id) || selectedStudentForDetail;
+    return students.find((s) => s.id === selectedStudentForDetail.id) || null;
   }, [students, selectedStudentForDetail]);
 
   // Handlers for Add/Edit
   const handleOpenAddStudent = () => {
+    editBaseline.current = undefined;
     setStudentToEdit({
       id: `stu-${Date.now()}`,
       fullName: "",
@@ -253,15 +258,16 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
   };
 
   const handleOpenEditStudent = (student: Student) => {
+    editBaseline.current = student;
     setStudentToEdit({ ...student });
     setIsEditModalOpen(true);
   };
 
-  const handleSaveStudentSubmit = (e: React.FormEvent) => {
+  const handleSaveStudentSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!studentToEdit || !studentToEdit.fullName.trim()) return;
 
-    onSaveStudent(studentToEdit);
+    if (!await save.run(() => onSaveStudent(studentToEdit, editBaseline.current))) return;
     setIsEditModalOpen(false);
 
     // If currently open in detail drawer, update state
@@ -271,7 +277,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
   };
 
   // Add note handler
-  const handleAddNoteSubmit = (e: React.FormEvent) => {
+  const handleAddNoteSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeDetailStudent || !newNoteContent.trim()) return;
 
@@ -285,7 +291,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
       createdAt: new Date().toISOString(),
     };
 
-    onAddNote(activeDetailStudent.id, note);
+    if (!await save.run(() => onAddNote(activeDetailStudent.id, note))) return;
     setNewNoteTitle("");
     setNewNoteContent("");
   };
@@ -296,7 +302,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
       title: `G.L.O. - ${student.fullName} (Classe ${student.className})`,
       category: "glo",
       className: student.className,
-      date: student.gloDate || new Date().toISOString().slice(0, 10),
+      date: student.gloDate || localDateISO(),
       startTime: "15:00",
       endTime: "16:30",
       notes: `Convocazione Gruppo di Lavoro Operativo per ${student.fullName}. Équipe specialistica: ${student.specialists || "ASL/Educatore"}.`,
@@ -311,7 +317,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
       title: `Colloquio con ${parent} (${student.fullName} - ${student.className})`,
       category: "ricevimento_genitori",
       className: student.className,
-      date: new Date().toISOString().slice(0, 10),
+      date: localDateISO(),
       startTime: "11:15",
       endTime: "12:00",
       notes: `Ricevimento genitori per ${student.fullName}. Recapito: ${student.contactParents?.phone || "N/D"}. Note genitore: ${student.contactParents?.notes || ""}`,
@@ -326,7 +332,8 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
 
   return (
     <div className="space-y-6 pb-12">
-      {/* Header Banner */}
+      {save.error && <p role="alert" className="p-3 text-sm text-rose-700">{save.error}</p>}
+        {/* Header Banner */}
       <div className="bg-white rounded-2xl p-5 sm:p-6 border border-stone-200 shadow-xs">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="space-y-1">
@@ -627,9 +634,9 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
                         <span className="text-[11px] font-bold text-rose-800">Elimina?</span>
                         <button
                           type="button"
-                          onClick={(e) => {
+                          onClick={async (e) => {
                             e.stopPropagation();
-                            onDeleteStudent(student.id);
+                            if (!await save.run(() => onDeleteStudent(student.id))) return;
                             if (selectedStudentForDetail?.id === student.id) {
                               setSelectedStudentForDetail(null);
                             }
@@ -819,8 +826,8 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
                     <span className="text-white text-xs font-bold">Eliminare definitivamente?</span>
                     <button
                       type="button"
-                      onClick={() => {
-                        onDeleteStudent(activeDetailStudent.id);
+                      onClick={async () => {
+                        if (!await save.run(() => onDeleteStudent(activeDetailStudent.id))) return;
                         setSelectedStudentForDetail(null);
                         setStudentIdConfirmingDelete(null);
                       }}
@@ -977,6 +984,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
                   onSubmit={handleAddNoteSubmit}
                   className="bg-purple-50/50 rounded-2xl p-4 border border-purple-200/80 space-y-3"
                 >
+              {save.error && <p role="alert" className="text-sm text-rose-700">{save.error}</p>}
                   <div className="flex items-center space-x-2">
                     <Plus className="w-4 h-4 text-purple-700 font-bold" />
                     <span className="text-xs font-bold text-purple-900 uppercase tracking-wide">
@@ -1045,7 +1053,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
 
                   <div className="flex justify-end">
                     <button
-                      type="submit"
+                      type="submit" disabled={save.pending}
                       className="px-4 py-2 bg-purple-700 hover:bg-purple-800 text-white rounded-xl text-xs font-semibold transition-colors shadow-xs"
                     >
                       Salva Nota nel Diario
@@ -1153,6 +1161,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
             </div>
 
             <form onSubmit={handleSaveStudentSubmit} className="p-6 space-y-4 max-h-[80vh] overflow-y-auto">
+              {save.error && <p role="alert" className="text-sm text-rose-700">{save.error}</p>}
               {/* Dati Anagrafici */}
               <div className="space-y-3">
                 <h3 className="text-xs font-bold text-stone-400 uppercase tracking-wider">
@@ -1447,7 +1456,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
                   Annulla
                 </button>
                 <button
-                  type="submit"
+                  type="submit" disabled={save.pending}
                   className="px-5 py-2 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold rounded-xl transition-colors shadow-xs"
                 >
                   Salva Scheda Alunno
@@ -1483,9 +1492,9 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => {
+                onClick={async () => {
                   const idToDelete = studentToDelete.id;
-                  onDeleteStudent(idToDelete);
+                  if (!await save.run(() => onDeleteStudent(idToDelete))) return;
                   if (selectedStudentForDetail?.id === idToDelete) {
                     setSelectedStudentForDetail(null);
                   }
@@ -1525,8 +1534,8 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  onDeleteNote(noteToDelete.studentId, noteToDelete.noteId);
+                onClick={async () => {
+                  if (!await save.run(() => onDeleteNote(noteToDelete.studentId, noteToDelete.noteId))) return;
                   setNoteToDelete(null);
                 }}
                 className="flex-1 py-2.5 bg-rose-600 hover:bg-rose-700 text-white font-semibold text-xs rounded-xl shadow-xs transition-colors"

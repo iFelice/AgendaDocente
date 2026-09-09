@@ -1,18 +1,11 @@
-import {
-  CalendarEvent,
-  CircularDocument,
-  ExtractedItem,
-  SchoolLevel,
-  Student,
-  StudentNote,
-  TeacherProfile,
-  TimetableMode,
-  TimetableSlot,
-  TimetableType,
-} from "../types";
+import { assertUnchanged } from "./persistenceErrors";
+import { linkLegacyCircularEvents } from "../utils/circularLinks";
+import { localDateISO } from "../utils/dates";
+import { CalendarEvent, CircularDocument, ExtractedItem, SchoolLevel, Student, StudentNote, TeacherProfile, TimetableMode, TimetableSlot, TimetableType, } from "../types";
 import { getCurrentSchoolYear } from "../utils/schoolYear";
-import { clientSideLocalParser, SAMPLE_CIRCULARS } from "./aiService";
-
+import { validateBackup } from "./backup";
+import { database, type LocalData, type LegacyStorage } from "./db";
+import { extractedItemError } from "../utils/circularParser";
 export function getSchoolLevelLabel(level?: SchoolLevel): string {
   switch (level) {
     case "infanzia":
@@ -27,17 +20,6 @@ export function getSchoolLevelLabel(level?: SchoolLevel): string {
       return "Secondaria di I Grado (SSIG)";
   }
 }
-
-const STORAGE_KEYS = {
-  PROFILE: "agedoc_teacher_profile_v2",
-  TIMETABLE: "agedoc_timetable_v2",
-  TIMETABLE_PROVISIONAL: "agedoc_timetable_provvisorio_v2",
-  TIMETABLE_MODE: "agedoc_timetable_mode_v2",
-  EVENTS: "agedoc_events_v2",
-  CIRCULARS: "agedoc_circulars_v2",
-  STUDENTS: "agedoc_students_v2",
-  ONBOARDING_COMPLETED: "agedoc_onboarding_completed_v2",
-};
 
 export const DEFAULT_STUDENTS: Student[] = [
   {
@@ -637,7 +619,7 @@ export const DEFAULT_PROVISIONAL_TIMETABLE: TimetableSlot[] = [
 function getIsoDateOffset(daysOffset: number): string {
   const d = new Date();
   d.setDate(d.getDate() + daysOffset);
-  return d.toISOString().slice(0, 10);
+  return localDateISO(d);
 }
 
 // Initial calendar events for Docente di Sostegno (inizio anno scolastico)
@@ -711,114 +693,68 @@ export const DEFAULT_EVENTS: CalendarEvent[] = [
   },
 ];
 
+export function demoInstallation(): LocalData {
+ return {profile:structuredClone(DEFAULT_PROFILE),events:structuredClone(DEFAULT_EVENTS),circulars:[],students:structuredClone(DEFAULT_STUDENTS),
+ definitiveTimetable:[],provisionalTimetable:structuredClone(DEFAULT_PROVISIONAL_TIMETABLE),timetableMode:'auto',onboardingCompleted:false};
+}
+export async function initializeStorage(legacy?: LegacyStorage): Promise<LocalData> {
+ await database.initialize(demoInstallation(),legacy);
+ return database.readSnapshot();
+}
 export const storage = {
   // PROFILE
-  getProfile(): TeacherProfile {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEYS.PROFILE);
-      if (!raw) {
-        this.saveProfile(DEFAULT_PROFILE);
-        return DEFAULT_PROFILE;
-      }
-      const parsed: TeacherProfile = JSON.parse(raw);
-      // Se l'anno scolastico non è impostato o corrisponde al vecchio default fisso "2025/2026",
-      // aggiorna con l'anno scolastico corrente calcolato (es. 2026/2027 a partire dal 1° agosto)
-      if (!parsed.schoolYear || parsed.schoolYear === "2025/2026") {
-        parsed.schoolYear = getCurrentSchoolYear();
-        this.saveProfile(parsed);
-      }
-      return parsed;
-    } catch {
-      return DEFAULT_PROFILE;
-    }
+  async getProfile(): Promise<TeacherProfile> { return database.read("profile"); },
+  async saveProfile(profile: TeacherProfile, expected?: TeacherProfile): Promise<void> {
+    return database.atomic(async () => { assertUnchanged(await this.getProfile(), expected); return database.write("profile", profile); });
   },
-
-  saveProfile(profile: TeacherProfile): void {
-    localStorage.setItem(STORAGE_KEYS.PROFILE, JSON.stringify(profile));
-  },
-
   // TIMETABLE - DEFINITIVE & PROVISIONAL MANAGEMENT
-  getDefinitiveTimetable(): TimetableSlot[] {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEYS.TIMETABLE);
-      if (raw === null) {
-        // Not yet compiled: return empty array so that provisional is shown by default
-        return [];
-      }
-      return JSON.parse(raw);
-    } catch {
-      return [];
-    }
+  async getDefinitiveTimetable(): Promise<TimetableSlot[]> { return database.read("definitiveTimetable"); },
+  async saveDefinitiveTimetable(slots: TimetableSlot[]): Promise<void> {
+    return database.atomic(async () => { return database.write("definitiveTimetable", slots); });
   },
-
-  saveDefinitiveTimetable(slots: TimetableSlot[]): void {
-    localStorage.setItem(STORAGE_KEYS.TIMETABLE, JSON.stringify(slots));
+  async getProvisionalTimetable(): Promise<TimetableSlot[]> { return database.read("provisionalTimetable"); },
+  async saveProvisionalTimetable(slots: TimetableSlot[]): Promise<void> {
+    return database.atomic(async () => { return database.write("provisionalTimetable", slots); });
   },
-
-  getProvisionalTimetable(): TimetableSlot[] {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEYS.TIMETABLE_PROVISIONAL);
-      if (!raw) {
-        this.saveProvisionalTimetable(DEFAULT_PROVISIONAL_TIMETABLE);
-        return DEFAULT_PROVISIONAL_TIMETABLE;
-      }
-      return JSON.parse(raw);
-    } catch {
-      return DEFAULT_PROVISIONAL_TIMETABLE;
-    }
+  async getTimetableMode(): Promise<TimetableMode> { return database.read("timetableMode"); },
+  async setTimetableMode(mode: TimetableMode): Promise<void> {
+    return database.atomic(async () => { return database.write("timetableMode", mode); });
   },
-
-  saveProvisionalTimetable(slots: TimetableSlot[]): void {
-    localStorage.setItem(STORAGE_KEYS.TIMETABLE_PROVISIONAL, JSON.stringify(slots));
-  },
-
-  getTimetableMode(): TimetableMode {
-    try {
-      const mode = localStorage.getItem(STORAGE_KEYS.TIMETABLE_MODE) as TimetableMode;
-      return mode === "definitivo" || mode === "provvisorio" ? mode : "auto";
-    } catch {
-      return "auto";
-    }
-  },
-
-  setTimetableMode(mode: TimetableMode): void {
-    localStorage.setItem(STORAGE_KEYS.TIMETABLE_MODE, mode);
-  },
-
-  getActiveTimetableInfo(): {
+  async getActiveTimetableInfo(): Promise<{
     slots: TimetableSlot[];
     activeType: "definitivo" | "provvisorio";
     isDefinitiveCompiled: boolean;
     isFallbackToProvisional: boolean;
-  } {
-    const definitive = this.getDefinitiveTimetable();
-    const provisional = this.getProvisionalTimetable();
-    const mode = this.getTimetableMode();
+  }> {
+    const definitive = (await this.getDefinitiveTimetable());
+    const provisional = (await this.getProvisionalTimetable());
+    const mode = (await this.getTimetableMode());
     const isDefinitiveCompiled = Array.isArray(definitive) && definitive.length > 0;
-
     let activeType: "definitivo" | "provvisorio" = "provvisorio";
     let isFallbackToProvisional = false;
-
     if (mode === "provvisorio") {
       activeType = "provvisorio";
-    } else if (mode === "definitivo") {
+    }
+    else if (mode === "definitivo") {
       if (isDefinitiveCompiled) {
         activeType = "definitivo";
-      } else {
+      }
+      else {
         // Fallback: definitivo not yet compiled, use provvisorio
         activeType = "provvisorio";
         isFallbackToProvisional = true;
       }
-    } else {
+    }
+    else {
       // "auto" mode: default to provisional when definitive is not compiled
       if (!isDefinitiveCompiled) {
         activeType = "provvisorio";
         isFallbackToProvisional = true;
-      } else {
+      }
+      else {
         activeType = "definitivo";
       }
     }
-
     return {
       slots: activeType === "definitivo" ? definitive : provisional,
       activeType,
@@ -826,427 +762,336 @@ export const storage = {
       isFallbackToProvisional,
     };
   },
-
-  getTimetable(): TimetableSlot[] {
-    return this.getActiveTimetableInfo().slots;
+  async getTimetable(): Promise<TimetableSlot[]> {
+    return (await this.getActiveTimetableInfo()).slots;
   },
-
-  saveTimetable(slots: TimetableSlot[], targetType: "definitivo" | "provvisorio" = "definitivo"): void {
-    if (targetType === "provvisorio") {
-      this.saveProvisionalTimetable(slots);
-    } else {
-      this.saveDefinitiveTimetable(slots);
-    }
-  },
-
-  saveTimetableSlot(slot: TimetableSlot, targetType: "definitivo" | "provvisorio" = "definitivo"): void {
-    if (targetType === "provvisorio") {
-      const list = this.getProvisionalTimetable();
-      const index = list.findIndex((s) => s.id === slot.id);
-      if (index >= 0) {
-        list[index] = { ...slot, isProvisional: true };
-      } else {
-        list.push({ ...slot, isProvisional: true });
+  async saveTimetable(slots: TimetableSlot[], targetType: "definitivo" | "provvisorio" = "definitivo"): Promise<void> {
+    return database.atomic(async () => {
+      if (targetType === "provvisorio") {
+        await this.saveProvisionalTimetable(slots);
       }
-      this.saveProvisionalTimetable(list);
-    } else {
-      const list = this.getDefinitiveTimetable();
-      const index = list.findIndex((s) => s.id === slot.id);
-      if (index >= 0) {
-        list[index] = { ...slot, isProvisional: false };
-      } else {
-        list.push({ ...slot, isProvisional: false });
+      else {
+        await this.saveDefinitiveTimetable(slots);
       }
-      this.saveDefinitiveTimetable(list);
-    }
+    });
   },
-
-  deleteTimetableSlot(id: string, targetType: "definitivo" | "provvisorio" = "definitivo"): void {
-    if (targetType === "provvisorio") {
-      const list = this.getProvisionalTimetable().filter((s) => s.id !== id);
-      this.saveProvisionalTimetable(list);
-    } else {
-      const list = this.getDefinitiveTimetable().filter((s) => s.id !== id);
-      this.saveDefinitiveTimetable(list);
-    }
+  async saveTimetableSlot(slot: TimetableSlot, targetType: "definitivo" | "provvisorio" = "definitivo", expected?: TimetableSlot): Promise<void> {
+    return database.atomic(async () => {
+      if (targetType === "provvisorio") {
+        const list = (await this.getProvisionalTimetable());
+        const index = list.findIndex((s) => s.id === slot.id);
+        assertUnchanged(list[index], expected);
+        if (index >= 0) {
+          list[index] = { ...slot, isProvisional: true };
+        }
+        else {
+          list.push({ ...slot, isProvisional: true });
+        }
+        await this.saveProvisionalTimetable(list);
+      }
+      else {
+        const list = (await this.getDefinitiveTimetable());
+        const index = list.findIndex((s) => s.id === slot.id);
+        assertUnchanged(list[index], expected);
+        if (index >= 0) {
+          list[index] = { ...slot, isProvisional: false };
+        }
+        else {
+          list.push({ ...slot, isProvisional: false });
+        }
+        await this.saveDefinitiveTimetable(list);
+      }
+    });
   },
-
-  copyProvisionalToDefinitive(): void {
-    const prov = this.getProvisionalTimetable();
-    const cloned = prov.map((s, idx) => ({
-      ...s,
-      id: `tt-def-${Date.now()}-${idx}`,
-      isProvisional: false,
-    }));
-    this.saveDefinitiveTimetable(cloned);
+  async deleteTimetableSlot(id: string, targetType: "definitivo" | "provvisorio" = "definitivo"): Promise<void> {
+    return database.atomic(async () => {
+      if (targetType === "provvisorio") {
+        const list = (await this.getProvisionalTimetable()).filter((s) => s.id !== id);
+        await this.saveProvisionalTimetable(list);
+      }
+      else {
+        const list = (await this.getDefinitiveTimetable()).filter((s) => s.id !== id);
+        await this.saveDefinitiveTimetable(list);
+      }
+    });
   },
-
-  copyDefinitiveToProvisional(): void {
-    const def = this.getDefinitiveTimetable();
-    const cloned = def.map((s, idx) => ({
-      ...s,
-      id: `tt-prov-${Date.now()}-${idx}`,
-      isProvisional: true,
-    }));
-    this.saveProvisionalTimetable(cloned);
+  async copyProvisionalToDefinitive(): Promise<void> {
+    return database.atomic(async () => {
+      const prov = (await this.getProvisionalTimetable());
+      const cloned = prov.map((s, idx) => ({
+        ...s,
+        id: `tt-def-${Date.now()}-${idx}`,
+        isProvisional: false,
+      }));
+      await this.saveDefinitiveTimetable(cloned);
+    });
   },
-
-  clearTimetable(type: "definitivo" | "provvisorio"): void {
-    if (type === "provvisorio") {
-      this.saveProvisionalTimetable([]);
-    } else {
-      this.saveDefinitiveTimetable([]);
-    }
+  async copyDefinitiveToProvisional(): Promise<void> {
+    return database.atomic(async () => {
+      const def = (await this.getDefinitiveTimetable());
+      const cloned = def.map((s, idx) => ({
+        ...s,
+        id: `tt-prov-${Date.now()}-${idx}`,
+        isProvisional: true,
+      }));
+      await this.saveProvisionalTimetable(cloned);
+    });
   },
-
-  resetProvisionalTimetable(): void {
-    this.saveProvisionalTimetable(DEFAULT_PROVISIONAL_TIMETABLE);
+  async clearTimetable(type: "definitivo" | "provvisorio"): Promise<void> {
+    return database.atomic(async () => {
+      if (type === "provvisorio") {
+        await this.saveProvisionalTimetable([]);
+      }
+      else {
+        await this.saveDefinitiveTimetable([]);
+      }
+    });
   },
-
-  resetDefinitiveTimetable(): void {
-    this.saveDefinitiveTimetable(DEFAULT_TIMETABLE);
+  async resetProvisionalTimetable(): Promise<void> {
+    return database.atomic(async () => {
+      await this.saveProvisionalTimetable(DEFAULT_PROVISIONAL_TIMETABLE);
+    });
   },
-
+  async resetDefinitiveTimetable(): Promise<void> {
+    return database.atomic(async () => {
+      await this.saveDefinitiveTimetable(DEFAULT_TIMETABLE);
+    });
+  },
   // EVENTS
-  getEvents(): CalendarEvent[] {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEYS.EVENTS);
-      if (!raw) {
-        this.saveEvents(DEFAULT_EVENTS);
-        return DEFAULT_EVENTS;
+  async getEvents(): Promise<CalendarEvent[]> { return database.read("events"); },
+  async saveEvents(events: CalendarEvent[]): Promise<void> {
+    return database.atomic(async () => { return database.write("events", events); });
+  },
+  async saveEvent(event: CalendarEvent, expected?: CalendarEvent): Promise<void> {
+    return database.atomic(async () => {
+      const list = (await this.getEvents());
+      const index = list.findIndex((e) => e.id === event.id);
+      assertUnchanged(list[index], expected);
+      if (index >= 0) {
+        list[index] = event;
       }
-      return JSON.parse(raw);
-    } catch {
-      return DEFAULT_EVENTS;
-    }
-  },
-
-  saveEvents(events: CalendarEvent[]): void {
-    localStorage.setItem(STORAGE_KEYS.EVENTS, JSON.stringify(events));
-  },
-
-  saveEvent(event: CalendarEvent): void {
-    const list = this.getEvents();
-    const index = list.findIndex((e) => e.id === event.id);
-    if (index >= 0) {
-      list[index] = event;
-    } else {
-      list.push(event);
-    }
-    this.saveEvents(list);
-  },
-
-  deleteEvent(id: string): void {
-    const list = this.getEvents().filter((e) => e.id !== id);
-    this.saveEvents(list);
-  },
-
-  toggleEventCompleted(id: string): void {
-    const list = this.getEvents();
-    const target = list.find((e) => e.id === id);
-    if (target) {
-      target.completed = !target.completed;
-      this.saveEvents(list);
-    }
-  },
-
-  bulkAddEvents(newEvents: CalendarEvent[]): number {
-    const list = this.getEvents();
-    let addedCount = 0;
-    for (const ev of newEvents) {
-      // Avoid duplicate matching same title and date and time
-      const duplicate = list.find(
-        (existing) =>
-          existing.title === ev.title &&
-          existing.date === ev.date &&
-          existing.startTime === ev.startTime
-      );
-      if (!duplicate) {
-        list.push(ev);
-        addedCount++;
+      else {
+        list.push(event);
       }
-    }
-    this.saveEvents(list);
-    return addedCount;
+      await this.saveEvents(list);
+    });
   },
-
-  // CIRCULARS
-  getCirculars(): CircularDocument[] {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEYS.CIRCULARS);
-      let list: CircularDocument[] = raw ? JSON.parse(raw) : [];
-
-      // Auto-heal / backfill extractedItems for circulars that didn't save them previously
-      let updated = false;
-      const profile = this.getProfile();
-      for (const circ of list) {
-        if (!circ.extractedItems || circ.extractedItems.length === 0) {
-          const matchSample = SAMPLE_CIRCULARS.find(
-            (s) => s.title === circ.title || s.title.includes(circ.title) || circ.title.includes(s.title)
-          );
-          const textToParse = matchSample ? matchSample.text : (circ.rawText || "");
-          if (textToParse && textToParse.trim().length > 10) {
-            const parsed = clientSideLocalParser(textToParse, profile);
-            if (parsed && parsed.length > 0) {
-              circ.extractedItems = parsed;
-              circ.extractedCount = parsed.length;
-              circ.relevantCount = parsed.filter((i) => i.relevance === "VERDE" || i.relevance === "GIALLO").length;
-              updated = true;
-            }
-          }
+  async deleteEvent(id: string): Promise<void> {
+    return database.atomic(async () => {
+      const list = (await this.getEvents()).filter((e) => e.id !== id);
+      await this.saveEvents(list);
+    });
+  },
+  async toggleEventCompleted(id: string): Promise<void> {
+    return database.atomic(async () => {
+      const list = (await this.getEvents());
+      const target = list.find((e) => e.id === id);
+      if (target) {
+        target.completed = !target.completed;
+        await this.saveEvents(list);
+      }
+    });
+  },
+  async bulkAddEvents(newEvents: CalendarEvent[]): Promise<number> {
+    return database.atomic(async () => {
+      const list = (await this.getEvents());
+      let addedCount = 0;
+      for (const ev of newEvents) {
+        // Avoid duplicate matching same title and date and time
+        const duplicate = list.find((existing) => existing.id === ev.id ||
+          (ev.sourceCircularId && existing.sourceCircularId === ev.sourceCircularId && existing.sourceItemId === ev.sourceItemId) ||
+          (!ev.sourceCircularId && !existing.sourceCircularId && existing.sourceType === ev.sourceType &&
+            existing.title === ev.title && existing.date === ev.date && existing.startTime === ev.startTime && existing.className === ev.className));
+        if (!duplicate) {
+          list.push(ev);
+          addedCount++;
         }
       }
-      if (updated) {
-        localStorage.setItem(STORAGE_KEYS.CIRCULARS, JSON.stringify(list));
+      await this.saveEvents(list);
+      return addedCount;
+    });
+  },
+  // CIRCULARS
+  async getCirculars(): Promise<CircularDocument[]> { return database.read("circulars"); },
+  async saveCircular(doc: CircularDocument): Promise<void> {
+    return database.atomic(async () => {
+      const list = (await this.getCirculars());
+      // Prevent exact duplicate id
+      const existingIndex = list.findIndex((c) => c.id === doc.id);
+      if (existingIndex >= 0) {
+        list[existingIndex] = doc;
       }
-
-      return list;
-    } catch {
-      return [];
-    }
-  },
-
-  saveCircular(doc: CircularDocument): void {
-    const list = this.getCirculars();
-    // Prevent exact duplicate id
-    const existingIndex = list.findIndex((c) => c.id === doc.id);
-    if (existingIndex >= 0) {
-      list[existingIndex] = doc;
-    } else {
-      list.unshift(doc);
-    }
-    localStorage.setItem(STORAGE_KEYS.CIRCULARS, JSON.stringify(list));
-  },
-
-  updateCircular(doc: CircularDocument): void {
-    const list = this.getCirculars();
-    const idx = list.findIndex((c) => c.id === doc.id);
-    if (idx >= 0) {
-      list[idx] = doc;
-    } else {
-      list.unshift(doc);
-    }
-    localStorage.setItem(STORAGE_KEYS.CIRCULARS, JSON.stringify(list));
-  },
-
-  deleteCircular(id: string): void {
-    const list = this.getCirculars().filter((c) => c.id !== id);
-    localStorage.setItem(STORAGE_KEYS.CIRCULARS, JSON.stringify(list));
-  },
-
-  deleteExtractedItemFromCircular(circularId: string, tempId: string): void {
-    const list = this.getCirculars();
-    const circ = list.find((c) => c.id === circularId);
-    if (circ && circ.extractedItems) {
-      circ.extractedItems = circ.extractedItems.filter((it) => it.tempId !== tempId);
-      circ.extractedCount = circ.extractedItems.length;
-      circ.relevantCount = circ.extractedItems.filter((i) => i.relevance === "VERDE" || i.relevance === "GIALLO").length;
-      this.updateCircular(circ);
-    }
-  },
-
-  deleteEventMatchingExtractedItem(item: ExtractedItem): boolean {
-    const events = this.getEvents();
-    const idx = events.findIndex(
-      (e) =>
-        e.date === item.date &&
-        (e.title.trim().toLowerCase() === item.title.trim().toLowerCase() ||
-          (e.startTime === item.startTime && e.date === item.date && Math.abs(e.title.length - item.title.length) < 15))
-    );
-    if (idx >= 0) {
-      events.splice(idx, 1);
-      this.saveEvents(events);
-      return true;
-    }
-    return false;
-  },
-
-  /**
-   * Syncs commitments from a circular into the calendar planning
-   */
-  syncCircularCommitments(circularId: string, onlyRelevant: boolean = false): number {
-    const circulars = this.getCirculars();
-    const target = circulars.find((c) => c.id === circularId);
-    if (!target || !target.extractedItems || target.extractedItems.length === 0) {
-      return 0;
-    }
-
-    const itemsToImport = target.extractedItems.filter((item) => {
-      if (onlyRelevant) {
-        return item.relevance === "VERDE" || item.relevance === "GIALLO";
+      else {
+        list.unshift(doc);
       }
+      await database.write("circulars", list);
+    });
+  },
+  async updateCircular(doc: CircularDocument): Promise<void> {
+    return database.atomic(async () => {
+      const list = (await this.getCirculars());
+      const idx = list.findIndex((c) => c.id === doc.id);
+      if (idx >= 0) {
+        list[idx] = doc;
+      }
+      else {
+        list.unshift(doc);
+      }
+      await database.write("circulars", list);
+    });
+  },
+  async deleteCircular(id: string): Promise<void> {
+    return database.atomic(async () => {
+      const list = (await this.getCirculars()).filter((c) => c.id !== id);
+      await database.write("circulars", list);
+    });
+  },
+  async deleteExtractedItemFromCircular(circularId: string, tempId: string): Promise<void> {
+    return database.atomic(async () => {
+      const list = (await this.getCirculars());
+      const circ = list.find((c) => c.id === circularId);
+      if (circ && circ.extractedItems) {
+        circ.extractedItems = circ.extractedItems.filter((it) => it.tempId !== tempId);
+        circ.extractedCount = circ.extractedItems.length;
+        circ.relevantCount = circ.extractedItems.filter((i) => i.relevance === "VERDE" || i.relevance === "GIALLO").length;
+        await this.updateCircular(circ);
+      }
+    });
+  },
+  async deleteEventMatchingExtractedItem(item: ExtractedItem, circularId: string): Promise<boolean> {
+    return database.atomic(async () => {
+      const events = (await this.getEvents());
+      const remaining = events.filter(e => !(e.sourceType === 'circolare' && e.sourceCircularId === circularId && e.sourceItemId === item.tempId));
+      if (remaining.length === events.length)
+        return false;
+      await this.saveEvents(remaining);
       return true;
     });
-
-    const newEvents: CalendarEvent[] = itemsToImport.map((it) =>
-      convertExtractedItemToEvent(it, target.title)
-    );
-
-    const added = this.bulkAddEvents(newEvents);
-    return added;
   },
-
+  /**
+  * Syncs commitments from a circular into the calendar planning
+  */
+  async syncCircularCommitments(circularId: string, onlyRelevant: boolean = true): Promise<number> {
+    return database.atomic(async () => {
+      const circulars = (await this.getCirculars());
+      const target = circulars.find((c) => c.id === circularId);
+      if (!target || !target.extractedItems || target.extractedItems.length === 0) {
+        return 0;
+      }
+      const itemsToImport = target.extractedItems.filter((item) => {
+        if (onlyRelevant) {
+          return item.relevance === "VERDE" || item.relevance === "GIALLO";
+        }
+        return true;
+      });
+      const newEvents: CalendarEvent[] = itemsToImport.filter(it => !extractedItemError(it)).map((it) => convertExtractedItemToEvent(it, target.title, target.id));
+      const added = (await this.bulkAddEvents(newEvents));
+      return added;
+    });
+  },
   // CLASSI & ALUNNI
-  getStudents(): Student[] {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEYS.STUDENTS);
-      if (!raw) {
-        localStorage.setItem(STORAGE_KEYS.STUDENTS, JSON.stringify(DEFAULT_STUDENTS));
-        return DEFAULT_STUDENTS;
+  async getStudents(): Promise<Student[]> { return database.read("students"); },
+  async saveStudents(students: Student[]): Promise<void> {
+    return database.atomic(async () => { return database.write("students", students); });
+  },
+  async saveStudent(student: Student, expected?: Student): Promise<void> {
+    return database.atomic(async () => {
+      const list = (await this.getStudents());
+      const idx = list.findIndex((s) => s.id === student.id);
+      if (expected) {
+        const withoutNotes = (value?: Student) => value && {...value, notes:[], updatedAt:undefined};
+        assertUnchanged(withoutNotes(list[idx]), withoutNotes(expected));
       }
-      return JSON.parse(raw);
-    } catch (e) {
-      console.warn("Failed to parse students:", e);
-      return DEFAULT_STUDENTS;
-    }
+      const updatedStudent = {
+        ...student,
+        notes: idx >= 0 ? list[idx].notes : student.notes,
+        updatedAt: new Date().toISOString(),
+      };
+      if (idx >= 0) {
+        list[idx] = updatedStudent;
+      }
+      else {
+        list.push(updatedStudent);
+      }
+      await this.saveStudents(list);
+    });
   },
-
-  saveStudents(students: Student[]): void {
-    try {
-      localStorage.setItem(STORAGE_KEYS.STUDENTS, JSON.stringify(students));
-    } catch (e) {
-      console.warn("Failed to save students:", e);
-    }
+  async deleteStudent(id: string): Promise<void> {
+    return database.atomic(async () => {
+      const list = (await this.getStudents()).filter((s) => s.id !== id);
+      await this.saveStudents(list);
+    });
   },
-
-  saveStudent(student: Student): void {
-    const list = this.getStudents();
-    const idx = list.findIndex((s) => s.id === student.id);
-    const updatedStudent = {
-      ...student,
-      updatedAt: new Date().toISOString(),
-    };
-    if (idx >= 0) {
-      list[idx] = updatedStudent;
-    } else {
-      list.push(updatedStudent);
-    }
-    this.saveStudents(list);
+  async addStudentNote(studentId: string, note: StudentNote): Promise<void> {
+    return database.atomic(async () => {
+      const list = (await this.getStudents());
+      const student = list.find((s) => s.id === studentId);
+      if (!student)
+        return;
+      student.notes = [note, ...(student.notes || [])];
+      student.updatedAt = new Date().toISOString();
+      await this.saveStudents(list);
+    });
   },
-
-  deleteStudent(id: string): void {
-    const list = this.getStudents().filter((s) => s.id !== id);
-    this.saveStudents(list);
+  async deleteStudentNote(studentId: string, noteId: string): Promise<void> {
+    return database.atomic(async () => {
+      const list = (await this.getStudents());
+      const student = list.find((s) => s.id === studentId);
+      if (!student)
+        return;
+      student.notes = (student.notes || []).filter((n) => n.id !== noteId);
+      student.updatedAt = new Date().toISOString();
+      await this.saveStudents(list);
+    });
   },
-
-  addStudentNote(studentId: string, note: StudentNote): void {
-    const list = this.getStudents();
-    const student = list.find((s) => s.id === studentId);
-    if (!student) return;
-    student.notes = [note, ...(student.notes || [])];
-    student.updatedAt = new Date().toISOString();
-    this.saveStudents(list);
-  },
-
-  deleteStudentNote(studentId: string, noteId: string): void {
-    const list = this.getStudents();
-    const student = list.find((s) => s.id === studentId);
-    if (!student) return;
-    student.notes = (student.notes || []).filter((n) => n.id !== noteId);
-    student.updatedAt = new Date().toISOString();
-    this.saveStudents(list);
-  },
-
   // BACKUP & RESTORE
-  exportDataBackup(): string {
-    const data = {
-      version: 2,
-      exportedAt: new Date().toISOString(),
-      profile: this.getProfile(),
-      timetable: this.getTimetable(),
-      events: this.getEvents(),
-      circulars: this.getCirculars(),
-      students: this.getStudents(),
-    };
-    return JSON.stringify(data, null, 2);
-  },
-
-  importDataBackup(jsonString: string): boolean {
+  async exportDataBackup(): Promise<string> { return JSON.stringify({ version: 3, exportedAt: new Date().toISOString(), ...await database.readSnapshot() }, null, 2); },
+  async importDataBackup(jsonString: string): Promise<boolean> {
     try {
-      const data = JSON.parse(jsonString);
-      if (data.profile) this.saveProfile(data.profile);
-      if (data.timetable) this.saveTimetable(data.timetable);
-      if (data.events) this.saveEvents(data.events);
-      if (data.students) this.saveStudents(data.students);
-      if (data.circulars) {
-        localStorage.setItem(STORAGE_KEYS.CIRCULARS, JSON.stringify(data.circulars));
-      }
+      const data: unknown = JSON.parse(jsonString);
+      validateBackup(data);
+      await database.atomic(async () => {
+        const current = await database.readSnapshot();
+        await database.restore({ profile: data.profile, events: linkLegacyCircularEvents(data.events, data.circulars), circulars: data.circulars, students: data.students,
+          definitiveTimetable: data.version === 3 ? data.definitiveTimetable : data.timetable,
+          provisionalTimetable: data.version === 3 ? data.provisionalTimetable : current.provisionalTimetable,
+          timetableMode: data.version === 3 ? data.timetableMode : current.timetableMode,
+          onboardingCompleted: data.version === 3 ? data.onboardingCompleted : current.onboardingCompleted });
+      });
       return true;
-    } catch (e) {
-      console.warn("Failed to restore backup:", e);
+    }
+    catch {
       return false;
     }
   },
-
   // ONBOARDING STATUS
-  hasCompletedOnboarding(): boolean {
-    try {
-      return localStorage.getItem(STORAGE_KEYS.ONBOARDING_COMPLETED) === "true";
-    } catch {
-      return false;
-    }
+  async hasCompletedOnboarding(): Promise<boolean> { return database.read("onboardingCompleted"); },
+  async setOnboardingCompleted(completed: boolean): Promise<void> {
+    return database.atomic(async () => { return database.write("onboardingCompleted", completed); });
   },
-
-  setOnboardingCompleted(completed: boolean): void {
-    try {
-      if (completed) {
-        localStorage.setItem(STORAGE_KEYS.ONBOARDING_COMPLETED, "true");
-      } else {
-        localStorage.removeItem(STORAGE_KEYS.ONBOARDING_COMPLETED);
-      }
-    } catch (e) {
-      console.warn("Failed to set onboarding status:", e);
-    }
-  },
-
-  resetOnboarding(): void {
-    this.setOnboardingCompleted(false);
+  async resetOnboarding(): Promise<void> {
+    return database.atomic(async () => {
+      await this.setOnboardingCompleted(false);
+    });
   },
 };
-
 export function convertExtractedItemToEvent(
-  it: ExtractedItem,
-  sourceCircularTitle: string
+  it: ExtractedItem, sourceCircularTitle: string, sourceCircularId: string
 ): CalendarEvent {
+  const error = extractedItemError(it);
+  if (error) throw new Error(error);
   return {
-    id: `ev-circ-${it.tempId || Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-    title: it.title,
-    category: it.category,
-    date: it.date,
-    startTime: it.startTime || "15:00",
-    endTime: it.endTime || "16:30",
-    isAllDay: it.isDeadline ? true : false,
-    className: it.className || undefined,
-    subject: it.subject || undefined,
-    location: it.location || undefined,
-    notes: it.notes || it.relevanceReason,
-    sourceType: "circolare",
-    sourceCircularTitle: sourceCircularTitle,
+    id: `ev-circ-${sourceCircularId}-${it.tempId}`,
+    title: it.title, category: it.category, date: it.date,
+    startTime: it.startTime || undefined, endTime: it.endTime || undefined,
+    isAllDay: !!it.isDeadline && !it.startTime,
+    className: it.className || undefined, subject: it.subject || undefined,
+    location: it.location || undefined, notes: it.notes || it.relevanceReason,
+    sourceType: 'circolare', sourceCircularTitle, sourceCircularId, sourceItemId: it.tempId,
     completed: false,
   };
 }
 
-export function isCommitmentInEvents(item: ExtractedItem, events: CalendarEvent[]): boolean {
-  return events.some((ev) => {
-    // Exact date match
-    if (ev.date !== item.date) return false;
-
-    // Matching title (cleaned)
-    const normEv = ev.title.trim().toLowerCase();
-    const normIt = item.title.trim().toLowerCase();
-    if (normEv === normIt) return true;
-    if (normEv.includes(normIt) || normIt.includes(normEv)) {
-      if (item.startTime && ev.startTime) {
-        return item.startTime.slice(0, 2) === ev.startTime.slice(0, 2);
-      }
-      return true;
-    }
-
-    // Matching class and start time
-    if (item.className && ev.className && item.className.toUpperCase() === ev.className.toUpperCase()) {
-      if (item.startTime && ev.startTime && item.startTime === ev.startTime) return true;
-    }
-
-    return false;
-  });
+export function isCommitmentInEvents(item: ExtractedItem, events: CalendarEvent[], circularId: string): boolean {
+  return events.some(ev => ev.sourceType === 'circolare' && ev.sourceCircularId === circularId && ev.sourceItemId === item.tempId);
 }

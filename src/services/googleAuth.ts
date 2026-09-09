@@ -13,11 +13,12 @@ import firebaseConfig from "../../firebase-applet-config.json";
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 export const auth = getAuth(app);
 
-// Only standard, non-sensitive identity scopes for sign in
-// (Sensitive scopes like calendar.events trigger "Accesso bloccato: verifica Google non completata")
+// Calendar writes use the primary (owned) calendar; identity scopes alone cannot authorize them.
+// The OAuth consent screen must allow this scope for the configured beta testers.
 export const SCOPES = [
   "https://www.googleapis.com/auth/userinfo.email",
   "https://www.googleapis.com/auth/userinfo.profile",
+  "https://www.googleapis.com/auth/calendar.events.owned",
 ];
 
 const provider = new GoogleAuthProvider();

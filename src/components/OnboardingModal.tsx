@@ -1,3 +1,4 @@
+import { usePersistenceAction } from "../hooks/usePersistenceAction";
 import React, { useState, useEffect } from "react";
 import {
   School,
@@ -23,7 +24,7 @@ import { signInWithGoogle, isUserCancellationError } from "../services/googleAut
 interface OnboardingModalProps {
   isOpen: boolean;
   initialProfile: TeacherProfile;
-  onFinish: (profile: TeacherProfile, openCircularScannerImmediately?: boolean) => void;
+  onFinish: (profile: TeacherProfile, openCircularScannerImmediately?: boolean) => void | false | Promise<void | false>;
   onClose: () => void;
   googleUser?: { displayName?: string | null; email?: string | null; photoURL?: string | null } | null;
   onGoogleLogin?: () => Promise<any>;
@@ -52,6 +53,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   googleUser,
   onGoogleLogin,
 }) => {
+  const save = usePersistenceAction();
   const [step, setStep] = useState<1 | 2 | 3 | 4 | 5>(1);
 
   // Form State
@@ -262,14 +264,15 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
     };
   };
 
-  const handleCompleteSetup = (openScanner: boolean) => {
+  const handleCompleteSetup = async (openScanner: boolean) => {
     const updatedProfile = buildProfile();
-    onFinish(updatedProfile, openScanner);
+    if (!await save.run(() => onFinish(updatedProfile, openScanner))) return;
   };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-stone-950/60 backdrop-blur-xs overflow-y-auto">
       <div className="bg-white rounded-2xl max-w-2xl w-full shadow-2xl border border-stone-200 flex flex-col overflow-hidden my-auto animate-in fade-in zoom-in-95">
+        {save.error && <p role="alert" className="p-3 text-sm text-rose-700">{save.error}</p>}
         {/* Header with Step indicator */}
         <div className="bg-emerald-800 text-white p-5">
           <div className="flex items-center justify-between">

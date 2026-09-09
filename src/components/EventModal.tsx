@@ -1,3 +1,7 @@
+import { usePersistenceAction } from "../hooks/usePersistenceAction";
+import { isGoogleSyncEnabled } from "../services/googleCalendarService";
+import { eventDateError } from "../utils/dates";
+import { localDateISO } from "../utils/dates";
 import React, { useState, useEffect } from "react";
 import { Clock, MapPin, X, Calendar, BookOpen, AlertCircle, Trash2 } from "lucide-react";
 import { CalendarEvent, EventCategory, TeacherProfile } from "../types";
@@ -9,8 +13,8 @@ interface EventModalProps {
   initialDate?: string;
   initialEventData?: Partial<CalendarEvent> | null;
   profile: TeacherProfile;
-  onSave: (event: CalendarEvent) => void;
-  onDelete?: (id: string) => void;
+  onSave: (event: CalendarEvent, expected?: CalendarEvent) => void | false | Promise<void | false>;
+  onDelete?: (id: string) => void | false | Promise<void | false>;
   isGoogleConnected?: boolean;
   googleUserEmail?: string;
 }
@@ -30,6 +34,13 @@ const CATEGORIES: { id: EventCategory; label: string }[] = [
   { id: "personale", label: "Personale" },
 ];
 
+/** Defaults are only suggestions for a new manual event, never replacements for source data. */
+export function getEventModalTimeFields(source?: Partial<CalendarEvent> | null) {
+  return source
+    ? { startTime: source.startTime ?? "", endTime: source.endTime ?? "", location: source.location ?? "" }
+    : { startTime: "15:00", endTime: "16:30", location: "Sede Centrale" };
+}
+
 export const EventModal: React.FC<EventModalProps> = ({
   isOpen,
   onClose,
@@ -42,67 +53,69 @@ export const EventModal: React.FC<EventModalProps> = ({
   isGoogleConnected = false,
   googleUserEmail,
 }) => {
+  const save = usePersistenceAction();
+  const [validationError, setValidationError] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [category, setCategory] = useState<EventCategory>("consiglio_classe");
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
-  const [startTime, setStartTime] = useState("15:00");
-  const [endTime, setEndTime] = useState("16:30");
+  const [date, setDate] = useState(localDateISO());
+  const initialTimeFields = getEventModalTimeFields(eventToEdit ?? initialEventData);
+  const [startTime, setStartTime] = useState(initialTimeFields.startTime);
+  const [endTime, setEndTime] = useState(initialTimeFields.endTime);
   const [isAllDay, setIsAllDay] = useState(false);
   const [className, setClassName] = useState("");
   const [subject, setSubject] = useState("");
-  const [location, setLocation] = useState("");
+  const [location, setLocation] = useState(initialTimeFields.location);
   const [notes, setNotes] = useState("");
   const [syncWithGoogle, setSyncWithGoogle] = useState(false);
   const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
 
   useEffect(() => {
+    const timeFields = getEventModalTimeFields(eventToEdit ?? initialEventData);
+    setStartTime(timeFields.startTime);
+    setEndTime(timeFields.endTime);
+    setLocation(timeFields.location);
+    setValidationError(null);
     setIsConfirmingDelete(false);
     if (eventToEdit) {
       setTitle(eventToEdit.title);
       setCategory(eventToEdit.category);
       setDate(eventToEdit.date);
-      setStartTime(eventToEdit.startTime || "15:00");
-      setEndTime(eventToEdit.endTime || "16:30");
       setIsAllDay(!!eventToEdit.isAllDay);
       setClassName(eventToEdit.className || "");
       setSubject(eventToEdit.subject || "");
-      setLocation(eventToEdit.location || "");
       setNotes(eventToEdit.notes || "");
-      setSyncWithGoogle(!!eventToEdit.googleEventId || !!eventToEdit.syncedWithGoogle);
+      setSyncWithGoogle(isGoogleSyncEnabled(eventToEdit));
     } else if (initialEventData) {
       setTitle(initialEventData.title || "");
       setCategory(initialEventData.category || "glo");
-      setDate(initialEventData.date || initialDate || new Date().toISOString().slice(0, 10));
-      setStartTime(initialEventData.startTime || "15:00");
-      setEndTime(initialEventData.endTime || "16:30");
+      setDate(initialEventData.date || initialDate || localDateISO());
       setIsAllDay(!!initialEventData.isAllDay);
       setClassName(initialEventData.className || profile.classes[0] || "1A");
       setSubject(initialEventData.subject || profile.primarySubjects[0] || "");
-      setLocation(initialEventData.location || "Sede Centrale");
       setNotes(initialEventData.notes || "");
-      setSyncWithGoogle(isGoogleConnected);
+      setSyncWithGoogle(isGoogleSyncEnabled(initialEventData));
     } else {
       setTitle("");
       setCategory("consiglio_classe");
-      setDate(initialDate || new Date().toISOString().slice(0, 10));
-      setStartTime("15:00");
-      setEndTime("16:30");
+      setDate(initialDate || localDateISO());
       setIsAllDay(false);
       setClassName(profile.classes[0] || "1A");
       setSubject(profile.primarySubjects[0] || "");
-      setLocation("Sede Centrale");
       setNotes("");
-      setSyncWithGoogle(isGoogleConnected);
+      setSyncWithGoogle(false);
     }
-  }, [eventToEdit, initialDate, initialEventData, profile, isOpen, isGoogleConnected]);
+  }, [eventToEdit, initialDate, initialEventData, isOpen]);
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
 
+    const error = eventDateError({ date, startTime, endTime, isAllDay });
+    if (error) { setValidationError(error); return; }
     const newEvent: CalendarEvent = {
+      ...eventToEdit,
       id: eventToEdit ? eventToEdit.id : `ev-${Date.now()}`,
       title: title.trim(),
       category,
@@ -120,7 +133,7 @@ export const EventModal: React.FC<EventModalProps> = ({
       syncedWithGoogle: syncWithGoogle,
     };
 
-    onSave(newEvent);
+    if (!await save.run(() => onSave(newEvent, eventToEdit ?? undefined))) return;
     onClose();
   };
 
@@ -159,7 +172,8 @@ export const EventModal: React.FC<EventModalProps> = ({
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4 mt-4 text-xs">
-          {/* Category Chips */}
+          {save.error && <p role="alert" className="p-3 text-sm text-rose-700">{save.error}</p>}
+        {/* Category Chips */}
           <div>
             <label className="block font-semibold text-stone-700 mb-1.5">Tipologia Impegno</label>
             <div className="flex flex-wrap gap-1.5">
@@ -219,6 +233,10 @@ export const EventModal: React.FC<EventModalProps> = ({
             </div>
           </div>
 
+          {validationError && <p role="alert" className="text-sm text-rose-700">{validationError}</p>}
+          {eventToEdit?.googleEventId && !syncWithGoogle && (
+            <p className="text-xs text-stone-600">Sincronizzazione disattivata: la copia su Google resta disponibile e non verrà aggiornata o eliminata da questa agenda.</p>
+          )}
           {/* Times */}
           {!isAllDay && (
             <div className="grid grid-cols-2 gap-3">
@@ -294,7 +312,7 @@ export const EventModal: React.FC<EventModalProps> = ({
           </div>
 
           {/* Google Calendar Sync Option */}
-          {isGoogleConnected && (
+          {(isGoogleConnected || !!eventToEdit?.googleEventId || syncWithGoogle) && (
             <div className="p-3 rounded-xl bg-blue-50/70 border border-blue-200 flex items-center justify-between">
               <div className="flex items-center space-x-2.5">
                 <div className="w-5 h-5 flex-shrink-0">
@@ -343,8 +361,8 @@ export const EventModal: React.FC<EventModalProps> = ({
                   <span className="text-xs font-bold text-rose-900 pl-1">Eliminare davvero?</span>
                   <button
                     type="button"
-                    onClick={() => {
-                      onDelete(eventToEdit.id);
+                    onClick={async () => {
+                      if (!await save.run(() => onDelete(eventToEdit.id))) return;
                       setIsConfirmingDelete(false);
                       onClose();
                     }}
@@ -372,7 +390,7 @@ export const EventModal: React.FC<EventModalProps> = ({
                 Annulla
               </button>
               <button
-                type="submit"
+                type="submit" disabled={save.pending}
                 className="px-5 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg shadow-xs transition-colors"
               >
                 Salva Impegno

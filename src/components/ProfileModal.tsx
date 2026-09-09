@@ -1,4 +1,7 @@
-import React, { useState, useEffect } from "react";
+import { restoreAndRefresh } from "../services/restoreWorkflow";
+import { usePersistenceAction } from "../hooks/usePersistenceAction";
+import { localDateISO } from "../utils/dates";
+import React, { useState, useEffect, useRef } from "react";
 import {
   Download,
   Plus,
@@ -30,8 +33,8 @@ interface ProfileModalProps {
   isOpen: boolean;
   onClose: () => void;
   profile: TeacherProfile;
-  onSaveProfile: (updatedProfile: TeacherProfile) => void;
-  onDataImported: () => void;
+  onSaveProfile: (updatedProfile: TeacherProfile, expected?: TeacherProfile) => void | false | Promise<void | false>;
+  onDataImported: () => void | false | Promise<void | false>;
   onOpenTutorial?: () => void;
   googleUser?: FirebaseUser | null;
   googleAccessToken?: string | null;
@@ -57,6 +60,8 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   onSyncAllToGoogle,
   initialTab = "profilo",
 }) => {
+  const save = usePersistenceAction();
+  const editBaseline = useRef(profile);
   const [activeTab, setActiveTab] = useState<"profilo" | "backup" | "google">(initialTab);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -191,7 +196,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   };
 
   // Save profile
-  const handleSave = (e: React.FormEvent) => {
+  const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     const updated: TeacherProfile = {
       ...profile,
@@ -207,43 +212,39 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
       isSupportTeacher,
       assignedStudents,
     };
-    onSaveProfile(updated);
+    if (!await save.run(() => onSaveProfile(updated, editBaseline.current))) return;
     onClose();
   };
 
   // Backup Export
-  const handleExportBackup = () => {
-    const jsonStr = storage.exportDataBackup();
+  const handleExportBackup = async () => {
+    let jsonStr: string;
+    try { jsonStr = await storage.exportDataBackup(); }
+    catch { setImportMessage("Esportazione non riuscita: impossibile leggere l’archivio locale. Nessun file parziale è stato scaricato."); return; }
     const blob = new Blob([jsonStr], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `backup_agenda_docente_${new Date().toISOString().slice(0, 10)}.json`;
+    link.download = `backup_agenda_docente_${localDateISO()}.json`;
     link.click();
     URL.revokeObjectURL(url);
   };
 
   // Backup Import
-  const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      const ok = storage.importDataBackup(reader.result as string);
-      if (ok) {
-        setImportMessage("Backup ripristinato con successo! I dati sono stati ricaricati.");
-        onDataImported();
-      } else {
-        setImportMessage("Errore: il file di backup non è valido.");
-      }
-    };
-    reader.readAsText(file);
+    await save.run(async () => {
+      const json = await file.text();
+      setImportMessage(await restoreAndRefresh(json, value => storage.importDataBackup(value), onDataImported));
+    });
   };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-950/40 backdrop-blur-xs">
       <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] shadow-2xl border border-stone-200 flex flex-col overflow-hidden animate-in fade-in zoom-in-95">
+        {save.error && <p role="alert" className="p-3 text-sm text-rose-700">{save.error}</p>}
         {/* Header */}
         <div className="p-4 sm:p-5 border-b border-stone-200 flex items-center justify-between bg-stone-50">
           <div className="flex items-center space-x-3">
@@ -689,7 +690,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
 
               <div className="flex justify-end pt-3">
                 <button
-                  type="submit"
+                  type="submit" disabled={save.pending}
                   className="px-5 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl shadow-xs"
                 >
                   Salva Modifiche Profilo
@@ -744,7 +745,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                   </div>
                   <label className="block w-full py-2 px-3 bg-stone-100 hover:bg-stone-200 text-stone-800 font-semibold rounded-lg text-center cursor-pointer transition-colors">
                     <span>Scegli File JSON...</span>
-                    <input type="file" accept=".json" onChange={handleImportFile} className="hidden" />
+                    <input type="file" disabled={save.pending} accept=".json" onChange={handleImportFile} className="hidden" />
                   </label>
                 </div>
               </div>
@@ -985,15 +986,15 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                       </div>
                       <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-center">
                         <div className="text-lg font-bold text-emerald-800">
-                          {events.filter((e) => e.googleEventId || e.syncedWithGoogle).length}
+                          {events.filter((e) => e.syncedWithGoogle === true).length}
                         </div>
-                        <div className="text-[11px] text-emerald-700 font-medium mt-0.5">Già Sincronizzati</div>
+                        <div className="text-[11px] text-emerald-700 font-medium mt-0.5">Sync abilitata</div>
                       </div>
                       <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-center">
                         <div className="text-lg font-bold text-amber-800">
-                          {events.filter((e) => !e.googleEventId && !e.syncedWithGoogle).length}
+                          {events.filter((e) => e.syncedWithGoogle !== true).length}
                         </div>
-                        <div className="text-[11px] text-amber-700 font-medium mt-0.5">Da Sincronizzare</div>
+                        <div className="text-[11px] text-amber-700 font-medium mt-0.5">Solo locali / Sync disattivata</div>
                       </div>
                     </div>
 
@@ -1005,7 +1006,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                           <div>
                             <h5 className="font-bold text-xs">Conferma Sincronizzazione Google Calendar</h5>
                             <p className="text-xs text-blue-800 mt-0.5 leading-relaxed">
-                              Stai per esportare e sincronizzare <strong>{events.length} impegni</strong> sul tuo
+                              Stai per esportare e sincronizzare <strong>{events.filter(e => e.syncedWithGoogle === true).length} impegni con sincronizzazione abilitata</strong> sul tuo
                               Google Calendar associato all'account <strong>{googleUser.email}</strong>.
                               Vuoi procedere?
                             </p>
@@ -1054,7 +1055,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                       <div className="pt-1 flex flex-col sm:flex-row gap-2">
                         <button
                           type="button"
-                          disabled={isSyncing || events.length === 0}
+                          disabled={isSyncing || !events.some(e => e.syncedWithGoogle === true)}
                           onClick={() => setShowSyncConfirm(true)}
                           className="flex-1 inline-flex items-center justify-center space-x-2 px-4 py-2.5 bg-emerald-700 hover:bg-emerald-800 disabled:bg-stone-300 disabled:cursor-not-allowed text-white font-bold rounded-xl shadow-xs transition-colors cursor-pointer text-xs"
                         >

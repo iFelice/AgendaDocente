@@ -9,12 +9,14 @@
     "start": "node dist/server.cjs",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "TZ=Europe/Rome tsx --test tests/*.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",
+    "dexie": "^4.4.5",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
     "firebase": "^12.18.0",
@@ -29,6 +31,8 @@
     "@types/node": "^22.14.0",
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.25.0",
+    "fake-indexeddb": "^6.2.5",
+    "react-test-renderer": "^19.2.8",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",

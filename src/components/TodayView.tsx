@@ -1,3 +1,4 @@
+import { localDateISO } from "../utils/dates";
 import React from "react";
 import {
   BookOpen,
@@ -45,7 +46,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
 }) => {
   const [confirmingDeleteEventId, setConfirmingDeleteEventId] = React.useState<string | null>(null);
   const now = new Date();
-  const todayIso = now.toISOString().slice(0, 10);
+  const todayIso = localDateISO(now);
   // In JS, 0 is Sunday, 1 is Monday, ... 6 is Saturday
   const currentDayOfWeek = now.getDay() === 0 ? 7 : (now.getDay() as 1 | 2 | 3 | 4 | 5 | 6);
 

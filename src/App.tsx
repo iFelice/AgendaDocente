@@ -1,4 +1,9 @@
-import React, { useState, useEffect } from "react";
+import { deleteEventLocallyFirst } from "./services/eventWorkflows";
+import { observeLocalData, retainEqual } from "./services/observeLocalData";
+import { persistenceErrorMessage } from "./services/persistenceErrors";
+import { database, type LocalData } from "./services/db";
+import { localDateISO } from "./utils/dates";
+import React, { useState, useEffect, useRef, lazy, Suspense } from "react";
 import {
   CalendarEvent,
   CircularDocument,
@@ -17,13 +22,13 @@ import { TodayView } from "./components/TodayView";
 import { WeekView } from "./components/WeekView";
 import { MonthView } from "./components/MonthView";
 import { DeadlinesView } from "./components/DeadlinesView";
-import { TimetableEditor } from "./components/TimetableEditor";
-import { CircularsArchiveView } from "./components/CircularsArchiveView";
-import { ClassesView } from "./components/ClassesView";
-import { CircularAnalyzerModal } from "./components/CircularAnalyzerModal";
+const TimetableEditor = lazy(() => import("./components/TimetableEditor").then(module => ({default: module.TimetableEditor})));
+const CircularsArchiveView = lazy(() => import("./components/CircularsArchiveView").then(module => ({default: module.CircularsArchiveView})));
+const ClassesView = lazy(() => import("./components/ClassesView").then(module => ({default: module.ClassesView})));
+const CircularAnalyzerModal = lazy(() => import("./components/CircularAnalyzerModal").then(module => ({default: module.CircularAnalyzerModal})));
 import { EventModal } from "./components/EventModal";
-import { ProfileModal } from "./components/ProfileModal";
-import { OnboardingModal } from "./components/OnboardingModal";
+const ProfileModal = lazy(() => import("./components/ProfileModal").then(module => ({default: module.ProfileModal})));
+const OnboardingModal = lazy(() => import("./components/OnboardingModal").then(module => ({default: module.OnboardingModal})));
 import { OfflineIndicator } from "./components/OfflineIndicator";
 import { CheckCircle2, AlertCircle } from "lucide-react";
 import { User as FirebaseUser } from "firebase/auth";
@@ -35,28 +40,32 @@ import {
   isUserCancellationError,
 } from "./services/googleAuth";
 import {
-  createGoogleCalendarEvent,
-  updateGoogleCalendarEvent,
-  deleteGoogleCalendarEvent,
+  isGoogleSyncEnabled,
+  syncOptedInGoogleEvents,
 } from "./services/googleCalendarService";
 
-export default function App() {
-  const [profile, setProfile] = useState<TeacherProfile>(() => storage.getProfile());
+export default function App({ initialData }: { initialData: LocalData }) {
+  const [profile, setProfile] = useState<TeacherProfile>(() => initialData.profile);
   const [definitiveTimetable, setDefinitiveTimetable] = useState<TimetableSlot[]>(() =>
-    storage.getDefinitiveTimetable()
+    initialData.definitiveTimetable
   );
   const [provisionalTimetable, setProvisionalTimetable] = useState<TimetableSlot[]>(() =>
-    storage.getProvisionalTimetable()
+    initialData.provisionalTimetable
   );
   const [timetableMode, setTimetableMode] = useState<TimetableMode>(() =>
-    storage.getTimetableMode()
+    initialData.timetableMode
   );
-  const [events, setEvents] = useState<CalendarEvent[]>(() => storage.getEvents());
-  const [circulars, setCirculars] = useState<CircularDocument[]>(() => storage.getCirculars());
-  const [students, setStudents] = useState<Student[]>(() => storage.getStudents());
+  const [events, setEvents] = useState<CalendarEvent[]>(() => initialData.events);
+  const [circulars, setCirculars] = useState<CircularDocument[]>(() => initialData.circulars);
+  const [students, setStudents] = useState<Student[]>(() => initialData.students);
 
   // Active Timetable logic: defaults to provisional if definitive is uncompiled
-  const activeTimetableInfo = storage.getActiveTimetableInfo();
+  const activeType = timetableMode !== 'provvisorio' && definitiveTimetable.length > 0 ? 'definitivo' : 'provvisorio';
+  const activeTimetableInfo = {
+    activeType, slots: activeType === 'definitivo' ? definitiveTimetable : provisionalTimetable,
+    isDefinitiveCompiled: definitiveTimetable.length > 0,
+    isFallbackToProvisional: timetableMode !== 'provvisorio' && definitiveTimetable.length === 0,
+  };
   const timetable = activeTimetableInfo.slots;
   const isProvisionalActive = activeTimetableInfo.activeType === "provvisorio";
   const isDefinitiveCompiled = activeTimetableInfo.isDefinitiveCompiled;
@@ -65,7 +74,7 @@ export default function App() {
   const [isCircularModalOpen, setIsCircularModalOpen] = useState(false);
   const [isEventModalOpen, setIsEventModalOpen] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
-  const [isOnboardingOpen, setIsOnboardingOpen] = useState<boolean>(() => !storage.hasCompletedOnboarding());
+  const [isOnboardingOpen, setIsOnboardingOpen] = useState<boolean>(() => !initialData.onboardingCompleted);
 
   const [editingEvent, setEditingEvent] = useState<CalendarEvent | null>(null);
   const [targetDateForNewEvent, setTargetDateForNewEvent] = useState<string | undefined>();
@@ -86,6 +95,40 @@ export default function App() {
       setToastMessage((prev) => (prev === msg ? null : prev));
     }, 4500);
   };
+
+  const [persistenceError, setPersistenceError] = useState<string | null>(null);
+  function withPersistenceFeedback<A extends unknown[]>(operation: (...args: A) => Promise<void>) {
+    return async (...args: A): Promise<void | false> => {
+      try {
+        if (database.mode !== 'indexeddb') throw new Error('Archivio in sola lettura');
+        await operation(...args); setPersistenceError(null);
+      }
+      catch (error) { setPersistenceError(persistenceErrorMessage(error)); return false; }
+    };
+  }
+
+  const lastOnboarding = useRef(initialData.onboardingCompleted);
+  function applySnapshot(data: LocalData) {
+    setProfile(previous => retainEqual(previous, data.profile));
+    setDefinitiveTimetable(previous => retainEqual(previous, data.definitiveTimetable));
+    setProvisionalTimetable(previous => retainEqual(previous, data.provisionalTimetable));
+    setTimetableMode(data.timetableMode);
+    setEvents(previous => retainEqual(previous, data.events));
+    setCirculars(previous => retainEqual(previous, data.circulars));
+    setStudents(previous => retainEqual(previous, data.students));
+    if (lastOnboarding.current !== data.onboardingCompleted) setIsOnboardingOpen(!data.onboardingCompleted);
+    lastOnboarding.current = data.onboardingCompleted;
+  }
+  useEffect(() => {
+    let stop = () => {};
+    const start = () => {
+      stop();
+      stop = observeLocalData(database, applySnapshot, error => setPersistenceError(persistenceErrorMessage(error)));
+    };
+    start();
+    window.addEventListener('focus', start);
+    return () => { stop(); window.removeEventListener('focus', start); };
+  }, []);
 
   // Initialize Google Auth listener
   useEffect(() => {
@@ -121,7 +164,7 @@ export default function App() {
           googleCalendarLinked: true,
           googleCalendarAccount: email,
         };
-        handleSaveProfile(updated);
+        if (await handleSaveProfile(updated) === false) return null;
         showToast(`Account istituzionale collegato: ${email}`);
         return result;
       }
@@ -147,7 +190,7 @@ export default function App() {
         googleCalendarLinked: false,
         googleCalendarAccount: undefined,
       };
-      handleSaveProfile(updated);
+      if (await handleSaveProfile(updated) === false) return;
       showToast("Account Google disconnesso.");
     } catch (err: any) {
       console.error("Disconnessione fallita:", err);
@@ -157,34 +200,18 @@ export default function App() {
   };
 
   const handleSyncAllToGoogle = async (): Promise<{ syncedCount: number; errorCount: number }> => {
+    if (database.mode !== "indexeddb") throw new Error("Archivio locale in sola lettura: sincronizzazione sospesa.");
     const token = googleAccessToken || getAccessToken();
     if (!token) {
       throw new Error("Effettua prima l'accesso con il tuo account istituzionale Google.");
     }
-    const currentEvents = storage.getEvents();
-    let synced = 0;
-    let errors = 0;
+    const result = await syncOptedInGoogleEvents(
+      token, (await storage.getEvents()).map(event => event.id),
+      async id => (await storage.getEvents()).find(event => event.id === id),
+      async event => (await storage.saveEvent(event)),
+    );
 
-    for (const ev of currentEvents) {
-      try {
-        if (ev.googleEventId) {
-          await updateGoogleCalendarEvent(token, ev.googleEventId, ev);
-          synced++;
-        } else {
-          const gId = await createGoogleCalendarEvent(token, ev);
-          ev.googleEventId = gId;
-          ev.syncedWithGoogle = true;
-          storage.saveEvent(ev);
-          synced++;
-        }
-      } catch (e) {
-        console.error("Errore sincronizzazione evento:", ev.title, e);
-        errors++;
-      }
-    }
-
-    setEvents(storage.getEvents());
-    return { syncedCount: synced, errorCount: errors };
+    return result;
   };
 
   const handleNavigateToPlanning = (
@@ -195,37 +222,32 @@ export default function App() {
     setCurrentView(view);
   };
 
-  const handleAddEventsToPlanning = (newEvents: CalendarEvent[], feedbackMsg?: string) => {
-    const addedCount = storage.bulkAddEvents(newEvents);
-    setEvents(storage.getEvents());
+  const handleAddEventsToPlanning = withPersistenceFeedback(async (newEvents: CalendarEvent[], feedbackMsg?: string) => {
+    const addedCount = (await storage.bulkAddEvents(newEvents));
+
     showToast(feedbackMsg || `${addedCount} impegni aggiunti al tuo planning!`);
-  };
+  });
 
   // Reload all data (e.g. after backup import)
-  const refreshAllData = () => {
-    setProfile(storage.getProfile());
-    setDefinitiveTimetable(storage.getDefinitiveTimetable());
-    setProvisionalTimetable(storage.getProvisionalTimetable());
-    setTimetableMode(storage.getTimetableMode());
-    setEvents(storage.getEvents());
-    setCirculars(storage.getCirculars());
-    setStudents(storage.getStudents());
-  };
+  const refreshAllData = withPersistenceFeedback(async () => {
+    const data = await database.readSnapshot();
+    applySnapshot(data);
+  });
 
   // Profile Save
-  const handleSaveProfile = (updated: TeacherProfile) => {
-    setProfile(updated);
-    storage.saveProfile(updated);
+  const handleSaveProfile = withPersistenceFeedback(async (updated: TeacherProfile, expected?: TeacherProfile) => {
+    await storage.saveProfile(updated, expected);
     showToast("Profilo docente aggiornato con successo.");
-  };
+  });
 
-  const handleFinishOnboarding = (
+  const handleFinishOnboarding = withPersistenceFeedback(async (
     updatedProfile: TeacherProfile,
     openCircularScannerImmediately?: boolean
   ) => {
-    storage.saveProfile(updatedProfile);
-    storage.setOnboardingCompleted(true);
-    setProfile(updatedProfile);
+    await database.atomic(async () => {
+      await storage.saveProfile(updatedProfile);
+      await storage.setOnboardingCompleted(true);
+    });
     setIsOnboardingOpen(false);
     showToast(`Configurazione completata! Benvenuto, ${updatedProfile.fullName}`);
     if (openCircularScannerImmediately) {
@@ -233,30 +255,27 @@ export default function App() {
         setIsCircularModalOpen(true);
       }, 250);
     }
-  };
+  });
 
   // Timetable Handlers
-  const handleSaveTimetableSlot = (slot: TimetableSlot, type: TimetableType) => {
-    storage.saveTimetableSlot(slot, type);
-    setDefinitiveTimetable(storage.getDefinitiveTimetable());
-    setProvisionalTimetable(storage.getProvisionalTimetable());
+  const handleSaveTimetableSlot = withPersistenceFeedback(async (slot: TimetableSlot, type: TimetableType, expected?: TimetableSlot) => {
+    await storage.saveTimetableSlot(slot, type, expected);
+
     showToast(
       type === "provvisorio"
         ? "Ora salvata nell'orario provvisorio."
         : "Ora salvata nell'orario definitivo."
     );
-  };
+  });
 
-  const handleDeleteTimetableSlot = (id: string, type: TimetableType) => {
-    storage.deleteTimetableSlot(id, type);
-    setDefinitiveTimetable(storage.getDefinitiveTimetable());
-    setProvisionalTimetable(storage.getProvisionalTimetable());
+  const handleDeleteTimetableSlot = withPersistenceFeedback(async (id: string, type: TimetableType) => {
+    await storage.deleteTimetableSlot(id, type);
+
     showToast("Ora rimossa dall'orario.");
-  };
+  });
 
-  const handleSetTimetableMode = (mode: TimetableMode) => {
-    storage.setTimetableMode(mode);
-    setTimetableMode(mode);
+  const handleSetTimetableMode = withPersistenceFeedback(async (mode: TimetableMode) => {
+    await storage.setTimetableMode(mode);
     showToast(
       mode === "provvisorio"
         ? "Orario provvisorio impostato come attivo nei planning."
@@ -264,105 +283,84 @@ export default function App() {
         ? "Orario definitivo impostato come attivo nei planning."
         : "Modalità automatica attiva (provvisorio fino a compilazione del definitivo)."
     );
-  };
+  });
 
-  const handleCopyProvisionalToDefinitive = () => {
-    storage.copyProvisionalToDefinitive();
-    setDefinitiveTimetable(storage.getDefinitiveTimetable());
+  const handleCopyProvisionalToDefinitive = withPersistenceFeedback(async () => {
+    await storage.copyProvisionalToDefinitive();
+
     showToast("Ore dell'orario provvisorio copiate nell'orario definitivo.");
-  };
+  });
 
-  const handleCopyDefinitiveToProvisional = () => {
-    storage.copyDefinitiveToProvisional();
-    setProvisionalTimetable(storage.getProvisionalTimetable());
+  const handleCopyDefinitiveToProvisional = withPersistenceFeedback(async () => {
+    await storage.copyDefinitiveToProvisional();
+
     showToast("Ore dell'orario definitivo copiate nell'orario provvisorio.");
-  };
+  });
 
-  const handleClearTimetable = (type: TimetableType) => {
-    storage.clearTimetable(type);
-    setDefinitiveTimetable(storage.getDefinitiveTimetable());
-    setProvisionalTimetable(storage.getProvisionalTimetable());
+  const handleClearTimetable = withPersistenceFeedback(async (type: TimetableType) => {
+    await storage.clearTimetable(type);
+
     showToast(
       type === "definitivo"
         ? "Orario definitivo azzerato (ora l'app mostra di default l'orario provvisorio)."
         : "Orario provvisorio azzerato."
     );
-  };
+  });
 
-  const handleResetProvisionalTimetable = () => {
-    storage.resetProvisionalTimetable();
-    setProvisionalTimetable(storage.getProvisionalTimetable());
+  const handleResetProvisionalTimetable = withPersistenceFeedback(async () => {
+    await storage.resetProvisionalTimetable();
+
     showToast("Orario provvisorio demo ripristinato.");
-  };
+  });
 
-  const handleResetDefinitiveTimetable = () => {
-    storage.resetDefinitiveTimetable();
-    setDefinitiveTimetable(storage.getDefinitiveTimetable());
+  const handleResetDefinitiveTimetable = withPersistenceFeedback(async () => {
+    await storage.resetDefinitiveTimetable();
+
     showToast("Orario definitivo standard (18 ore) caricato.");
-  };
+  });
 
-  const handleDeleteExtractedItem = (circularId: string, item: ExtractedItem) => {
-    storage.deleteExtractedItemFromCircular(circularId, item.tempId);
-    storage.deleteEventMatchingExtractedItem(item);
-    setCirculars(storage.getCirculars());
-    setEvents(storage.getEvents());
+  const handleDeleteExtractedItem = withPersistenceFeedback(async (circularId: string, item: ExtractedItem) => {
+    await database.atomic(async () => {
+      await storage.deleteExtractedItemFromCircular(circularId, item.tempId);
+      await storage.deleteEventMatchingExtractedItem(item, circularId);
+    });
+
     showToast("Riga estrapolata eliminata dalla circolare.");
-  };
+  });
 
   // Event Handlers
-  const handleSaveEvent = async (event: CalendarEvent) => {
+  const handleSaveEvent = withPersistenceFeedback(async (event: CalendarEvent, expected?: CalendarEvent) => {
     // Save locally first
-    storage.saveEvent(event);
-    setEvents(storage.getEvents());
+    await storage.saveEvent(event, expected);
 
     // If sync with Google is requested and we have an access token
     const token = googleAccessToken || getAccessToken();
-    if (event.syncedWithGoogle && token) {
+    if (isGoogleSyncEnabled(event) && token) {
       try {
-        if (event.googleEventId) {
-          await updateGoogleCalendarEvent(token, event.googleEventId, event);
-          showToast("Impegno salvato e sincronizzato su Google Calendar.");
-        } else {
-          const gId = await createGoogleCalendarEvent(token, event);
-          const updatedEvent: CalendarEvent = {
-            ...event,
-            googleEventId: gId,
-            syncedWithGoogle: true,
-          };
-          storage.saveEvent(updatedEvent);
-          setEvents(storage.getEvents());
-          showToast("Impegno salvato e aggiunto su Google Calendar.");
-        }
-        return;
-      } catch (err: any) {
-        console.error("Errore sincronizzazione Google Calendar:", err);
-        showToast("Impegno salvato in locale (errore sync Google Calendar).");
-        return;
-      }
+      const result = await syncOptedInGoogleEvents(
+        token, [event.id],
+        async id => (await storage.getEvents()).find(current => current.id === id),
+        async current => (await storage.saveEvent(current)),
+      );
+
+      showToast(result.errorCount ? "Impegno salvato in locale (errore sync Google Calendar)."
+        : result.syncedCount ? "Impegno salvato e sincronizzato su Google Calendar." : "Impegno salvato in locale.");
+      } catch { showToast("Impegno salvato in locale; sincronizzazione Google non completata."); }
+      return;
     }
 
     showToast("Impegno salvato con successo.");
-  };
+  });
 
-  const handleDeleteEvent = async (id: string) => {
-    const ev = events.find((e) => e.id === id);
-    const token = googleAccessToken || getAccessToken();
-    if (ev?.googleEventId && token) {
-      try {
-        await deleteGoogleCalendarEvent(token, ev.googleEventId);
-      } catch (err) {
-        console.warn("Impossibile eliminare da Google Calendar:", err);
-      }
-    }
-    storage.deleteEvent(id);
-    setEvents(storage.getEvents());
-    showToast("Impegno eliminato dall'agenda.");
-  };
+  const handleDeleteEvent = withPersistenceFeedback(async (id: string) => {
+    const remoteRemoved = await deleteEventLocallyFirst(id, googleAccessToken || getAccessToken());
+    showToast(remoteRemoved ? "Impegno eliminato dall’agenda." : "Impegno eliminato in locale; la copia Google non è stata eliminata. Verifica Google Calendar.");
+  });
 
-  const handleToggleComplete = (id: string) => {
-    storage.toggleEventCompleted(id);
-    setEvents(storage.getEvents());
-  };
+  const handleToggleComplete = withPersistenceFeedback(async (id: string) => {
+    await storage.toggleEventCompleted(id);
+
+  });
 
   const handleOpenNewEvent = (initialDate?: string) => {
     setEditingEvent(null);
@@ -379,54 +377,55 @@ export default function App() {
   };
 
   // Student & Classes Handlers
-  const handleSaveStudent = (student: Student) => {
-    storage.saveStudent(student);
-    setStudents(storage.getStudents());
+  const handleSaveStudent = withPersistenceFeedback(async (student: Student, expected?: Student) => {
+    await storage.saveStudent(student, expected);
+
     showToast(`Scheda di ${student.fullName} salvata.`);
-  };
+  });
 
-  const handleDeleteStudent = (studentId: string) => {
-    storage.deleteStudent(studentId);
-    setStudents(storage.getStudents());
+  const handleDeleteStudent = withPersistenceFeedback(async (studentId: string) => {
+    await storage.deleteStudent(studentId);
+
     showToast("Alunno rimosso dall'elenco.");
-  };
+  });
 
-  const handleAddStudentNote = (studentId: string, note: StudentNote) => {
-    storage.addStudentNote(studentId, note);
-    setStudents(storage.getStudents());
+  const handleAddStudentNote = withPersistenceFeedback(async (studentId: string, note: StudentNote) => {
+    await storage.addStudentNote(studentId, note);
+
     showToast("Nota aggiunta al diario dell'alunno.");
-  };
+  });
 
-  const handleDeleteStudentNote = (studentId: string, noteId: string) => {
-    storage.deleteStudentNote(studentId, noteId);
-    setStudents(storage.getStudents());
+  const handleDeleteStudentNote = withPersistenceFeedback(async (studentId: string, noteId: string) => {
+    await storage.deleteStudentNote(studentId, noteId);
+
     showToast("Nota rimossa dal diario.");
-  };
+  });
 
-  const handleDeleteMultipleStudents = (studentIds: string[]) => {
-    const list = storage.getStudents().filter((s) => !studentIds.includes(s.id));
-    storage.saveStudents(list);
-    setStudents(list);
+  const handleDeleteMultipleStudents = withPersistenceFeedback(async (studentIds: string[]) => {
+    await database.atomic(async () => {
+      const list = (await storage.getStudents()).filter((s) => !studentIds.includes(s.id));
+    await storage.saveStudents(list);
+    });
     showToast(`${studentIds.length} alunni rimossi.`);
-  };
+  });
 
-  const handleReassignStudentsClass = (studentIds: string[], targetClass: string) => {
-    const list = storage.getStudents().map((s) => {
+  const handleReassignStudentsClass = withPersistenceFeedback(async (studentIds: string[], targetClass: string) => {
+    await database.atomic(async () => {
+      const list = (await storage.getStudents()).map((s) => {
       if (studentIds.includes(s.id)) {
         return { ...s, className: targetClass.toUpperCase(), updatedAt: new Date().toISOString() };
       }
       return s;
     });
-    storage.saveStudents(list);
-    setStudents(list);
+    await storage.saveStudents(list);
+    });
     showToast(`${studentIds.length} alunni spostati nella classe ${targetClass.toUpperCase()}.`);
-  };
+  });
 
-  const handleClearAllStudents = () => {
-    storage.saveStudents([]);
-    setStudents([]);
+  const handleClearAllStudents = withPersistenceFeedback(async () => {
+    await storage.saveStudents([]);
     showToast("Elenco alunni azzerato.");
-  };
+  });
 
   const handleScheduleStudentEvent = (prefill: Partial<CalendarEvent>) => {
     setEditingEvent(null);
@@ -436,33 +435,37 @@ export default function App() {
   };
 
   // Circular Import Confirmation
-  const handleImportCircularEvents = (
+  const handleImportCircularEvents = withPersistenceFeedback(async (
     newEvents: CalendarEvent[],
     docMeta: CircularDocument
   ) => {
-    const addedCount = storage.bulkAddEvents(newEvents);
-    storage.saveCircular(docMeta);
-    setEvents(storage.getEvents());
-    setCirculars(storage.getCirculars());
+    const addedCount = await database.atomic(async () => {
+      const added = await storage.bulkAddEvents(newEvents);
+      await storage.saveCircular(docMeta);
+      return added;
+    });
+
     showToast(`Perfetto! ${addedCount} impegni pertinenti aggiunti all'agenda.`);
     setCurrentView("oggi");
-  };
+  });
 
-  const handleDeleteCircular = (id: string) => {
-    storage.deleteCircular(id);
-    setCirculars(storage.getCirculars());
+  const handleDeleteCircular = withPersistenceFeedback(async (id: string) => {
+    await storage.deleteCircular(id);
+
     showToast("Circolare rimossa dall'archivio.");
-  };
+  });
 
   // Stats for badges
-  const todayIso = new Date().toISOString().slice(0, 10);
+  const todayIso = localDateISO();
   const todayEventsCount = events.filter((e) => e.date === todayIso && !e.completed).length;
   const pendingDeadlinesCount = events.filter(
     (e) => (e.category === "scadenza" || e.category === "promemoria") && !e.completed
   ).length;
 
   return (
+    <Suspense fallback={<p role="status" className="p-6">Caricamento vista locale…</p>}>
     <div className="min-h-screen bg-stone-100/70 text-stone-900 flex flex-col font-sans selection:bg-emerald-100 selection:text-emerald-900">
+      {persistenceError && <div role="alert" className="fixed top-0 inset-x-0 z-[10000] p-3 bg-rose-50 text-rose-800">{persistenceError}</div>}
       {/* Top Navigation */}
       <Navbar
         currentView={currentView}
@@ -599,13 +602,16 @@ export default function App() {
       </main>
 
       {/* MODALS */}
+      {isCircularModalOpen && (
       <CircularAnalyzerModal
         isOpen={isCircularModalOpen}
         onClose={() => setIsCircularModalOpen(false)}
         profile={profile}
         onImportEvents={handleImportCircularEvents}
       />
+      )}
 
+      {isEventModalOpen && (
       <EventModal
         isOpen={isEventModalOpen}
         onClose={() => {
@@ -621,7 +627,9 @@ export default function App() {
         isGoogleConnected={!!googleUser && !!googleAccessToken}
         googleUserEmail={googleUser?.email || undefined}
       />
+      )}
 
+      {isProfileModalOpen && (
       <ProfileModal
         isOpen={isProfileModalOpen}
         onClose={() => setIsProfileModalOpen(false)}
@@ -637,7 +645,9 @@ export default function App() {
         onSyncAllToGoogle={handleSyncAllToGoogle}
         initialTab={profileInitialTab}
       />
+      )}
 
+      {isOnboardingOpen && (
       <OnboardingModal
         isOpen={isOnboardingOpen}
         initialProfile={profile}
@@ -646,8 +656,10 @@ export default function App() {
         googleUser={googleUser}
         onGoogleLogin={handleGoogleLogin}
       />
+      )}
 
       <OfflineIndicator />
     </div>
+    </Suspense>
   );
 }
