@@ -23,6 +23,17 @@ function timetable(v: unknown): boolean {
     && s.periodNumber > 0 && isValidTime(s.startTime) && isValidTime(s.endTime) && s.endTime > s.startTime && text(s.subject) && text(s.className)
     && ['classroom','campus','color'].every(k => optional(s[k], text)) && optional(s.isProvisional, bool));
 }
+function periodSlotValidator(v: unknown): boolean {
+  return record(v) && Number.isInteger(v.periodNumber) && v.periodNumber > 0
+    && isValidTime(v.startTime) && isValidTime(v.endTime) && v.endTime > v.startTime
+    && optional(v.label, text);
+}
+function timeSlotConfigValidator(v: unknown): boolean {
+  return record(v) && isValidTime(v.firstHourStartTime)
+    && Number.isInteger(v.periodsPerDay) && v.periodsPerDay > 0
+    && Number.isInteger(v.standardDurationMinutes) && v.standardDurationMinutes > 0
+    && optional(v.customSlots, slots => Array.isArray(slots) && slots.every(periodSlotValidator));
+}
 
 /** Validate the entire document before touching live storage, including nested arrays used by views. */
 export function validateBackup(data: unknown): asserts data is Record<string, any> {
@@ -49,7 +60,8 @@ export function validateBackup(data: unknown): asserts data is Record<string, an
   if (data.version === 2) {
     if (!timetable(data.timetable)) throw new Error('Orario nel backup non valido.');
   } else if (!timetable(data.definitiveTimetable) || !timetable(data.provisionalTimetable)
-    || !['auto','provvisorio','definitivo'].includes(data.timetableMode) || !bool(data.onboardingCompleted)) throw new Error('Orari o impostazioni nel backup non validi.');
+    || !['auto','provvisorio','definitivo'].includes(data.timetableMode) || !bool(data.onboardingCompleted)
+    || !optional(data.timeSlotConfig, timeSlotConfigValidator)) throw new Error('Orari o impostazioni nel backup non validi.');
 }
 
 const JOURNAL = 'agedoc_restore_journal_v1';

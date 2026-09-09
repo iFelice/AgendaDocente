@@ -1,6 +1,6 @@
 import { linkLegacyCircularEvents } from '../utils/circularLinks';
 import Dexie, { type Table } from 'dexie';
-import type { CalendarEvent, CircularDocument, Student, TeacherProfile, TimetableSlot, TimetableMode } from '../types';
+import type { CalendarEvent, CircularDocument, Student, TeacherProfile, TimetableSlot, TimetableMode, TimeSlotConfig } from '../types';
 import { validateBackup, recoverBackupRestore } from './backup';
 
 export const LEGACY_KEYS = {
@@ -8,11 +8,13 @@ export const LEGACY_KEYS = {
   students: 'agedoc_students_v2', definitiveTimetable: 'agedoc_timetable_v2',
   provisionalTimetable: 'agedoc_timetable_provvisorio_v2', timetableMode: 'agedoc_timetable_mode_v2',
   onboardingCompleted: 'agedoc_onboarding_completed_v2',
+  timeSlotConfig: 'agedoc_time_slot_config_v2',
 } as const;
 export interface LocalData {
   profile: TeacherProfile; events: CalendarEvent[]; circulars: CircularDocument[]; students: Student[];
   definitiveTimetable: TimetableSlot[]; provisionalTimetable: TimetableSlot[];
   timetableMode: TimetableMode; onboardingCompleted: boolean;
+  timeSlotConfig?: TimeSlotConfig;
 }
 const collections = ['events','circulars','students','definitiveTimetable','provisionalTimetable'] as const;
 const stores = ['profile', ...collections, 'metadata'];
@@ -44,6 +46,7 @@ export function readLegacyData(legacy: LegacyStorage): LocalData | null {
     profile: JSON.parse(raw.profile!),
     ...Object.fromEntries(collections.map(k => [k, raw[k] === null ? [] : JSON.parse(raw[k]!)])),
     timetableMode: raw.timetableMode ?? 'auto', onboardingCompleted: raw.onboardingCompleted === 'true',
+    timeSlotConfig: raw.timeSlotConfig ? JSON.parse(raw.timeSlotConfig) : undefined,
   } as LocalData;
   validateBackup({version:3,...data});
   data.events = linkLegacyCircularEvents(data.events, data.circulars);
@@ -117,7 +120,8 @@ export class AgendaDatabase extends Dexie {
   private ordered(data: LocalData): LocalData {
     return {profile:data.profile,events:data.events,circulars:data.circulars,students:data.students,
       definitiveTimetable:data.definitiveTimetable,provisionalTimetable:data.provisionalTimetable,
-      timetableMode:data.timetableMode,onboardingCompleted:data.onboardingCompleted};
+      timetableMode:data.timetableMode,onboardingCompleted:data.onboardingCompleted,
+      timeSlotConfig:data.timeSlotConfig};
   }
   async readSnapshot(): Promise<LocalData> {
     if (this.fallback) return structuredClone(this.fallback);
@@ -128,6 +132,7 @@ export class AgendaDatabase extends Dexie {
         ...Object.fromEntries(await Promise.all(collections.map(async name => [name, (await this.rows(name).orderBy('position').toArray()).map(row => row.value)]))),
         timetableMode: (await this.meta().get('timetableMode'))?.value,
         onboardingCompleted: (await this.meta().get('onboardingCompleted'))?.value,
+        timeSlotConfig: (await this.meta().get('timeSlotConfig'))?.value,
       } as LocalData);
     });
   }
@@ -139,8 +144,9 @@ export class AgendaDatabase extends Dexie {
       if (rows.length !== 1) throw new Error('Profilo locale mancante.');
       return rows[0].value;
     }
-    if (name === 'timetableMode' || name === 'onboardingCompleted') {
+    if (name === 'timetableMode' || name === 'onboardingCompleted' || name === 'timeSlotConfig') {
       const row = await this.meta().get(name);
+      if (name === 'timeSlotConfig') return row?.value as LocalData[K];
       if (!row) throw new Error('Impostazioni locali mancanti.');
       return row.value;
     }
@@ -152,7 +158,7 @@ export class AgendaDatabase extends Dexie {
     await this.atomic(async () => { await this.writeValue(name, value); });
   }
   private async writeValue(name: keyof LocalData, value: any): Promise<void> {
-    if (name === 'timetableMode' || name === 'onboardingCompleted') {
+    if (name === 'timetableMode' || name === 'onboardingCompleted' || name === 'timeSlotConfig') {
       await this.meta().put({key:name,value}); return;
     }
     const values = name === 'profile' ? [value] : value;

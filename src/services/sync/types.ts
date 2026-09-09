@@ -3,6 +3,7 @@ import type {
   CircularDocument,
   Student,
   TeacherProfile,
+  TimeSlotConfig,
   TimetableMode,
   TimetableSlot,
 } from "../../types";
@@ -25,6 +26,7 @@ export interface SyncableSnapshot {
   provisionalTimetable: TimetableSlot[];
   timetableMode: TimetableMode;
   onboardingCompleted: boolean;
+  timeSlotConfig?: TimeSlotConfig;
 }
 
 export interface RemoteStateDoc {

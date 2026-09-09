@@ -1,7 +1,7 @@
 import { assertUnchanged } from "./persistenceErrors";
 import { linkLegacyCircularEvents } from "../utils/circularLinks";
 import { localDateISO } from "../utils/dates";
-import { CalendarEvent, CircularDocument, ExtractedItem, SchoolLevel, Student, StudentNote, TeacherProfile, TimetableMode, TimetableSlot, TimetableType, } from "../types";
+import { CalendarEvent, CircularDocument, ExtractedItem, SchoolLevel, Student, StudentNote, TeacherProfile, TimeSlotConfig, TimetableMode, TimetableSlot, TimetableType, } from "../types";
 import { getCurrentSchoolYear } from "../utils/schoolYear";
 import { validateBackup } from "./backup";
 import { database, type LocalData, type LegacyStorage } from "./db";
@@ -700,7 +700,7 @@ export const DEFAULT_EVENTS: CalendarEvent[] = [
  */
 export function demoInstallation(): LocalData {
  return {profile:structuredClone(DEFAULT_PROFILE),events:structuredClone(DEFAULT_EVENTS),circulars:[],students:structuredClone(DEFAULT_STUDENTS),
- definitiveTimetable:[],provisionalTimetable:structuredClone(DEFAULT_PROVISIONAL_TIMETABLE),timetableMode:'auto',onboardingCompleted:false};
+ definitiveTimetable:[],provisionalTimetable:structuredClone(DEFAULT_PROVISIONAL_TIMETABLE),timetableMode:'auto',onboardingCompleted:false,timeSlotConfig:undefined};
 }
 
 /** Placeholder profile for a fresh install: real values arrive through onboarding. */
@@ -722,7 +722,7 @@ export function defaultTeacherProfile(): TeacherProfile {
 /** A new installation starts empty: no demo profile, students, events or lessons. */
 export function emptyInstallation(): LocalData {
  return {profile:defaultTeacherProfile(),events:[],circulars:[],students:[],
-  definitiveTimetable:[],provisionalTimetable:[],timetableMode:'auto',onboardingCompleted:false};
+  definitiveTimetable:[],provisionalTimetable:[],timetableMode:'auto',onboardingCompleted:false,timeSlotConfig:undefined};
 }
 
 const sameRecordExcept = (a: Record<string, any>, b: Record<string, any>, ignore: string[]) =>
@@ -793,6 +793,10 @@ export const storage = {
     return database.atomic(async () => { assertUnchanged(await this.getProfile(), expected); return database.write("profile", profile); });
   },
   // TIMETABLE - DEFINITIVE & PROVISIONAL MANAGEMENT
+  async getTimeSlotConfig(): Promise<TimeSlotConfig | undefined> { return database.read("timeSlotConfig"); },
+  async saveTimeSlotConfig(config: TimeSlotConfig): Promise<void> {
+    return database.atomic(async () => { return database.write("timeSlotConfig", config); });
+  },
   async getDefinitiveTimetable(): Promise<TimetableSlot[]> { return database.read("definitiveTimetable"); },
   async saveDefinitiveTimetable(slots: TimetableSlot[]): Promise<void> {
     return database.atomic(async () => { return database.write("definitiveTimetable", slots); });
@@ -1136,7 +1140,8 @@ export const storage = {
           definitiveTimetable: data.version === 3 ? data.definitiveTimetable : data.timetable,
           provisionalTimetable: data.version === 3 ? data.provisionalTimetable : current.provisionalTimetable,
           timetableMode: data.version === 3 ? data.timetableMode : current.timetableMode,
-          onboardingCompleted: data.version === 3 ? data.onboardingCompleted : current.onboardingCompleted });
+          onboardingCompleted: data.version === 3 ? data.onboardingCompleted : current.onboardingCompleted,
+          timeSlotConfig: data.version === 3 ? data.timeSlotConfig : current.timeSlotConfig });
       });
       return true;
     }

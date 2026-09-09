@@ -71,6 +71,20 @@ export interface TeacherProfile {
 export type TimetableType = "definitivo" | "provvisorio";
 export type TimetableMode = "auto" | "provvisorio" | "definitivo";
 
+export interface PeriodSlot {
+  periodNumber: number;
+  label?: string;
+  startTime: string; // "07:50"
+  endTime: string;   // "08:50"
+}
+
+export interface TimeSlotConfig {
+  firstHourStartTime: string;      // "07:50"
+  periodsPerDay: number;           // 6
+  standardDurationMinutes: number; // 60
+  customSlots?: PeriodSlot[];
+}
+
 export interface TimetableSlot {
   id: string;
   dayOfWeek: 1 | 2 | 3 | 4 | 5 | 6; // 1 = Lunedì, 6 = Sabato
