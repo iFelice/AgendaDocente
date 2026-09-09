@@ -8,7 +8,14 @@ import { createServer as createViteServer } from "vite";
 
 
 export const app = express();
-const PORT = 3000;
+export function serverPort(env = process.env): number {
+  const value = env.PORT;
+  if (!value && env.NODE_ENV !== "production") return 3000;
+  if (!value || !/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 65535) {
+    throw new Error("PORT deve essere una porta valida (1-65535); obbligatoria in produzione.");
+  }
+  return Number(value);
+}
 
 
 
@@ -34,7 +41,6 @@ function getGeminiClient(): GoogleGenAI | null {
 app.get("/api/health", (req, res) => {
   res.json({
     status: "ok",
-    timestamp: new Date().toISOString(),
   });
 });
 
@@ -198,9 +204,12 @@ Restituisci soltanto l'array JSON richiesto.`;
   }
 });
 app.use("/api/analyze-circular", analysisErrorHandler);
+// Unknown API routes must never become HTML, even for browser navigations.
+app.use("/api", (_req, res) => res.status(404).json({ error: "Endpoint non trovato." }));
 
 // Production & Vite Development integration
 async function startServer() {
+  const PORT = serverPort();
   const httpServer = http.createServer(app);
 
   if (process.env.NODE_ENV !== "production") {
@@ -214,6 +223,14 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
+    // The build also contains the server bundle and its source map: never publish them.
+    app.use((req, res, next) => {
+      let requestPath: string;
+      try { requestPath = decodeURIComponent(req.path); }
+      catch { return res.sendStatus(400); }
+      if (/\.(?:cjs|map)$/i.test(requestPath)) return res.sendStatus(404);
+      next();
+    });
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
