@@ -98,6 +98,17 @@ export const TodayView: React.FC<TodayViewProps> = ({
     displayDate,
   } = selectDayAgenda(selectedIso, timetable, events);
   const isFutureDay = selectedIso > todayIso;
+  /*
+    Visual state of the selected day, shared by the date badge and the "Oggi" shortcut.
+    Green is reserved for the real today; a future selection reads as amber ("you are
+    ahead of the present") and a past one as neutral, so "Futuro" can never carry the
+    same green semantics as "Oggi". Pure presentation: no date logic involved.
+  */
+  const dayStatus = isToday
+    ? { label: "Oggi", badgeClass: "bg-emerald-100 text-emerald-800 border-emerald-300" }
+    : isFutureDay
+      ? { label: "Futuro", badgeClass: "bg-amber-100 text-amber-900 border-amber-300" }
+      : { label: "Passato", badgeClass: "bg-stone-100 text-stone-600 border-stone-200" };
 
   const getCategoryColor = (category: string) => {
     switch (category) {
@@ -161,18 +172,17 @@ export const TodayView: React.FC<TodayViewProps> = ({
           <div className="min-w-0 flex-1">
             <span className="hidden sm:flex text-xs font-semibold text-emerald-800 uppercase tracking-wider items-center gap-2">
               Panoramica della Giornata
-              {isToday ? (
-                <span className="px-1.5 py-0.5 rounded-md bg-emerald-100 text-emerald-800 text-[10px] font-bold normal-case tracking-normal">Oggi</span>
-              ) : (
-                <span className="px-1.5 py-0.5 rounded-md bg-stone-100 text-stone-600 text-[10px] font-bold normal-case tracking-normal">
-                  {isFutureDay ? "Giorno futuro" : "Giorno passato"}
-                </span>
-              )}
+              <span
+                className={`px-1.5 py-0.5 rounded-md border text-[10px] font-bold normal-case tracking-normal ${dayStatus.badgeClass}`}
+                title={isToday ? "Stai visualizzando la data di oggi" : isFutureDay ? "Stai visualizzando una data futura" : "Stai visualizzando una data passata"}
+              >
+                {dayStatus.label}
+              </span>
             </span>
             <h1 className="text-base sm:text-2xl font-bold text-stone-900 mt-0.5 break-words leading-snug">
               <span className="truncate">{displayDate}</span>
-              <span className="sm:hidden ml-1.5 align-middle text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-emerald-100 text-emerald-800">
-                {isToday ? "Oggi" : isFutureDay ? "Futuro" : "Passato"}
+              <span className={`sm:hidden ml-1.5 align-middle text-[10px] font-bold px-1.5 py-0.5 rounded-md border ${dayStatus.badgeClass}`}>
+                {dayStatus.label}
               </span>
             </h1>
             <p className="text-xs sm:text-sm text-stone-500 mt-0.5 truncate">
@@ -194,17 +204,23 @@ export const TodayView: React.FC<TodayViewProps> = ({
             >
               <ChevronLeft className="w-5 h-5" />
             </button>
+            {/*
+              "Oggi" shortcut. On the real today it stays green and clearly ACTIVE (solid,
+              never an ambiguous gray); on any other date it turns amber as a "come back
+              to the present" call-to-action. Text is always "Oggi".
+            */}
             <button
               id="today-back-to-today"
               type="button"
               onClick={() => setSelectedIso(todayIso)}
               disabled={isToday}
+              aria-pressed={isToday}
+              title={isToday ? "Stai già visualizzando la data di oggi" : "Torna alla data corrente"}
               className={`min-h-[44px] px-2.5 sm:px-3 py-2 rounded-lg border text-xs font-semibold transition-colors ${
                 isToday
-                  ? "border-stone-100 bg-stone-50 text-stone-400 cursor-default"
-                  : "border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100"
+                  ? "border-emerald-700 bg-emerald-700 text-white cursor-default shadow-xs"
+                  : "border-amber-400 bg-amber-400 text-amber-950 hover:bg-amber-300 hover:border-amber-500 active:bg-amber-200"
               }`}
-              title="Torna alla data corrente"
             >
               Oggi
             </button>
