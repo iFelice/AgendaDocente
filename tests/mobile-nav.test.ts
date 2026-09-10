@@ -420,7 +420,7 @@ test('the day overview is compact on phones so lessons appear immediately', asyn
   const dayNav = renderer.root.findByProps({ role: 'group', 'aria-label': 'Navigazione del giorno' });
   const buttons = dayNav.findAll((el: any) => el.type === 'button');
   assert.equal(buttons.length, 3);
-  for (const button of buttons) assert.ok(hasClass(button, 'min-h-[44px]'));
+  for (const button of buttons) assert.ok(hasClass(button, 'min-h-[36px]'));
   assert.ok(renderer.root.findAll((el: any) => el.type === 'div' && hasClass(el, 'p-3') && hasClass(el, 'sm:p-5')).length >= 1,
     'the overview card uses reduced phone padding');
 

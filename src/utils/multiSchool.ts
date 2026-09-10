@@ -28,8 +28,9 @@ export function createPrimarySchool(profile: TeacherProfile): SchoolProfile {
 export function normalizeTeacherProfile(input: TeacherProfile): TeacherProfile {
   const profile = structuredClone(input);
   const schools = Array.isArray(profile.schools) ? profile.schools.filter(s => s && typeof s.id === "string" && typeof s.name === "string") : [];
-  if (schools.length === 0) profile.schools = [createPrimarySchool(profile)];
-  else {
+  if (schools.length === 0) {
+    profile.schools = [createPrimarySchool(profile)];
+  } else {
     const primary = schools.find(s => s.isPrimary) ?? schools[0];
     // Legacy scalar fields are still edited by the current UI. Keep the primary id
     // stable, but refresh its projection on every normalization.
@@ -44,6 +45,10 @@ export function normalizeTeacherProfile(input: TeacherProfile): TeacherProfile {
     };
     profile.schools = [primaryProjection, ...schools.filter(s => s !== primary && s.id !== primary.id)
       .map(s => ({ ...s, active: s.active ?? true, isPrimary: false }))];
+  }
+  // Ensure weeklyDeclaredHours defaults to 18 for legacy profiles
+  if (profile.weeklyDeclaredHours === undefined) {
+    profile.weeklyDeclaredHours = 18;
   }
   return profile;
 }
@@ -77,4 +82,55 @@ export function findTimetableConflicts(slots: TimetableSlot[]): Array<{ first: T
     if (a.dayOfWeek === b.dayOfWeek && a.startTime < b.endTime && b.startTime < a.endTime && a.schoolId !== b.schoolId) conflicts.push({ first: a, second: b });
   }
   return conflicts;
+}
+
+/**
+ * Calculates the expected primary school hours given:
+ * - weeklyDeclaredHours: total declared weekly hours for the teacher
+ * - otherSchools: array of other active school profiles with their weeklyHours
+ *
+ * Returns the hours expected for the primary institute.
+ */
+export function calculatePrimaryExpectedHours(weeklyDeclaredHours: number, otherSchools: SchoolProfile[]): number {
+  const totalOtherHours = otherSchools.reduce((sum, school) => {
+    const weekly = school.weeklyHours ?? 0;
+    return school.active !== false ? sum + weekly : sum;
+  }, 0);
+  return weeklyDeclaredHours - totalOtherHours;
+}
+
+/**
+ * Calculates total declared hours across all active schools.
+ * If only one school (primary), returns weeklyDeclaredHours.
+ * If multiple active schools, derives primaryExpectedHours logic.
+ */
+export function calculateTotalDeclaredHours(weeklyDeclaredHours: number, schools: SchoolProfile[]): { primaryExpectedHours: number; bySchool: Record<string, number> } {
+  const activeSchools = schools.filter(s => s.active !== false);
+  const bySchool: Record<string, number> = {};
+
+  activeSchools.forEach(school => {
+    bySchool[school.id] = school.weeklyHours ?? 0;
+  });
+
+  if (activeSchools.length <= 1) {
+    return { primaryExpectedHours: weeklyDeclaredHours, bySchool };
+  }
+
+  // Multiple schools: derive primary expected hours
+  const otherSchools = activeSchools.filter(s => !s.isPrimary);
+  const primaryExpectedHours = calculatePrimaryExpectedHours(weeklyDeclaredHours, otherSchools);
+
+  return { primaryExpectedHours, bySchool };
+}
+
+/** Gets all other (non-primary) active school profiles. */
+export function getOtherActiveSchools(profile: TeacherProfile): SchoolProfile[] {
+  const normalized = normalizeTeacherProfile(profile);
+  return (normalized.schools ?? []).filter(s => !s.isPrimary && s.active !== false);
+}
+
+/** Gets the primary school profile. */
+export function getPrimarySchool(profile: TeacherProfile): SchoolProfile | undefined {
+  const normalized = normalizeTeacherProfile(profile);
+  return normalized.schools?.find(s => s.isPrimary);
 }

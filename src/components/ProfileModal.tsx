@@ -101,6 +101,9 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   const [schoolName, setSchoolName] = useState(profile.schoolName);
   const [schoolLevel, setSchoolLevel] = useState<SchoolLevel>(profile.schoolLevel || "ssig");
   const [schoolYear, setSchoolYear] = useState(profile.schoolYear);
+  const [weeklyDeclaredHours, setWeeklyDeclaredHours] = useState<number | undefined>(
+    profile.weeklyDeclaredHours !== undefined ? profile.weeklyDeclaredHours : 18
+  );
   const existingSecondary = (profile.schools ?? []).find(s => !s.isPrimary);
   const [multiSchoolEnabled, setMultiSchoolEnabled] = useState(hasActiveSecondarySchool(profile));
   const [secondarySchool, setSecondarySchool] = useState<SchoolProfile>(existingSecondary ?? { id: `school-secondary-${profile.id}`, name: "", institutionalEmail: "", campuses: [], schoolLevel: profile.schoolLevel, weeklyHours: undefined, active: true, isPrimary: false });
@@ -200,6 +203,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
       schoolName: schoolName.trim(),
       schoolLevel,
       schoolYear: schoolYear.trim(),
+      weeklyDeclaredHours: weeklyDeclaredHours !== undefined ? weeklyDeclaredHours : undefined,
       primarySubjects,
       classes,
       campuses,
@@ -393,6 +397,21 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                       placeholder="nome.cognome@scuola.edu.it"
                       className="w-full p-2.5 border border-stone-300 rounded-xl text-xs"
                     />
+                  <div className="pt-1 space-y-2">
+                    <label className="block font-semibold text-stone-700">Monte ore settimanale dichiarato</label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        min="0"
+                        max="100"
+                        value={weeklyDeclaredHours !== undefined ? String(weeklyDeclaredHours) : ""}
+                        onChange={(e) => setWeeklyDeclaredHours(e.target.value ? Number(e.target.value) : undefined)}
+                        className="p-2 border border-stone-300 rounded-lg text-xs flex-1 min-w-[60px]"
+                      />
+                      <span className="text-[10px] text-stone-500">ore settimanali</span>
+                    </div>
+                    <p className="text-[10px] text-stone-500 mt-1">Default 18 ore per profili legacy. Modificabile in qualsiasi momento.</p>
+                  </div>
                   </div>
                 </div>
 
