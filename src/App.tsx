@@ -32,6 +32,7 @@ import { EventModal } from "./components/EventModal";
 const ProfileModal = lazy(() => import("./components/ProfileModal").then(module => ({default: module.ProfileModal})));
 const OnboardingModal = lazy(() => import("./components/OnboardingModal").then(module => ({default: module.OnboardingModal})));
 import { OfflineIndicator } from "./components/OfflineIndicator";
+import { useOnlineStatus } from "./hooks/useOnlineStatus";
 import { formatPersonDisplayName, isPlaceholderFullName } from "./utils/names";
 import { CheckCircle2, AlertCircle } from "lucide-react";
 import { User as FirebaseUser } from "firebase/auth";
@@ -161,6 +162,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
   // keyed by uid. It starts/stops with the authenticated user and never blocks the app.
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(accountSync.getStatus());
   useEffect(() => accountSync.subscribe(setSyncStatus), []);
+  const isOnline = useOnlineStatus();
   useEffect(() => {
     if (googleUser) accountSync.startSession(googleUser.uid);
     else accountSync.stopSession();
@@ -687,6 +689,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
         onSyncNow={() => void accountSync.syncNow()}
         onSyncToggle={(enabled) => void accountSync.setEnabled(enabled)}
         onSyncResolve={(choice) => void accountSync.resolveConflict(choice)}
+        online={isOnline}
         initialTab={profileInitialTab}
       />
       )}
