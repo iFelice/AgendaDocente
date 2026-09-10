@@ -696,14 +696,14 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
 
       {/* Helper Banner for uncompiled definitive */}
       {!isDefinitiveCompiled && activeTab === "provvisorio" && (
-        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-2xs">
-          <div className="flex items-start space-x-3">
-            <Info className="w-5 h-5 text-amber-700 mt-0.5 flex-shrink-0" />
-            <div>
-              <h3 className="text-sm font-bold text-amber-950">
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 sm:p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-3 shadow-2xs">
+          <div className="flex items-start space-x-2.5 sm:space-x-3 min-w-0">
+            <Info className="w-4 h-4 sm:w-5 sm:h-5 text-amber-700 mt-0.5 flex-shrink-0" />
+            <div className="min-w-0">
+              <h3 className="text-xs sm:text-sm font-bold text-amber-950">
                 Orario Provvisorio attivo di default
               </h3>
-              <p className="text-xs text-amber-900 mt-0.5">
+              <p className="hidden sm:block text-xs text-amber-900 mt-0.5">
                 Le lezioni in <strong>Oggi</strong> e <strong>Settimana</strong> mostrano questo orario provvisorio finché il definitivo non sarà compilato.
               </p>
             </div>

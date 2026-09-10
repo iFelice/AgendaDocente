@@ -149,8 +149,19 @@ export const DeadlinesView: React.FC<DeadlinesViewProps> = ({
       {/* Deadlines List */}
       <div className="bg-white rounded-xl border border-stone-200 shadow-xs divide-y divide-stone-100 overflow-hidden">
         {filteredDeadlines.length === 0 ? (
-          <div className="p-12 text-center text-stone-400 text-sm">
-            Nessuna scadenza trovata in questa sezione.
+          /* Empty section: one compact row instead of a large empty block. */
+          <div className="px-3 sm:px-4 py-3 flex items-center justify-between gap-2">
+            <p className="text-xs text-stone-500 min-w-0 truncate">
+              Nessuna scadenza in questa sezione
+            </p>
+            <button
+              type="button"
+              onClick={() => onOpenNewEvent()}
+              className="shrink-0 inline-flex items-center gap-1 min-h-[40px] px-3 rounded-lg text-xs font-semibold text-rose-800 bg-rose-50 hover:bg-rose-100 border border-rose-200"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              Aggiungi
+            </button>
           </div>
         ) : (
           filteredDeadlines.map((item) => (

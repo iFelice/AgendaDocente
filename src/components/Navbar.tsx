@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { TeacherProfile, ViewMode } from "../types";
 import { PWAInstallButton } from "./PWAInstallButton";
+import { GoogleGlyph } from "./GoogleGlyph";
 import { User as FirebaseUser } from "firebase/auth";
 
 interface NavbarProps {
@@ -64,20 +65,16 @@ export const Navbar: React.FC<NavbarProps> = ({
     : profile.schoolLevel === "ssiig" ? "SSIIG"
     : "SSIG";
 
-  const googleGlyph = (
-    <div className="w-4 h-4 flex-shrink-0">
-      <svg version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" className="w-full h-full block" aria-hidden>
-        <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z" />
-        <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z" />
-        <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z" />
-        <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z" />
-      </svg>
-    </div>
-  );
+  const googleGlyph = <GoogleGlyph />;
 
   return (
     <header className="sticky top-0 z-30 bg-white border-b border-stone-200 shadow-xs">
-      {/* Utility bar: brand + quick actions (compact on phones) */}
+      {/*
+        Utility bar. On phones this is the WHOLE header: brand + profile only, because
+        navigation moves to the fixed bottom bar (MobileNav) and the secondary actions
+        (circolare AI, installa app, account Google) live in the "Altro" sheet.
+        From 768px the richer desktop action row comes back.
+      */}
       <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between gap-2 h-14 sm:h-16">
           {/* Logo & Teacher Info */}
@@ -110,14 +107,19 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
           </div>
 
-          {/* Quick Actions & PWA Install (fewer, larger targets on mobile) */}
+          {/*
+            Quick actions: desktop/tablet only. On phones the header keeps just the
+            profile avatar (the "+" primary action is the floating button of MobileNav).
+          */}
           <div className="flex items-center gap-1 sm:gap-2 shrink-0">
-            <PWAInstallButton />
+            <span className="hidden md:inline-flex">
+              <PWAInstallButton />
+            </span>
 
             <button
               id="btn-scan-circular"
               onClick={onOpenCircularModal}
-              className="inline-flex items-center justify-center gap-1.5 px-2.5 sm:px-3.5 min-h-[44px] min-w-[44px] rounded-lg text-sm font-medium bg-amber-500 hover:bg-amber-600 text-white transition-colors shadow-xs"
+              className="hidden md:inline-flex items-center justify-center gap-1.5 px-2.5 sm:px-3.5 min-h-[44px] min-w-[44px] rounded-lg text-sm font-medium bg-amber-500 hover:bg-amber-600 text-white transition-colors shadow-xs"
               title="Analizza circolare con intelligenza semantica"
               aria-label="Analizza circolare"
             >
@@ -128,7 +130,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             <button
               id="btn-new-event"
               onClick={onOpenNewEventModal}
-              className="inline-flex items-center justify-center gap-1 px-3 sm:px-3.5 min-h-[44px] rounded-lg text-sm font-medium bg-emerald-700 hover:bg-emerald-800 text-white transition-colors shadow-xs"
+              className="hidden md:inline-flex items-center justify-center gap-1 px-3 sm:px-3.5 min-h-[44px] rounded-lg text-sm font-medium bg-emerald-700 hover:bg-emerald-800 text-white transition-colors shadow-xs"
             >
               <Plus className="w-4 h-4" />
               <span className="hidden sm:inline">Nuovo Impegno</span>
@@ -182,9 +184,10 @@ export const Navbar: React.FC<NavbarProps> = ({
         </div>
       </div>
 
-      {/* Navigation Tabs: large touch targets, horizontal scroll on phones, the active
-          section gets a filled pill so it is unambiguous. */}
-      <div className="bg-white border-t border-stone-100">
+      {/* Navigation tabs: DESKTOP/TABLET ONLY. On phones the same destinations are
+          reached from the fixed bottom navigation (MobileNav), so this second bar is
+          not rendered visually — no compressed tab strip on small screens. */}
+      <div className="hidden md:block bg-white border-t border-stone-100">
         <div className="max-w-7xl mx-auto px-2 sm:px-6 lg:px-8">
           <nav
             className="flex items-center gap-1 sm:gap-1.5 overflow-x-auto py-1.5 no-scrollbar scroll-smooth"

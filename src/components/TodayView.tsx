@@ -150,12 +150,16 @@ export const TodayView: React.FC<TodayViewProps> = ({
   };
 
   return (
-    <div className="space-y-6 pb-12">
-      {/* Header Banner with day navigation (works on mobile and desktop) */}
-      <div className="bg-white rounded-xl p-4 sm:p-5 border border-stone-200 shadow-xs flex flex-col gap-3">
-        <div className="flex items-start justify-between gap-2 flex-wrap">
-          <div className="min-w-0">
-            <span className="text-xs font-semibold text-emerald-800 uppercase tracking-wider flex items-center gap-2">
+    <div className="space-y-4 sm:space-y-6">
+      {/*
+        Day overview: deliberately compact on phones (date + day navigation + one-line
+        summary) so the lesson list is above the fold almost immediately. The duplicate
+        quick actions live in the header/FAB and in "Altro", so they are desktop only.
+      */}
+      <div className="bg-white rounded-xl p-3 sm:p-5 border border-stone-200 shadow-xs">
+        <div className="flex items-center justify-between gap-2">
+          <div className="min-w-0 flex-1">
+            <span className="hidden sm:flex text-xs font-semibold text-emerald-800 uppercase tracking-wider items-center gap-2">
               Panoramica della Giornata
               {isToday ? (
                 <span className="px-1.5 py-0.5 rounded-md bg-emerald-100 text-emerald-800 text-[10px] font-bold normal-case tracking-normal">Oggi</span>
@@ -165,18 +169,21 @@ export const TodayView: React.FC<TodayViewProps> = ({
                 </span>
               )}
             </span>
-            <h1 className="text-lg sm:text-2xl font-bold text-stone-900 mt-0.5 break-words">{displayDate}</h1>
-            <p className="text-sm text-stone-500 mt-1">
+            <h1 className="text-base sm:text-2xl font-bold text-stone-900 mt-0.5 break-words leading-snug">
+              <span className="truncate">{displayDate}</span>
+              <span className="sm:hidden ml-1.5 align-middle text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-emerald-100 text-emerald-800">
+                {isToday ? "Oggi" : isFutureDay ? "Futuro" : "Passato"}
+              </span>
+            </h1>
+            <p className="text-xs sm:text-sm text-stone-500 mt-0.5 truncate">
               {todayLessons.length > 0
                 ? `${todayLessons.length} ore di lezione in programma`
                 : "Nessuna lezione curricolare prevista"}
               {todayEvents.length > 0 && ` • ${todayEvents.length} impegni/riunioni`}
             </p>
           </div>
-        </div>
 
-        <div className="flex items-center justify-between gap-2 flex-wrap">
-          <div className="flex items-center gap-1" role="group" aria-label="Navigazione del giorno">
+          <div className="flex items-center gap-1 shrink-0" role="group" aria-label="Navigazione del giorno">
             <button
               id="today-previous-day"
               type="button"
@@ -192,7 +199,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
               type="button"
               onClick={() => setSelectedIso(todayIso)}
               disabled={isToday}
-              className={`min-h-[44px] px-3 py-2 rounded-lg border text-xs font-semibold transition-colors ${
+              className={`min-h-[44px] px-2.5 sm:px-3 py-2 rounded-lg border text-xs font-semibold transition-colors ${
                 isToday
                   ? "border-stone-100 bg-stone-50 text-stone-400 cursor-default"
                   : "border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100"
@@ -212,65 +219,71 @@ export const TodayView: React.FC<TodayViewProps> = ({
               <ChevronRight className="w-5 h-5" />
             </button>
           </div>
+        </div>
 
-          <div className="flex items-center gap-2">
-            <button
-              id="today-quick-add"
-              onClick={() => onOpenNewEvent(selectedIso)}
-              className="inline-flex items-center px-3 py-2 text-sm font-medium rounded-lg text-emerald-800 bg-emerald-50 hover:bg-emerald-100 transition-colors border border-emerald-200 min-h-[44px]"
-            >
-              <Plus className="w-4 h-4 mr-1.5" />
-              Aggiungi{isToday ? " per oggi" : ""}
-            </button>
-            <button
-              id="today-quick-scan"
-              onClick={onOpenCircularModal}
-              className="inline-flex items-center px-3 py-2 text-sm font-medium rounded-lg text-amber-800 bg-amber-50 hover:bg-amber-100 transition-colors border border-amber-200 min-h-[44px]"
-            >
-              <Sparkles className="w-4 h-4 mr-1.5 text-amber-600" />
-              Importa circolare
-            </button>
-          </div>
+        {/* Quick actions: desktop/tablet only (on phones: floating "+" and "Altro"). */}
+        <div className="hidden md:flex items-center justify-end gap-2 mt-3">
+          <button
+            id="today-quick-add"
+            onClick={() => onOpenNewEvent(selectedIso)}
+            className="inline-flex items-center px-3 py-2 text-sm font-medium rounded-lg text-emerald-800 bg-emerald-50 hover:bg-emerald-100 transition-colors border border-emerald-200 min-h-[44px]"
+          >
+            <Plus className="w-4 h-4 mr-1.5" />
+            Aggiungi{isToday ? " per oggi" : ""}
+          </button>
+          <button
+            id="today-quick-scan"
+            onClick={onOpenCircularModal}
+            className="inline-flex items-center px-3 py-2 text-sm font-medium rounded-lg text-amber-800 bg-amber-50 hover:bg-amber-100 transition-colors border border-amber-200 min-h-[44px]"
+          >
+            <Sparkles className="w-4 h-4 mr-1.5 text-amber-600" />
+            Importa circolare
+          </button>
         </div>
       </div>
 
-      {/* Grid: Lessons + Afternoon Meetings */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      {/* Grid: Lessons + Afternoon Meetings.
+          Phones: single column; tablets (768-1023px): two columns; desktop: 2/3 + 1/3. */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6">
         {/* Left 2 Cols: Lessons & Afternoon */}
-        <div className="lg:col-span-2 space-y-6">
+        <div className="md:col-span-1 lg:col-span-2 space-y-4 sm:space-y-6">
           {/* Section 1: Morning Lessons */}
           <div className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-hidden">
-            <div className="p-4 border-b border-stone-100 flex items-center justify-between bg-stone-50/70">
-              <div className="flex items-center space-x-2">
-                <BookOpen className="w-5 h-5 text-emerald-700" />
-                <h2 className="text-base font-semibold text-stone-900">Lezioni Curricolari{isToday ? " di Oggi" : " del Giorno"}</h2>
+            <div className="p-3 sm:p-4 border-b border-stone-100 flex items-center justify-between gap-2 bg-stone-50/70">
+              <div className="flex items-center space-x-2 min-w-0">
+                <BookOpen className="w-5 h-5 text-emerald-700 shrink-0" />
+                <h2 className="text-sm sm:text-base font-semibold text-stone-900 truncate">Lezioni Curricolari{isToday ? " di Oggi" : " del Giorno"}</h2>
                 {isProvisionalTimetable && (
-                  <span className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
-                    🕒 Orario Provvisorio
+                  <span
+                    className="shrink-0 px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-300 whitespace-nowrap"
+                    title="Orario provvisorio per i primi giorni di scuola attivo"
+                  >
+                    <span className="sm:hidden">Provvisorio</span>
+                    <span className="hidden sm:inline">🕒 Orario Provvisorio</span>
                   </span>
                 )}
               </div>
-              <div className="flex items-center space-x-2">
+              <div className="flex items-center space-x-2 shrink-0">
                 {isProvisionalTimetable && !isDefinitiveCompiled && (
                   <span className="text-[11px] text-amber-800 bg-amber-50 px-2 py-0.5 rounded border border-amber-200 hidden sm:inline">
                     Definitivo non compilato
                   </span>
                 )}
-                <span className="text-xs font-semibold px-2.5 py-1 bg-stone-100 text-stone-700 rounded-full">
+                <span className="text-xs font-semibold px-2.5 py-1 bg-stone-100 text-stone-700 rounded-full whitespace-nowrap">
                   {todayLessons.length} {todayLessons.length === 1 ? "ora" : "ore"}
                 </span>
               </div>
             </div>
 
-            <div className="p-4">
+            <div className="p-3 sm:p-4">
               {todayLessons.length === 0 ? (
-                <div className="py-8 text-center space-y-2">
+                <div className="py-5 sm:py-8 text-center space-y-1.5 sm:space-y-2">
                   <p className="text-sm text-stone-600 font-medium">
                     {isWeekend
                       ? "Fine settimana: nessuna lezione curricolare prevista."
                       : "Nessuna lezione inserita per questo giorno della settimana."}
                   </p>
-                  <p className="text-xs text-stone-400">
+                  <p className="hidden sm:block text-xs text-stone-400">
                     Puoi personalizzare la griglia oraria dalla scheda "Orario Lezioni" o visualizzare il planning settimanale.
                   </p>
                   {onNavigateToPlanning && (
@@ -349,49 +362,69 @@ export const TodayView: React.FC<TodayViewProps> = ({
             </div>
 
             {isProvisionalTimetable && !isDefinitiveCompiled && (
-              <div className="p-3 bg-amber-50/70 border-t border-amber-200 text-xs text-amber-900 flex items-center justify-between">
-                <div className="flex items-center space-x-2">
-                  <Clock className="w-4 h-4 text-amber-700 flex-shrink-0" />
-                  <span>
-                    Orario provvisorio per i primi giorni di scuola attivo di default (orario definitivo non ancora compilato).
+              /* Compact informational row on phones (no big yellow block): short label +
+                 link to complete the timetable; the full explanation stays on >= 640px. */
+              <div className="px-3 sm:px-4 py-2 sm:py-3 bg-amber-50/70 border-t border-amber-200 text-[11px] sm:text-xs text-amber-900 flex items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5 min-w-0">
+                  <Clock className="w-3.5 h-3.5 text-amber-700 flex-shrink-0" />
+                  <span className="truncate">
+                    <span className="sm:hidden">Orario provvisorio attivo</span>
+                    <span className="hidden sm:inline sm:truncate-none">
+                      Orario provvisorio per i primi giorni di scuola attivo di default (orario definitivo non ancora compilato).
+                    </span>
                   </span>
-                </div>
+                </span>
                 {onNavigateToTimetable && (
                   <button
                     type="button"
+                    id="today-complete-timetable"
                     onClick={onNavigateToTimetable}
-                    className="font-bold underline hover:text-amber-950 text-[11px] whitespace-nowrap ml-2"
+                    className="font-bold underline hover:text-amber-950 text-[11px] whitespace-nowrap shrink-0 min-h-[32px]"
                   >
-                    Compila Definitivo &rarr;
+                    <span className="sm:hidden">Completa orario</span>
+                    <span className="hidden sm:inline">Compila Definitivo &rarr;</span>
                   </button>
                 )}
               </div>
             )}
           </div>
 
-          {/* Section 2: Meetings & Events */}
+          {/* Section 2: Meetings & Events. With no data the section collapses to a
+              single compact row ("Nessun impegno oggi · + Aggiungi") instead of a big
+              empty card, and expands only when real items exist. */}
+          {todayEvents.length === 0 ? (
+            <div className="bg-white rounded-xl border border-stone-200 shadow-xs px-3 py-2.5 flex items-center justify-between gap-2">
+              <p className="text-xs text-stone-500 min-w-0 truncate">
+                Nessun impegno {isToday ? "oggi" : "in questa data"}
+                <span className="text-stone-400"> · i consigli di classe appariranno qui</span>
+              </p>
+              <button
+                type="button"
+                id="today-empty-add-event"
+                onClick={() => onOpenNewEvent(selectedIso)}
+                className="shrink-0 inline-flex items-center gap-1 min-h-[40px] px-3 rounded-lg text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Aggiungi
+              </button>
+            </div>
+          ) : (
           <div className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-hidden">
-            <div className="p-4 border-b border-stone-100 flex items-center justify-between bg-stone-50/70">
-              <div className="flex items-center space-x-2">
-                <Calendar className="w-5 h-5 text-purple-700" />
-                <h2 className="text-base font-semibold text-stone-900">Impegni & Riunioni{isToday ? "" : " del giorno selezionato"}</h2>
+            <div className="p-3 sm:p-4 border-b border-stone-100 flex items-center justify-between bg-stone-50/70">
+              <div className="flex items-center space-x-2 min-w-0">
+                <Calendar className="w-5 h-5 text-purple-700 shrink-0" />
+                <h2 className="text-sm sm:text-base font-semibold text-stone-900 truncate">Impegni & Riunioni{isToday ? "" : " del giorno selezionato"}</h2>
               </div>
               <button
                 onClick={() => onOpenNewEvent(selectedIso)}
-                className="text-xs font-semibold text-emerald-700 hover:text-emerald-800 flex items-center"
+                className="text-xs font-semibold text-emerald-700 hover:text-emerald-800 flex items-center min-h-[36px] px-2 shrink-0"
               >
                 <Plus className="w-3.5 h-3.5 mr-1" />
                 Aggiungi
               </button>
             </div>
 
-            <div className="p-4">
-              {todayEvents.length === 0 ? (
-                <div className="py-8 text-center">
-                  <p className="text-sm text-stone-500">Nessun impegno registrato per questa data.</p>
-                  <p className="text-xs text-stone-400 mt-1">I consigli di classe o le riunioni appariranno qui quando inseriti.</p>
-                </div>
-              ) : (
+            <div className="p-3 sm:p-4">
                 <div className="space-y-3">
                   {todayEvents.map((ev) => (
                     <div
@@ -479,31 +512,43 @@ export const TodayView: React.FC<TodayViewProps> = ({
                     </div>
                   ))}
                 </div>
-              )}
             </div>
           </div>
+          )}
         </div>
 
         {/* Right Col: Deadlines & Quick Reference */}
-        <div className="space-y-6">
-          {/* Deadlines of the selected day, then the nearest upcoming ones */}
+        <div className="space-y-4 sm:space-y-6">
+          {/* Deadlines of the selected day, then the nearest upcoming ones. With no
+              data at all the section is a single compact row, not a big empty card. */}
+          {dayDeadlines.length === 0 && nextDeadlines.length === 0 ? (
+            <div className="bg-white rounded-xl border border-stone-200 shadow-xs px-3 py-2.5 flex items-center justify-between gap-2">
+              <p className="text-xs text-stone-500 min-w-0 truncate">
+                Nessuna scadenza {isToday ? "oggi" : "in questa data"}
+              </p>
+              <button
+                type="button"
+                id="today-empty-add-deadline"
+                onClick={() => onOpenNewEvent(selectedIso)}
+                className="shrink-0 inline-flex items-center gap-1 min-h-[40px] px-3 rounded-lg text-xs font-semibold text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Aggiungi
+              </button>
+            </div>
+          ) : (
           <div className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-hidden">
-            <div className="p-4 border-b border-stone-100 flex items-center justify-between bg-stone-50/70">
-              <div className="flex items-center space-x-2">
-                <AlertCircle className="w-5 h-5 text-amber-600" />
-                <h2 className="text-base font-semibold text-stone-900">Scadenze & Adempimenti</h2>
+            <div className="p-3 sm:p-4 border-b border-stone-100 flex items-center justify-between bg-stone-50/70">
+              <div className="flex items-center space-x-2 min-w-0">
+                <AlertCircle className="w-5 h-5 text-amber-600 shrink-0" />
+                <h2 className="text-sm sm:text-base font-semibold text-stone-900 truncate">Scadenze & Adempimenti</h2>
               </div>
-              <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 font-medium">
+              <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 font-medium whitespace-nowrap shrink-0">
                 {dayDeadlines.length} {isToday ? "oggi" : "del giorno"}
               </span>
             </div>
 
-            <div className="p-4">
-              {dayDeadlines.length === 0 && nextDeadlines.length === 0 ? (
-                <div className="py-6 text-center text-stone-400 text-xs">
-                  Nessuna scadenza in sospeso per questa data. Ottimo lavoro!
-                </div>
-              ) : (
+            <div className="p-3 sm:p-4">
                 <div className="space-y-3">
                   {dayDeadlines.map((d) => (
                     <div
@@ -552,23 +597,33 @@ export const TodayView: React.FC<TodayViewProps> = ({
                       </div>
                     ))}
                 </div>
-              )}
             </div>
           </div>
+          )}
 
           {/* Quick AI Circular Promo Box */}
-          <div className="bg-gradient-to-br from-amber-50 to-orange-50 rounded-xl border border-amber-200 p-4 space-y-3">
-            <div className="flex items-center space-x-2 text-amber-900 font-semibold text-sm">
-              <Sparkles className="w-4 h-4 text-amber-600" />
-              <span>Hai ricevuto una nuova circolare?</span>
+          <div className="bg-gradient-to-br from-amber-50 to-orange-50 rounded-xl border border-amber-200 p-3 sm:p-4">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center space-x-2 text-amber-900 font-semibold text-xs sm:text-sm min-w-0">
+                <Sparkles className="w-4 h-4 text-amber-600 shrink-0" />
+                <span className="truncate">Hai ricevuto una nuova circolare?</span>
+              </div>
+              <button
+                onClick={onOpenCircularModal}
+                id="today-circular-cta-mobile"
+                className="shrink-0 sm:hidden min-h-[40px] py-2 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-medium text-xs shadow-xs transition-colors text-center"
+              >
+                Analizza
+              </button>
             </div>
-            <p className="text-xs text-amber-800 leading-relaxed">
+            <p className="hidden sm:block text-xs text-amber-800 leading-relaxed mt-3">
               Non ricopiare a mano gli orari dei consigli o le date del collegio. Carica il PDF o scatta una foto: l'app seleziona
               solo gli impegni pertinenti alle tue classi e al tuo grado.
             </p>
             <button
               onClick={onOpenCircularModal}
-              className="w-full py-2 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-medium text-xs shadow-xs transition-colors text-center"
+              id="today-circular-cta"
+              className="hidden sm:block w-full mt-3 py-2 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-medium text-xs shadow-xs transition-colors text-center"
             >
               Apri Analizzatore Circolari
             </button>

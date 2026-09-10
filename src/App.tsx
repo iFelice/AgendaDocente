@@ -19,6 +19,7 @@ import {
 } from "./types";
 import { storage } from "./services/storage";
 import { Navbar } from "./components/Navbar";
+import { MobileNav } from "./components/MobileNav";
 import { TodayView } from "./components/TodayView";
 import { WeekView } from "./components/WeekView";
 import { MonthView } from "./components/MonthView";
@@ -504,9 +505,12 @@ export default function App({ initialData }: { initialData: LocalData }) {
         }}
       />
 
-      {/* Floating Notification Toast */}
+      {/* Floating notification toast (clears the mobile bottom navigation) */}
       {toastMessage && (
-        <div className="fixed bottom-5 right-5 z-50 animate-in slide-in-from-bottom-5 fade-in duration-200">
+        <div
+          role="status"
+          className="app-toast fixed left-3 right-3 md:left-auto md:right-5 md:bottom-5 z-50 animate-in slide-in-from-bottom-5 fade-in duration-200"
+        >
           <div className="bg-stone-900 text-white px-4 py-3 rounded-xl shadow-xl border border-stone-700 flex items-center space-x-2 text-xs font-medium">
             <CheckCircle2 className="w-4 h-4 text-emerald-400 flex-shrink-0" />
             <span>{toastMessage}</span>
@@ -514,8 +518,8 @@ export default function App({ initialData }: { initialData: LocalData }) {
         </div>
       )}
 
-      {/* Main View Container */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 pt-3 sm:pt-6 pb-6">
+      {/* Main View Container: `.app-main` reserves the bottom navigation space on phones */}
+      <main className="app-main flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 pt-3 sm:pt-6">
         {currentView === "oggi" && (
           <TodayView
             profile={profile}
@@ -616,6 +620,27 @@ export default function App({ initialData }: { initialData: LocalData }) {
         )}
       </main>
 
+      {/* Mobile navigation (fixed bottom bar + "Altro" sheet); hidden from 768px up,
+          where the header navigation stays in charge. */}
+      <MobileNav
+        currentView={currentView}
+        onViewChange={setCurrentView}
+        onOpenNewEvent={() => handleOpenNewEvent()}
+        onOpenProfileModal={() => {
+          setProfileInitialTab("profilo");
+          setIsProfileModalOpen(true);
+        }}
+        onOpenGoogleTab={() => {
+          setProfileInitialTab("google");
+          setIsProfileModalOpen(true);
+        }}
+        onOpenGoogleLogin={handleGoogleLogin}
+        onOpenTutorial={() => setIsOnboardingOpen(true)}
+        onOpenCircularModal={() => setIsCircularModalOpen(true)}
+        googleUser={googleUser}
+        stats={{ todayEventsCount, pendingDeadlinesCount }}
+      />
+
       {/* MODALS */}
       {isCircularModalOpen && (
       <CircularAnalyzerModal
@@ -680,7 +705,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
       {pwaUpdate.updateAvailable && (
         <div
           role="status"
-          className="fixed bottom-20 left-1/2 z-[80] w-[calc(100vw-2rem)] max-w-md -translate-x-1/2 rounded-xl border border-amber-300 bg-white px-4 py-3 shadow-lg flex items-center gap-3"
+          className="app-update-banner fixed left-1/2 md:bottom-20 z-[80] w-[calc(100vw-2rem)] max-w-md -translate-x-1/2 rounded-xl border border-amber-300 bg-white px-4 py-3 shadow-lg flex items-center gap-3"
         >
           <span className="text-sm font-semibold text-amber-900 flex-1">È disponibile una nuova versione</span>
           <button
