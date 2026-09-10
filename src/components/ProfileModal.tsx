@@ -21,7 +21,7 @@ import {
   Check,
 } from "lucide-react";
 import { User as FirebaseUser } from "firebase/auth";
-import { TeacherProfile, TeacherRole, TeacherRoleKind, TEACHER_ROLE_KINDS, SchoolLevel, CalendarEvent } from "../types";
+import { TeacherProfile, TeacherRole, TeacherRoleKind, TEACHER_ROLE_KINDS, SchoolLevel, CalendarEvent, SchoolProfile } from "../types";
 import { ROLE_LABELS, roleDisplayName } from "../utils/teacherRoles";
 import { formatPersonDisplayName } from "../utils/names";
 import { storage } from "../services/storage";
@@ -31,6 +31,7 @@ import { isUserCancellationError } from "../services/googleAuth";
 import { downloadIcsCalendar } from "../services/googleCalendarService";
 import type { SyncStatus } from "../services/sync/types";
 import { CloudSync } from "./CloudSyncCard";
+import { hasActiveSecondarySchool, normalizeTeacherProfile } from "../utils/multiSchool";
 
 interface ProfileModalProps {
   isOpen: boolean;
@@ -90,11 +91,21 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
       setSyncStatus(null);
       setShowSyncConfirm(false);
       setShowLogoutConfirm(false);
+      // Re-derive the dormant flag on every opening: an inactive saved secondary
+      // must not resurrect the multi-school UI after a close/reopen cycle.
+      setMultiSchoolEnabled(hasActiveSecondarySchool(profile));
+      const secondary = (profile.schools ?? []).find(s => !s.isPrimary);
+      if (secondary) setSecondarySchool(secondary);
     }
-  }, [isOpen, initialTab]);
+  }, [isOpen, initialTab, profile]);
   const [schoolName, setSchoolName] = useState(profile.schoolName);
   const [schoolLevel, setSchoolLevel] = useState<SchoolLevel>(profile.schoolLevel || "ssig");
   const [schoolYear, setSchoolYear] = useState(profile.schoolYear);
+  const existingSecondary = (profile.schools ?? []).find(s => !s.isPrimary);
+  const [multiSchoolEnabled, setMultiSchoolEnabled] = useState(hasActiveSecondarySchool(profile));
+  const [secondarySchool, setSecondarySchool] = useState<SchoolProfile>(existingSecondary ?? { id: `school-secondary-${profile.id}`, name: "", institutionalEmail: "", campuses: [], schoolLevel: profile.schoolLevel, weeklyHours: undefined, active: true, isPrimary: false });
+  const [secondaryCampusInput, setSecondaryCampusInput] = useState("");
+  const updateSecondary = (patch: Partial<SchoolProfile>) => setSecondarySchool(current => ({ ...current, ...patch }));
   const [primarySubjects, setPrimarySubjects] = useState<string[]>(profile.primarySubjects);
   const [classes, setClasses] = useState<string[]>(profile.classes);
   const [campuses, setCampuses] = useState<string[]>(profile.campuses);
@@ -197,8 +208,14 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
       // Students are managed in "Classi & Alunni", not in this editor: the existing
       // assignment is carried over verbatim so saving the profile never drops it.
       assignedStudents: profile.assignedStudents,
+      schools: [
+        ...(profile.schools ?? []).filter(s => s.isPrimary),
+        ...(multiSchoolEnabled ? [{ ...secondarySchool, active: true, isPrimary: false, name: secondarySchool.name.trim(), institutionalEmail: secondarySchool.institutionalEmail?.trim() || undefined }] :
+          (profile.schools ?? []).filter(s => !s.isPrimary).map(s => ({ ...s, active: false }))),
+      ],
     };
-    if (!await save.run(() => onSaveProfile(updated, editBaseline.current))) return;
+    const normalizedUpdated = normalizeTeacherProfile(updated);
+    if (!await save.run(() => onSaveProfile(normalizedUpdated, editBaseline.current))) return;
     onClose();
   };
 
@@ -455,6 +472,24 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                     </button>
                   </div>
                 </div>
+              </div>
+
+              <div className="rounded-xl border border-stone-200 bg-white p-3.5 space-y-3">
+                <label className="flex items-center gap-2 text-xs font-semibold text-stone-700 cursor-pointer">
+                  <input type="checkbox" checked={multiSchoolEnabled} onChange={e => setMultiSchoolEnabled(e.target.checked)} className="accent-emerald-700" />
+                  Completo il mio orario anche in un altro istituto
+                </label>
+                {multiSchoolEnabled && <div className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-3 space-y-3">
+                  <div className="flex items-center gap-2"><School className="w-4 h-4 text-emerald-700" /><strong className="text-sm text-stone-800">Altro istituto</strong></div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <input aria-label="Nome altro istituto" value={secondarySchool.name} onChange={e => updateSecondary({ name: e.target.value })} placeholder="Nome istituto" className="p-2.5 border border-stone-300 rounded-xl text-xs" />
+                    <input aria-label="Email altro istituto" type="email" value={secondarySchool.institutionalEmail ?? ""} onChange={e => updateSecondary({ institutionalEmail: e.target.value })} placeholder="Email istituzionale" className="p-2.5 border border-stone-300 rounded-xl text-xs" />
+                    <input aria-label="Ore settimanali altro istituto" type="number" min="0" value={secondarySchool.weeklyHours ?? ""} onChange={e => updateSecondary({ weeklyHours: e.target.value ? Number(e.target.value) : undefined })} placeholder="Ore settimanali" className="p-2.5 border border-stone-300 rounded-xl text-xs" />
+                    <div className="flex gap-2"><input aria-label="Plesso altro istituto" value={secondaryCampusInput} onChange={e => setSecondaryCampusInput(e.target.value)} placeholder="Plesso/Sede" className="min-w-0 flex-1 p-2.5 border border-stone-300 rounded-xl text-xs" /><button type="button" className="px-2 rounded-lg bg-stone-700 text-white text-xs" onClick={() => { const c = secondaryCampusInput.trim(); if (c && !(secondarySchool.campuses ?? []).includes(c)) updateSecondary({ campuses: [...(secondarySchool.campuses ?? []), c] }); setSecondaryCampusInput(""); }}>Aggiungi</button></div>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">{(secondarySchool.campuses ?? []).map(c => <span key={c} className="text-[11px] rounded bg-stone-200 px-2 py-1">{c}</span>)}</div>
+                  <p className="text-[11px] text-stone-500">I dati restano conservati anche se disattivi questa opzione.</p>
+                </div>}
               </div>
 
               {/* Grado Scolastico di Appartenenza (SSIG, Primaria, SSIIG) */}

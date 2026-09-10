@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import Dexie from 'dexie';
 import { AgendaDatabase, LEGACY_KEYS, readLegacyData, type LegacyStorage, type LocalData, exportLegacyData } from '../src/services/db';
 import { demoInstallation } from '../src/services/storage';
+import { normalizeSchoolLinkedData } from '../src/utils/multiSchool';
+const migrated = (data: LocalData) => normalizeSchoolLinkedData(data);
 
 function legacy(data?: LocalData) {
   const values = new Map<string,string>();
@@ -46,7 +48,7 @@ test('new installation seeds once, with separate entity records and a committed 
 test('complete legacy migration preserves every collection, field, ID and source data',async()=>withDB(async db=>{
   const data=realData(), old=legacy(data), original=exportLegacyData(old.store);
   await db.initialize(demoInstallation(),old.store);
-  assert.equal(db.mode,'indexeddb');assert.deepEqual(await db.readSnapshot(),data);
+  assert.equal(db.mode,'indexeddb');assert.deepEqual(await db.readSnapshot(),migrated(data));
   assert.equal(exportLegacyData(old.store),original);
   assert.equal((await db.read('events'))[0].sourceCircularId,'real-circular');
   assert.equal((await db.read('events'))[0].sourceItemId,'item');
@@ -77,13 +79,13 @@ for(const phase of ['events','metadata']) test(`interruption at ${phase} rolls b
   const abort=(_key:unknown,value:any)=>{ if(phase==='events'||value.key==='migration') Dexie.currentTransaction!.abort(); };
   db.table(phase).hook('creating',abort);
   await db.initialize(demoInstallation(),old.store);
-  assert.equal(db.mode,'legacy-readonly');assert.deepEqual(await db.readSnapshot(),realData());
+  assert.equal(db.mode,'legacy-readonly');assert.deepEqual(await db.readSnapshot(),migrated(realData()));
   for(const table of db.tables)assert.equal(await table.count(),0);
   assert.equal(exportLegacyData(old.store),original);
   await assert.rejects(db.write('events',[]),/sola lettura/);
   db.table(phase).hook('creating').unsubscribe(abort);db.close();
   await db.initialize(demoInstallation(),old.store);
-  assert.equal(db.mode,'indexeddb');assert.deepEqual(await db.readSnapshot(),realData());
+  assert.equal(db.mode,'indexeddb');assert.deepEqual(await db.readSnapshot(),migrated(realData()));
 }));
 
 test('quota failure during migration retains a read-only legacy copy and no partially migrated records',async()=>withDB(async db=>{
@@ -97,7 +99,7 @@ test('quota failure during migration retains a read-only legacy copy and no part
 
 test('DB unavailable can still expose validated legacy offline, without permitting edits',async()=>withDB(async db=>{
   const originalOpen=db.open.bind(db);db.open=()=>Dexie.Promise.reject(new Error('Unavailable'));
-  try {await db.initialize(demoInstallation(),legacy(realData()).store);assert.equal(db.mode,'legacy-readonly');assert.deepEqual(await db.readSnapshot(),realData());await assert.rejects(db.write('events',[]));}
+  try {await db.initialize(demoInstallation(),legacy(realData()).store);assert.equal(db.mode,'legacy-readonly');assert.deepEqual(await db.readSnapshot(),migrated(realData()));await assert.rejects(db.write('events',[]));}
   finally {db.open=originalOpen;}
 }));
 
@@ -127,7 +129,7 @@ test('read failures never substitute demo records for real data',async()=>withDB
   const fail=()=>{throw new Error('Read failed');};db.table('events').hook('reading',fail);
   await assert.rejects(db.read('events'),/Read failed/);
   db.table('events').hook('reading').unsubscribe(fail);
-  assert.deepEqual(await db.read('events'),realData().events);
+  assert.deepEqual(await db.read('events'),migrated(realData()).events);
 }));
 
 test('interrupted legacy restore journal is recovered before the migration snapshot',async()=>withDB(async db=>{
@@ -139,7 +141,7 @@ test('interrupted legacy restore journal is recovered before the migration snaps
 
 test('concurrent migrations commit one complete snapshot',async()=>withDB(async db=>{
   const other=new AgendaDatabase(db.name), old=legacy(realData());
-  try {await Promise.all([db.initialize(demoInstallation(),old.store),other.initialize(demoInstallation(),old.store)]);assert.deepEqual(await other.readSnapshot(),realData());}
+  try {await Promise.all([db.initialize(demoInstallation(),old.store),other.initialize(demoInstallation(),old.store)]);assert.deepEqual(await other.readSnapshot(),migrated(realData()));}
   finally{other.close();}
 }));
 
@@ -153,7 +155,7 @@ test('restore failure after writes to earlier collections leaves the entire prev
 test('invalid backup never modifies DB and full export/import roundtrip preserves the exact snapshot',async()=>withDB(async db=>{
   await db.initialize(demoInstallation(),legacy(realData()).store);const before=await db.readSnapshot();
   await assert.rejects(db.restore({...before,students:[{...before.students[0],notes:[null as any]}]}));assert.deepEqual(await db.readSnapshot(),before);
-  const json=JSON.stringify(before);await db.restore(demoInstallation());await db.restore(JSON.parse(json));assert.deepEqual(await db.readSnapshot(),before);
+  const json=JSON.stringify(before);await db.restore(demoInstallation());await db.restore(JSON.parse(json));assert.deepEqual(await db.readSnapshot(),{...JSON.parse(json),timeSlotConfig:undefined});
 }));
 
 test('legacy validator rejects invalid modes, onboarding and duplicate IDs without normalizing user data',()=>{
@@ -165,7 +167,7 @@ test('legacy validator rejects invalid modes, onboarding and duplicate IDs witho
 test('migrated DB opens even when legacy storage access is denied',async()=>withDB(async db=>{
   await db.initialize(demoInstallation(),legacy(realData()).store);db.close();
   const denied = legacy().store;denied.getItem=()=>{throw new Error('Denied');};
-  await db.initialize(demoInstallation(),denied);assert.equal(db.mode,'indexeddb');assert.deepEqual(await db.readSnapshot(),realData());
+  await db.initialize(demoInstallation(),denied);assert.equal(db.mode,'indexeddb');assert.deepEqual(await db.readSnapshot(),migrated(realData()));
 }));
 
 test('failed legacy read on an empty DB never treats real data as a new installation',async()=>withDB(async db=>{

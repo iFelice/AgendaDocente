@@ -2,6 +2,7 @@ import { linkLegacyCircularEvents } from '../utils/circularLinks';
 import Dexie, { type Table } from 'dexie';
 import type { CalendarEvent, CircularDocument, Student, TeacherProfile, TimetableSlot, TimetableMode, TimeSlotConfig } from '../types';
 import { validateBackup, recoverBackupRestore } from './backup';
+import { normalizeSchoolLinkedData } from '../utils/multiSchool';
 
 export const LEGACY_KEYS = {
   profile: 'agedoc_teacher_profile_v2', events: 'agedoc_events_v2', circulars: 'agedoc_circulars_v2',
@@ -50,7 +51,8 @@ export function readLegacyData(legacy: LegacyStorage): LocalData | null {
   } as LocalData;
   validateBackup({version:3,...data});
   data.events = linkLegacyCircularEvents(data.events, data.circulars);
-  return data;
+  const normalized = normalizeSchoolLinkedData(data);
+  return { ...data, ...normalized };
 }
 
 export class AgendaDatabase extends Dexie {
@@ -105,15 +107,19 @@ export class AgendaDatabase extends Dexie {
         }
         const occupied = (await Promise.all(stores.map(name => this.table(name).count()))).some(n => n > 0);
         if (occupied) {
-          // A valid populated database wins even without a migration marker.
-          validateBackup({version:3,...await this.readSnapshot()});
+          // A valid populated database wins even without a migration marker. Apply the
+          // additive school migration in-place; no rows are deleted and the operation is idempotent.
+          const current = await this.readSnapshot();
+          const normalized = normalizeSchoolLinkedData(current);
+          validateBackup({version:3,...normalized});
+          if (JSON.stringify(current) !== JSON.stringify(normalized)) await this.writeSnapshot(normalized);
           await this.meta().put({key:'migration',value:1});
           return;
         }
         const source = legacy ?? localStorage;
         recoverBackupRestore(source);
         const previous = readLegacyData(source);
-        const data = previous ?? seed;
+        const data = previous ? normalizeSchoolLinkedData(previous) : seed;
         validateBackup({version:3,...data});
         await this.writeSnapshot(data);
         const copied = await this.readSnapshot();

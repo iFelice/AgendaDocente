@@ -15,6 +15,24 @@ export type EventCategory =
 
 export type SchoolLevel = "infanzia" | "primaria" | "ssig" | "ssiig";
 
+export interface SchoolProfile {
+  id: string;
+  name: string;
+  institutionalEmail?: string;
+  campuses?: string[];
+  schoolLevel?: SchoolLevel;
+  weeklyHours?: number;
+  isPrimary?: boolean;
+  active?: boolean;
+}
+
+/** Future-proof class directory record; current ClassesView still uses className strings. */
+export interface SchoolClass {
+  id: string;
+  name: string;
+  schoolId: string;
+}
+
 /**
  * Ruoli reali assegnabili da un docente. Il tipo "docente di sostegno" NON implica
  * automaticamente altri ruoli (GLI, coordinatoriecc.): ogni ruolo aggiuntivo deriva
@@ -66,6 +84,8 @@ export interface TeacherProfile {
   assignedStudents?: string[];
   googleCalendarLinked?: boolean;
   googleCalendarAccount?: string;
+  /** Additive multi-institute model; legacy scalar fields remain supported. */
+  schools?: SchoolProfile[];
 }
 
 export type TimetableType = "definitivo" | "provvisorio";
@@ -113,6 +133,7 @@ export interface TimetableSlot {
    * Opzionale: nessuno, uno o più docenti.
    */
   supportTeachers?: string[];
+  schoolId?: string;
 }
 
 export interface CalendarEvent {
@@ -137,6 +158,7 @@ export interface CalendarEvent {
   syncedWithGoogle?: boolean;
   /** Wall-clock stamp maintained by the storage layer; used by account sync conflict checks. */
   updatedAt?: string;
+  schoolId?: string;
 }
 
 export type RelevanceLevel = "VERDE" | "GIALLO" | "ROSSO";
@@ -171,6 +193,7 @@ export interface CircularDocument {
   extractedItems?: ExtractedItem[];
   /** Wall-clock stamp maintained by the storage layer; used by account sync conflict checks. */
   updatedAt?: string;
+  schoolId?: string;
 }
 
 export type StudentNoteCategory =

@@ -6,6 +6,7 @@ import { getCurrentSchoolYear } from "../utils/schoolYear";
 import { validateBackup } from "./backup";
 import { database, type LocalData, type LegacyStorage } from "./db";
 import { extractedItemError } from "../utils/circularParser";
+import { normalizeSchoolLinkedData } from "../utils/multiSchool";
 export function getSchoolLevelLabel(level?: SchoolLevel): string {
   switch (level) {
     case "infanzia":
@@ -1136,12 +1137,10 @@ export const storage = {
       validateBackup(data);
       await database.atomic(async () => {
         const current = await database.readSnapshot();
-        await database.restore({ profile: data.profile, events: linkLegacyCircularEvents(data.events, data.circulars), circulars: data.circulars, students: data.students,
-          definitiveTimetable: data.version === 3 ? data.definitiveTimetable : data.timetable,
-          provisionalTimetable: data.version === 3 ? data.provisionalTimetable : current.provisionalTimetable,
-          timetableMode: data.version === 3 ? data.timetableMode : current.timetableMode,
-          onboardingCompleted: data.version === 3 ? data.onboardingCompleted : current.onboardingCompleted,
-          timeSlotConfig: data.version === 3 ? data.timeSlotConfig : current.timeSlotConfig });
+        const restored = normalizeSchoolLinkedData({ profile: data.profile, events: linkLegacyCircularEvents(data.events, data.circulars), circulars: data.circulars, students: data.students,
+          definitiveTimetable: data.version === 3 ? data.definitiveTimetable : data.timetable, provisionalTimetable: data.version === 3 ? data.provisionalTimetable : current.provisionalTimetable,
+          timetableMode: data.version === 3 ? data.timetableMode : current.timetableMode, onboardingCompleted: data.version === 3 ? data.onboardingCompleted : current.onboardingCompleted, timeSlotConfig: data.version === 3 ? data.timeSlotConfig : current.timeSlotConfig });
+        await database.restore(restored);
       });
       return true;
     }

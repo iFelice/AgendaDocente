@@ -2,6 +2,7 @@ import { database, type LocalData } from "../db";
 import type { SyncableSnapshot } from "./types";
 import type { LocalApply, SyncStore } from "./engine";
 import { liveQuery } from "dexie";
+import { normalizeSchoolLinkedData, normalizeTeacherProfile } from "../../utils/multiSchool";
 
 /**
  * Bridges the sync engine to the local-first store. IndexedDB (Dexie) stays the single
@@ -24,10 +25,10 @@ export function createStoreAdapter(): SyncStore {
       await database.atomic(async () => {
         const write = async <K extends keyof LocalData>(name: K, value: LocalData[K]) => database.write(name, value);
         if (full) {
-          await applySnapshot(full);
+          await applySnapshot(normalizeSchoolLinkedData(full));
           return;
         }
-        if ("profile" in state) await write("profile", state.profile as LocalData["profile"]);
+        if ("profile" in state) await write("profile", normalizeTeacherProfile(state.profile as LocalData["profile"]));
         if ("students" in state) await write("students", state.students as LocalData["students"]);
         if ("definitiveTimetable" in state) await write("definitiveTimetable", state.definitiveTimetable as LocalData["definitiveTimetable"]);
         if ("provisionalTimetable" in state) await write("provisionalTimetable", state.provisionalTimetable as LocalData["provisionalTimetable"]);

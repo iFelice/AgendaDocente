@@ -8,6 +8,7 @@ import { localDateISO, nextDateISO, isValidDate, eventDateError } from '../src/u
 import { parseCircularText, normalizeExtractedItems, extractedItemError } from '../src/utils/circularParser';
 import { evaluateItemRelevance, detectSubjects } from '../src/utils/circularRelevance';
 import { analyzeCircular } from '../src/services/aiService';
+import { normalizeSchoolLinkedData } from '../src/utils/multiSchool';
 import { storage, convertExtractedItemToEvent, isCommitmentInEvents } from '../src/services/storage';
 import { recoverBackupRestore } from '../src/services/backup';
 import { linkLegacyCircularEvents } from '../src/utils/circularLinks';
@@ -361,6 +362,6 @@ test('all local operations and backup roundtrip work with network unavailable',a
     await storage.saveStudent({id:'offline',fullName:'Studente',className:'1A',notes:[]});
     await storage.addStudentNote('offline',{id:'note',date:'2027-09-01',category:'didattica',title:'Nota',content:'Offline',createdAt:'2027-09-01T09:00:00Z'});
     const before=await database.readSnapshot(), backup=await storage.exportDataBackup();await storage.deleteEvent(event.id);
-    assert.equal(await storage.importDataBackup(backup),true);assert.deepEqual(await database.readSnapshot(),before);assert.equal(calls,0);
+    assert.equal(await storage.importDataBackup(backup),true);assert.deepEqual(await database.readSnapshot(),normalizeSchoolLinkedData(before));assert.equal(calls,0);
   }finally{globalThis.fetch=original;}
 });
