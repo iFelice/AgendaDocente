@@ -136,29 +136,31 @@ export const MonthView: React.FC<MonthViewProps> = ({
   return (
     <div className="space-y-6 pb-12">
       {/* Month Navigation */}
-      <div className="bg-white rounded-xl p-4 border border-stone-200 shadow-xs flex items-center justify-between">
-        <div className="flex items-center space-x-3">
-          <h2 className="text-xl font-bold text-stone-900 capitalize">{monthTitle}</h2>
+      <div className="bg-white rounded-xl p-3 sm:p-4 border border-stone-200 shadow-xs flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+          <h2 className="text-lg sm:text-xl font-bold text-stone-900 capitalize leading-tight">{monthTitle}</h2>
           <button
             onClick={resetToToday}
-            className="px-2.5 py-1 text-xs font-semibold rounded-md border border-stone-200 text-stone-600 hover:bg-stone-50"
+            className="px-2.5 py-2 text-xs font-semibold rounded-lg border border-stone-200 text-stone-600 hover:bg-stone-50 min-h-[40px]"
           >
             Oggi
           </button>
         </div>
 
-        <div className="flex items-center space-x-1">
+        <div className="flex items-center gap-1.5">
           <button
             onClick={prevMonth}
-            className="p-2 rounded-lg border border-stone-200 hover:bg-stone-50 text-stone-600 transition-colors"
+            className="inline-flex items-center justify-center w-[44px] h-[44px] rounded-lg border border-stone-200 hover:bg-stone-50 active:bg-stone-100 text-stone-600 transition-colors"
             title="Mese precedente"
+            aria-label="Mese precedente"
           >
             <ChevronLeft className="w-5 h-5" />
           </button>
           <button
             onClick={nextMonth}
-            className="p-2 rounded-lg border border-stone-200 hover:bg-stone-50 text-stone-600 transition-colors"
+            className="inline-flex items-center justify-center w-[44px] h-[44px] rounded-lg border border-stone-200 hover:bg-stone-50 active:bg-stone-100 text-stone-600 transition-colors"
             title="Mese successivo"
+            aria-label="Mese successivo"
           >
             <ChevronRight className="w-5 h-5" />
           </button>
@@ -187,7 +189,7 @@ export const MonthView: React.FC<MonthViewProps> = ({
                 <button
                   key={`${cell.iso}-${idx}`}
                   onClick={() => setSelectedDateIso(cell.iso)}
-                  className={`min-h-[75px] p-2 rounded-lg text-left flex flex-col justify-between border transition-all ${
+                  className={`min-h-[56px] sm:min-h-[75px] p-1 sm:p-2 rounded-lg text-left flex flex-col justify-between border transition-all ${
                     isSelected
                       ? "border-emerald-600 bg-emerald-50/50 shadow-xs ring-1 ring-emerald-600"
                       : isToday
@@ -195,11 +197,11 @@ export const MonthView: React.FC<MonthViewProps> = ({
                       : "border-stone-100 hover:border-stone-200 bg-white"
                   } ${!cell.isCurrentMonth ? "opacity-35" : ""}`}
                 >
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between gap-0.5 min-w-0">
                     <span
-                      className={`text-xs font-semibold ${
+                      className={`text-[11px] sm:text-xs font-semibold ${
                         isToday
-                          ? "w-6 h-6 rounded-full bg-emerald-700 text-white flex items-center justify-center"
+                          ? "w-5 h-5 sm:w-6 sm:h-6 rounded-full bg-emerald-700 text-white flex items-center justify-center"
                           : isSelected
                           ? "text-emerald-900 font-bold"
                           : "text-stone-800"
@@ -208,14 +210,14 @@ export const MonthView: React.FC<MonthViewProps> = ({
                       {cell.dayNum}
                     </span>
                     {cellEvents.length > 0 && (
-                      <span className="text-[10px] px-1.5 py-0.2 rounded-full font-bold bg-purple-100 text-purple-800">
+                      <span className="text-[9px] sm:text-[10px] px-1 py-px rounded-full font-bold bg-purple-100 text-purple-800">
                         {cellEvents.length}
                       </span>
                     )}
                   </div>
 
-                  {/* Dots / snippets */}
-                  <div className="space-y-1 mt-1">
+                  {/* Snippets only where there is room (≥sm); phones keep the count pill */}
+                  <div className="hidden sm:block space-y-1 mt-1">
                     {cellEvents.slice(0, 2).map((ev) => (
                       <div
                         key={ev.id}
@@ -238,12 +240,12 @@ export const MonthView: React.FC<MonthViewProps> = ({
 
         {/* Selected Date Details */}
         <div className="bg-white rounded-xl border border-stone-200 shadow-xs p-5 flex flex-col h-full">
-          <div className="flex items-center justify-between pb-4 border-b border-stone-100">
-            <div>
+          <div className="flex flex-wrap items-center justify-between gap-2 pb-4 border-b border-stone-100">
+            <div className="min-w-0">
               <span className="text-xs font-semibold text-emerald-800 uppercase">
                 Data Selezionata
               </span>
-              <h3 className="text-base font-bold text-stone-900 mt-0.5">
+              <h3 className="text-sm sm:text-base font-bold text-stone-900 mt-0.5 capitalize">
                 {new Intl.DateTimeFormat("it-IT", {
                   weekday: "long",
                   day: "numeric",
@@ -252,11 +254,11 @@ export const MonthView: React.FC<MonthViewProps> = ({
                 }).format(new Date(selectedDateIso + "T12:00:00"))}
               </h3>
             </div>
-            <div className="flex items-center space-x-2">
+            <div className="flex items-center gap-2 flex-wrap">
               {circularEventsCount > 0 && (
                 <button
                   onClick={() => setFilterCircularsOnly(!filterCircularsOnly)}
-                  className={`p-1.5 rounded-lg border text-xs font-semibold flex items-center transition-colors ${
+                  className={`px-2 py-2 rounded-lg border text-xs font-semibold flex items-center transition-colors min-h-[40px] ${
                     filterCircularsOnly
                       ? "bg-amber-600 text-white border-amber-600"
                       : "bg-white text-stone-600 border-stone-200 hover:bg-stone-50"
@@ -271,7 +273,7 @@ export const MonthView: React.FC<MonthViewProps> = ({
                 <button
                   type="button"
                   onClick={() => onNavigateToPlanning(selectedDateIso, "settimana")}
-                  className="p-1.5 rounded-lg border border-stone-200 bg-white hover:bg-stone-50 text-stone-700 hover:text-emerald-800 text-xs font-semibold flex items-center transition-colors shadow-2xs"
+                  className="px-2 py-2 rounded-lg border border-stone-200 bg-white hover:bg-stone-50 text-stone-700 hover:text-emerald-800 text-xs font-semibold flex items-center transition-colors shadow-2xs min-h-[40px]"
                   title="Visualizza questa data nella vista Settimana"
                 >
                   <Calendar className="w-3.5 h-3.5 mr-1 text-emerald-700" />
@@ -280,8 +282,9 @@ export const MonthView: React.FC<MonthViewProps> = ({
               )}
               <button
                 onClick={() => onOpenNewEvent(selectedDateIso)}
-                className="p-2 rounded-lg bg-emerald-50 text-emerald-800 hover:bg-emerald-100 border border-emerald-200 transition-colors"
+                className="inline-flex items-center justify-center w-[44px] h-[44px] rounded-lg bg-emerald-50 text-emerald-800 hover:bg-emerald-100 active:bg-emerald-200 border border-emerald-200 transition-colors"
                 title="Aggiungi impegno per questa data"
+                aria-label="Aggiungi impegno per questa data"
               >
                 <Plus className="w-4 h-4" />
               </button>

@@ -269,8 +269,8 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-stone-950/60 backdrop-blur-xs overflow-y-auto">
-      <div className="bg-white rounded-2xl max-w-2xl w-full shadow-2xl border border-stone-200 flex flex-col overflow-hidden my-auto animate-in fade-in zoom-in-95">
+    <div className="app-modal fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-stone-950/60 backdrop-blur-xs overflow-y-auto">
+      <div className="app-modal-panel bg-white rounded-2xl max-w-2xl w-full shadow-2xl border border-stone-200 flex flex-col overflow-hidden my-auto animate-in fade-in zoom-in-95">
         {save.error && <p role="alert" className="p-3 text-sm text-rose-700">{save.error}</p>}
         {/* Header with Step indicator */}
         <div className="bg-emerald-800 text-white p-5">

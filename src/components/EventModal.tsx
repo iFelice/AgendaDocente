@@ -138,40 +138,42 @@ export const EventModal: React.FC<EventModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-950/40 backdrop-blur-xs">
-      <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-stone-200 animate-in fade-in zoom-in-95">
-        <div className="flex items-center justify-between pb-3 border-b border-stone-100">
-          <div className="flex items-center space-x-2">
+    <div className="app-modal app-modal-scroll fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-stone-950/40 backdrop-blur-xs">
+      <div className="app-modal-panel bg-white rounded-2xl max-w-lg w-full shadow-2xl border border-stone-200 animate-in fade-in zoom-in-95">
+        <div className="modal-sticky-header flex items-center justify-between px-4 sm:px-6 pt-4 sm:pt-5 pb-3 border-b border-stone-100 rounded-t-2xl">
+          <div className="flex items-center space-x-2 min-w-0">
             <h2 className="text-base font-bold text-stone-900">
               {eventToEdit ? "Modifica Impegno" : "Nuovo Impegno in Agenda"}
             </h2>
             {eventToEdit?.sourceType === "circolare" && (
-              <span className="text-[10px] font-semibold bg-amber-100 text-amber-900 px-2 py-0.5 rounded-md border border-amber-200">
+              <span className="text-[10px] font-semibold bg-amber-100 text-amber-900 px-2 py-0.5 rounded-md border border-amber-200 whitespace-nowrap">
                 Da Circolare
               </span>
             )}
           </div>
-          <div className="flex items-center space-x-1">
+          <div className="flex items-center space-x-1 flex-shrink-0">
             {eventToEdit && onDelete && (
               <button
                 type="button"
                 onClick={() => setIsConfirmingDelete(true)}
-                className="p-1.5 rounded-lg text-stone-400 hover:text-rose-600 hover:bg-rose-50 transition-colors"
+                className="p-2 rounded-lg text-stone-400 hover:text-rose-600 hover:bg-rose-50 transition-colors"
                 title="Elimina impegno"
+                aria-label="Elimina impegno"
               >
                 <Trash2 className="w-4 h-4" />
               </button>
             )}
             <button
               onClick={onClose}
-              className="p-1 rounded-md text-stone-400 hover:text-stone-700 transition-colors"
+              className="p-2 rounded-md text-stone-400 hover:text-stone-700 transition-colors"
+              aria-label="Chiudi"
             >
               <X className="w-5 h-5" />
             </button>
           </div>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4 mt-4 text-xs">
+        <form onSubmit={handleSubmit} className="space-y-4 mt-4 px-4 sm:px-6 text-xs">
           {save.error && <p role="alert" className="p-3 text-sm text-rose-700">{save.error}</p>}
         {/* Category Chips */}
           <div>
@@ -182,7 +184,7 @@ export const EventModal: React.FC<EventModalProps> = ({
                   key={cat.id}
                   type="button"
                   onClick={() => setCategory(cat.id)}
-                  className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors border ${
+                  className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
                     category === cat.id
                       ? "bg-emerald-700 text-white border-emerald-700 shadow-2xs"
                       : "bg-stone-50 text-stone-700 border-stone-200 hover:bg-stone-100"
@@ -208,25 +210,25 @@ export const EventModal: React.FC<EventModalProps> = ({
           </div>
 
           {/* Date & All Day */}
-          <div className="grid grid-cols-2 gap-3">
-            <div>
+          <div className="flex flex-col sm:flex-row sm:items-end gap-3">
+            <div className="sm:flex-1 min-w-0">
               <label className="block font-semibold text-stone-700 mb-1">Data *</label>
               <input
                 type="date"
                 required
                 value={date}
                 onChange={(e) => setDate(e.target.value)}
-                className="w-full p-2 border border-stone-300 rounded-lg text-xs"
+                className="w-full p-2.5 border border-stone-300 rounded-lg text-xs bg-white"
               />
             </div>
 
-            <div className="flex items-center pt-5">
+            <div className="flex items-center min-h-[44px]">
               <label className="flex items-center space-x-2 text-stone-700 cursor-pointer">
                 <input
                   type="checkbox"
                   checked={isAllDay}
                   onChange={(e) => setIsAllDay(e.target.checked)}
-                  className="rounded-sm text-emerald-700 focus:ring-emerald-500"
+                  className="rounded-sm text-emerald-700 focus:ring-emerald-500 w-4 h-4"
                 />
                 <span className="font-medium">Intera giornata / Scadenza</span>
               </label>
@@ -343,8 +345,8 @@ export const EventModal: React.FC<EventModalProps> = ({
             </div>
           )}
 
-          {/* Actions */}
-          <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-stone-100">
+          {/* Actions (sticky on mobile: Salva sempre raggiungibile anche con tastiera aperta) */}
+          <div className="modal-sticky-footer flex flex-wrap items-center justify-between gap-2 pt-3 pb-2 border-t border-stone-100 bg-white">
             <div>
               {eventToEdit && onDelete && !isConfirmingDelete && (
                 <button

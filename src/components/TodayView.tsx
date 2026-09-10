@@ -181,7 +181,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
               id="today-previous-day"
               type="button"
               onClick={() => setSelectedIso((iso) => addDaysISO(iso, -1))}
-              className="p-2 rounded-lg border border-stone-200 hover:bg-stone-50 text-stone-600 transition-colors"
+              className="min-w-[44px] min-h-[44px] flex items-center justify-center p-2 rounded-lg border border-stone-200 hover:bg-stone-50 text-stone-600 transition-colors"
               title="Giorno precedente"
               aria-label="Giorno precedente"
             >
@@ -192,7 +192,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
               type="button"
               onClick={() => setSelectedIso(todayIso)}
               disabled={isToday}
-              className={`px-3 py-2 rounded-lg border text-xs font-semibold transition-colors ${
+              className={`min-h-[44px] px-3 py-2 rounded-lg border text-xs font-semibold transition-colors ${
                 isToday
                   ? "border-stone-100 bg-stone-50 text-stone-400 cursor-default"
                   : "border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100"
@@ -205,7 +205,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
               id="today-next-day"
               type="button"
               onClick={() => setSelectedIso((iso) => addDaysISO(iso, 1))}
-              className="p-2 rounded-lg border border-stone-200 hover:bg-stone-50 text-stone-600 transition-colors"
+              className="min-w-[44px] min-h-[44px] flex items-center justify-center p-2 rounded-lg border border-stone-200 hover:bg-stone-50 text-stone-600 transition-colors"
               title="Giorno successivo"
               aria-label="Giorno successivo"
             >
@@ -217,7 +217,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
             <button
               id="today-quick-add"
               onClick={() => onOpenNewEvent(selectedIso)}
-              className="inline-flex items-center px-3 py-2 text-sm font-medium rounded-lg text-emerald-800 bg-emerald-50 hover:bg-emerald-100 transition-colors border border-emerald-200"
+              className="inline-flex items-center px-3 py-2 text-sm font-medium rounded-lg text-emerald-800 bg-emerald-50 hover:bg-emerald-100 transition-colors border border-emerald-200 min-h-[44px]"
             >
               <Plus className="w-4 h-4 mr-1.5" />
               Aggiungi{isToday ? " per oggi" : ""}
@@ -225,7 +225,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
             <button
               id="today-quick-scan"
               onClick={onOpenCircularModal}
-              className="inline-flex items-center px-3 py-2 text-sm font-medium rounded-lg text-amber-800 bg-amber-50 hover:bg-amber-100 transition-colors border border-amber-200"
+              className="inline-flex items-center px-3 py-2 text-sm font-medium rounded-lg text-amber-800 bg-amber-50 hover:bg-amber-100 transition-colors border border-amber-200 min-h-[44px]"
             >
               <Sparkles className="w-4 h-4 mr-1.5 text-amber-600" />
               Importa circolare
@@ -285,54 +285,65 @@ export const TodayView: React.FC<TodayViewProps> = ({
                   )}
                 </div>
               ) : (
-                <div className="space-y-3">
-                  {todayLessons.map((slot) => (
-                    <div
-                      key={slot.id}
-                      className="flex items-center justify-between p-3 rounded-lg border border-stone-200 hover:border-emerald-300 transition-colors bg-white"
-                    >
-                      <div className="flex items-center space-x-3">
-                        <div className="w-10 h-10 rounded-lg bg-emerald-50 text-emerald-800 flex flex-col items-center justify-center font-bold text-xs border border-emerald-200">
-                          <span>{slot.periodNumber}ª</span>
-                          <span className="text-[10px] font-normal text-emerald-600">ora</span>
-                        </div>
-                        <div>
-                          <div className="flex items-center space-x-2">
-                            <span className="font-bold text-stone-900 text-sm">{slot.className}</span>
-                            <span className="text-stone-300">•</span>
-                            <span className="font-medium text-stone-800 text-sm">{slot.subject}</span>
+                <div className="space-y-2.5">
+                  {todayLessons.map((slot) => {
+                    const summary = coTeachingSummary(slot);
+                    return (
+                      <div
+                        key={slot.id}
+                        className="p-3 rounded-xl border border-stone-200 hover:border-emerald-300 active:border-emerald-400 transition-colors bg-white"
+                      >
+                        <div className="flex items-start gap-3">
+                          {/* Ora & periodo: blocco verticale compatto */}
+                          <div
+                            className="w-14 shrink-0 rounded-lg bg-emerald-50 border border-emerald-200 text-center px-1 py-1.5"
+                            aria-label={`${slot.periodNumber}ª ora, dalle ${slot.startTime} alle ${slot.endTime}`}
+                          >
+                            <div className="text-sm font-bold text-emerald-900 leading-none">
+                              {slot.periodNumber}ª
+                            </div>
+                            <div className="text-[10px] text-emerald-700 font-medium leading-tight mt-1">
+                              {slot.startTime}
+                              <br />– {slot.endTime}
+                            </div>
                           </div>
-                          <div className="flex items-center space-x-2 text-xs text-stone-500 mt-0.5">
-                            <Clock className="w-3.5 h-3.5 text-stone-400" />
-                            <span>
-                              {slot.startTime} – {slot.endTime}
-                            </span>
-                            {slot.classroom && (
-                              <>
-                                <span>•</span>
-                                <MapPin className="w-3.5 h-3.5 text-stone-400" />
-                                <span>{slot.classroom}</span>
-                              </>
+
+                          {/* Materia + classe, aula/plesso e compresenza */}
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                              <h3 className="text-sm font-bold text-stone-900 leading-snug break-words">
+                                {slot.subject}
+                              </h3>
+                              <span className="text-[11px] font-semibold px-1.5 py-0.5 rounded-md bg-stone-100 text-stone-700 border border-stone-200 whitespace-nowrap">
+                                {slot.className}
+                              </span>
+                            </div>
+
+                            {(slot.classroom || slot.campus) && (
+                              <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] text-stone-500 mt-1">
+                                {slot.classroom && (
+                                  <span className="inline-flex items-center gap-1 min-w-0">
+                                    <MapPin className="w-3 h-3 text-stone-400 shrink-0" />
+                                    <span className="truncate">{slot.classroom}</span>
+                                  </span>
+                                )}
+                                {slot.campus && <span className="text-stone-400">{slot.campus}</span>}
+                              </div>
+                            )}
+
+                            {summary && (
+                              <p
+                                className="mt-1.5 inline-flex items-center max-w-full text-[11px] leading-snug text-emerald-900 bg-emerald-50 border border-emerald-200 rounded-md px-2 py-1"
+                                title={summary}
+                              >
+                                <span className="truncate">{summary}</span>
+                              </p>
                             )}
                           </div>
-                          {coTeachingSummary(slot) && (
-                            <div
-                              className="mt-1 inline-flex items-center max-w-full text-[11px] leading-snug text-emerald-900 bg-emerald-50 border border-emerald-200 rounded-md px-1.5 py-0.5"
-                              title={coTeachingSummary(slot) ?? undefined}
-                            >
-                              <span className="truncate">{coTeachingSummary(slot)}</span>
-                            </div>
-                          )}
                         </div>
                       </div>
-
-                      <div className="text-right">
-                        <span className="text-xs px-2.5 py-1 rounded-md font-medium bg-stone-100 text-stone-700 border border-stone-200">
-                          {slot.campus || "Centrale"}
-                        </span>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -404,13 +415,14 @@ export const TodayView: React.FC<TodayViewProps> = ({
                           )}
                         </div>
 
-                        <div className="flex items-center space-x-1">
+                        <div className="flex items-center gap-1">
                           <button
                             onClick={() => onEditEvent(ev)}
-                            className="p-1 rounded-md text-stone-400 hover:text-stone-700 hover:bg-stone-100 transition-colors"
+                            className="p-2 rounded-md text-stone-400 hover:text-stone-700 hover:bg-stone-100 active:bg-stone-200 transition-colors"
                             title="Modifica"
+                            aria-label="Modifica impegno"
                           >
-                            <Pencil className="w-3.5 h-3.5" />
+                            <Pencil className="w-4 h-4" />
                           </button>
                           {confirmingDeleteEventId === ev.id ? (
                             <div className="flex items-center space-x-1 bg-rose-50 border border-rose-300 px-2 py-0.5 rounded-lg text-xs">
@@ -436,10 +448,11 @@ export const TodayView: React.FC<TodayViewProps> = ({
                           ) : (
                             <button
                               onClick={() => setConfirmingDeleteEventId(ev.id)}
-                              className="p-1 rounded-md text-stone-400 hover:text-rose-600 hover:bg-rose-50 transition-colors"
+                              className="p-2 rounded-md text-stone-400 hover:text-rose-600 hover:bg-rose-50 active:bg-rose-100 transition-colors"
                               title="Elimina"
+                              aria-label="Elimina impegno"
                             >
-                              <Trash2 className="w-3.5 h-3.5" />
+                              <Trash2 className="w-4 h-4" />
                             </button>
                           )}
                         </div>

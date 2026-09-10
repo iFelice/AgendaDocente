@@ -789,10 +789,10 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
 
       {/* STUDENT DETAIL & NOTES MODAL / DRAWER */}
       {activeDetailStudent && (
-        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto animate-in fade-in duration-150">
-          <div className="bg-white w-full max-w-3xl rounded-2xl shadow-2xl border border-stone-200 overflow-hidden flex flex-col max-h-[92vh]">
+        <div className="app-modal fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto animate-in fade-in duration-150">
+          <div className="app-modal-panel bg-white w-full max-w-3xl rounded-2xl shadow-2xl border border-stone-200 overflow-hidden flex flex-col max-h-[92vh]">
             {/* Modal Header */}
-            <div className="px-6 py-4 bg-stone-900 text-white flex items-center justify-between">
+            <div className="px-4 py-3 sm:px-6 sm:py-4 bg-stone-900 text-white flex items-center justify-between gap-2">
               <div className="flex items-center space-x-3">
                 <div className="w-10 h-10 rounded-xl bg-purple-600 text-white flex items-center justify-center font-bold">
                   {activeDetailStudent.fullName.charAt(0)}
@@ -864,7 +864,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
             </div>
 
             {/* Modal Body: Scrollable */}
-            <div className="p-6 overflow-y-auto space-y-6">
+            <div className="p-4 sm:p-6 overflow-y-auto space-y-6 momentum-scroll">
               {/* Quick Profile Summary Box */}
               <div className="bg-stone-50 rounded-2xl p-4 border border-stone-200/80 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1144,9 +1144,9 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
 
       {/* ADD / EDIT STUDENT MODAL */}
       {isEditModalOpen && studentToEdit && (
-        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto animate-in fade-in duration-150">
-          <div className="bg-white w-full max-w-xl rounded-2xl shadow-2xl border border-stone-200 overflow-hidden">
-            <div className="px-6 py-4 bg-stone-900 text-white flex items-center justify-between">
+        <div className="app-modal fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto animate-in fade-in duration-150">
+          <div className="app-modal-panel bg-white w-full max-w-xl rounded-2xl shadow-2xl border border-stone-200 overflow-hidden">
+            <div className="px-4 py-3 sm:px-6 sm:py-4 bg-stone-900 text-white flex items-center justify-between">
               <h2 className="text-base sm:text-lg font-bold">
                 {students.some((s) => s.id === studentToEdit.id)
                   ? `Modifica Alunno: ${studentToEdit.fullName}`
@@ -1160,7 +1160,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
               </button>
             </div>
 
-            <form onSubmit={handleSaveStudentSubmit} className="p-6 space-y-4 max-h-[80vh] overflow-y-auto">
+            <form onSubmit={handleSaveStudentSubmit} className="p-4 sm:p-6 space-y-4 max-h-[80vh] overflow-y-auto momentum-scroll">
               {save.error && <p role="alert" className="text-sm text-rose-700">{save.error}</p>}
               {/* Dati Anagrafici */}
               <div className="space-y-3">

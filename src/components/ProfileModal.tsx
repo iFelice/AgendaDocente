@@ -239,11 +239,11 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-950/40 backdrop-blur-xs">
-      <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] shadow-2xl border border-stone-200 flex flex-col overflow-hidden animate-in fade-in zoom-in-95">
+    <div className="app-modal fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-stone-950/40 backdrop-blur-xs">
+      <div className="app-modal-panel bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] shadow-2xl border border-stone-200 flex flex-col overflow-hidden animate-in fade-in zoom-in-95">
         {save.error && <p role="alert" className="p-3 text-sm text-rose-700">{save.error}</p>}
         {/* Header */}
-        <div className="p-4 sm:p-5 border-b border-stone-200 flex items-center justify-between bg-stone-50">
+        <div className="p-3 sm:p-5 border-b border-stone-200 flex items-center justify-between bg-stone-50 gap-3">
           <div className="flex items-center space-x-3">
             <div className="w-10 h-10 rounded-xl bg-emerald-700 text-white flex items-center justify-center shadow-xs">
               <User className="w-5 h-5" />
@@ -276,11 +276,11 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
           </div>
         </div>
 
-        {/* Tabs */}
-        <div className="flex border-b border-stone-200 px-5 bg-stone-50/60">
+        {/* Tabs (scrollable on phones so every tab stays reachable) */}
+        <div className="flex border-b border-stone-200 px-2 sm:px-5 bg-stone-50/60 overflow-x-auto no-scrollbar">
           <button
             onClick={() => setActiveTab("profilo")}
-            className={`py-2.5 px-4 text-xs font-semibold border-b-2 transition-colors ${
+            className={`py-2.5 px-3 sm:px-4 text-xs font-semibold border-b-2 transition-colors whitespace-nowrap ${
               activeTab === "profilo"
                 ? "border-emerald-700 text-emerald-800"
                 : "border-transparent text-stone-600 hover:text-stone-900"
@@ -290,7 +290,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
           </button>
           <button
             onClick={() => setActiveTab("backup")}
-            className={`py-2.5 px-4 text-xs font-semibold border-b-2 transition-colors ${
+            className={`py-2.5 px-3 sm:px-4 text-xs font-semibold border-b-2 transition-colors whitespace-nowrap ${
               activeTab === "backup"
                 ? "border-emerald-700 text-emerald-800"
                 : "border-transparent text-stone-600 hover:text-stone-900"
@@ -300,7 +300,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
           </button>
           <button
             onClick={() => setActiveTab("google")}
-            className={`py-2.5 px-4 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${
+            className={`py-2.5 px-3 sm:px-4 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 whitespace-nowrap ${
               activeTab === "google"
                 ? "border-emerald-700 text-emerald-800"
                 : "border-transparent text-stone-600 hover:text-stone-900"
@@ -314,7 +314,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
         </div>
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto p-5 text-xs">
+        <div className="flex-1 overflow-y-auto p-4 sm:p-5 text-xs momentum-scroll">
           {activeTab === "profilo" && (
             <form onSubmit={handleSave} className="space-y-4">
               {/* Docente di Sostegno Quick Preset & Toggle */}
