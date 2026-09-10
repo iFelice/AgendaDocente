@@ -31,9 +31,26 @@ export function normalizeTeacherProfile(input: TeacherProfile): TeacherProfile {
   if (schools.length === 0) profile.schools = [createPrimarySchool(profile)];
   else {
     const primary = schools.find(s => s.isPrimary) ?? schools[0];
-    profile.schools = schools.map(s => ({ ...s, active: s.active ?? true, isPrimary: s.id === primary.id }));
+    // Legacy scalar fields are still edited by the current UI. Keep the primary id
+    // stable, but refresh its projection on every normalization.
+    const primaryProjection: SchoolProfile = {
+      ...primary,
+      name: profile.schoolName,
+      institutionalEmail: profile.email,
+      campuses: [...(profile.campuses ?? [])],
+      schoolLevel: profile.schoolLevel,
+      isPrimary: true,
+      active: true,
+    };
+    profile.schools = [primaryProjection, ...schools.filter(s => s !== primary && s.id !== primary.id)
+      .map(s => ({ ...s, active: s.active ?? true, isPrimary: false }))];
   }
   return profile;
+}
+
+/** The dormant UI flag is derived only from active secondary institutes. */
+export function hasActiveSecondarySchool(profile: TeacherProfile): boolean {
+  return (profile.schools ?? []).some(s => !s.isPrimary && s.active !== false);
 }
 
 const primaryId = (profile: TeacherProfile) => normalizeTeacherProfile(profile).schools!.find(s => s.isPrimary)?.id;

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { normalizeSchoolLinkedData, normalizeTeacherProfile, findTimetableConflicts, legacyPrimarySchoolId } from '../src/utils/multiSchool';
+import { normalizeSchoolLinkedData, normalizeTeacherProfile, findTimetableConflicts, legacyPrimarySchoolId, hasActiveSecondarySchool } from '../src/utils/multiSchool';
 import { validateBackup } from '../src/services/backup';
 import type { CalendarEvent, CircularDocument, TeacherProfile, TimetableSlot } from '../src/types';
 
@@ -42,4 +42,34 @@ test('different schools overlapping lessons are reported, same school is not', (
 test('secondary school can be switched off without deletion', () => {
   const p = { ...profile(), schools: [{ id: 'a', name: 'A', isPrimary: true, active: true }, { id: 'b', name: 'B', active: false }] };
   const n = normalizeTeacherProfile(p); assert.equal(n.schools?.find(s => s.id === 'b')?.name, 'B');
+});
+
+test('active secondary enables toggle while inactive secondary keeps it dormant', () => {
+  const base = normalizeTeacherProfile(profile());
+  const secondary = { id: 'school-b', name: 'Istituto B', active: true, isPrimary: false };
+  assert.equal(hasActiveSecondarySchool({ ...base, schools: [...base.schools!, secondary] }), true);
+  const disabled = { ...base, schools: [...base.schools!, { ...secondary, active: false }] };
+  assert.equal(hasActiveSecondarySchool(disabled), false);
+  assert.equal(disabled.schools?.find(s => s.id === 'school-b')?.name, 'Istituto B');
+});
+test('primary projection follows legacy edits without changing its id', () => {
+  const first = normalizeTeacherProfile(profile());
+  const edited = { ...first, schoolName: 'Istituto Nuovo', email: 'nuovo@scuola.it', campuses: ['Nord'], schoolLevel: 'primaria' as const };
+  const second = normalizeTeacherProfile(edited);
+  assert.equal(second.schools?.filter(s => s.isPrimary).length, 1);
+  assert.equal(second.schools?.[0].id, first.schools?.[0].id);
+  assert.equal(second.schools?.[0].name, 'Istituto Nuovo');
+  assert.equal(second.schools?.[0].institutionalEmail, 'nuovo@scuola.it');
+  assert.deepEqual(second.schools?.[0].campuses, ['Nord']);
+  assert.equal(second.schools?.[0].schoolLevel, 'primaria');
+  assert.deepEqual(normalizeTeacherProfile(second), second);
+});
+test('disabling and re-enabling preserves the complete secondary record', () => {
+  const p = normalizeTeacherProfile(profile());
+  const secondary = { id: 'school-b', name: 'Istituto B', institutionalEmail: 'b@scuola.it', campuses: ['Sud'], weeklyHours: 6, active: true, isPrimary: false };
+  const off = normalizeTeacherProfile({ ...p, schools: [...p.schools!, { ...secondary, active: false }] });
+  const on = normalizeTeacherProfile({ ...off, schools: off.schools!.map(s => s.id === 'school-b' ? { ...s, active: true } : s) });
+  assert.deepEqual(on.schools?.find(s => s.id === 'school-b'), secondary);
+  assert.equal(hasActiveSecondarySchool(off), false);
+  assert.equal(hasActiveSecondarySchool(on), true);
 });

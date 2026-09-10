@@ -31,7 +31,7 @@ import { isUserCancellationError } from "../services/googleAuth";
 import { downloadIcsCalendar } from "../services/googleCalendarService";
 import type { SyncStatus } from "../services/sync/types";
 import { CloudSync } from "./CloudSyncCard";
-import { normalizeTeacherProfile } from "../utils/multiSchool";
+import { hasActiveSecondarySchool, normalizeTeacherProfile } from "../utils/multiSchool";
 
 interface ProfileModalProps {
   isOpen: boolean;
@@ -91,13 +91,18 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
       setSyncStatus(null);
       setShowSyncConfirm(false);
       setShowLogoutConfirm(false);
+      // Re-derive the dormant flag on every opening: an inactive saved secondary
+      // must not resurrect the multi-school UI after a close/reopen cycle.
+      setMultiSchoolEnabled(hasActiveSecondarySchool(profile));
+      const secondary = (profile.schools ?? []).find(s => !s.isPrimary);
+      if (secondary) setSecondarySchool(secondary);
     }
-  }, [isOpen, initialTab]);
+  }, [isOpen, initialTab, profile]);
   const [schoolName, setSchoolName] = useState(profile.schoolName);
   const [schoolLevel, setSchoolLevel] = useState<SchoolLevel>(profile.schoolLevel || "ssig");
   const [schoolYear, setSchoolYear] = useState(profile.schoolYear);
   const existingSecondary = (profile.schools ?? []).find(s => !s.isPrimary);
-  const [multiSchoolEnabled, setMultiSchoolEnabled] = useState(Boolean(existingSecondary));
+  const [multiSchoolEnabled, setMultiSchoolEnabled] = useState(hasActiveSecondarySchool(profile));
   const [secondarySchool, setSecondarySchool] = useState<SchoolProfile>(existingSecondary ?? { id: `school-secondary-${profile.id}`, name: "", institutionalEmail: "", campuses: [], schoolLevel: profile.schoolLevel, weeklyHours: undefined, active: true, isPrimary: false });
   const [secondaryCampusInput, setSecondaryCampusInput] = useState("");
   const updateSecondary = (patch: Partial<SchoolProfile>) => setSecondarySchool(current => ({ ...current, ...patch }));
