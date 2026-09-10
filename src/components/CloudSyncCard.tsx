@@ -1,6 +1,9 @@
-import React, { useState } from "react";
-import { Cloud, CloudOff, RefreshCw, ChevronDown, ChevronUp } from "lucide-react";
+import React, { useEffect, useRef, useState } from "react";
+import { Cloud, CloudOff, RefreshCw, ChevronDown, ChevronUp, Check, TriangleAlert } from "lucide-react";
 import type { SyncStatus } from "../services/sync/types";
+
+/** Outcome of the manual run triggered from the button (transient UI feedback). */
+type ManualOutcome = "idle" | "success" | "error" | "offline";
 
 /**
  * Account sync status card shown inside ProfileModal. Purely informational + explicit actions:
@@ -9,14 +12,59 @@ import type { SyncStatus } from "../services/sync/types";
  *
  * Mobile-friendly: compact spacing, sync status + "Sincronizza ora" always visible, secondary
  * explanations and diagnostics hidden behind an explicit "Dettagli" disclosure.
+ *
+ * "Sincronizza ora" drives the REAL account-sync engine (SyncEngine.syncNow — full
+ * pull/push/reconcile cycle with merge + conflict protection): it is never a page reload.
+ * The button gives transient feedback for the manual run —
+ *   normal  ↻ Sincronizza ora
+ *   during  ↻ Sincronizzazione…
+ *   success ✓ Aggiornato ora
+ *   error   ⚠ Sincronizzazione non riuscita
+ * and returns to the neutral state after a few seconds. Offline the button stays available;
+ * a clear message explains that local data remain available (nothing is deleted or lost).
  */
 export const CloudSync: React.FC<{
   status?: SyncStatus;
   onSyncNow?: () => void;
   onToggle?: (enabled: boolean) => void;
   onResolve?: (choice: "local" | "remote") => void;
-}> = ({ status, onSyncNow, onToggle, onResolve }) => {
+  /** Device connectivity; defaults to navigator.onLine when not provided (browser default true). */
+  online?: boolean;
+}> = ({ status, onSyncNow, onToggle, onResolve, online: onlineProp }) => {
   const phase = status?.phase ?? "disabled";
+  const online = onlineProp ?? (typeof navigator === "undefined" ? true : navigator.onLine !== false);
+
+  const [outcome, setOutcome] = useState<ManualOutcome>("idle");
+  /** True between a button click and the engine publishing the end of that cycle. */
+  const manualRunRef = useRef(false);
+
+  // Conclude the manual run when the engine publishes a status that is no longer
+  // "syncing": every publish emits a fresh status object, so this fires even when a very
+  // fast cycle never renders the intermediate "syncing" phase. Success for a completed
+  // cycle (idle/awaiting-resolution), explicit failure for error/offline.
+  useEffect(() => {
+    if (phase === "syncing") return;
+    if (!manualRunRef.current) return;
+    manualRunRef.current = false;
+    setOutcome(phase === "error" ? "error" : phase === "offline" ? "offline" : "success");
+  }, [status, phase]);
+
+  // The feedback is transient: back to the neutral label after a few seconds.
+  useEffect(() => {
+    if (outcome === "idle") return;
+    const timer = setTimeout(() => setOutcome("idle"), 4000);
+    return () => clearTimeout(timer);
+  }, [outcome]);
+
+  const handleSyncNow = () => {
+    // No double-fire: one manual run at a time; the engine itself coalesces any overlapping
+    // request into the running cycle (never two concurrent syncs).
+    if (!onSyncNow || manualRunRef.current || phase === "syncing" || phase === "disabled") return;
+    manualRunRef.current = true;
+    setOutcome("idle");
+    onSyncNow();
+  };
+
   const [showDetails, setShowDetails] = useState(false);
   const badge =
     phase === "syncing" ? { text: "In corso…", cls: "bg-blue-50 text-blue-800 border-blue-200" }
@@ -31,6 +79,12 @@ export const CloudSync: React.FC<{
     !!status?.lastAttemptAt ||
     (status?.syncedSections?.length ?? 0) > 0 ||
     (status?.notices?.length ?? 0) > 0;
+
+  const syncButton =
+    outcome === "success" ? { Icon: Check, label: "Aggiornato ora", tone: "border-emerald-300 bg-emerald-50 text-emerald-800" }
+    : outcome === "error" ? { Icon: TriangleAlert, label: "Sincronizzazione non riuscita", tone: "border-rose-300 bg-rose-50 text-rose-800" }
+    : phase === "syncing" ? { Icon: RefreshCw, label: "Sincronizzazione…", tone: "border-stone-300 bg-white text-stone-800" }
+    : { Icon: RefreshCw, label: "Sincronizza ora", tone: "border-stone-300 bg-white text-stone-800" };
 
   return (
     <div className="p-4 sm:p-5 rounded-2xl border border-stone-200 bg-white space-y-3">
@@ -58,12 +112,18 @@ export const CloudSync: React.FC<{
 
       {status?.lastSyncedAt && phase !== "disabled" && (
         <p className="text-[11px] text-stone-500">
-          Ultima sincronizzazione riuscita: {formatDateTime(status.lastSyncedAt)}
+          Ultimo aggiornamento: {formatDateTime(status.lastSyncedAt)}
         </p>
       )}
 
       {status?.message && (
         <p className="text-[11px] text-rose-700 bg-rose-50 border border-rose-100 rounded-lg px-2.5 py-1.5">{status.message}</p>
+      )}
+
+      {!online && (
+        <p role="status" className="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+          Sei offline. I dati locali restano disponibili.
+        </p>
       )}
 
       {status?.conflicts && status.conflicts.length > 0 && (
@@ -140,14 +200,19 @@ export const CloudSync: React.FC<{
           />
           Sincronizza automaticamente
         </label>
+        {/* Manual run feedback is announced to assistive tech without being intrusive. */}
+        <span aria-live="polite" className="sr-only">
+          {outcome === "success" ? "Sincronizzazione completata" : outcome === "error" ? "Sincronizzazione non riuscita" : ""}
+        </span>
         <button
           type="button"
-          onClick={() => onSyncNow?.()}
+          onClick={handleSyncNow}
           disabled={!onSyncNow || phase === "syncing" || phase === "disabled"}
-          className="px-3 py-2 rounded-lg bg-white border border-stone-300 hover:bg-stone-50 text-stone-800 text-xs font-bold disabled:opacity-50 flex items-center gap-1.5 min-h-[40px]"
+          aria-label={syncButton.label}
+          className={`px-3 py-2 rounded-lg border text-xs font-bold disabled:opacity-50 flex items-center gap-1.5 min-h-[40px] max-w-full transition-colors ${syncButton.tone}`}
         >
-          <RefreshCw className={`w-3.5 h-3.5 ${phase === "syncing" ? "animate-spin" : ""}`} />
-          Sincronizza ora
+          <syncButton.Icon className={`w-3.5 h-3.5 shrink-0 ${phase === "syncing" && outcome === "idle" ? "animate-spin" : ""}`} />
+          <span className="truncate">{syncButton.label}</span>
         </button>
       </div>
     </div>

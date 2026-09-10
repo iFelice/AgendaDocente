@@ -202,7 +202,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
               title="Giorno precedente"
               aria-label="Giorno precedente"
             >
-              <span className="w-[36px] h-[36px] inline-flex items-center justify-center rounded-lg border border-stone-200/50 group-hover:bg-stone-50 group-active:bg-stone-100 transition-colors"><ChevronLeft className="w-5 h-5" /></span>
+              <span className="w-[30px] h-[30px] inline-flex items-center justify-center rounded-lg border border-stone-200/60 text-stone-500 group-hover:bg-stone-50 group-active:bg-stone-100 transition-colors"><ChevronLeft className="w-[18px] h-[18px]" /></span>
             </button>
             {/*
               "Oggi" shortcut. On the real today it stays green and clearly ACTIVE (solid,
@@ -232,7 +232,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
               title="Giorno successivo"
               aria-label="Giorno successivo"
             >
-              <span className="w-[36px] h-[36px] inline-flex items-center justify-center rounded-lg border border-stone-200/50 group-hover:bg-stone-50 group-active:bg-stone-100 transition-colors"><ChevronRight className="w-5 h-5" /></span>
+              <span className="w-[30px] h-[30px] inline-flex items-center justify-center rounded-lg border border-stone-200/60 text-stone-500 group-hover:bg-stone-50 group-active:bg-stone-100 transition-colors"><ChevronRight className="w-[18px] h-[18px]" /></span>
             </button>
           </div>
         </div>

@@ -150,7 +150,7 @@ export const WeekView: React.FC<WeekViewProps> = ({
             title="Settimana precedente"
             aria-label="Settimana precedente"
           >
-            <span className="w-[36px] h-[36px] inline-flex items-center justify-center rounded-lg border border-stone-200/50 group-hover:bg-stone-50 group-active:bg-stone-100 transition-colors"><ChevronLeft className="w-5 h-5" /></span>
+            <span className="w-[30px] h-[30px] inline-flex items-center justify-center rounded-lg border border-stone-200/60 text-stone-500 group-hover:bg-stone-50 group-active:bg-stone-100 transition-colors"><ChevronLeft className="w-[18px] h-[18px]" /></span>
           </button>
           {/* Pulsante "Questa settimana" con semantica verde/ambra */}
           <button
@@ -169,7 +169,7 @@ export const WeekView: React.FC<WeekViewProps> = ({
             title="Settimana successiva"
             aria-label="Settimana successiva"
           >
-            <span className="w-[36px] h-[36px] inline-flex items-center justify-center rounded-lg border border-stone-200/50 group-hover:bg-stone-50 group-active:bg-stone-100 transition-colors"><ChevronRight className="w-5 h-5" /></span>
+            <span className="w-[30px] h-[30px] inline-flex items-center justify-center rounded-lg border border-stone-200/60 text-stone-500 group-hover:bg-stone-50 group-active:bg-stone-100 transition-colors"><ChevronRight className="w-[18px] h-[18px]" /></span>
           </button>
           <span
             className="text-xs sm:text-sm font-semibold text-stone-800 ml-0.5 sm:ml-1 min-w-0 break-words"

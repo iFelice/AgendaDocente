@@ -34,7 +34,11 @@ for (const [date, monday, label] of [
     for (const direction of ['Settimana precedente', 'Settimana successiva']) {
       const arrow = renderer.root.findByProps({ 'aria-label': direction });
       assert.match(arrow.props.className, /min-w-\[44px\] min-h-\[44px\]/);
-      assert.match(arrow.findByType('span').props.className, /w-\[36px\] h-\[36px\]/);
+      // Discreet inner glyph: small visual box (30px) + 18px icon, while the real touch
+      // target above stays >= 44x44.
+      assert.match(arrow.findByType('span').props.className, /w-\[30px\] h-\[30px\]/);
+      const icon = arrow.findAll((n: any) => n.type === 'svg' && String(n.props?.className ?? '').includes('w-[18px]'));
+      assert.equal(icon.length, 1, 'the chevron icon is 18px');
       await act(async () => { arrow.props.onClick(); });
       assert.equal(referenceButton().props['aria-pressed'], false);
       assert.equal(referenceButton().props.disabled, false);

@@ -1,5 +1,6 @@
 import { usePersistenceAction } from "../hooks/usePersistenceAction";
 import { localDateISO } from "../utils/dates";
+import { parseSupportHoursDraft } from "../utils/supportHours";
 import React, { useState, useMemo, useRef } from "react";
 import {
   Users,
@@ -119,6 +120,11 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
   const [selectedStudentForDetail, setSelectedStudentForDetail] = useState<Student | null>(null);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [studentToEdit, setStudentToEdit] = useState<Student | null>(null);
+  // Raw draft of the "ore settimanali sostegno" field while editing. Keeping the user's
+  // literal string (including the temporary empty state after Backspace) is what makes the
+  // field behave like a normal numeric input: the model value (number | undefined) is only
+  // derived on blur/save, never by re-inserting the previous/default value while typing.
+  const [supportHoursDraft, setSupportHoursDraft] = useState<string>("");
 
   // In-App Deletion confirmation states (prevents iframe confirm() blocking)
   const [studentToDelete, setStudentToDelete] = useState<Student | null>(null);
@@ -254,25 +260,55 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
       },
       notes: [],
     });
+    setSupportHoursDraft("9");
     setIsEditModalOpen(true);
   };
 
   const handleOpenEditStudent = (student: Student) => {
     editBaseline.current = student;
     setStudentToEdit({ ...student });
+    setSupportHoursDraft(student.supportHoursPerWeek !== undefined ? String(student.supportHoursPerWeek) : "");
     setIsEditModalOpen(true);
+  };
+
+  /**
+   * Derives the model value from the raw hours draft: "" commits undefined (no value, the
+   * old one is NOT re-inserted), a valid number is stored as-is, an invalid entry (negative,
+   * non-numeric) leaves the stored value untouched — garbage is never saved.
+   */
+  const withCommittedSupportHours = (base: Student): Student => {
+    const parsed = parseSupportHoursDraft(supportHoursDraft);
+    if (parsed.kind === "valid") return { ...base, supportHoursPerWeek: parsed.hours };
+    if (parsed.kind === "empty") {
+      const next = { ...base };
+      delete next.supportHoursPerWeek;
+      return next;
+    }
+    return base;
+  };
+
+  /** On blur the field must never keep showing an invalid amount: revert to the committed value. */
+  const handleSupportHoursBlur = () => {
+    if (parseSupportHoursDraft(supportHoursDraft).kind === "invalid") {
+      setSupportHoursDraft(studentToEdit?.supportHoursPerWeek !== undefined ? String(studentToEdit.supportHoursPerWeek) : "");
+      return;
+    }
+    if (studentToEdit) setStudentToEdit((prev) => (prev ? withCommittedSupportHours(prev) : prev));
   };
 
   const handleSaveStudentSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!studentToEdit || !studentToEdit.fullName.trim()) return;
+    // Flush the raw draft even if the blur handler did not run (e.g. keyboard submit).
+    const studentToSave = withCommittedSupportHours(studentToEdit);
+    setStudentToEdit(studentToSave);
 
-    if (!await save.run(() => onSaveStudent(studentToEdit, editBaseline.current))) return;
+    if (!await save.run(() => onSaveStudent(studentToSave, editBaseline.current))) return;
     setIsEditModalOpen(false);
 
     // If currently open in detail drawer, update state
-    if (selectedStudentForDetail && selectedStudentForDetail.id === studentToEdit.id) {
-      setSelectedStudentForDetail(studentToEdit);
+    if (selectedStudentForDetail && selectedStudentForDetail.id === studentToSave.id) {
+      setSelectedStudentForDetail(studentToSave);
     }
   };
 
@@ -1287,17 +1323,19 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
                         <label className="block text-[11px] font-semibold text-stone-700 mb-1">
                           Ore settimanali sostegno
                         </label>
+                        {/* Draft-backed: while typing the raw string is the source of truth,
+                            so Backspace to empty stays empty (no snap-back to the old/default
+                            value). Validation/normalization happens on blur and on save. */}
                         <input
                           type="number"
-                          min="1"
+                          min="0"
                           max="25"
-                          value={studentToEdit.supportHoursPerWeek || 9}
-                          onChange={(e) =>
-                            setStudentToEdit({
-                              ...studentToEdit,
-                              supportHoursPerWeek: Number(e.target.value),
-                            })
-                          }
+                          step="any"
+                          inputMode="numeric"
+                          value={supportHoursDraft}
+                          aria-label="Ore settimanali sostegno"
+                          onChange={(e) => setSupportHoursDraft(e.target.value)}
+                          onBlur={handleSupportHoursBlur}
                           className="w-full px-3 py-1.5 bg-white border border-stone-200 rounded-lg text-xs"
                         />
                       </div>

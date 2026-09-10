@@ -50,6 +50,8 @@ interface ProfileModalProps {
   onSyncNow?: () => void;
   onSyncToggle?: (enabled: boolean) => void;
   onSyncResolve?: (choice: "local" | "remote") => void;
+  /** Device connectivity, forwarded to the account-sync card (offline message + badge). */
+  online?: boolean;
   initialTab?: "profilo" | "backup" | "google";
 }
 
@@ -70,6 +72,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   onSyncNow,
   onSyncToggle,
   onSyncResolve,
+  online,
   initialTab = "profilo",
 }) => {
   const save = usePersistenceAction();
@@ -981,6 +984,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                     onSyncNow={onSyncNow}
                     onToggle={onSyncToggle}
                     onResolve={onSyncResolve}
+                    online={online}
                   />
 
                   {/* Google Calendar Sync Section */}
