@@ -1,5 +1,5 @@
 import { usePersistenceAction } from "../hooks/usePersistenceAction";
-import React, { useState, useRef, useMemo } from "react";
+import React, { useState, useRef, useMemo, useEffect } from "react";
 import {
   Clock,
   MapPin,
@@ -33,24 +33,8 @@ import {
   areSlotsMatchingAuto,
 } from "../utils/timeSlots";
 import { MultiChipInput } from "./MultiChipInput";
-import { collectKnownTeacherNames, coTeachingSummary, pruneCoTeachingFields } from "../utils/coTeaching";
-
-/** Common curricular subjects offered as co-teaching suggestions (free text always allowed). */
-const CO_TEACHING_SUBJECT_SUGGESTIONS = [
-  "Italiano",
-  "Matematica",
-  "Scienze",
-  "Inglese",
-  "Educazione fisica",
-  "Storia",
-  "Geografia",
-  "Arte e immagine",
-  "Tecnologia",
-  "Musica",
-  "Religione",
-  "Francese",
-  "Spagnolo",
-];
+import { collectKnownTeacherNames, coTeachingSummary, coTeachingSubjectsOf, pruneCoTeachingFields } from "../utils/coTeaching";
+import { DEFAULT_SUBJECTS, mergeSubjectSuggestions, normalizeSubjectName } from "../utils/subjects";
 
 interface TimetableEditorProps {
   profile: TeacherProfile;
@@ -146,13 +130,24 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   const isSsig = profile?.schoolLevel === "ssig";
   const [includeSaturday, setIncludeSaturday] = useState<boolean>(!isSsig);
 
-  // Co-teaching (compresenza): suggestions from the profile and names already used in the
-  // timetables. A future school directory can replace these sources without migrations.
+  // Co-teaching (compresenza): suggestions come from the predefined subject list, the
+  // teacher's profile and the subjects/names already used in the timetables. A future
+  // school directory can replace these sources without migrations.
   const isSupportTeacher = profile?.isSupportTeacher === true;
-  const coTeachingSubjectSuggestions = [
-    ...CO_TEACHING_SUBJECT_SUGGESTIONS,
-    ...(profile.primarySubjects || []).filter(s => !/sostegno/i.test(s)),
-  ].filter((s, i, arr) => arr.indexOf(s) === i);
+  const usedSubjects = useMemo(() => {
+    const used: string[] = [];
+    for (const timetable of [definitiveTimetable, provisionalTimetable]) {
+      for (const slot of timetable) {
+        used.push(slot.subject);
+        used.push(...coTeachingSubjectsOf(slot));
+      }
+    }
+    return used;
+  }, [definitiveTimetable, provisionalTimetable]);
+  const coTeachingSubjectSuggestions = useMemo(
+    () => mergeSubjectSuggestions(DEFAULT_SUBJECTS, profile.primarySubjects ?? [], usedSubjects),
+    [profile.primarySubjects, usedSubjects]
+  );
   const knownTeacherNames = useMemo(
     () => collectKnownTeacherNames(definitiveTimetable, provisionalTimetable),
     [definitiveTimetable, provisionalTimetable]
@@ -177,6 +172,19 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
       ? [{ day: 6 as const, label: "Sabato", short: "Sab" }]
       : []),
   ];
+
+  // On phones the timetable matrix opens on the current weekday by default (one day per
+  // screen, no horizontal scrolling); the day chips let the teacher switch day or see the
+  // full week ("Tutti i giorni"), where the horizontal scroll is genuinely useful.
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    if (!window.matchMedia("(max-width: 767.98px)").matches) return;
+    const jsDay = new Date().getDay(); // 0 = Sunday … 6 = Saturday
+    if (jsDay === 0) return; // no lessons on Sunday
+    if (!includeSaturday && jsDay === 6) return; // SSIG short week excludes Saturday
+    setMobileSelectedDay(jsDay as number);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Open Add slot modal prefilled with the selected day and period
   const handleOpenAdd = (day: 1 | 2 | 3 | 4 | 5 | 6, periodNum: number) => {
@@ -688,14 +696,14 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
 
       {/* Helper Banner for uncompiled definitive */}
       {!isDefinitiveCompiled && activeTab === "provvisorio" && (
-        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-2xs">
-          <div className="flex items-start space-x-3">
-            <Info className="w-5 h-5 text-amber-700 mt-0.5 flex-shrink-0" />
-            <div>
-              <h3 className="text-sm font-bold text-amber-950">
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 sm:p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-3 shadow-2xs">
+          <div className="flex items-start space-x-2.5 sm:space-x-3 min-w-0">
+            <Info className="w-4 h-4 sm:w-5 sm:h-5 text-amber-700 mt-0.5 flex-shrink-0" />
+            <div className="min-w-0">
+              <h3 className="text-xs sm:text-sm font-bold text-amber-950">
                 Orario Provvisorio attivo di default
               </h3>
-              <p className="text-xs text-amber-900 mt-0.5">
+              <p className="hidden sm:block text-xs text-amber-900 mt-0.5">
                 Le lezioni in <strong>Oggi</strong> e <strong>Settimana</strong> mostrano questo orario provvisorio finché il definitivo non sarà compilato.
               </p>
             </div>
@@ -811,12 +819,13 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
         ))}
       </div>
 
-      {/* Timetable Matrix Table */}
+      {/* Timetable Matrix Table (day filter chips above let phones show one readable day
+          per screen; the full-week grid keeps its horizontal scroll inside this card) */}
       <div className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-x-auto max-w-full">
-        <table className="w-full text-left border-collapse min-w-[620px]">
+        <table className={`w-full text-left border-collapse ${mobileSelectedDay === "all" ? "min-w-[620px]" : "min-w-0"}`}>
           <thead>
             <tr className="bg-stone-50 border-b border-stone-200 text-stone-700 text-xs font-semibold uppercase">
-              <th className="p-3 w-28 text-center border-r border-stone-200 bg-stone-50 sticky left-0 z-10">
+              <th className="p-2 sm:p-3 w-20 sm:w-28 text-center border-r border-stone-200 bg-stone-50 sticky left-0 z-10">
                 Campana
               </th>
               {days
@@ -824,7 +833,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                 .map((d) => (
                   <th
                     key={d.day}
-                    className="p-3 text-center border-r border-stone-200 last:border-r-0 min-w-[110px]"
+                    className="p-2 sm:p-3 text-center border-r border-stone-200 last:border-r-0 min-w-[110px]"
                   >
                     {d.label}
                   </th>
@@ -834,7 +843,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
           <tbody className="divide-y divide-stone-100 text-xs">
             {periods.map((p) => (
               <tr key={p.periodNumber} className="hover:bg-stone-50/50 transition-colors">
-                <td className="p-3 text-center border-r border-stone-200 bg-stone-50/80 sticky left-0 z-10 shadow-2xs">
+                <td className="p-2 sm:p-3 text-center border-r border-stone-200 bg-stone-50/80 sticky left-0 z-10 shadow-2xs">
                   <div className="font-bold text-stone-900">{p.label || `${p.periodNumber}ª Ora`}</div>
                   <div className="text-[10px] text-stone-500 mt-0.5 font-mono">
                     {p.startTime} – {p.endTime}
@@ -919,8 +928,8 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
 
       {/* Edit/Add Slot Modal */}
       {isModalOpen && editingSlot && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-stone-900/40 backdrop-blur-xs overflow-y-auto">
-          <div className="bg-white rounded-2xl max-w-md w-full p-5 sm:p-6 shadow-xl border border-stone-200 animate-in fade-in zoom-in-95 my-auto max-h-[92vh] overflow-y-auto">
+        <div className="app-modal app-modal-scroll fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-stone-900/40 backdrop-blur-xs">
+          <div className="app-modal-panel bg-white rounded-2xl max-w-md w-full p-4 sm:p-6 shadow-xl border border-stone-200 animate-in fade-in zoom-in-95 my-auto max-h-[92vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-stone-100">
               <div>
                 <h3 className="text-base font-bold text-stone-900">
@@ -1161,7 +1170,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                         suggestions={coTeachingSubjectSuggestions}
                         placeholder="es. Matematica, Italiano…"
                         addLabel="Aggiungi materia"
-                        normalize={(raw) => raw.replace(/\s+/g, " ").trim()}
+                        normalize={normalizeSubjectName}
                         emptyHint="Nessuna materia in compresenza."
                       />
                     </div>
@@ -1268,8 +1277,8 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                 </div>
               </div>
 
-              {/* Actions */}
-              <div className="flex items-center justify-between pt-4 border-t border-stone-100 gap-2">
+              {/* Actions (sticky on mobile so Salva/Elimina stay reachable with the keyboard open) */}
+              <div className="modal-sticky-footer flex items-center justify-between pt-4 border-t border-stone-100 gap-2 bg-white">
                 {currentSlots.some((s) => s.id === editingSlot.id) ? (
                   <button
                     type="button"
@@ -1319,8 +1328,8 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
 
       {/* Time Slot Configuration Drawer / Modal */}
       {isSlotConfigOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-stone-900/40 backdrop-blur-xs overflow-y-auto">
-          <div className="bg-white rounded-2xl max-w-lg w-full p-5 sm:p-6 shadow-xl border border-stone-200 animate-in fade-in zoom-in-95 my-auto max-h-[92vh] overflow-y-auto">
+        <div className="app-modal app-modal-scroll fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-stone-900/40 backdrop-blur-xs">
+          <div className="app-modal-panel bg-white rounded-2xl max-w-lg w-full p-4 sm:p-6 shadow-xl border border-stone-200 animate-in fade-in zoom-in-95 my-auto max-h-[92vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-stone-100">
               <div className="flex items-center space-x-2">
                 <Sliders className="w-5 h-5 text-emerald-700" />
@@ -1541,8 +1550,8 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                 </div>
               </div>
 
-              {/* Drawer Footer */}
-              <div className="flex justify-end space-x-2 pt-3 border-t border-stone-100">
+              {/* Drawer Footer (sticky on mobile) */}
+              <div className="modal-sticky-footer flex justify-end space-x-2 pt-3 border-t border-stone-100 bg-white">
                 <button
                   type="button"
                   onClick={() => setIsSlotConfigOpen(false)}

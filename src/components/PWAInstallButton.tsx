@@ -28,11 +28,11 @@ export const PWAInstallButton: React.FC = () => {
         <button
           id="btn-pwa-install"
           onClick={handleInstallClick}
-          className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-700 hover:bg-emerald-800 text-white shadow-xs transition-all animate-pulse"
+          className="inline-flex items-center justify-center gap-1.5 px-2 sm:px-3 min-h-[44px] min-w-[44px] rounded-lg text-xs font-semibold bg-emerald-700 hover:bg-emerald-800 text-white shadow-xs transition-all animate-pulse"
           title="Installa Agenda Docente sullo smartphone o sul computer"
         >
           <Smartphone className="w-3.5 h-3.5" />
-          <span>Installa App</span>
+          <span className="hidden sm:inline">Installa App</span>
         </button>
 
         {installSuccess && (
@@ -51,16 +51,16 @@ export const PWAInstallButton: React.FC = () => {
       <>
         <button
           onClick={() => setShowIOSGuide(true)}
-          className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-stone-300 hover:bg-stone-100 text-stone-700 transition-colors"
+          className="inline-flex items-center justify-center gap-1.5 px-2 sm:px-3 min-h-[44px] min-w-[44px] rounded-lg text-xs font-semibold border border-stone-300 hover:bg-stone-100 text-stone-700 transition-colors"
           title="Istruzioni per installare su iPhone o iPad"
         >
           <Smartphone className="w-3.5 h-3.5 text-stone-600" />
-          <span>Installa su iPhone</span>
+          <span className="hidden sm:inline">Installa su iPhone</span>
         </button>
 
         {showIOSGuide && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/50 backdrop-blur-xs p-4">
-            <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl border border-stone-200 text-xs">
+          <div className="app-modal app-modal-scroll fixed inset-0 z-50 flex items-center justify-center bg-stone-900/50 backdrop-blur-xs p-4">
+            <div className="app-modal-panel w-full max-w-sm rounded-2xl bg-white p-4 sm:p-6 shadow-2xl border border-stone-200 text-xs">
               <div className="flex items-center justify-between pb-3 border-b border-stone-100">
                 <div className="flex items-center space-x-2">
                   <div className="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-800 flex items-center justify-center font-bold">
@@ -129,7 +129,7 @@ export const PWAInstallButton: React.FC = () => {
     <>
       <button
         onClick={() => setShowInfoGuide(true)}
-        className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-stone-200 hover:bg-stone-50 text-stone-600 transition-colors"
+        className="inline-flex items-center justify-center gap-1.5 px-2 sm:px-3 min-h-[44px] min-w-[44px] rounded-lg text-xs font-semibold border border-stone-200 hover:bg-stone-50 text-stone-600 transition-colors"
         title="Installa Agenda Docente"
       >
         <Download className="w-3.5 h-3.5 text-stone-500" />
@@ -137,8 +137,8 @@ export const PWAInstallButton: React.FC = () => {
       </button>
 
       {showInfoGuide && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/50 backdrop-blur-xs p-4">
-          <div className="w-full max-w-sm rounded-2xl bg-white p-5 shadow-2xl border border-stone-200 text-xs">
+        <div className="app-modal app-modal-scroll fixed inset-0 z-50 flex items-center justify-center bg-stone-900/50 backdrop-blur-xs p-4">
+          <div className="app-modal-panel w-full max-w-sm rounded-2xl bg-white p-4 sm:p-5 shadow-2xl border border-stone-200 text-xs">
             <div className="flex items-center justify-between pb-3 border-b border-stone-100">
               <div className="flex items-center space-x-2">
                 <div className="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-800 flex items-center justify-center font-bold">

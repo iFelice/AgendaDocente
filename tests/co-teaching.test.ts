@@ -217,15 +217,20 @@ function findInputByPlaceholder(renderer: any, placeholder: string) {
 
 /** Full text content of a rendered tree (react-test-renderer's toString() is shallow). */
 function textContent(renderer: any): string {
+  return textContentOfNode(renderer.root);
+}
+
+/** Full text content of a single rendered node. */
+function textContentOfNode(node: any): string {
   const parts: string[] = [];
-  const walk = (node: any) => {
-    if (typeof node === 'string' || typeof node === 'number') { parts.push(String(node)); return; }
-    if (!node || typeof node !== 'object') return;
-    if (Array.isArray(node)) { node.forEach(walk); return; }
-    if (typeof node.children === 'string' || typeof node.children === 'number') parts.push(String(node.children));
-    else if (Array.isArray(node.children)) node.children.forEach(walk);
+  const walk = (n: any) => {
+    if (typeof n === 'string' || typeof n === 'number') { parts.push(String(n)); return; }
+    if (!n || typeof n !== 'object') return;
+    if (Array.isArray(n)) { n.forEach(walk); return; }
+    if (Array.isArray(n.children)) n.children.forEach(walk);
+    else if (typeof n.children === 'string' || typeof n.children === 'number') parts.push(String(n.children));
   };
-  walk(renderer.root);
+  walk(node);
   return parts.join(' ');
 }
 
@@ -293,7 +298,7 @@ test('curricular teacher can add optional support teachers (none, one or more) a
   assert.deepEqual(saved!.supportTeachers, ['Prof. Bianchi', 'Prof.ssa Verdi']);
 });
 
-test('teacher names already used in the timetable are offered as datalist suggestions', async () => {
+test('teacher names already used in the timetable are offered as clickable listbox suggestions (no datalist)', async () => {
   const existing: TimetableSlot = { ...baseSlot, id: 'tt-prev', supportTeachers: ['Prof.ssa Rossi'] };
   const renderer = await render(editorProps({
     profile: profileWith({ isSupportTeacher: false }),
@@ -303,12 +308,20 @@ test('teacher names already used in the timetable are offered as datalist sugges
 
   const teacherInputs = findInputByPlaceholder(renderer, TEACHER_PLACEHOLDER);
   assert.ok(teacherInputs.length > 0);
-  const listId = teacherInputs[0].props.list;
-  assert.ok(listId, 'input must reference a datalist');
-  const datalist = renderer.root.findAll((el: any) => el.type === 'datalist').find((el: any) => el.props.id === listId);
-  assert.ok(datalist, 'the referenced datalist must exist');
-  const options = datalist.findAllByType('option').map((o: any) => o.props.value);
-  assert.deepEqual(options, ['Prof.ssa Rossi'], 'previously used names appear as suggestions');
+  // The component must NOT rely on the native datalist menu (unreliable on mobile).
+  assert.equal(teacherInputs[0].props.list, undefined, 'input must not reference a datalist');
+  assert.equal(teacherInputs[0].props.autoComplete, 'off');
+  assert.equal(renderer.root.findAll((el: any) => el.type === 'datalist').length, 0, 'no datalist element is rendered');
+  assert.equal(teacherInputs[0].props.role, 'combobox');
+
+  // Focusing the field opens a React-rendered listbox with the previously used names.
+  await act(async () => { teacherInputs[0].props.onFocus(); });
+  const listbox = renderer.root.findAll((el: any) => el.props.role === 'listbox');
+  assert.ok(listbox.length > 0, 'a listbox is rendered');
+  const optionButtons = listbox[0].findAll((el: any) => el.type === 'button' && el.props.role === 'option');
+  assert.ok(optionButtons.length > 0, 'suggestions are clickable option buttons');
+  const labels = optionButtons.map((o: any) => textContentOfNode(o)).join(' ');
+  assert.ok(labels.includes('Prof.ssa Rossi'), 'previously used names appear as clickable suggestions');
 });
 
 test('editing a slot with co-teaching data keeps the values and the grid shows the compact summary', async () => {

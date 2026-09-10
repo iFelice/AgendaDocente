@@ -1,11 +1,285 @@
 @import "tailwindcss";
 
 /*
+ * =============================================================================
+ * AGENDA DOCENTE — DESIGN SYSTEM MINIMO & MOBILE UX LAYER
+ * =============================================================================
+ * Tokens and low-level rules shared by every view. Components keep using Tailwind
+ * utilities for their specific spacing/colors; this layer guarantees coherence for
+ * the behaviours that are otherwise easy to get wrong on smartphones:
+ *  - no involuntary horizontal page overflow;
+ *  - readable typography + no iOS auto-zoom on focused fields;
+ *  - visible keyboard focus;
+ *  - full-width bottom-sheet modals (safe-area aware) instead of compressed dialogs;
+ *  - smooth momentum scrolling of inner lists.
+ */
+
+:root {
+  /* Control height / touch baseline (slightly above the 44px Apple guideline). */
+  --ctl-h: 44px;
+  --ctl-h-sm: 40px;
+  --radius-md: 0.75rem;   /* rounded-xl */
+  --radius-lg: 1rem;      /* rounded-2xl */
+  --radius-full: 9999px;
+  /* Focus ring color shared by the app (emerald-700, WCAG AA on white). */
+  --focus-ring: 0 0 0 2px #fff, 0 0 0 4px rgba(4, 120, 87, 0.55);
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+/* Hard safety net against accidental horizontal scroll (real fixes live per view). */
+html,
+body {
+  overflow-x: clip;
+}
+@supports not (overflow: clip) {
+  html,
+  body {
+    overflow-x: hidden;
+  }
+}
+
+body {
+  -webkit-tap-highlight-color: transparent;
+  text-rendering: optimizeLegibility;
+}
+
+/* Visible, consistent keyboard focus everywhere (accessibility + hover/focus states). */
+:where(button, [role="button"], input, select, textarea, summary, a, [tabindex]):focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: 0.375rem;
+}
+
+/* Buttons should never trigger double-tap zoom or text selection on touch. */
+button {
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Prevent iOS Safari auto-zoom while typing: inputs on phones keep ≥16px text. */
+@media (max-width: 767.98px) {
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+}
+
+/* Thin, unobtrusive scrollbars for horizontal tab strips. */
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* Smooth momentum scrolling for internal lists on iOS. */
+.momentum-scroll {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+/*
+ * Modals on phones become bottom sheets ("quasi full screen") while desktop stays a
+ * centered dialog. Opt-in classes: .app-modal on the backdrop, .app-modal-panel on the
+ * card. Panels that should scroll entirely get .app-modal-scroll on the backdrop too.
+ */
+@media (max-width: 639.98px) {
+  .app-modal {
+    align-items: flex-end !important;
+    justify-content: center !important;
+    padding: 0 !important;
+  }
+  .app-modal > .app-modal-panel {
+    width: 100% !important;
+    max-width: 100% !important;
+    max-height: calc(100dvh - env(safe-area-inset-top, 0px) - 0.5rem);
+    margin: 0 !important;
+    border-radius: 1.25rem 1.25rem 0 0 !important;
+    border-bottom: none !important;
+    border-left: none !important;
+    border-right: none !important;
+  }
+  .app-modal-scroll > .app-modal-panel {
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+/* Sticky action footer used inside scrollable modal panels: always reachable while
+   the virtual keyboard is open or the form is taller than the sheet. */
+.modal-sticky-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
+  background: rgb(255 255 255 / 0.96);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  padding-bottom: calc(0.5rem + env(safe-area-inset-bottom, 0px));
+}
+
+/* Sticky modal header: the close button stays reachable while the sheet scrolls. */
+.modal-sticky-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: #fff;
+}
+
+/*
+ * =============================================================================
+ * MOBILE-FIRST NAVIGATION (below 768px)
+ * =============================================================================
+ * On phones the primary navigation is a fixed bottom bar (thumb reachable,
+ * safe-area aware) with at most 5 destinations: Oggi, Settimana, Mese,
+ * Scadenze, Altro. The header keeps only brand + profile, and its tab strip is
+ * desktop/tablet only (see Navbar: `hidden md:block`). Desktop and tablets keep
+ * the richer top navigation, so the bottom bar is never shown there.
+ */
+.bottom-nav {
+  position: fixed;
+  inset-inline: 0;
+  bottom: 0;
+  z-index: 40;
+  display: flex;
+  align-items: stretch;
+  gap: 0.25rem;
+  padding: 0.375rem 0.5rem calc(0.375rem + env(safe-area-inset-bottom, 0px));
+  background: rgb(255 255 255 / 0.97);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-top: 1px solid #e7e5e4; /* stone-200 */
+  box-shadow: 0 -2px 14px rgb(28 25 23 / 0.08);
+}
+
+/* Each destination: >= 44px touch target (56px is the comfortable bottom-nav height),
+   equal width, never forces horizontal overflow. */
+.bottom-nav-item {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 56px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  border-radius: var(--radius-md);
+  font-size: 0.6875rem; /* 11px */
+  font-weight: 600;
+  line-height: 1.15;
+  text-align: center;
+  color: #57534e; /* stone-600 */
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.bottom-nav-item:active {
+  background: #f5f5f4; /* stone-100 */
+}
+/* Unambiguous active state: filled emerald pill + white label. */
+.bottom-nav-item[aria-current="page"] {
+  color: #fff;
+  background: #047857; /* emerald-700 */
+}
+.bottom-nav-item[aria-current="page"]:active {
+  background: #065f46; /* emerald-800 */
+}
+.bottom-nav-label {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bottom-nav-badge {
+  position: absolute;
+  top: 6px;
+  right: 50%;
+  transform: translateX(18px);
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-full);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* Primary action: floating button parked just above the bottom navigation. */
+.app-fab {
+  position: fixed;
+  right: 1rem;
+  bottom: calc(5rem + env(safe-area-inset-bottom, 0px));
+  z-index: 45;
+  width: 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-full);
+  background: #047857;
+  color: #fff;
+  box-shadow: 0 6px 20px rgb(28 25 23 / 0.3);
+}
+.app-fab:active {
+  background: #065f46;
+}
+
+/* The "Altro" sheet: bottom sheet, safe-area aware, above the bottom bar. */
+.more-sheet {
+  position: fixed;
+  inset-inline: 0;
+  bottom: 0;
+  z-index: 61;
+  max-height: min(80dvh, 34rem);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  border-radius: 1.25rem 1.25rem 0 0;
+  background: #fff;
+  padding-bottom: calc(0.75rem + env(safe-area-inset-bottom, 0px));
+  box-shadow: 0 -8px 30px rgb(28 25 23 / 0.22);
+}
+.more-sheet-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  min-height: 52px;
+  padding: 0.5rem 1rem;
+  text-align: left;
+}
+
+/*
+ * Content must never be hidden behind the fixed bottom navigation: every main view
+ * gets extra bottom padding on phones only (desktop keeps the previous spacing).
+ */
+.app-main {
+  padding-bottom: 1.5rem;
+}
+
+/* Nothing may be hidden by the fixed bar (68px) nor by the floating "+" (bottom 5rem
+   + 56px), so views are padded 8rem on phones; floating overlays sit above the "+". */
+@media (max-width: 767.98px) {
+  .app-main {
+    padding-bottom: calc(8rem + env(safe-area-inset-bottom, 0px));
+  }
+  .app-toast,
+  .app-update-banner {
+    bottom: calc(9rem + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+/*
  * Week planner responsiveness (fluid, never tied to specific phone models):
- * - below 768px: days are full-width-ish horizontal cards with scroll snap; only the strip
- *   scrolls horizontally, never the page;
+ * - below 768px: days are near-full-width horizontal cards with scroll snap; only the
+ *   strip scrolls horizontally, never the page;
  * - 768px-1023px (tablet): two readable columns;
- * - from 1024px: every visible day fits side by side (5 or 6 columns), like before.
+ * - from 1024px: every visible day fits side by side, like before.
  */
 .week-scroller {
   display: flex;
@@ -13,15 +287,20 @@
   overflow-x: auto;
   overscroll-behavior-x: contain;
   scroll-snap-type: x proximity;
-  scroll-padding-inline: 0.5rem;
+  scroll-padding-inline: 1rem;
   -webkit-overflow-scrolling: touch;
   padding-bottom: 0.5rem;
   scrollbar-width: thin;
 }
 .week-day-card {
-  flex: 0 0 min(82vw, 360px);
+  flex: 0 0 min(86vw, 360px);
   scroll-snap-align: start;
-  min-height: 26rem;
+  min-height: 24rem;
+}
+@media (min-width: 640px) and (max-width: 767.98px) {
+  .week-day-card {
+    flex-basis: min(62vw, 360px);
+  }
 }
 @media (min-width: 768px) {
   .week-scroller {
@@ -44,7 +323,15 @@
   .week-scroller {
     grid-template-columns: repeat(5, minmax(0, 1fr));
   }
-  .week-scroller[data-days='6'] {
+  .week-scroller[data-days="6"] {
     grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+}
+
+/* Phone in landscape: week cards become shorter so several are visible per screen. */
+@media (orientation: landscape) and (max-height: 520px) and (max-width: 959.98px) {
+  .week-day-card {
+    flex-basis: min(76vw, 340px);
+    min-height: 18rem;
   }
 }

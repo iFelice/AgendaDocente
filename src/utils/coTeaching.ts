@@ -54,8 +54,8 @@ export function hasCoTeaching(slot: TimetableSlot): boolean {
 
 /**
  * All teacher names already used in the given timetables (support and curricular side),
- * de-duplicated and alphabetically sorted. Used for datalist suggestions; a future school
- * directory can extend or replace this source.
+ * de-duplicated and alphabetically sorted. Used for the co-teaching picker suggestions
+ * (listbox of the multi-chip input); a future school directory can extend/replace it.
  */
 export function collectKnownTeacherNames(...timetables: TimetableSlot[][]): string[] {
   const names = new Set<string>();
