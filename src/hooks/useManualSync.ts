@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { SyncPhase, SyncStatus } from "../services/sync/types";
 
 /** Outcome of a manual run triggered from a UI button (transient UI feedback). */
-export type ManualOutcome = "idle" | "success" | "error" | "offline";
+export type ManualOutcome = "idle" | "success" | "error" | "offline" | "conflict";
 
 export interface ManualSyncInput {
   status?: SyncStatus;
@@ -39,13 +39,20 @@ export function useManualSync({ status, onSyncNow }: ManualSyncInput): ManualSyn
 
   // Conclude the manual run when the engine publishes a status that is no longer
   // "syncing": every publish emits a fresh status object, so this fires even when a very
-  // fast cycle never renders the intermediate "syncing" phase. Success for a completed
-  // cycle (idle/awaiting-resolution), explicit failure for error/offline.
+  // fast cycle never renders the intermediate "syncing" phase. Success only for a fully
+  // completed cycle (idle); awaiting-resolution gets its own "conflict" outcome because
+  // the sync is NOT done until the user resolves the conflict — it must never be
+  // presented as success. Explicit failure for error/offline.
   useEffect(() => {
     if (phase === "syncing") return;
     if (!manualRunRef.current) return;
     manualRunRef.current = false;
-    setOutcome(phase === "error" ? "error" : phase === "offline" ? "offline" : "success");
+    setOutcome(
+      phase === "error" ? "error"
+      : phase === "offline" ? "offline"
+      : phase === "awaiting-resolution" ? "conflict"
+      : "success"
+    );
   }, [status, phase]);
 
   // The feedback is transient: back to the neutral label after a few seconds.

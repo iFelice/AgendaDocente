@@ -263,29 +263,39 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   // controller: header icon and CloudSync card button are the same action).
   const onlineEffective = online ?? (typeof navigator === "undefined" ? true : navigator.onLine !== false);
   const quickSyncing = manualSync.phase === "syncing";
+  // Awaiting-resolution is never success: while the engine waits for an explicit
+  // user choice (transient outcome or current phase) the header shows amber.
+  const quickConflict =
+    !quickSyncing &&
+    (manualSync.outcome === "conflict" || manualSync.phase === "awaiting-resolution");
   const quickOffline =
     !quickSyncing &&
+    !quickConflict &&
     manualSync.outcome !== "success" &&
     manualSync.outcome !== "error" &&
     (manualSync.phase === "offline" || manualSync.outcome === "offline" || !onlineEffective);
   const quickSyncTitle = quickSyncing
     ? "Sincronizzazione in corso…"
-    : manualSync.outcome === "success"
-      ? "Sincronizzazione completata"
-      : manualSync.outcome === "error"
-        ? "Sincronizzazione non riuscita. Riprova più tardi: i dati locali sono al sicuro."
-        : quickOffline
-          ? "Sei offline. I dati locali restano disponibili."
-          : "Sincronizza ora";
+    : quickConflict
+      ? "Sincronizzazione completata con conflitto da risolvere"
+      : manualSync.outcome === "success"
+        ? "Sincronizzazione completata"
+        : manualSync.outcome === "error"
+          ? "Sincronizzazione non riuscita. Riprova più tardi: i dati locali sono al sicuro."
+          : quickOffline
+            ? "Sei offline. I dati locali restano disponibili."
+            : "Sincronizza ora";
   const quickSyncLive = quickSyncing
     ? "Sincronizzazione in corso"
-    : manualSync.outcome === "success"
-      ? "Sincronizzazione completata"
-      : manualSync.outcome === "error"
-        ? "Sincronizzazione non riuscita"
-        : quickOffline
-          ? "Sei offline. I dati locali restano disponibili."
-          : "";
+    : quickConflict
+      ? "Sincronizzazione richiede una risoluzione del conflitto"
+      : manualSync.outcome === "success"
+        ? "Sincronizzazione completata"
+        : manualSync.outcome === "error"
+          ? "Sincronizzazione non riuscita"
+          : quickOffline
+            ? "Sei offline. I dati locali restano disponibili."
+            : "";
 
   return (
     <div className="app-modal fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-stone-950/40 backdrop-blur-xs">
@@ -334,6 +344,8 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
             >
               {quickSyncing ? (
                 <RefreshCw className="w-5 h-5 animate-spin" aria-hidden="true" />
+              ) : quickConflict ? (
+                <TriangleAlert className="w-5 h-5 text-amber-600" aria-hidden="true" />
               ) : manualSync.outcome === "success" ? (
                 <Check className="w-5 h-5 text-emerald-600" aria-hidden="true" />
               ) : manualSync.outcome === "error" ? (

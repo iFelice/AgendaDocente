@@ -18,6 +18,7 @@ import { useManualSync, type ManualSyncController } from "../hooks/useManualSync
  *   during  ↻ Sincronizzazione…
  *   success ✓ Aggiornato ora
  *   error   ⚠ Sincronizzazione non riuscita
+ *   conflict ⚠ Conflitto da risolvere (awaiting-resolution is never shown as success)
  * and returns to the neutral state after a few seconds. Offline the button stays available;
  * a clear message explains that local data remain available (nothing is deleted or lost).
  */
@@ -61,6 +62,7 @@ export const CloudSync: React.FC<{
   const syncButton =
     outcome === "success" ? { Icon: Check, label: "Aggiornato ora", tone: "border-emerald-300 bg-emerald-50 text-emerald-800" }
     : outcome === "error" ? { Icon: TriangleAlert, label: "Sincronizzazione non riuscita", tone: "border-rose-300 bg-rose-50 text-rose-800" }
+    : outcome === "conflict" || phase === "awaiting-resolution" ? { Icon: TriangleAlert, label: "Conflitto da risolvere", tone: "border-amber-300 bg-amber-50 text-amber-900" }
     : phase === "syncing" ? { Icon: RefreshCw, label: "Sincronizzazione…", tone: "border-stone-300 bg-white text-stone-800" }
     : { Icon: RefreshCw, label: "Sincronizza ora", tone: "border-stone-300 bg-white text-stone-800" };
 
@@ -180,7 +182,7 @@ export const CloudSync: React.FC<{
         </label>
         {/* Manual run feedback is announced to assistive tech without being intrusive. */}
         <span aria-live="polite" className="sr-only">
-          {outcome === "success" ? "Sincronizzazione completata" : outcome === "error" ? "Sincronizzazione non riuscita" : ""}
+          {outcome === "success" ? "Sincronizzazione completata" : outcome === "error" ? "Sincronizzazione non riuscita" : outcome === "conflict" || phase === "awaiting-resolution" ? "Sincronizzazione richiede una risoluzione del conflitto" : ""}
         </span>
         <button
           type="button"

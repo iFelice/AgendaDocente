@@ -6,6 +6,7 @@ import React, { useEffect, useState } from 'react';
 import { create, act } from 'react-test-renderer';
 import type { User as FirebaseUser } from 'firebase/auth';
 import { ProfileModal } from '../src/components/ProfileModal';
+import { useManualSync, type ManualOutcome } from '../src/hooks/useManualSync';
 import { SyncEngine, type LocalApply, type SyncStore } from '../src/services/sync/engine';
 import type {
   ItemsCollection,
@@ -207,21 +208,25 @@ function Harness({ engine, online, initialTab, syncSpy }: {
   });
 }
 
+function modalProps(props: Partial<React.ComponentProps<typeof ProfileModal>> = {}) {
+  return {
+    isOpen: true,
+    onClose: () => {},
+    profile,
+    onSaveProfile: () => {},
+    onDataImported: () => {},
+    googleUser,
+    googleAccessToken: 'token',
+    events: [],
+    initialTab: 'google' as const,
+    ...props,
+  };
+}
+
 async function mountModal(props: Partial<React.ComponentProps<typeof ProfileModal>> = {}) {
   let renderer: any;
   await act(async () => {
-    renderer = create(React.createElement(ProfileModal, {
-      isOpen: true,
-      onClose: () => {},
-      profile,
-      onSaveProfile: () => {},
-      onDataImported: () => {},
-      googleUser,
-      googleAccessToken: 'token',
-      events: [],
-      initialTab: 'google',
-      ...props,
-    }));
+    renderer = create(React.createElement(ProfileModal, modalProps(props)));
   });
   return renderer;
 }
@@ -234,7 +239,7 @@ async function mountWithEngine(engine: SyncEngine, opts: { online?: boolean; ini
   return renderer;
 }
 
-const CARD_SYNC_LABELS = ['Sincronizza ora', 'Sincronizzazione…', 'Aggiornato ora', 'Sincronizzazione non riuscita'];
+const CARD_SYNC_LABELS = ['Sincronizza ora', 'Sincronizzazione…', 'Aggiornato ora', 'Sincronizzazione non riuscita', 'Conflitto da risolvere'];
 
 /** Header quick sync: constant aria-label + always a title (the card button has no title). */
 function quickSyncButton(renderer: any) {
@@ -629,4 +634,121 @@ test('quick sync and card share one controller; no duplicated sync logic, no rel
   // The production wiring still goes through accountSync.syncNow().
   const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
   assert.match(appSource, /onSyncNow=\{\(\) => void accountSync\.syncNow\(\)\}/);
+});
+
+// ---------------------------------------------------------------------------
+// 5. awaiting-resolution is never success: distinct "conflict" outcome
+// ---------------------------------------------------------------------------
+
+/** Minimal probe exposing the shared controller state for mapping tests. */
+function OutcomeProbe({ status }: { status: SyncStatus }) {
+  const manual = useManualSync({ status, onSyncNow: () => {} });
+  return React.createElement(
+    'div',
+    { 'data-outcome': manual.outcome, 'data-phase': manual.phase },
+    React.createElement('button', { type: 'button', onClick: manual.runSync, disabled: manual.disabled, 'aria-label': 'run' }, 'run'),
+  );
+}
+
+async function runToPhase(targetPhase: SyncStatus['phase']): Promise<ManualOutcome> {
+  const idle: SyncStatus = { phase: 'idle', enabled: true, activeUid: 'uid-manual' };
+  let renderer: any;
+  await act(async () => {
+    renderer = create(React.createElement(OutcomeProbe, { status: idle }));
+  });
+  await act(async () => {
+    renderer.root.findByType('button').props.onClick();
+  });
+  // The engine publishes the end of the cycle (a fresh status object, as always).
+  await act(async () => {
+    renderer.update(React.createElement(OutcomeProbe, { status: { ...idle, phase: targetPhase } }));
+  });
+  const outcome = renderer.root.findByType('div').props['data-outcome'] as ManualOutcome;
+  await act(async () => { renderer.unmount(); });
+  return outcome;
+}
+
+test('manual outcome mapping: idle→success, error→error, offline→offline, awaiting-resolution→conflict', async () => {
+  assert.equal(await runToPhase('idle'), 'success', 'a fully completed cycle is success');
+  assert.equal(await runToPhase('error'), 'error');
+  assert.equal(await runToPhase('offline'), 'offline');
+  assert.equal(
+    await runToPhase('awaiting-resolution'),
+    'conflict',
+    'a run ending with an unresolved conflict is NOT success',
+  );
+});
+
+const CONFLICT_STATUS: SyncStatus = {
+  phase: 'awaiting-resolution',
+  enabled: true,
+  activeUid: 'uid-manual',
+  conflicts: ['events'],
+};
+
+/** Modal with a test-only publisher simulating the engine subscription (as App delivers it). */
+function ConflictHarness({ initialStatus, syncSpy }: { initialStatus: SyncStatus; syncSpy: () => void }) {
+  const [status, setStatus] = useState<SyncStatus>(initialStatus);
+  return React.createElement(
+    React.Fragment,
+    null,
+    React.createElement(ProfileModal, modalProps({ accountSyncStatus: status, onSyncNow: syncSpy })),
+    React.createElement('button', { type: 'button', 'aria-label': 'publish-conflict', onClick: () => setStatus(CONFLICT_STATUS) }, 'publish'),
+  );
+}
+
+function liveTexts(renderer: any): string[] {
+  return renderer.root.findAll((el: any) => el.type === 'span' && el.props['aria-live'] === 'polite').map(nodeText);
+}
+
+test('run ending in awaiting-resolution: header shows amber conflict (never green Check), card shares it', async () => {
+  let calls = 0;
+  let renderer: any;
+  await act(async () => {
+    renderer = create(React.createElement(ConflictHarness, {
+      initialStatus: { phase: 'idle', enabled: true, activeUid: 'uid-manual' },
+      syncSpy: () => { calls++; },
+    }));
+  });
+
+  await click(quickSyncButton(renderer));
+  assert.equal(calls, 1, 'the manual run went through the shared pipeline');
+
+  // The engine concludes the cycle awaiting an explicit user choice.
+  await click(renderer.root.findAllByType('button').find((b: any) => b.props['aria-label'] === 'publish-conflict'));
+  assert.equal(calls, 1, 'publishing the status triggers no extra run');
+
+  // Header: amber warning, never the green success Check.
+  const quick = quickSyncButton(renderer);
+  assert.equal(quick.props.title, 'Sincronizzazione completata con conflitto da risolvere');
+  const iconClass = String(svgIcon(quick).props.className);
+  assert.ok(iconClass.includes('text-amber-600'), 'header shows the amber warning icon');
+  assert.ok(!iconClass.includes('text-emerald-600'), 'header does NOT show the green success Check');
+
+  // Same shared outcome on the card, whose conflict panel keeps working normally.
+  assert.equal(cardSyncButton(renderer).props['aria-label'], 'Conflitto da risolvere');
+  assert.match(nodeText(renderer.root), /Mantieni dati di questo dispositivo/, 'the conflict resolution panel is intact');
+
+  // Accessible announcement on both triggers.
+  const live = liveTexts(renderer);
+  assert.ok(
+    live.some((text) => text.includes('Sincronizzazione richiede una risoluzione del conflitto')),
+    'the conflict is announced to assistive tech',
+  );
+
+  await act(async () => { renderer.unmount(); });
+});
+
+test('static awaiting-resolution status: header and card reflect the conflict without any run', async () => {
+  const renderer = await mountModal({ accountSyncStatus: CONFLICT_STATUS, onSyncNow: () => {} });
+
+  const quick = quickSyncButton(renderer);
+  assert.equal(quick.props.title, 'Sincronizzazione completata con conflitto da risolvere');
+  assert.ok(hasClass(svgIcon(quick), 'text-amber-600'));
+  assert.ok(!String(svgIcon(quick).props.className).includes('text-emerald-600'), 'no green Check while a conflict is pending');
+
+  assert.equal(cardSyncButton(renderer).props['aria-label'], 'Conflitto da risolvere');
+  assert.match(nodeText(renderer.root), /Mantieni dati di questo dispositivo/);
+
+  await act(async () => { renderer.unmount(); });
 });
