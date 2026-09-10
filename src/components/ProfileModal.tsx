@@ -4,7 +4,6 @@ import { localDateISO } from "../utils/dates";
 import React, { useState, useEffect, useRef } from "react";
 import {
   Download,
-  Plus,
   Save,
   Trash2,
   Upload,
@@ -103,8 +102,6 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   const [isSupportTeacher, setIsSupportTeacher] = useState<boolean>(
     profile.isSupportTeacher || profile.primarySubjects.some(s => s.toLowerCase().includes("sostegno"))
   );
-  const [assignedStudents, setAssignedStudents] = useState<string[]>(profile.assignedStudents || []);
-  const [newStudentInput, setNewStudentInput] = useState("");
 
   const [newSubjectInput, setNewSubjectInput] = useState("");
   const [newClassInput, setNewClassInput] = useState("");
@@ -182,16 +179,6 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
     setRoles(roles.filter((_, i) => i !== index));
   };
 
-  const handleAddStudent = () => {
-    if (!newStudentInput.trim()) return;
-    setAssignedStudents([...assignedStudents, newStudentInput.trim()]);
-    setNewStudentInput("");
-  };
-
-  const handleRemoveStudent = (index: number) => {
-    setAssignedStudents(assignedStudents.filter((_, i) => i !== index));
-  };
-
   // Save profile
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -207,7 +194,9 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
       campuses,
       roles,
       isSupportTeacher,
-      assignedStudents,
+      // Students are managed in "Classi & Alunni", not in this editor: the existing
+      // assignment is carried over verbatim so saving the profile never drops it.
+      assignedStudents: profile.assignedStudents,
     };
     if (!await save.run(() => onSaveProfile(updated, editBaseline.current))) return;
     onClose();
@@ -341,78 +330,53 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                 </div>
               </div>
 
-              {/* Studenti Seguiti (specifico per Sostegno) */}
-              {isSupportTeacher && (
-                <div className="p-3.5 rounded-xl border border-emerald-200 bg-emerald-50/30 space-y-2">
-                  <label className="block font-bold text-emerald-900">
-                    Studenti Seguiti & Quote Orarie (Anonimizzati nel rispetto della privacy)
-                  </label>
-                  <div className="space-y-1.5">
-                    {assignedStudents.map((st, i) => (
-                      <div key={i} className="flex items-center justify-between p-2 rounded-lg bg-white border border-emerald-200 text-xs text-stone-800">
-                        <span className="font-medium">{st}</span>
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveStudent(i)}
-                          className="text-stone-400 hover:text-rose-600 p-1"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="flex items-center space-x-2 pt-1">
-                    <input
-                      type="text"
-                      value={newStudentInput}
-                      onChange={(e) => setNewStudentInput(e.target.value)}
-                      placeholder="es. Studente M.R. (Classe 2E, 9 ore - PEI differenziato)"
-                      className="p-1.5 border border-stone-300 rounded-lg text-xs flex-1 bg-white"
-                    />
-                    <button
-                      type="button"
-                      onClick={handleAddStudent}
-                      className="px-3 py-1.5 bg-emerald-700 text-white rounded-lg font-semibold hover:bg-emerald-800 text-xs"
-                    >
-                      + Aggiungi
-                    </button>
-                  </div>
-                </div>
-              )}
+              {/* Studenti seguiti: la gestione è nell'area "Classi & Alunni"; il profilo
+                  docente non contiene più l'elenco studenti (i dati esistenti restano). */}
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-semibold text-stone-700 mb-1">Nome e Cognome *</label>
-                  <input
-                    type="text"
-                    required
-                    value={fullName}
-                    onChange={(e) => setFullName(e.target.value)}
-                    className="w-full p-2.5 border border-stone-300 rounded-xl text-xs"
-                  />
-                </div>
-
-                <div>
-                  <label className="block font-semibold text-stone-700 mb-1">Email Istituzionale</label>
-                  <input
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="nome.cognome@scuola.edu.it"
-                    className="w-full p-2.5 border border-stone-300 rounded-xl text-xs"
-                  />
-                </div>
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">Nome e Cognome *</label>
+                <input
+                  type="text"
+                  required
+                  value={fullName}
+                  onChange={(e) => setFullName(e.target.value)}
+                  className="w-full p-2.5 border border-stone-300 rounded-xl text-xs"
+                />
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-semibold text-stone-700 mb-1">Istituto Scolastico</label>
-                  <input
-                    type="text"
-                    value={schoolName}
-                    onChange={(e) => setSchoolName(e.target.value)}
-                    className="w-full p-2.5 border border-stone-300 rounded-xl text-xs"
-                  />
+              {/* Istituto Principale: identità della scuola di servizio del docente.
+                  Raggruppa i dati d'istituto esistenti (nome, email, anno, sedi) sotto un
+                  titolo univoco in vista del futuro supporto multi-istituto. */}
+              <div className="p-3.5 rounded-xl border border-stone-200 bg-stone-50/50 space-y-3">
+                <div className="flex items-center space-x-2">
+                  <School className="w-4 h-4 text-emerald-700 shrink-0" />
+                  <label className="block font-bold text-stone-800">Istituto Principale</label>
+                </div>
+                <p className="text-[11px] text-stone-600 leading-relaxed">
+                  La scuola in cui presti servizio: nome, email istituzionale, anno scolastico e sedi usati dall'agenda per il filtro circolari e l'orario.
+                </p>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-semibold text-stone-700 mb-1">Istituto Scolastico</label>
+                    <input
+                      type="text"
+                      value={schoolName}
+                      onChange={(e) => setSchoolName(e.target.value)}
+                      className="w-full p-2.5 border border-stone-300 rounded-xl text-xs"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block font-semibold text-stone-700 mb-1">Email Istituzionale</label>
+                    <input
+                      type="email"
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      placeholder="nome.cognome@scuola.edu.it"
+                      className="w-full p-2.5 border border-stone-300 rounded-xl text-xs"
+                    />
+                  </div>
                 </div>
 
                 <div>
@@ -452,6 +416,44 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                   <p className="text-[11px] text-stone-500 mt-1.5 leading-relaxed">
                     💡 Dal 1° agosto in poi l'anno scolastico parte dall'anno in corso più il successivo (es. 28 agosto 2026 → <strong>2026/2027</strong>).
                   </p>
+                </div>
+
+                {/* Plessi e Sedi (dati della scuola di servizio) */}
+                <div className="pt-1 space-y-2">
+                  <label className="block font-bold text-stone-800">Plessi e Sedi</label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {campuses.map((c) => (
+                      <span
+                        key={c}
+                        className="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-medium bg-stone-200 text-stone-800"
+                      >
+                        {c}
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveCampus(c)}
+                          className="ml-1.5 text-stone-600 hover:text-stone-900"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <input
+                      type="text"
+                      value={newCampusInput}
+                      onChange={(e) => setNewCampusInput(e.target.value)}
+                      placeholder="es. Succursale Sud..."
+                      className="p-1.5 border border-stone-300 rounded-lg text-xs w-44"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleAddCampus}
+                      className="px-3 py-1.5 bg-stone-700 text-white rounded-lg font-semibold hover:bg-stone-800 text-xs"
+                    >
+                      + Aggiungi Plesso
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -575,44 +577,6 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                     className="px-3 py-1.5 bg-emerald-700 text-white rounded-lg font-semibold hover:bg-emerald-800 text-xs"
                   >
                     + Aggiungi Materia
-                  </button>
-                </div>
-              </div>
-
-              {/* Plessi / Sedi */}
-              <div className="p-3.5 rounded-xl border border-stone-200 bg-stone-50/50 space-y-2">
-                <label className="block font-bold text-stone-800">Plessi e Sedi</label>
-                <div className="flex flex-wrap gap-1.5">
-                  {campuses.map((c) => (
-                    <span
-                      key={c}
-                      className="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-medium bg-stone-200 text-stone-800"
-                    >
-                      {c}
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveCampus(c)}
-                        className="ml-1.5 text-stone-600 hover:text-stone-900"
-                      >
-                        <X className="w-3.5 h-3.5" />
-                      </button>
-                    </span>
-                  ))}
-                </div>
-                <div className="flex items-center space-x-2 pt-1">
-                  <input
-                    type="text"
-                    value={newCampusInput}
-                    onChange={(e) => setNewCampusInput(e.target.value)}
-                    placeholder="es. Succursale Sud..."
-                    className="p-1.5 border border-stone-300 rounded-lg text-xs w-44"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleAddCampus}
-                    className="px-3 py-1.5 bg-stone-700 text-white rounded-lg font-semibold hover:bg-stone-800 text-xs"
-                  >
-                    + Aggiungi Plesso
                   </button>
                 </div>
               </div>
