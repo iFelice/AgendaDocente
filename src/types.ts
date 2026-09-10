@@ -84,6 +84,8 @@ export interface TeacherProfile {
   assignedStudents?: string[];
   googleCalendarLinked?: boolean;
   googleCalendarAccount?: string;
+  /** Ore settimanali dichiarate dal docente (default 18 se non presente). */
+  weeklyDeclaredHours?: number;
   /** Additive multi-institute model; legacy scalar fields remain supported. */
   schools?: SchoolProfile[];
 }
