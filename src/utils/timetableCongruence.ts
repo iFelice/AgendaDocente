@@ -14,6 +14,20 @@ import {
   getPrimarySchool,
 } from "../utils/multiSchool";
 
+/** Shared technical tolerance for both status and visible warnings. */
+const CONGRUENCE_TOLERANCE_MINUTES = 5;
+const isWithinTolerance = (minutes: number): boolean => Math.abs(minutes) <= CONGRUENCE_TOLERANCE_MINUTES;
+
+/** Formats the exact difference without rounding it to decimal hours. */
+export function formatMinuteDifference(minutes: number): string {
+  const absolute = Math.abs(minutes);
+  const hours = Math.floor(absolute / 60);
+  const remainder = absolute % 60;
+  const duration = [hours ? `${hours} h` : "", remainder || !hours ? `${remainder} min` : ""]
+    .filter(Boolean).join(" ");
+  return `${duration} ${minutes < 0 ? "in meno" : "in più"}`;
+}
+
 /** Converts a "HH:MM" time string to minutes after midnight */
 export function timeToMinutes(timeStr: string): number {
   if (typeof timeStr !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(timeStr)) return NaN;
@@ -108,9 +122,9 @@ export function calculateCongruence(
   });
 
   // Overall congruence
-  const isTotalCongruent = Math.abs(totalPlanned - declaredMinutes) <= 5; // 5 min tolerance
+  const isTotalCongruent = isWithinTolerance(totalPlanned - declaredMinutes);
   const allSchoolsOk = Object.values(schoolCongruence).every(
-    s => Math.abs(s.differenceMinutes) <= 5
+    s => isWithinTolerance(s.differenceMinutes)
   );
   const isBySchoolCongruent = allSchoolsOk;
 
@@ -118,23 +132,14 @@ export function calculateCongruence(
   const warnings: string[] = [];
 
   if (!isTotalCongruent) {
-    const over = totalPlanned > declaredMinutes;
-    warnings.push(
-      over
-        ? `L'orario pianificato supera il monte ore dichiarato di ${Math.round((totalPlanned - declaredMinutes) / 60)} h`
-        : `L'orario pianificato è inferiore di ${Math.round((declaredMinutes - totalPlanned) / 60)} h al monte ore dichiarato`
-    );
+    warnings.push(`L'orario pianificato non corrisponde al monte ore dichiarato (${formatMinuteDifference(totalPlanned - declaredMinutes)})`);
   }
 
-  // Per-school warnings
+  // Per-school warnings use exactly the same tolerance as the congruence state.
   Object.entries(schoolCongruence).forEach(([schoolId, school]) => {
-    const diffHours = school.differenceMinutes / 60;
-    if (Math.abs(diffHours) > 1 || Math.abs(school.differenceMinutes) > 30) {
+    if (!isWithinTolerance(school.differenceMinutes)) {
       const schoolName = schoolId === primaryKey ? "Istituto principale" : `Istituto ${schoolId}`;
-      const over = school.differenceMinutes > 0;
-      warnings.push(
-        `${schoolName}: ${over ? "supera" : "è inferiore di"} ${Math.abs(diffHours).toFixed(1)} h ${over ? "(totale)" : ""}`
-      );
+      warnings.push(`${schoolName}: ${formatMinuteDifference(school.differenceMinutes)} rispetto al dichiarato`);
     }
   });
 
@@ -178,23 +183,18 @@ export function getCongruenceStatus(
   // Total warning
   let totalWarning: string | null = null;
   if (!congruence.isTotalCongruent) {
-    totalWarning = differenceHours > 0
-      ? `L'orario inserito non corrisponde al monte ore dichiarato (${differenceHours.toFixed(1)} h in più)`
-      : `L'orario inserito non corrisponde al monte ore dichiarato (${Math.abs(differenceHours).toFixed(1)} h in meno)`;
+    totalWarning = `L'orario inserito non corrisponde al monte ore dichiarato (${formatMinuteDifference(congruence.totalDifferenceMinutes)})`;
   }
 
   // Per-school warnings
   const bySchoolWarnings: Array<{ schoolId: string; label: string; warning: string }> = [];
   Object.entries(congruence.bySchool).forEach(([schoolId, school]) => {
-    const diffHours = school.differenceMinutes / 60;
-    if (Math.abs(diffHours) > 0.5) {
+    if (!isWithinTolerance(school.differenceMinutes)) {
       const schoolLabel = schoolId === (getPrimarySchool(profile)?.id ?? "primary") ? "Istituto principale" : `Istituto secondario`;
       bySchoolWarnings.push({
         schoolId,
         label: schoolLabel,
-        warning: diffHours > 0
-          ? `${schoolLabel}: ${diffHours.toFixed(1)} h superiori al dichiarato`
-          : `${schoolLabel}: ${Math.abs(diffHours).toFixed(1)} h inferiori al dichiarato`,
+        warning: `${schoolLabel}: ${formatMinuteDifference(school.differenceMinutes)} rispetto al dichiarato`,
       });
     }
   });

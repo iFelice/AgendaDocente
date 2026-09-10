@@ -57,3 +57,52 @@ test('invalid times, zero/negative durations and overnight lessons contribute ze
     assert.equal(slotDurationMinutes(start as string, end as string), 0, `${start}-${end}`);
   }
 });
+
+// Change a single planned slot by an exact signed number of minutes.
+const withDifference = (difference: number, schoolId: string, hours: number) => {
+  const timetable = slots(hours, schoolId);
+  const end = 9 * 60 + difference;
+  timetable[0].endTime = `${String(Math.floor(end / 60)).padStart(2, '0')}:${String(end % 60).padStart(2, '0')}`;
+  return timetable;
+};
+for (const difference of [-20, -5, 5, 6, 10, 30, 50, 60, 90]) {
+  test(`school and total difference ${difference} min: matching state and exact warnings`, () => {
+    const timetable = [...withDifference(difference, primary, 12), ...slots(6, secondary)];
+    const result = calculateCongruence(timetable, profile);
+    const status = getCongruenceStatus(timetable, profile);
+    const congruent = Math.abs(difference) <= 5;
+    assert.equal(result.isTotalCongruent, congruent);
+    assert.equal(result.isBySchoolCongruent, congruent);
+    assert.equal(status.isConsistent, congruent);
+    if (congruent) {
+      assert.deepEqual(result.warnings, []);
+      assert.equal(status.totalWarning, null);
+      assert.deepEqual(status.bySchoolWarnings, []);
+    } else {
+      const expected = new Map([[-20, '20 min in meno'], [6, '6 min in più'], [10, '10 min in più'], [30, '30 min in più'], [50, '50 min in più'], [60, '1 h in più'], [90, '1 h 30 min in più']]).get(difference)!;
+      assert.equal(result.warnings.length, 2);
+      for (const warning of result.warnings) assert.ok(warning.includes(expected), warning);
+      assert.ok(status.totalWarning?.includes(expected));
+      assert.equal(status.bySchoolWarnings.length, 1);
+      assert.equal(status.bySchoolWarnings[0].schoolId, primary);
+      assert.ok(status.bySchoolWarnings[0].warning.includes(expected));
+    }
+  });
+}
+test('correct total with +20/-20 distribution shows both school details and distribution warning', () => {
+  const timetable = [...withDifference(20, primary, 12), ...withDifference(-20, secondary, 6)];
+  const result = calculateCongruence(timetable, profile);
+  const status = getCongruenceStatus(timetable, profile);
+  assert.equal(result.isTotalCongruent, true);
+  assert.equal(result.isBySchoolCongruent, false);
+  assert.equal(status.isConsistent, false);
+  assert.equal(status.totalWarning, null);
+  assert.equal(result.warnings.length, 3);
+  assert.ok(result.warnings.some(w => w.includes('20 min in più')));
+  assert.ok(result.warnings.some(w => w.includes('20 min in meno')));
+  assert.ok(result.warnings.some(w => w.includes('distribuzione')));
+  assert.equal(status.bySchoolWarnings.length, 3);
+  assert.match(status.bySchoolWarnings.find(w => w.schoolId === primary)!.warning, /20 min in più/);
+  assert.match(status.bySchoolWarnings.find(w => w.schoolId === secondary)!.warning, /20 min in meno/);
+  assert.ok(status.bySchoolWarnings.find(w => w.schoolId === 'distribution'));
+});
