@@ -6,6 +6,7 @@
  * - Converts to hours only for UI display
  * - Calculates per-school totals for multi-institute scenarios
  * - Handles legacy profiles without weeklyDeclaredHours (defaults to 18)
+ * - Uses real school IDs from profile, never the special "primary" string
  */
 import type { TimetableSlot, TeacherProfile } from "../types";
 import {
@@ -32,21 +33,13 @@ export function minutesToTime(minutes: number): string {
 
 /** Calculates the duration in minutes between start and end time strings */
 export function slotDurationMinutes(startTime: string, endTime: string): number {
-  return timeToMinutes(endTime) - timeToMinutes(startTime);
+  const start = timeToMinutes(startTime);
+  const end = timeToMinutes(endTime);
+  // Ensure non-negative duration
+  return end >= start ? end - start : 0;
 }
 
-/** Calculates total planned hours (in minutes) for a single timetable slot */
-export function calculateSlotMinutes(slot: TimetableSlot): number {
-  return slotDurationMinutes(slot.startTime, slot.endTime);
-}
-
-/** Calculates total planned hours (in minutes) for all slots on a specific day of week */
-export function calculateDayTotalMinutes(timetable: TimetableSlot[], dayOfWeek: 1 | 2 | 3 | 4 | 5 | 6): number {
-  const daySlots = timetable.filter(slot => slot.dayOfWeek === dayOfWeek);
-  return daySlots.reduce((total, slot) => total + slotDurationMinutes(slot.startTime, slot.endTime), 0);
-}
-
-/** Calculates total planned hours (in minutes) across the entire timetable */
+/** Calculates total planned hours (in minutes) for all timetable slots */
 export function calculateTotalTimetableMinutes(timetable: TimetableSlot[]): number {
   return timetable.reduce((total, slot) => total + slotDurationMinutes(slot.startTime, slot.endTime), 0);
 }
@@ -55,20 +48,28 @@ export function calculateTotalTimetableMinutes(timetable: TimetableSlot[]): numb
 export function calculateTimetableBySchoolMinutes(timetable: TimetableSlot[]): Record<string, number> {
   const bySchool: Record<string, number> = {};
   timetable.forEach(slot => {
-    const schoolId = slot.schoolId ?? "primary";
-    bySchool[schoolId] = (bySchool[schoolId] || 0) + slotDurationMinutes(slot.startTime, slot.endTime);
+    const schoolId = slot.schoolId;
+    if (schoolId) {
+      bySchool[schoolId] = (bySchool[schoolId] || 0) + slotDurationMinutes(slot.startTime, slot.endTime);
+    }
   });
   return bySchool;
 }
 
-/** Gets the declared weekly hours for a profile, defaulting to 18 for legacy profiles */
-export function getDeclaredWeeklyHours(profile: TeacherProfile): number {
-  return (profile.weeklyDeclaredHours ?? 18);
+/**
+ * Gets the real primary school ID from the profile,
+ * or undefined if no primary school is configured.
+ */
+export function getPrimarySchoolId(profile: TeacherProfile): string | undefined {
+  const primary = getPrimarySchool(profile);
+  return primary?.id;
 }
 
-/** 
+/**
  * Calculates congruence between the planned timetable and declared weekly hours.
- * Returns an object with total and per-school breakdowns and warnings.
+ * 
+ * @returns Object with total and per-school breakdowns, differences, and warnings.
+ * Never blocks saving - only returns messages.
  */
 export function calculateCongruence(
   timetable: TimetableSlot[],
@@ -86,36 +87,56 @@ export function calculateCongruence(
   const declaredMinutes = declaredHours * 60;
   const totalPlanned = calculateTotalTimetableMinutes(timetable);
   const bySchool = calculateTimetableBySchoolMinutes(timetable);
-  const bySchoolDeclared = calculateTimetableBySchoolMinutes(
-    timetable.map(slot => ({ ...slot, schoolId: slot.schoolId ?? "primary" }))
-  );
-
-  // Build per-school declared hours - use the multi-school distribution
+  const primarySchoolId = getPrimarySchoolId(profile);
   const otherSchools = getOtherActiveSchools(profile);
-  const primarySchool = getPrimarySchool(profile);
   const primaryExpected = calculatePrimaryExpectedHours(declaredHours, otherSchools);
 
-  // Calculate per-school congruence
+  // Build per-school congruence using real school IDs
   const schoolCongruence: Record<string, { plannedMinutes: number; declaredMinutes: number; differenceMinutes: number }> = {};
-  const allSchoolIds = new Set([...Object.keys(bySchool), ...Object.keys(bySchoolDeclared)]);
+  
+  // Collect all school IDs that appear in the timetable
+  const timetableSchoolIds = new Set<string>();
+  timetable.forEach(slot => {
+    if (slot.schoolId) timetableSchoolIds.add(slot.schoolId);
+  });
 
-  allSchoolIds.forEach(schoolId => {
+  // For each school found in the timetable
+  timetableSchoolIds.forEach(schoolId => {
     const planned = bySchool[schoolId] || 0;
-    // For primary school, use the derived expected hours
+    
+    // Determine declared hours for this school
     let declaredForSchool: number;
-    if (schoolId === "primary") {
+    
+    // Check if this is the primary school
+    const isPrimary = schoolId === primarySchoolId;
+    
+    if (isPrimary) {
+      // Primary school gets the derived expected hours
       declaredForSchool = primaryExpected * 60;
     } else {
-      // For other schools, use their declared weeklyHours
+      // Secondary school - use its declared weeklyHours
       const otherSchool = otherSchools.find(s => s.id === schoolId);
       declaredForSchool = (otherSchool?.weeklyHours ?? 0) * 60;
     }
+    
     const difference = planned - declaredForSchool;
     schoolCongruence[schoolId] = { plannedMinutes: planned, declaredMinutes: declaredForSchool, differenceMinutes: difference };
   });
 
-  // Overall congruence
-  const isTotalCongruent = Math.abs(totalPlanned - declaredMinutes) <= 5; // 5 min tolerance
+  // Also include primary school if it has no slots but we need to show the expected hours
+  // This handles the case where the profile has a primary school but no slots are currently scheduled
+  if (primarySchoolId && !timetableSchoolIds.has(primarySchoolId)) {
+    schoolCongruence[primarySchoolId] = {
+      plannedMinutes: 0,
+      declaredMinutes: primaryExpected * 60,
+      differenceMinutes: -primaryExpected * 60,
+    };
+  }
+
+  // Overall congruence (with 5-minute tolerance)
+  const isTotalCongruent = Math.abs(totalPlanned - declaredMinutes) <= 5;
+  
+  // Per-school congruence: all schools must be within tolerance
   const allSchoolsOk = Object.values(schoolCongruence).every(
     s => Math.abs(s.differenceMinutes) <= 5
   );
@@ -133,14 +154,14 @@ export function calculateCongruence(
     );
   }
 
-  // Per-school warnings
+  // Per-school warnings: show if difference is significant (> 1 hour or > 30 min)
   Object.entries(schoolCongruence).forEach(([schoolId, school]) => {
     const diffHours = school.differenceMinutes / 60;
     if (Math.abs(diffHours) > 1 || Math.abs(school.differenceMinutes) > 30) {
-      const schoolName = schoolId === "primary" ? "Istituto principale" : `Istituto ${schoolId}`;
+      const schoolName = schoolId === primarySchoolId ? "Istituto principale" : `Istituto ${schoolId}`;
       const over = school.differenceMinutes > 0;
       warnings.push(
-        `${schoolName}: ${over ? "supera" : "è inferiore di"} ${Math.abs(diffHours).toFixed(1)} h ${over ? "(totale)" : ""}`
+        `${schoolName}: ${over ? "supera" : "è inferiore di"} ${Math.abs(diffHours).toFixed(1)} h ${over ? "" : "(distribuzione)"}`
       );
     }
   });
@@ -161,7 +182,7 @@ export function calculateCongruence(
   };
 }
 
-/** 
+/**
  * Gets UI-ready congruence status with amber warning messages.
  * Does NOT prevent saving, only returns messages.
  */
@@ -195,7 +216,7 @@ export function getCongruenceStatus(
   Object.entries(congruence.bySchool).forEach(([schoolId, school]) => {
     const diffHours = school.differenceMinutes / 60;
     if (Math.abs(diffHours) > 0.5) {
-      const schoolLabel = schoolId === "primary" ? "Istituto principale" : `Istituto secondario`;
+      const schoolLabel = schoolId === (getPrimarySchoolId(profile) || '') ? "Istituto principale" : `Istituto secondario`;
       bySchoolWarnings.push({
         schoolId,
         label: schoolLabel,
@@ -210,7 +231,6 @@ export function getCongruenceStatus(
   let isConsistent = congruence.isTotalCongruent && congruence.isBySchoolCongruent;
   if (congruence.isTotalCongruent && !congruence.isBySchoolCongruent) {
     isConsistent = false;
-    // Add a distribution warning
     bySchoolWarnings.push({
       schoolId: "distribution",
       label: "Distribuzione",
@@ -226,4 +246,14 @@ export function getCongruenceStatus(
     bySchoolWarnings,
     isConsistent,
   };
+}
+
+/** Gets the declared weekly hours for a profile, defaulting to 18 for legacy profiles */
+export function getDeclaredWeeklyHours(profile: TeacherProfile): number {
+  return profile.weeklyDeclaredHours ?? 18;
+}
+
+/** Validates that a slot's end time is after its start time */
+export function validateSlotTimes(startTime: string, endTime: string): boolean {
+  return slotDurationMinutes(startTime, endTime) >= 0;
 }
