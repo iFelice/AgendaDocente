@@ -198,11 +198,11 @@ export const TodayView: React.FC<TodayViewProps> = ({
               id="today-previous-day"
               type="button"
               onClick={() => setSelectedIso((iso) => addDaysISO(iso, -1))}
-              className="min-w-[36px] min-h-[36px] flex items-center justify-center p-1 rounded-lg border border-stone-200/50 hover:bg-stone-50/20 text-stone-600 transition-colors"
+              className="group min-w-[44px] min-h-[44px] inline-flex items-center justify-center text-stone-600"
               title="Giorno precedente"
               aria-label="Giorno precedente"
             >
-              <ChevronLeft className="w-5 h-5" />
+              <span className="w-[36px] h-[36px] inline-flex items-center justify-center rounded-lg border border-stone-200/50 group-hover:bg-stone-50 group-active:bg-stone-100 transition-colors"><ChevronLeft className="w-5 h-5" /></span>
             </button>
             {/*
               "Oggi" shortcut. On the real today it stays green and clearly ACTIVE (solid,
@@ -228,11 +228,11 @@ export const TodayView: React.FC<TodayViewProps> = ({
               id="today-next-day"
               type="button"
               onClick={() => setSelectedIso((iso) => addDaysISO(iso, 1))}
-              className="min-w-[36px] min-h-[36px] flex items-center justify-center p-1 rounded-lg border border-stone-200/50 hover:bg-stone-50/20 text-stone-600 transition-colors"
+              className="group min-w-[44px] min-h-[44px] inline-flex items-center justify-center text-stone-600"
               title="Giorno successivo"
               aria-label="Giorno successivo"
             >
-              <ChevronRight className="w-5 h-5" />
+              <span className="w-[36px] h-[36px] inline-flex items-center justify-center rounded-lg border border-stone-200/50 group-hover:bg-stone-50 group-active:bg-stone-100 transition-colors"><ChevronRight className="w-5 h-5" /></span>
             </button>
           </div>
         </div>
@@ -467,7 +467,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
                         <div className="flex items-center gap-1">
                           <button
                             onClick={() => onEditEvent(ev)}
-                            className="p-1 rounded-md text-stone-400 hover:text-stone-700 hover:bg-stone-100 active:bg-stone-200 transition-colors"
+                            className="p-2 min-w-[44px] min-h-[44px] inline-flex items-center justify-center rounded-md text-stone-400 hover:text-stone-700 hover:bg-stone-100 active:bg-stone-200 transition-colors"
                             title="Modifica"
                             aria-label="Modifica impegno"
                           >
@@ -497,7 +497,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
                           ) : (
                             <button
                               onClick={() => setConfirmingDeleteEventId(ev.id)}
-                              className="p-1 rounded-md text-stone-400 hover:text-rose-600 hover:bg-rose-50 active:bg-rose-100 transition-colors"
+                              className="p-2 min-w-[44px] min-h-[44px] inline-flex items-center justify-center rounded-md text-stone-400 hover:text-rose-600 hover:bg-rose-50 active:bg-rose-100 transition-colors"
                               title="Elimina"
                               aria-label="Elimina impegno"
                             >
@@ -524,7 +524,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
                         )}
                       </div>
 
-                      {ev.notes && <p className="text-xs text-stone-500 bg-stone-50 p-1 rounded-md">{ev.notes}</p>}
+                      {ev.notes && <p className="text-xs text-stone-500 bg-stone-50 p-2 rounded-md">{ev.notes}</p>}
                     </div>
                   ))}
                 </div>

@@ -10,16 +10,14 @@
 import type { TimetableSlot, TeacherProfile } from "../types";
 import {
   calculatePrimaryExpectedHours,
-  calculateTotalDeclaredHours,
   getOtherActiveSchools,
   getPrimarySchool,
 } from "../utils/multiSchool";
 
 /** Converts a "HH:MM" time string to minutes after midnight */
 export function timeToMinutes(timeStr: string): number {
-  const parts = timeStr.split(":");
-  const h = Number(parts[0]) || 0;
-  const m = Number(parts[1]) || 0;
+  if (typeof timeStr !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(timeStr)) return NaN;
+  const [h, m] = timeStr.split(":").map(Number);
   return h * 60 + m;
 }
 
@@ -32,7 +30,8 @@ export function minutesToTime(minutes: number): string {
 
 /** Calculates the duration in minutes between start and end time strings */
 export function slotDurationMinutes(startTime: string, endTime: string): number {
-  return timeToMinutes(endTime) - timeToMinutes(startTime);
+  const duration = timeToMinutes(endTime) - timeToMinutes(startTime);
+  return Number.isFinite(duration) && duration > 0 ? duration : 0;
 }
 
 /** Calculates total planned hours (in minutes) for a single timetable slot */
@@ -52,10 +51,10 @@ export function calculateTotalTimetableMinutes(timetable: TimetableSlot[]): numb
 }
 
 /** Calculates total planned hours grouped by schoolId */
-export function calculateTimetableBySchoolMinutes(timetable: TimetableSlot[]): Record<string, number> {
+export function calculateTimetableBySchoolMinutes(timetable: TimetableSlot[], primarySchoolId: string = "primary"): Record<string, number> {
   const bySchool: Record<string, number> = {};
   timetable.forEach(slot => {
-    const schoolId = slot.schoolId ?? "primary";
+    const schoolId = slot.schoolId ?? primarySchoolId;
     bySchool[schoolId] = (bySchool[schoolId] || 0) + slotDurationMinutes(slot.startTime, slot.endTime);
   });
   return bySchool;
@@ -85,33 +84,27 @@ export function calculateCongruence(
   const declaredHours = getDeclaredWeeklyHours(profile);
   const declaredMinutes = declaredHours * 60;
   const totalPlanned = calculateTotalTimetableMinutes(timetable);
-  const bySchool = calculateTimetableBySchoolMinutes(timetable);
-  const bySchoolDeclared = calculateTimetableBySchoolMinutes(
-    timetable.map(slot => ({ ...slot, schoolId: slot.schoolId ?? "primary" }))
-  );
-
-  // Build per-school declared hours - use the multi-school distribution
-  const otherSchools = getOtherActiveSchools(profile);
   const primarySchool = getPrimarySchool(profile);
-  const primaryExpected = calculatePrimaryExpectedHours(declaredHours, otherSchools);
+  const primarySchoolId = primarySchool?.id;
+  // The fallback is only for profiles with no resolvable primary identity.
+  const primaryKey = primarySchoolId ?? "primary";
+  const bySchool = calculateTimetableBySchoolMinutes(timetable, primaryKey);
+  const otherSchools = getOtherActiveSchools(profile);
+  const expectedMinutes: Record<string, number> = {
+    [primaryKey]: calculatePrimaryExpectedHours(declaredHours, otherSchools) * 60,
+  };
+  otherSchools.forEach(school => {
+    expectedMinutes[school.id] = (school.weeklyHours ?? 0) * 60;
+  });
 
-  // Calculate per-school congruence
   const schoolCongruence: Record<string, { plannedMinutes: number; declaredMinutes: number; differenceMinutes: number }> = {};
-  const allSchoolIds = new Set([...Object.keys(bySchool), ...Object.keys(bySchoolDeclared)]);
-
+  const allSchoolIds = new Set([...Object.keys(bySchool), ...Object.keys(expectedMinutes)]);
   allSchoolIds.forEach(schoolId => {
-    const planned = bySchool[schoolId] || 0;
-    // For primary school, use the derived expected hours
-    let declaredForSchool: number;
-    if (schoolId === "primary") {
-      declaredForSchool = primaryExpected * 60;
-    } else {
-      // For other schools, use their declared weeklyHours
-      const otherSchool = otherSchools.find(s => s.id === schoolId);
-      declaredForSchool = (otherSchool?.weeklyHours ?? 0) * 60;
-    }
-    const difference = planned - declaredForSchool;
-    schoolCongruence[schoolId] = { plannedMinutes: planned, declaredMinutes: declaredForSchool, differenceMinutes: difference };
+    const plannedMinutes = bySchool[schoolId] ?? 0;
+    const declaredMinutes = expectedMinutes[schoolId] ?? 0;
+    schoolCongruence[schoolId] = {
+      plannedMinutes, declaredMinutes, differenceMinutes: plannedMinutes - declaredMinutes,
+    };
   });
 
   // Overall congruence
@@ -137,7 +130,7 @@ export function calculateCongruence(
   Object.entries(schoolCongruence).forEach(([schoolId, school]) => {
     const diffHours = school.differenceMinutes / 60;
     if (Math.abs(diffHours) > 1 || Math.abs(school.differenceMinutes) > 30) {
-      const schoolName = schoolId === "primary" ? "Istituto principale" : `Istituto ${schoolId}`;
+      const schoolName = schoolId === primaryKey ? "Istituto principale" : `Istituto ${schoolId}`;
       const over = school.differenceMinutes > 0;
       warnings.push(
         `${schoolName}: ${over ? "supera" : "è inferiore di"} ${Math.abs(diffHours).toFixed(1)} h ${over ? "(totale)" : ""}`
@@ -195,7 +188,7 @@ export function getCongruenceStatus(
   Object.entries(congruence.bySchool).forEach(([schoolId, school]) => {
     const diffHours = school.differenceMinutes / 60;
     if (Math.abs(diffHours) > 0.5) {
-      const schoolLabel = schoolId === "primary" ? "Istituto principale" : `Istituto secondario`;
+      const schoolLabel = schoolId === (getPrimarySchool(profile)?.id ?? "primary") ? "Istituto principale" : `Istituto secondario`;
       bySchoolWarnings.push({
         schoolId,
         label: schoolLabel,

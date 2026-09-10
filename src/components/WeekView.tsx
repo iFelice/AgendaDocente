@@ -1,3 +1,4 @@
+import { getReferenceMonday } from "../utils/weekNavigation";
 import { localDateISO } from "../utils/dates";
 import React, { useState, useEffect } from "react";
 import {
@@ -51,32 +52,6 @@ export const WeekView: React.FC<WeekViewProps> = ({
     }
   }, [profile?.schoolLevel]);
 
-  /**
-   * Calcola il Lunedì di riferimento per una data:
-   * - Se la data cade durante la settimana lavorativa (Lunedì-Venerdì, es. 4 settembre):
-   *   mantiene il Lunedì della settimana corrispondente (così il 4 settembre è visibile nel suo contesto).
-   * - Se la data cade di Sabato (es. 5 settembre) o Domenica:
-   *   salta direttamente al Lunedì successivo (es. 7 settembre), perché la settimana didattica è conclusa.
-   */
-  const getReferenceMonday = (refDate: Date, rollWeekend: boolean = true): Date => {
-    const d = new Date(refDate);
-    d.setHours(0, 0, 0, 0);
-    const day = d.getDay(); // 0 = Domenica, 1 = Lunedì, ..., 5 = Venerdì, 6 = Sabato
-
-    if (rollWeekend && (day === 6 || day === 0)) {
-      // Sabato (6) -> +2 giorni (Lunedì successivo)
-      // Domenica (0) -> +1 giorno (Lunedì successivo)
-      const daysToNextMonday = day === 6 ? 2 : 1;
-      d.setDate(d.getDate() + daysToNextMonday);
-      return d;
-    }
-
-    // Regola sul Lunedì della settimana corrente
-    const diff = d.getDate() - day + (day === 0 ? -6 : 1);
-    d.setDate(diff);
-    return d;
-  };
-
   // Sync a targetDateIso se fornita (es. click da Oggi o Mese)
   useEffect(() => {
     if (targetDateIso) {
@@ -110,12 +85,8 @@ export const WeekView: React.FC<WeekViewProps> = ({
   const now = new Date();
   const isWeekendToday = now.getDay() === 6 || now.getDay() === 0;
 
-  // Check if the displayed week is the current week (for green/yellow semantics)
-  const displayMonday = getDisplayMonday(currentWeekOffset);
-  const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-  const displayMondayStart = new Date(displayMonday);
-  const weekDiff = Math.round((displayMondayStart.getTime() - todayStart.getTime()) / (7 * 24 * 60 * 60 * 1000));
-  const isCurrentWeek = weekDiff === 0;
+  // Compare local reference Mondays, not a rounded distance from today's date.
+  const isCurrentWeek = monday.getTime() === getReferenceMonday(now, true).getTime();
 
   // Generate days array (Lunedì a Venerdì [5 giorni] oppure Sabato [6 giorni])
   const daysCount = includeSaturday ? 6 : 5;
@@ -175,35 +146,30 @@ export const WeekView: React.FC<WeekViewProps> = ({
         <div className="flex items-center gap-1.5 sm:gap-2 min-w-0 flex-wrap">
           <button
             onClick={() => setCurrentWeekOffset((prev) => prev - 1)}
-            className="inline-flex items-center justify-center w-[36px] h-[36px] rounded-lg border border-stone-200 hover:bg-stone-50 active:bg-stone-100 text-stone-600 transition-colors"
+            className="group min-w-[44px] min-h-[44px] inline-flex items-center justify-center text-stone-600"
             title="Settimana precedente"
             aria-label="Settimana precedente"
           >
-            <ChevronLeft className="w-5 h-5" />
+            <span className="w-[36px] h-[36px] inline-flex items-center justify-center rounded-lg border border-stone-200/50 group-hover:bg-stone-50 group-active:bg-stone-100 transition-colors"><ChevronLeft className="w-5 h-5" /></span>
           </button>
           {/* Pulsante "Questa settimana" con semantica verde/ambra */}
-          {isCurrentWeek ? (
-            <button
-              onClick={() => setCurrentWeekOffset(0)}
-              className="inline-flex items-center px-3 py-2 rounded-lg border border-emerald-600 bg-emerald-100 text-emerald-900 font-semibold min-h-[36px] py-1.5 text-xs"
-            >
-              {isCurrentWeek ? "Questa Settimana" : "Questa Settimana (ambra)"}
-            </button>
-          ) : (
-            <button
-              onClick={() => setCurrentWeekOffset(0)}
-              className="inline-flex items-center px-3 py-2 rounded-lg border border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-50 hover:border-amber-200 font-medium min-h-[36px] py-1.5 text-xs"
-            >
-              {isCurrentWeek ? "Questa Settimana" : "Questa Settimana (ambra)"}
-            </button>
-          )}
+          <button
+            onClick={() => setCurrentWeekOffset(0)}
+            aria-pressed={isCurrentWeek}
+            disabled={isCurrentWeek}
+            className={`inline-flex items-center px-3 py-2 min-h-[44px] rounded-lg border text-xs font-semibold transition-colors ${isCurrentWeek
+              ? "border-emerald-600 bg-emerald-100 text-emerald-900"
+              : "border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100"}`}
+          >
+            {isWeekendToday ? "Settimana Entrante" : "Questa Settimana"}
+          </button>
           <button
             onClick={() => setCurrentWeekOffset((prev) => prev + 1)}
-            className="inline-flex items-center justify-center w-[36px] h-[36px] rounded-lg border border-stone-200 hover:bg-stone-50 active:bg-stone-100 text-stone-600 transition-colors"
+            className="group min-w-[44px] min-h-[44px] inline-flex items-center justify-center text-stone-600"
             title="Settimana successiva"
             aria-label="Settimana successiva"
           >
-            <ChevronRight className="w-5 h-5" />
+            <span className="w-[36px] h-[36px] inline-flex items-center justify-center rounded-lg border border-stone-200/50 group-hover:bg-stone-50 group-active:bg-stone-100 transition-colors"><ChevronRight className="w-5 h-5" /></span>
           </button>
           <span
             className="text-xs sm:text-sm font-semibold text-stone-800 ml-0.5 sm:ml-1 min-w-0 break-words"
@@ -249,7 +215,7 @@ export const WeekView: React.FC<WeekViewProps> = ({
             </span>
           )}
 
-          <label className="inline-flex items-center gap-2 text-xs text-stone-600 cursor-pointer select-none min-h-[36px] px-1 rounded-lg hover:bg-stone-50">
+          <label className="inline-flex items-center gap-2 text-xs text-stone-600 cursor-pointer select-none min-h-[44px] px-1 rounded-lg hover:bg-stone-50">
             <input
               type="checkbox"
               checked={includeSaturday}
