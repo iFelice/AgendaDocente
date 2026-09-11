@@ -1,9 +1,7 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useState } from "react";
 import { Cloud, CloudOff, RefreshCw, ChevronDown, ChevronUp, Check, TriangleAlert } from "lucide-react";
 import type { SyncStatus } from "../services/sync/types";
-
-/** Outcome of the manual run triggered from the button (transient UI feedback). */
-type ManualOutcome = "idle" | "success" | "error" | "offline";
+import { useManualSync, type ManualSyncController } from "../hooks/useManualSync";
 
 /**
  * Account sync status card shown inside ProfileModal. Purely informational + explicit actions:
@@ -20,6 +18,7 @@ type ManualOutcome = "idle" | "success" | "error" | "offline";
  *   during  ↻ Sincronizzazione…
  *   success ✓ Aggiornato ora
  *   error   ⚠ Sincronizzazione non riuscita
+ *   conflict ⚠ Conflitto da risolvere (awaiting-resolution is never shown as success)
  * and returns to the neutral state after a few seconds. Offline the button stays available;
  * a clear message explains that local data remain available (nothing is deleted or lost).
  */
@@ -30,40 +29,20 @@ export const CloudSync: React.FC<{
   onResolve?: (choice: "local" | "remote") => void;
   /** Device connectivity; defaults to navigator.onLine when not provided (browser default true). */
   online?: boolean;
-}> = ({ status, onSyncNow, onToggle, onResolve, online: onlineProp }) => {
-  const phase = status?.phase ?? "disabled";
+  /**
+   * Shared manual-run controller. ProfileModal passes the SAME instance to its
+   * header quick-sync button and to this card, so both triggers share one
+   * pipeline, one double-trigger guard and one transient feedback state.
+   * When omitted (standalone usage) the card owns an equivalent private one.
+   */
+  controller?: ManualSyncController;
+}> = ({ status, onSyncNow, onToggle, onResolve, online: onlineProp, controller }) => {
+  const internal = useManualSync({ status, onSyncNow });
+  const manual = controller ?? internal;
+  const phase = manual.phase;
+  const outcome = manual.outcome;
+  const handleSyncNow = manual.runSync;
   const online = onlineProp ?? (typeof navigator === "undefined" ? true : navigator.onLine !== false);
-
-  const [outcome, setOutcome] = useState<ManualOutcome>("idle");
-  /** True between a button click and the engine publishing the end of that cycle. */
-  const manualRunRef = useRef(false);
-
-  // Conclude the manual run when the engine publishes a status that is no longer
-  // "syncing": every publish emits a fresh status object, so this fires even when a very
-  // fast cycle never renders the intermediate "syncing" phase. Success for a completed
-  // cycle (idle/awaiting-resolution), explicit failure for error/offline.
-  useEffect(() => {
-    if (phase === "syncing") return;
-    if (!manualRunRef.current) return;
-    manualRunRef.current = false;
-    setOutcome(phase === "error" ? "error" : phase === "offline" ? "offline" : "success");
-  }, [status, phase]);
-
-  // The feedback is transient: back to the neutral label after a few seconds.
-  useEffect(() => {
-    if (outcome === "idle") return;
-    const timer = setTimeout(() => setOutcome("idle"), 4000);
-    return () => clearTimeout(timer);
-  }, [outcome]);
-
-  const handleSyncNow = () => {
-    // No double-fire: one manual run at a time; the engine itself coalesces any overlapping
-    // request into the running cycle (never two concurrent syncs).
-    if (!onSyncNow || manualRunRef.current || phase === "syncing" || phase === "disabled") return;
-    manualRunRef.current = true;
-    setOutcome("idle");
-    onSyncNow();
-  };
 
   const [showDetails, setShowDetails] = useState(false);
   const badge =
@@ -83,6 +62,7 @@ export const CloudSync: React.FC<{
   const syncButton =
     outcome === "success" ? { Icon: Check, label: "Aggiornato ora", tone: "border-emerald-300 bg-emerald-50 text-emerald-800" }
     : outcome === "error" ? { Icon: TriangleAlert, label: "Sincronizzazione non riuscita", tone: "border-rose-300 bg-rose-50 text-rose-800" }
+    : outcome === "conflict" || phase === "awaiting-resolution" ? { Icon: TriangleAlert, label: "Conflitto da risolvere", tone: "border-amber-300 bg-amber-50 text-amber-900" }
     : phase === "syncing" ? { Icon: RefreshCw, label: "Sincronizzazione…", tone: "border-stone-300 bg-white text-stone-800" }
     : { Icon: RefreshCw, label: "Sincronizza ora", tone: "border-stone-300 bg-white text-stone-800" };
 
@@ -202,12 +182,12 @@ export const CloudSync: React.FC<{
         </label>
         {/* Manual run feedback is announced to assistive tech without being intrusive. */}
         <span aria-live="polite" className="sr-only">
-          {outcome === "success" ? "Sincronizzazione completata" : outcome === "error" ? "Sincronizzazione non riuscita" : ""}
+          {outcome === "success" ? "Sincronizzazione completata" : outcome === "error" ? "Sincronizzazione non riuscita" : outcome === "conflict" || phase === "awaiting-resolution" ? "Sincronizzazione richiede una risoluzione del conflitto" : ""}
         </span>
         <button
           type="button"
           onClick={handleSyncNow}
-          disabled={!onSyncNow || phase === "syncing" || phase === "disabled"}
+          disabled={manual.disabled}
           aria-label={syncButton.label}
           className={`px-3 py-2 rounded-lg border text-xs font-bold disabled:opacity-50 flex items-center gap-1.5 min-h-[40px] max-w-full transition-colors ${syncButton.tone}`}
         >

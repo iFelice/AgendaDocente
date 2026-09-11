@@ -9,14 +9,13 @@ import {
   HelpCircle,
   MoreHorizontal,
   Plus,
-  Smartphone,
   Sparkles,
   User,
   Users,
   X,
 } from "lucide-react";
 import type { ViewMode } from "../types";
-import { PWAInstallButton } from "./PWAInstallButton";
+import { PWAInstallRow } from "./PWAInstallButton";
 import { GoogleGlyph } from "./GoogleGlyph";
 
 type IconType = React.ComponentType<{ className?: string }>;
@@ -286,14 +285,10 @@ export const MobileNav: React.FC<MobileNavProps> = ({
                 </button>
               )}
 
-              {/* Secondary: PWA install (removed from the phone header). */}
-              <div className="flex min-h-[52px] items-center justify-between gap-3 px-4 py-2">
-                <span className="flex items-center gap-3 text-sm font-semibold text-stone-800">
-                  <Smartphone className="h-5 w-5 shrink-0 text-stone-400" />
-                  <span className="truncate">Installa App</span>
-                </span>
-                <PWAInstallButton />
-              </div>
+              {/* Secondary: PWA install (removed from the phone header). The whole
+                  row is the action, so a tap always gives feedback — never a
+                  dead label next to a tiny button. */}
+              <PWAInstallRow />
             </div>
           </div>
         </>

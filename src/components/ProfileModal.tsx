@@ -19,6 +19,8 @@ import {
   AlertCircle,
   CalendarCheck,
   Check,
+  CloudOff,
+  TriangleAlert,
 } from "lucide-react";
 import { User as FirebaseUser } from "firebase/auth";
 import { TeacherProfile, TeacherRole, TeacherRoleKind, TEACHER_ROLE_KINDS, SchoolLevel, CalendarEvent, SchoolProfile } from "../types";
@@ -31,6 +33,7 @@ import { isUserCancellationError } from "../services/googleAuth";
 import { downloadIcsCalendar } from "../services/googleCalendarService";
 import type { SyncStatus } from "../services/sync/types";
 import { CloudSync } from "./CloudSyncCard";
+import { useManualSync } from "../hooks/useManualSync";
 import { hasActiveSecondarySchool, normalizeTeacherProfile } from "../utils/multiSchool";
 
 interface ProfileModalProps {
@@ -130,6 +133,11 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   const [newRoleLabel, setNewRoleLabel] = useState("");
 
   const [importMessage, setImportMessage] = useState<string | null>(null);
+
+  // ONE manual-sync controller shared by the header quick-sync button and the
+  // CloudSync card: same pipeline (accountSync.syncNow), same double-trigger
+  // guard, same transient feedback. No second sync engine is ever created here.
+  const manualSync = useManualSync({ status: accountSyncStatus, onSyncNow });
 
   if (!isOpen) return null;
 
@@ -251,24 +259,64 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
     });
   };
 
+  // Header quick-sync presentation (the pipeline is the shared manualSync
+  // controller: header icon and CloudSync card button are the same action).
+  const onlineEffective = online ?? (typeof navigator === "undefined" ? true : navigator.onLine !== false);
+  const quickSyncing = manualSync.phase === "syncing";
+  // Awaiting-resolution is never success: while the engine waits for an explicit
+  // user choice (transient outcome or current phase) the header shows amber.
+  const quickConflict =
+    !quickSyncing &&
+    (manualSync.outcome === "conflict" || manualSync.phase === "awaiting-resolution");
+  const quickOffline =
+    !quickSyncing &&
+    !quickConflict &&
+    manualSync.outcome !== "success" &&
+    manualSync.outcome !== "error" &&
+    (manualSync.phase === "offline" || manualSync.outcome === "offline" || !onlineEffective);
+  const quickSyncTitle = quickSyncing
+    ? "Sincronizzazione in corso…"
+    : quickConflict
+      ? "Sincronizzazione completata con conflitto da risolvere"
+      : manualSync.outcome === "success"
+        ? "Sincronizzazione completata"
+        : manualSync.outcome === "error"
+          ? "Sincronizzazione non riuscita. Riprova più tardi: i dati locali sono al sicuro."
+          : quickOffline
+            ? "Sei offline. I dati locali restano disponibili."
+            : "Sincronizza ora";
+  const quickSyncLive = quickSyncing
+    ? "Sincronizzazione in corso"
+    : quickConflict
+      ? "Sincronizzazione richiede una risoluzione del conflitto"
+      : manualSync.outcome === "success"
+        ? "Sincronizzazione completata"
+        : manualSync.outcome === "error"
+          ? "Sincronizzazione non riuscita"
+          : quickOffline
+            ? "Sei offline. I dati locali restano disponibili."
+            : "";
+
   return (
     <div className="app-modal fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-stone-950/40 backdrop-blur-xs">
-      <div className="app-modal-panel bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] shadow-2xl border border-stone-200 flex flex-col overflow-hidden animate-in fade-in zoom-in-95">
+      <div role="dialog" aria-modal={true} aria-label="Configurazione Profilo Docente" className="app-modal-panel bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] shadow-2xl border border-stone-200 flex flex-col overflow-hidden animate-in fade-in zoom-in-95">
         {save.error && <p role="alert" className="p-3 text-sm text-rose-700">{save.error}</p>}
-        {/* Header */}
-        <div className="p-3 sm:p-5 border-b border-stone-200 flex items-center justify-between bg-stone-50 gap-3">
-          <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 rounded-xl bg-emerald-700 text-white flex items-center justify-center shadow-xs">
+        {/* Header: fixed block (never shrinks, above scrolled content). The title
+            truncates inside min-w-0 while the actions keep their size, so the
+            quick-sync and close buttons are always fully visible and tappable. */}
+        <div className="shrink-0 relative z-10 p-3 sm:p-5 border-b border-stone-200 flex items-center justify-between bg-stone-50 gap-2 sm:gap-3">
+          <div className="flex items-center space-x-2.5 sm:space-x-3 min-w-0 flex-1">
+            <div className="w-10 h-10 rounded-xl bg-emerald-700 text-white flex items-center justify-center shadow-xs shrink-0">
               <User className="w-5 h-5" />
             </div>
-            <div>
-              <h2 className="text-base sm:text-lg font-bold text-stone-900">Configurazione Profilo Docente</h2>
-              <p className="text-xs text-stone-500">
+            <div className="min-w-0">
+              <h2 className="text-base sm:text-lg font-bold text-stone-900 truncate">Configurazione Profilo Docente</h2>
+              <p className="hidden sm:block text-xs text-stone-500 truncate">
                 La matrice di verità usata dall'AI per filtrare le circolari e organizzare l'orario
               </p>
             </div>
           </div>
-          <div className="flex items-center space-x-2">
+          <div className="flex items-center gap-1 sm:gap-2 shrink-0">
             {onOpenTutorial && (
               <button
                 type="button"
@@ -283,51 +331,107 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                 <span>Riavvia Tutorial</span>
               </button>
             )}
-            <button onClick={onClose} className="p-1.5 rounded-lg text-stone-400 hover:text-stone-700">
-              <X className="w-5 h-5" />
+            {/* Quick sync: icon-only trigger of the SAME shared pipeline used by
+                the CloudSync card button (same controller, same engine cycle). */}
+            <span aria-live="polite" className="sr-only">{quickSyncLive}</span>
+            <button
+              type="button"
+              onClick={manualSync.runSync}
+              disabled={manualSync.disabled}
+              aria-label="Sincronizza ora"
+              title={quickSyncTitle}
+              className="min-w-[44px] min-h-[44px] w-11 h-11 flex items-center justify-center rounded-xl text-stone-500 hover:text-emerald-700 hover:bg-emerald-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              {quickSyncing ? (
+                <RefreshCw className="w-5 h-5 animate-spin" aria-hidden="true" />
+              ) : quickConflict ? (
+                <TriangleAlert className="w-5 h-5 text-amber-600" aria-hidden="true" />
+              ) : manualSync.outcome === "success" ? (
+                <Check className="w-5 h-5 text-emerald-600" aria-hidden="true" />
+              ) : manualSync.outcome === "error" ? (
+                <TriangleAlert className="w-5 h-5 text-rose-600" aria-hidden="true" />
+              ) : quickOffline ? (
+                <CloudOff className="w-5 h-5" aria-hidden="true" />
+              ) : (
+                <RefreshCw className="w-5 h-5" aria-hidden="true" />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Chiudi"
+              title="Chiudi"
+              className="min-w-[44px] min-h-[44px] w-11 h-11 flex items-center justify-center rounded-xl text-stone-400 hover:text-stone-700 hover:bg-stone-200/60 transition-colors"
+            >
+              <X className="w-5 h-5" aria-hidden="true" />
             </button>
           </div>
         </div>
 
-        {/* Tabs (scrollable on phones so every tab stays reachable) */}
-        <div className="flex border-b border-stone-200 px-2 sm:px-5 bg-stone-50/60 overflow-x-auto no-scrollbar">
+        {/* Tabs: fixed block above the scrolled content. On phones the three tabs
+            share one row with short labels (no scroll strip, nothing clipped);
+            sm+ keeps the fuller desktop labels. */}
+        <div role="tablist" aria-label="Sezioni profilo" className="shrink-0 relative z-10 grid grid-cols-3 sm:flex border-b border-stone-200 bg-stone-50/60 sm:px-5">
           <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "profilo"}
             onClick={() => setActiveTab("profilo")}
-            className={`py-2.5 px-3 sm:px-4 text-xs font-semibold border-b-2 transition-colors whitespace-nowrap ${
+            className={`min-h-[44px] py-2.5 px-2 sm:px-4 text-xs font-semibold border-b-2 transition-colors min-w-0 ${
               activeTab === "profilo"
                 ? "border-emerald-700 text-emerald-800"
                 : "border-transparent text-stone-600 hover:text-stone-900"
             }`}
           >
-            Profilo & Classi
+            <span className="flex items-center justify-center min-w-0">
+              <span className="truncate">Profilo & Classi</span>
+            </span>
           </button>
           <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "backup"}
             onClick={() => setActiveTab("backup")}
-            className={`py-2.5 px-3 sm:px-4 text-xs font-semibold border-b-2 transition-colors whitespace-nowrap ${
+            className={`min-h-[44px] py-2.5 px-2 sm:px-4 text-xs font-semibold border-b-2 transition-colors min-w-0 ${
               activeTab === "backup"
                 ? "border-emerald-700 text-emerald-800"
                 : "border-transparent text-stone-600 hover:text-stone-900"
             }`}
           >
-            Backup & Ripristino
+            <span className="flex items-center justify-center min-w-0">
+              <span className="truncate">
+                <span className="sm:hidden">Backup</span>
+                <span className="hidden sm:inline">Backup & Ripristino</span>
+              </span>
+            </span>
           </button>
           <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "google"}
             onClick={() => setActiveTab("google")}
-            className={`py-2.5 px-3 sm:px-4 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 whitespace-nowrap ${
+            className={`min-h-[44px] py-2.5 px-2 sm:px-4 text-xs font-semibold border-b-2 transition-colors min-w-0 ${
               activeTab === "google"
                 ? "border-emerald-700 text-emerald-800"
                 : "border-transparent text-stone-600 hover:text-stone-900"
             }`}
           >
-            <span>Account Istituzionale & Google</span>
-            {googleUser && (
-              <span className="w-2 h-2 rounded-full bg-emerald-500 ring-2 ring-emerald-100" title="Account Google collegato" />
-            )}
+            <span className="flex items-center justify-center gap-1.5 min-w-0">
+              <span className="truncate">
+                <span className="sm:hidden">Google & Sync</span>
+                <span className="hidden sm:inline">Account Istituzionale & Google</span>
+              </span>
+              {googleUser && (
+                <span className="w-2 h-2 rounded-full bg-emerald-500 ring-2 ring-emerald-100 shrink-0" title="Account Google collegato" />
+              )}
+            </span>
           </button>
         </div>
 
-        {/* Content */}
-        <div className="flex-1 overflow-y-auto p-4 sm:p-5 text-xs momentum-scroll">
+        {/* Content: the ONLY scrollable area (vertical). min-h-0 lets it shrink
+            inside the flex column; the bottom padding respects the home-indicator
+            safe area on phones shaped as a bottom sheet. */}
+        <div className="flex-1 min-h-0 overflow-y-auto px-4 pt-4 sm:px-5 sm:pt-5 pb-[max(1rem,env(safe-area-inset-bottom))] sm:pb-[max(1.25rem,env(safe-area-inset-bottom))] text-xs momentum-scroll">
           {activeTab === "profilo" && (
             <form onSubmit={handleSave} className="space-y-4">
               {/* Docente di Sostegno Quick Preset & Toggle */}
@@ -985,6 +1089,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                     onToggle={onSyncToggle}
                     onResolve={onSyncResolve}
                     online={online}
+                    controller={manualSync}
                   />
 
                   {/* Google Calendar Sync Section */}
