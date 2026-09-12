@@ -321,7 +321,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
         });
         if (revision !== readingRevision.current) return;
         const rows: CurricularRawRow[] = (result.curricularRows ?? []).map((r, i) => ({
-          rowIndex: i,
+          rowIndex: Number.isInteger(r.rowIndex) ? r.rowIndex : i,
           rowLabel: r.rowLabel,
           subject: r.subject,
           classes: r.classes,

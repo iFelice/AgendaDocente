@@ -185,7 +185,7 @@ export const studentDocumentSchema = {
 
 export interface TimetableAnalysisOutcome {
   rows?: string[];
-  curricularRows?: Array<{ rowLabel?: string; subject?: string; classes?: string[] }>;
+  curricularRows?: Array<{ rowIndex: number; rowLabel?: string; subject?: string; classes?: string[] }>;
   cells: Array<{ rowIndex: number; dayOfWeek: number; periodIndex: number; raw: string }>;
 }
 
@@ -196,7 +196,7 @@ export function parseTimetableAiResponse(documentType: TimetableDocumentType, ra
     return { rows, cells };
   }
   const { rows, cells } = validateCurricularTimetablePayload(raw);
-  return { curricularRows: rows.map(({ rowIndex, rowLabel, subject, classes }) => ({ rowLabel, subject, classes })), cells };
+  return { curricularRows: rows.map(({ rowIndex, rowLabel, subject, classes }) => ({ rowIndex, rowLabel, subject, classes })), cells };
 }
 
 /** Valida la risposta AI del registro/appunti. */

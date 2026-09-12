@@ -26,7 +26,7 @@ export interface ScanTimetableResult {
   /** Righe della colonna docenti (orario personale). */
   rows?: string[];
   /** Righe docente curricolare: label/materia/classi (orario curricolare). */
-  curricularRows?: Array<{ rowLabel?: string; subject?: string; classes?: string[] }>;
+  curricularRows?: Array<{ rowIndex: number; rowLabel?: string; subject?: string; classes?: string[] }>;
   /** Celle grezze della griglia giorno/periodo (validate a runtime). */
   cells?: Array<{ rowIndex: number; dayOfWeek: number; periodIndex: number; raw: string }>;
 }
