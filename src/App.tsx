@@ -18,6 +18,7 @@ import {
   ViewMode,
 } from "./types";
 import { storage } from "./services/storage";
+import { applyReconstruction, type TimetableMergeMode } from "./utils/reconstructTimetable";
 import { Navbar } from "./components/Navbar";
 import { MobileNav } from "./components/MobileNav";
 import { TodayView } from "./components/TodayView";
@@ -28,6 +29,7 @@ const TimetableEditor = lazy(() => import("./components/TimetableEditor").then(m
 const CircularsArchiveView = lazy(() => import("./components/CircularsArchiveView").then(module => ({default: module.CircularsArchiveView})));
 const ClassesView = lazy(() => import("./components/ClassesView").then(module => ({default: module.ClassesView})));
 const CircularAnalyzerModal = lazy(() => import("./components/CircularAnalyzerModal").then(module => ({default: module.CircularAnalyzerModal})));
+const DocumentScannerModal = lazy(() => import("./components/DocumentScannerModal").then(module => ({default: module.DocumentScannerModal})));
 import { EventModal } from "./components/EventModal";
 const ProfileModal = lazy(() => import("./components/ProfileModal").then(module => ({default: module.ProfileModal})));
 const OnboardingModal = lazy(() => import("./components/OnboardingModal").then(module => ({default: module.OnboardingModal})));
@@ -82,6 +84,9 @@ export default function App({ initialData }: { initialData: LocalData }) {
 
   const [currentView, setCurrentView] = useState<ViewMode>("oggi");
   const [isCircularModalOpen, setIsCircularModalOpen] = useState(false);
+  const [isScannerOpen, setIsScannerOpen] = useState(false);
+  // File pre-scansionato dal flusso unificato, da alimentare alla pipeline circolare esistente.
+  const [scannerCircularFile, setScannerCircularFile] = useState<{ base64: string; mimeType: string; fileName: string } | null>(null);
   const [isEventModalOpen, setIsEventModalOpen] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [isOnboardingOpen, setIsOnboardingOpen] = useState<boolean>(() => !initialData.onboardingCompleted);
@@ -472,6 +477,43 @@ export default function App({ initialData }: { initialData: LocalData }) {
     showToast("Circolare rimossa dall'archivio.");
   });
 
+  // Scansiona documento: la circolare pre-scansionata alimenta la pipeline esistente.
+  const handleScanDocumentToCircular = (info: { base64: string; mimeType: string; fileName: string }) => {
+    setScannerCircularFile(info);
+    setIsScannerOpen(false);
+    setIsCircularModalOpen(true);
+  };
+
+  // Orario ricostruito: salvataggio CONFERMATO nel modello timetable esistente.
+  // Nessun sovrascrittura automatica: il merge segue la modalità scelta dall'utente.
+  const handleSaveReconstructedTimetable = withPersistenceFeedback(async (
+    slots: TimetableSlot[],
+    type: TimetableType,
+    mode: TimetableMergeMode
+  ) => {
+    let added = 0;
+    let replaced = 0;
+    await database.atomic(async () => {
+      const existing = type === "provvisorio" ? await storage.getProvisionalTimetable() : await storage.getDefinitiveTimetable();
+      const merged = applyReconstruction(existing, slots, mode);
+      added = merged.addedCount;
+      replaced = merged.replacedCount;
+      if (type === "provvisorio") await storage.saveProvisionalTimetable(merged.slots);
+      else await storage.saveDefinitiveTimetable(merged.slots);
+    });
+    const targetLabel = type === "provvisorio" ? "orario provvisorio" : "orario definitivo";
+    const parts: string[] = [];
+    if (added) parts.push(`${added} aggiunte`);
+    if (replaced) parts.push(`${replaced} sostituite`);
+    showToast(`Orario ricostruito salvato nel ${targetLabel}${parts.length ? ` (${parts.join(", ")})` : ""}.`);
+  });
+
+  // Registro/appunti: impegni alunni confermati -> agenda (mai nuovi studenti).
+  const handleImportStudentCommitments = withPersistenceFeedback(async (newEvents: CalendarEvent[]) => {
+    const addedCount = await storage.bulkAddEvents(newEvents);
+    showToast(`${addedCount} impegni dal registro aggiunti all'agenda.`);
+  });
+
   // Stats for badges
   const todayIso = localDateISO();
   const todayEventsCount = events.filter((e) => e.date === todayIso && !e.completed).length;
@@ -489,6 +531,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
         onViewChange={setCurrentView}
         profile={profile}
         onOpenCircularModal={() => setIsCircularModalOpen(true)}
+        onOpenScanner={() => setIsScannerOpen(true)}
         onOpenNewEventModal={() => handleOpenNewEvent()}
         onOpenProfileModal={() => {
           setProfileInitialTab("profilo");
@@ -628,6 +671,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
         currentView={currentView}
         onViewChange={setCurrentView}
         onOpenNewEvent={() => handleOpenNewEvent()}
+        onOpenScanner={() => setIsScannerOpen(true)}
         onOpenProfileModal={() => {
           setProfileInitialTab("profilo");
           setIsProfileModalOpen(true);
@@ -644,12 +688,31 @@ export default function App({ initialData }: { initialData: LocalData }) {
       />
 
       {/* MODALS */}
+      {isScannerOpen && (
+      <DocumentScannerModal
+        isOpen={isScannerOpen}
+        onClose={() => setIsScannerOpen(false)}
+        profile={profile}
+        students={students}
+        timeSlotConfig={timeSlotConfig}
+        provisionalTimetable={provisionalTimetable}
+        definitiveTimetable={definitiveTimetable}
+        onOpenCircularWithFile={handleScanDocumentToCircular}
+        onSaveReconstructedTimetable={handleSaveReconstructedTimetable}
+        onImportStudentCommitments={handleImportStudentCommitments}
+      />
+      )}
+
       {isCircularModalOpen && (
       <CircularAnalyzerModal
         isOpen={isCircularModalOpen}
-        onClose={() => setIsCircularModalOpen(false)}
+        onClose={() => {
+          setIsCircularModalOpen(false);
+          setScannerCircularFile(null);
+        }}
         profile={profile}
         onImportEvents={handleImportCircularEvents}
+        initialFile={scannerCircularFile}
       />
       )}
 

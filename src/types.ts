@@ -150,7 +150,7 @@ export interface CalendarEvent {
   subject?: string;
   location?: string;
   notes?: string;
-  sourceType: "manuale" | "circolare" | "orario" | "google_calendar";
+  sourceType: "manuale" | "circolare" | "orario" | "google_calendar" | "registro";
   sourceCircularTitle?: string;
   sourceCircularId?: string;
   sourceItemId?: string;

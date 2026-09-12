@@ -241,19 +241,51 @@ test('tapping a destination switches the view', async () => {
   assert.deepEqual(calls, ['mese', 'settimana']);
 });
 
-test('the primary "+" action is a floating button above the bar', async () => {
-  let opened = 0;
-  const renderer = await render(React.createElement(MobileNav, navProps({ onOpenNewEvent: () => { opened += 1; } })));
-  const fab = byId(renderer, 'mobile-fab-new-event');
+test('the primary "+" action is a floating button that opens the quick-actions sheet', async () => {
+  let newEvent = 0;
+  let scanner = 0;
+  const renderer = await render(React.createElement(MobileNav, navProps({
+    onOpenNewEvent: () => { newEvent += 1; },
+    onOpenScanner: () => { scanner += 1; },
+  })));
+  const fab = byId(renderer, 'mobile-fab-actions');
   assert.ok(hasClass(fab, 'app-fab'));
-  assert.equal(fab.props['aria-label'], 'Nuovo impegno');
+  assert.equal(fab.props['aria-label'], 'Azioni rapide');
+  assert.equal(fab.props['aria-haspopup'], 'menu');
+  assert.equal(fab.props['aria-expanded'], false);
+
+  // Closed by default: no quick-actions menu rendered.
+  assert.equal(renderer.root.findAll((el: any) => el.props?.role === 'menu').length, 0);
+
   await act(async () => { fab.props.onClick(); });
-  assert.equal(opened, 1);
+  assert.equal(byId(renderer, 'mobile-fab-actions').props['aria-expanded'], true);
+  const menu = renderer.root.findByProps({ role: 'menu' });
+  assert.equal(menu.props['aria-label'], 'Azioni rapide');
+  // The two quick actions are reachable: new commitment AND document scan.
+  const menuText = flatText(menu);
+  assert.ok(menuText.includes('Nuovo impegno'), 'quick action "Nuovo impegno"');
+  assert.ok(menuText.includes('Scansiona documento'), 'quick action "Scansiona documento"');
+
+  await act(async () => { byId(renderer, 'mobile-fab-scan-document').props.onClick(); });
+  assert.equal(scanner, 1, 'tapping "Scansiona documento" opens the unified flow');
+  assert.equal(renderer.root.findAll((el: any) => el.props?.role === 'menu').length, 0, 'the menu closes after a choice');
+
+  await act(async () => { byId(renderer, 'mobile-fab-actions').props.onClick(); });
+  await act(async () => { byId(renderer, 'mobile-fab-new-event').props.onClick(); });
+  assert.equal(newEvent, 1, 'tapping "Nuovo impegno" still opens the event form');
 
   const fabRule = cssRule('.app-fab');
   assert.match(fabRule, /position: fixed;/);
   assert.match(fabRule, /bottom: calc\(5rem \+ env\(safe-area-inset-bottom, 0px\)\)/, 'parked above the bottom bar');
   assert.match(fabRule, /height: 56px;/);
+
+  // The quick-actions sheet is anchored above the FAB and keeps >= 44px targets.
+  const sheetRule = cssRule('.quick-actions-sheet');
+  assert.match(sheetRule, /position: fixed;/);
+  assert.match(sheetRule, /bottom: calc\(9rem \+ env\(safe-area-inset-bottom, 0px\)\)/, 'anchored above the floating button');
+  const itemRule = cssRule('.quick-actions-item');
+  const minHeight = Number(/min-height: (\d+)px;/.exec(itemRule)?.[1]);
+  assert.ok(minHeight >= 44, `quick actions keep >= 44px touch targets (found ${minHeight}px)`);
 });
 
 // ---------------------------------------------------------------------------

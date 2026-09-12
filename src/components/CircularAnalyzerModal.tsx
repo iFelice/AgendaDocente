@@ -38,6 +38,11 @@ interface CircularAnalyzerModalProps {
   onClose: () => void;
   profile: TeacherProfile;
   onImportEvents: (events: CalendarEvent[], docMeta: CircularDocument) => void | false | Promise<void | false>;
+  /**
+   * File già scansionato dal flusso unificato "Scansiona documento":
+   * lo si alimenta nel passo di input senza duplicare la pipeline.
+   */
+  initialFile?: { base64: string; mimeType: string; fileName: string } | null;
 }
 
 export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
@@ -45,6 +50,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   onClose,
   profile,
   onImportEvents,
+  initialFile,
 }) => {
   const save = usePersistenceAction();
   const [step, setStep] = useState<"input" | "results">("input");
@@ -68,10 +74,18 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   const [isReadingFile, setIsReadingFile] = useState(false);
   useEffect(() => {
     inputRevision.current++;
-    setStep('input'); setCircularText(''); setFileName(''); setDefaultLocation('');
+    setStep('input'); setCircularText(''); setDefaultLocation('');
     setFileBase64(undefined); setFileMimeType(undefined); setExtractedItems([]);
     setAnalysisError(null); setSelectionWarning(null); setIsAnalyzing(false); setIsReadingFile(false);
-  }, [isOpen]);
+    // Alimentazione dal flusso unificato: il file già scansionato parte dal passo input.
+    if (initialFile) {
+      setFileName(initialFile.fileName);
+      setFileBase64(initialFile.base64);
+      setFileMimeType(initialFile.mimeType);
+    } else {
+      setFileName('');
+    }
+  }, [isOpen, initialFile]);
 
   if (!isOpen) return null;
 
