@@ -14,6 +14,7 @@ import { classifyTimetableToken, extractClassesFromCell } from "./timetableToken
 import { foldName } from "./studentMatcher";
 import { isGenericSubject } from "./circularRelevance";
 import { normalizeSubjectName } from "./subjects";
+import { isValidDate, isValidTime } from "./dates";
 
 // ---------------------------------------------------------------------------
 // Tipi candidati (schema concettuale del documento)
@@ -140,15 +141,21 @@ export function validateStudentCommitmentsPayload(raw: unknown): Array<Omit<Stud
     if (!COMMITMENT_TYPES.includes(entry.type as StudentCommitmentType)) invalidShape(`Tipo impegno non valido (#${index}).`);
     const optionalStr = (v: unknown, max: number): string | undefined =>
       v === undefined || v === "" ? undefined : str(v, max) ? v.trim() : invalidShape(`Campo non valido (#${index}).`);
+    const date = optionalStr(entry.date, 10);
+    const startTime = optionalStr(entry.startTime, 5);
+    const endTime = optionalStr(entry.endTime, 5);
+    if (date !== undefined && !isValidDate(date)) invalidShape(`Data non valida (#${index}).`);
+    if (startTime !== undefined && !isValidTime(startTime)) invalidShape(`Ora di inizio non valida (#${index}).`);
+    if (endTime !== undefined && !isValidTime(endTime)) invalidShape(`Ora di fine non valida (#${index}).`);
     return {
       id: `commit-${Date.now()}-${index}`,
       rawText: optionalStr(entry.rawText, 500),
       studentNameRaw: optionalStr(entry.studentNameRaw, 120),
       type: entry.type as StudentCommitmentType,
       title: entry.title.trim(),
-      date: optionalStr(entry.date, 10),
-      startTime: optionalStr(entry.startTime, 5),
-      endTime: optionalStr(entry.endTime, 5),
+      date,
+      startTime,
+      endTime,
       subject: optionalStr(entry.subject, 80),
       className: optionalStr(entry.className, 20),
       notes: optionalStr(entry.notes, 500),

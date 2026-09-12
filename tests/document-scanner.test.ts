@@ -384,6 +384,9 @@ test('registro: validazione runtime impegni (niente date/ora inventati dai campi
   assert.equal(parsed[1].startTime, undefined, 'ora non visibile -> undefined');
   assert.throws(() => validateStudentCommitmentsPayload([{ title: 'x', type: 'ballgame' }]), /non valid/i);
   assert.throws(() => validateStudentCommitmentsPayload([{ title: '', type: 'other' }]), /non valid/i);
+  assert.throws(() => validateStudentCommitmentsPayload([{ title: 'x', type: 'other', date: '2026-02-31' }]), /data non valida/i);
+  assert.throws(() => validateStudentCommitmentsPayload([{ title: 'x', type: 'other', startTime: '25:99' }]), /ora di inizio non valida/i);
+  assert.throws(() => validateStudentCommitmentsPayload([{ title: 'x', type: 'other', endTime: '9:00' }]), /ora di fine non valida/i);
 });
 
 test('matching studenti: exact / probable / ambiguous / unmatched', () => {
