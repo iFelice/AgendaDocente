@@ -942,6 +942,10 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
               )}
               {studentCandidates.map(c => {
                 const match = c.studentNameRaw ? matchStudentName(c.studentNameRaw, students) : { status: "unmatched" as const, candidates: [] };
+                const displayMatch = { ...match, status: c.matchStatus, matchedStudentId: c.matchedStudentId };
+                const manualCandidates = c.matchStatus === "ambiguous"
+                  ? match.candidates
+                  : students.map(student => ({ id: student.id, fullName: student.fullName, confidence: 0 }));
                 const statusColor = c.matchStatus === "exact" ? "bg-emerald-100 text-emerald-900"
                   : c.matchStatus === "probable" ? "bg-emerald-50 text-emerald-800"
                     : c.matchStatus === "ambiguous" ? "bg-amber-100 text-amber-900"
@@ -959,7 +963,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                       <div className="flex-1 min-w-0 space-y-2">
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="text-xs font-bold text-stone-900 uppercase">{COMMITMENT_TITLES[c.type]}</span>
-                          <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${statusColor}`}>{studentMatchLabel(match)}</span>
+                          <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${statusColor}`}>{studentMatchLabel(displayMatch)}</span>
                         </div>
                         <input
                           type="text"
@@ -972,14 +976,14 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                           <div className="flex flex-wrap items-center gap-2 text-xs">
                             <span className="text-stone-500">Alunno:</span>
                             <span className="font-medium text-stone-900 truncate">{c.studentNameRaw}</span>
-                            {c.matchStatus === "ambiguous" && match.candidates.length > 0 && (
+                            {(c.matchStatus === "ambiguous" || c.matchStatus === "unmatched") && manualCandidates.length > 0 && (
                               <select
                                 value={c.matchedStudentId ?? ""}
                                 onChange={e => {
                                   const chosen = students.find(s => s.id === e.target.value);
                                   updateStudentCandidate(c.id, {
                                     matchedStudentId: chosen?.id,
-                                    matchStatus: chosen ? "probable" : "unmatched",
+                                    matchStatus: chosen ? "probable" : c.matchStatus,
                                     matchConfidence: chosen ? 1 : undefined,
                                   });
                                 }}
@@ -987,7 +991,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                                 aria-label="Scegli l'alunno corretto"
                               >
                                 <option value="">— scegli —</option>
-                                {match.candidates.map(candidate => (
+                                {manualCandidates.map(candidate => (
                                   <option key={candidate.id} value={candidate.id}>{candidate.fullName}</option>
                                 ))}
                               </select>
