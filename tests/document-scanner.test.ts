@@ -147,6 +147,36 @@ test('orario personale: estrae giorno/ora/classe e NON inventa celle mancanti', 
   assert.ok(!candidates.some(c => c.dayOfWeek === 2 && c.periodIndex === 5));
 });
 
+test('orario personale Manganiello: preserva le 18 coordinate assolute e le colonne vuote', () => {
+  const groundTruth: Array<Array<string | undefined>> = [
+    ['3D', '3D', '3E', '3E', undefined],
+    ['3D', undefined, '3D', '3D', '3E'],
+    [undefined, '3E', '3E', '3D', '3E'],
+    [undefined, '3E', '3D', '3E', undefined],
+    ['3E', '3D', '3E', undefined, undefined],
+  ];
+  const cells: TimetableRawCell[] = groundTruth.flatMap((periods, dayIndex) => periods.flatMap((raw, periodIndex) =>
+    raw === undefined ? [] : [{ rowIndex: 1, dayOfWeek: dayIndex + 1, periodIndex: periodIndex + 1, raw }]
+  ));
+  const { candidates } = personalCellsToCandidates(cells, [1]);
+  assert.equal(candidates.length, 18);
+  for (let day = 1; day <= 5; day++) {
+    for (let period = 1; period <= 5; period++) {
+      const expected = groundTruth[day - 1][period - 1];
+      const found = candidates.filter(c => c.dayOfWeek === day && c.periodIndex === period);
+      assert.equal(found.length, expected === undefined ? 0 : 1, `coordinate ${day}/${period}`);
+      if (expected !== undefined) assert.equal(found[0]?.classLabel, expected, `class at ${day}/${period}`);
+    }
+  }
+  assert.equal(candidates.some(c => c.dayOfWeek === 2 && c.periodIndex === 2), false, 'Martedì 2 vuoto');
+  assert.equal(candidates.find(c => c.dayOfWeek === 2 && c.periodIndex === 5)?.classLabel, '3E');
+  assert.equal(candidates.some(c => c.dayOfWeek === 3 && c.periodIndex === 1), false, 'Mercoledì 1 vuoto');
+  assert.equal(candidates.find(c => c.dayOfWeek === 3 && c.periodIndex === 5)?.classLabel, '3E');
+  assert.equal(candidates.some(c => c.dayOfWeek === 4 && c.periodIndex === 1), false, 'Giovedì 1 vuoto');
+  assert.equal(candidates.find(c => c.dayOfWeek === 4 && c.periodIndex === 4)?.classLabel, '3E');
+  assert.equal(candidates.some(c => c.dayOfWeek === 5 && (c.periodIndex === 4 || c.periodIndex === 5)), false, 'Venerdì 4 e 5 vuoti');
+});
+
 test('orario personale: validazione runtime della risposta AI (shape obbligatoria)', () => {
   assert.deepEqual(validatePersonalTimetablePayload({ rows: ['Manganiello'], cells: [{ rowIndex: 0, dayOfWeek: 2, periodIndex: 1, raw: '3D' }] }).rows, ['Manganiello']);
   for (const bad of [
