@@ -32,6 +32,7 @@ Configurazione manuale, senza render.yaml: il nome definitivo, il piano e l'even
 | Variabile | Dove viene letta | Segreta? | Uso |
 | --- | --- | --- | --- |
 | `GEMINI_API_KEY` | Express, runtime | **Sì** | Facoltativa; vuota/assente disabilita l'AI cloud. |
+| `GEMINI_CANDIDATE_MODELS` | Express, runtime | No (solo nomi di modello) | Facoltativa: elenco separato da virgole per verificare la disponibilità di un modello senza rifare il build. Valori non ammissibili ricadono sui predefiniti. |
 | `PORT` | Express, runtime | No | Fornita da Render; fallback 3000 solo in sviluppo. |
 | `NODE_ENV` | Server/toolchain | No | `production` su Render. |
 | `NODE_VERSION` | Render | No | `24.12.0`, versione verificata. |
@@ -77,6 +78,42 @@ Non cancellare i dati del sito per aggiornare la PWA: perderesti IndexedDB. Espo
 Rimuovi o svuota `GEMINI_API_KEY` in Environment, salva e riavvia/ridistribuisci il servizio. Il processo riparte senza AI; non serve cambiare il codice. Il testo viene elaborato dal parser locale/server quando previsto; PDF/immagini ricevono il messaggio controllato di indisponibilità. Health resta identico. Non usare una chiave fittizia per disabilitare: causerebbe tentativi cloud inutili.
 
 L'endpoint conserva limiti payload, rate limiting e errori sanitizzati, senza upload persistente. Il limite per IP usa la connessione socket: dietro Render più utenti possono condividere il budget del proxy (10 richieste/minuto), oltre ai limiti globali. Non abbiamo abilitato fiducia indiscriminata in X-Forwarded-For. È un limite conservativo da misurare nella piccola beta; non è un sistema di autenticazione o protezione completa dei costi AI.
+
+## Diagnostica analisi documenti (Render)
+
+L'analisi di foto/PDF passa da `runGeminiJson()` (server.ts). I log sono l'unico modo
+sicuro di capire un 503 senza toccare i contenuti: **non contengono mai** immagine,
+base64, OCR, nomi di studenti o testo dei documenti.
+
+1. Avvio (riga unica, nessuna chiave): `[AI] Analisi documenti: chiave configurata|assente
+   (servizio cloud disabilitato), modelli candidati [gemini-3.1-flash-lite, gemini-3.8-flash].`
+   `chiave assente` + 503 `Il servizio di analisi non è disponibile` = `GEMINI_API_KEY`
+   mancante o vuota nel servizio Render.
+2. Ogni tentativo: `[AI Orari] modello=<modello> tentativo=1/2 esito=ok|fallito
+   categoria=<categoria> status=<http> thinking=basso|default timeoutMs=<n> durataMs=<n>`.
+3. Esito: `[AI Orari] analisi cloud non riuscita categoria=<categoria> tentativi=[...]`.
+
+Categorie e azioni:
+
+| categoria | significato | azione |
+| --- | --- | --- |
+| `deadline` | tempo del tentativo esaurito (504/`DEADLINE_EXCEEDED` o abort locale a fine budget) | la generazione della foto richiede più tempo: verificare `durataMs` rispetto a `timeoutMs`, eventualmente una foto più stretta |
+| `quota` | 429 RESOURCE_EXHAUSTED (minuto o giorno) | attesa: il retry è già in coda; se ricorre, chiave con billing/quota adeguata |
+| `sovraccarico` | 500/502/503, modello non disponibile | riprovare più tardi (due tentativi per modello) |
+| `modello-non-trovato` | 404 per quel modello | verificare i nomi: impostare `GEMINI_CANDIDATE_MODELS` con un modello disponibile per quella chiave |
+| `chiave-o-permessi` | 401/403 chiave non valida, bloccata o senza accesso al progetto | chiave nuova/limiti abilitati nel progetto Google Cloud |
+| `richiesta-non-valida` | 400 `INVALID_ARGUMENT` | payload o schema non accettato: confrontare `responseSchema` e prompt |
+| `output-vuoto` / `output-troncato` | HTTP 200 senza testo (blocco di sicurezza) o interrotto a `MAX_TOKENS` | foto più leggibile/inquadrata; documento più piccolo |
+| `json-non-valido` | testo del modello non interpretabile | categoria transitoria per l'utente (503), nessuna ripetizione del contenuto |
+| `rete` | `fetch failed` dal pod Render verso l'API | egress del runtime |
+| `budget-esaurito` / `annullata` | deadline dell'endpoint scaduto o client disconnesso | normale dietro un client che chiude la richiesta |
+
+Vincoli di tempo verificati dai test (`tests/gemini-analysis-resilience.test.ts`): il
+singolo tentativo riceve il budget rimasto dell'endpoint (45 s) meno la riserva di
+risposta, quindi non esiste più un limite fisso più corto del tempo reale di generazione;
+i tentativi non possono eccedere il deadline dell'endpoint (503 scrivibile) e restano
+sotto il timeout del client (90 s). Per verificare un modello senza rifare il build:
+Environment → `GEMINI_CANDIDATE_MODELS=gemini-3.5-flash` → riavvio del servizio.
 
 ## Verifiche e limiti
 
