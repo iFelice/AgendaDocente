@@ -3,8 +3,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyTimetableToken, extractClassesFromCell, normalizeClassLabel, DAY_LABELS } from '../src/utils/timetableTokens';
 import {
+  buildPersonalCoordinateScope,
   curricularCellsToSlots,
   findTeacherRows,
+  restrictCurricularSlotsToCoordinates,
+  summarizeCurricularCoverage,
   personalCellsToCandidates,
   teacherSurnames,
   validateCurricularTimetablePayload,
@@ -545,6 +548,138 @@ test('conferma: slot deselezionato non salvato; modifica manuale della materia r
   assert.equal(slots[0].className, '3D');
   assert.deepEqual(slots[0].coTeachingSubjects, ['Storia'], 'la correzione manuale dell\'utente vince sulla proposta');
   assert.equal(slots[0].subject, 'Sostegno');
+});
+
+// ---------------------------------------------------------------------------
+// 12-bis. AMBITO DELLA FASE CURRICOLARE: solo le MIE compresenze
+// ---------------------------------------------------------------------------
+
+/** Coordinate personali del docente: 3D martedì 1ª e venerdì 1ª, 3E mercoledì 2ª, un sostegno senza classe. */
+const myPersonalCells: TimetableRawCell[] = [
+  { rowIndex: 0, dayOfWeek: 2, periodIndex: 1, raw: '3D' },
+  { rowIndex: 0, dayOfWeek: 3, periodIndex: 2, raw: '3E' },
+  { rowIndex: 0, dayOfWeek: 4, periodIndex: 3, raw: 'sos' },
+  { rowIndex: 0, dayOfWeek: 5, periodIndex: 1, raw: '3D' },
+];
+
+/** Tabella d’istituto “vera”: decine di classi × 5 giorni × 6 ore, più i casi limite. */
+const noiseClasses = ['1A', '1B', '2A', '2B', '3A', '3B', '3C', '4A', '4B', '5A', '5B'];
+const curricularRowsFixture: CurricularRawRow[] = [
+  { rowIndex: 0, rowLabel: 'Rossi', subject: 'Matematica', classes: ['3D'] },
+  { rowIndex: 1, rowLabel: 'Bianchi', subject: 'Italiano', classes: ['3E'] },
+  { rowIndex: 2, rowLabel: 'Neri', subject: 'Inglese', classes: ['3E'] },
+  { rowIndex: 3, rowLabel: 'Verdi', subject: 'Scienze', classes: ['1A'] },
+  ...noiseClasses.map((className, i) => ({
+    rowIndex: 4 + i, rowLabel: `Docente ${i + 1}`, subject: `Materia ${i + 1}`, classes: [className],
+  })),
+];
+
+const curricularCellsFixture: TimetableRawCell[] = [
+  // Le mie coordinate: una materia (martedì 1ª 3D) e DUE materie (mercoledì 2ª 3E) -> ambigua.
+  { rowIndex: 0, dayOfWeek: 2, periodIndex: 1, raw: '3D' },
+  { rowIndex: 1, dayOfWeek: 3, periodIndex: 2, raw: '3E' },
+  { rowIndex: 2, dayOfWeek: 3, periodIndex: 2, raw: '3E' },
+  // Classe giusta ma giorno/periodo diverso (3D giovedì 3ª, 3D lunedì 1ª).
+  { rowIndex: 0, dayOfWeek: 4, periodIndex: 3, raw: '3D' },
+  { rowIndex: 0, dayOfWeek: 1, periodIndex: 1, raw: '3D' },
+  // Giorno/periodo giusti ma classe diversa (venerdì 1ª -> 1A; martedì 1ª -> 3A).
+  { rowIndex: 3, dayOfWeek: 5, periodIndex: 1, raw: '1A' },
+  { rowIndex: 3, dayOfWeek: 2, periodIndex: 1, raw: '3A' },
+  // Rumore d’istituto: tutte le altre classi su tutta la settimana.
+  ...noiseClasses.flatMap((className, i) =>
+    [1, 2, 3, 4, 5].flatMap(dayOfWeek =>
+      [1, 2, 3, 4, 5, 6].map(periodIndex => ({ rowIndex: 4 + i, dayOfWeek, periodIndex, raw: className }))
+    )
+  ),
+];
+
+test('ambito curricolare: solo le coordinate (giorno, periodo, classe) del mio orario sopravvivono', () => {
+  const extraction = curricularCellsToSlots(curricularRowsFixture, curricularCellsFixture);
+  const coordinates = buildPersonalCoordinateScope({ candidates: personalCellsToCandidates(myPersonalCells, [0]).candidates });
+
+  const before = extraction.slots.length;
+  assert.ok(before > 300, `la tabella d’istituto è grande davvero (${before} slot)`);
+
+  const scoped = restrictCurricularSlotsToCoordinates(extraction.slots, coordinates);
+  assert.deepEqual(
+    scoped.slots.map(s => `${s.dayOfWeek}|${s.periodIndex}|${s.classLabel}|${s.subject}`).sort(),
+    ['2|1|3D|Matematica', '3|2|3E|Inglese', '3|2|3E|Italiano'],
+    'restano solo le mie ore, con le materie che le riguardano'
+  );
+  assert.equal(scoped.droppedCount, before - 3, 'tutto il resto è scartato prima della UI');
+  // classi corrette in giorno/periodo diversi e giorno/periodo corretti in altre classi
+  assert.ok(!scoped.slots.some(s => s.dayOfWeek === 4 || s.dayOfWeek === 1), 'giorno/periodo diversi esclusi');
+  assert.ok(!scoped.slots.some(s => s.classLabel !== '3D' && s.classLabel !== '3E'), 'altre classi escluse');
+  assert.equal(scoped.slots.filter(s => s.classLabel === '3D' && s.dayOfWeek === 5).length, 0, 'la classe 1A di venerdì non diventa una mia materia');
+});
+
+test('ambito curricolare: incrocio 1:1 con le mie ore — unique, ambiguous e none preservati, nessuna materia inventata', () => {
+  const candidates = personalCellsToCandidates(myPersonalCells, [0]).candidates;
+  const coordinates = buildPersonalCoordinateScope({ candidates });
+  const scoped = restrictCurricularSlotsToCoordinates(curricularCellsToSlots(curricularRowsFixture, curricularCellsFixture).slots, coordinates);
+  const reconstruction = crossrefTimetables(candidates, scoped.slots);
+
+  assert.equal(reconstruction.length, candidates.length, 'un output per ogni ora personale, mai di più');
+  const byCoord = (day: number, period: number) => reconstruction.find(r => r.dayOfWeek === day && r.periodIndex === period)!;
+
+  const tue = byCoord(2, 1);
+  assert.equal(tue.status, 'unique');
+  assert.equal(tue.confidence, 'high');
+  assert.deepEqual(tue.coTeachingSubjects, ['Matematica'], 'una sola materia -> certa');
+
+  const wed = byCoord(3, 2);
+  assert.equal(wed.status, 'ambiguous', 'più materie sulla stessa coordinata -> scelta manuale');
+  assert.deepEqual(wed.coTeachingSubjects, ['Italiano', 'Inglese']);
+
+  const fri = byCoord(5, 1);
+  assert.equal(fri.status, 'none', 'ora personale senza materia nella tabella -> nessuna materia');
+  assert.deepEqual(fri.coTeachingSubjects, []);
+  // Le uniche materie che circolano sono quelle delle mie coordinate: niente rumore d’istituto.
+  const subjects = [...new Set(reconstruction.flatMap(r => r.coTeachingSubjects))].sort();
+  assert.deepEqual(subjects, ['Inglese', 'Italiano', 'Matematica']);
+  assert.ok(!reconstruction.some(r => /Scienze|Materia \d|3A|1A/.test(JSON.stringify(r))),
+    'materie e classi non pertinenti non entrano nella ricostruzione');
+
+  const supportHour = byCoord(4, 3);
+  assert.equal(supportHour.status, 'none', 'ora personale senza classe: la classe non viene inventata');
+  assert.equal(supportHour.note, RECON_NOTES.noClass);
+  assert.deepEqual(supportHour.coTeachingSubjects, [], 'la 3D di giovedì non viene assegnata al mio sostegno senza classe');
+
+  // Cosa verrebbe salvato: solo le mie classi, senza materie inventate.
+  const slotsToSave = reconstruction.filter(r => r.status === 'unique' || (r.status === 'ambiguous' && r.coTeachingSubjects.length === 1))
+    .map(r => ({ ...r, correctedClass: r.classLabel ?? '', correctedSubject: r.coTeachingSubjects[0] ?? '' }));
+  const saved = reconstructedToTimetableSlots(slotsToSave, { profile });
+  assert.deepEqual(saved.map(s => `${s.dayOfWeek}-${s.periodNumber}:${s.className}`), ['2-1:3D']);
+});
+
+test('ambito curricolare: le ore già salvate contano (Fase B dopo il salvataggio, modale riaperto)', () => {
+  const fromArchive = buildPersonalCoordinateScope({
+    candidates: [],
+    savedSlots: [
+      { dayOfWeek: 2, periodNumber: 1, className: '3 D' },   // spazi diversi: stessa classe
+      { dayOfWeek: 5, periodNumber: 1, className: '3E' },
+    ],
+  });
+  assert.deepEqual(fromArchive.map(c => c.key), ['2|1|3D', '5|1|3E']);
+
+  const scoped = restrictCurricularSlotsToCoordinates(curricularCellsToSlots(curricularRowsFixture, curricularCellsFixture).slots, fromArchive);
+  assert.deepEqual(scoped.slots.map(s => `${s.dayOfWeek}|${s.periodIndex}|${s.classLabel}`), ['2|1|3D'],
+    'venerdì 1ª: la tabella non ha una 3E in quella ora, quindi niente materia');
+
+  // Nessun orario personale -> nessun filtro (la fase curricolare non viene svuotata).
+  const nothing = restrictCurricularSlotsToCoordinates(curricularCellsToSlots(curricularRowsFixture, curricularCellsFixture).slots, []);
+  assert.equal(nothing.droppedCount, 0);
+});
+
+test('riepilogo copertura: ore del mio orario, trovate, ambigue, non identificate', () => {
+  const coordinates = buildPersonalCoordinateScope({ candidates: personalCellsToCandidates(myPersonalCells, [0]).candidates });
+  const scoped = restrictCurricularSlotsToCoordinates(curricularCellsToSlots(curricularRowsFixture, curricularCellsFixture).slots, coordinates);
+  const summary = summarizeCurricularCoverage(coordinates, scoped.slots);
+  assert.deepEqual(summary, { hours: 3, found: 1, ambiguous: 1, missing: 1 });
+  assert.equal(coordinates.length, 3, 'l’ora di sostegno senza classe non diventa una coordinata inventata');
+
+  // Senza tabella curricolare: tutte le mie ore restano "non identificate".
+  assert.deepEqual(summarizeCurricularCoverage(coordinates, []), { hours: 3, found: 0, ambiguous: 0, missing: 3 });
 });
 
 // ---------------------------------------------------------------------------

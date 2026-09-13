@@ -24,11 +24,15 @@ import {
 } from "../utils/reconstructTimetable";
 import { RECON_NOTES, crossrefTimetables, reconSignal, type ReconstructedSlot } from "../utils/timetableCrossref";
 import {
+  buildPersonalCoordinateScope,
   curricularCellsToSlots,
   findTeacherRows,
   personalCellsToCandidates,
+  restrictCurricularSlotsToCoordinates,
+  summarizeCurricularCoverage,
   validateStudentCommitmentsPayload,
   type CurricularRawRow,
+  type PersonalCoordinate,
   type CurricularTimetableSlot,
   type PersonalTimetableSlotCandidate,
   type SkippedCell,
@@ -147,7 +151,8 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
   const [isReading, setIsReading] = useState(false);
   const [consentGiven, setConsentGiven] = useState(false);
   const [personal, setPersonal] = useState<PersonalReviewState | null>(null);
-  const [curricular, setCurricular] = useState<{ rows: CurricularRawRow[]; slots: CurricularTimetableSlot[]; skipped: SkippedCell[] } | null>(null);
+  /** Ore curricolari GIÀ limitate alle mie coordinate: `droppedCount` è quanto è stato scartato. */
+  const [curricular, setCurricular] = useState<{ rows: CurricularRawRow[]; slots: CurricularTimetableSlot[]; skipped: SkippedCell[]; droppedCount: number } | null>(null);
   const [studentCandidates, setStudentCandidates] = useState<StudentCommitmentCandidate[] | null>(null);
   const [reconSlots, setReconSlots] = useState<ReconEditSlot[] | null>(null);
   const [reconSchoolId, setReconSchoolId] = useState<string | undefined>(undefined);
@@ -363,7 +368,10 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
           classes: r.classes,
         }));
         const extraction = curricularCellsToSlots(rows, result.cells ?? []);
-        setCurricular({ rows, ...extraction });
+        // Filtro locale immediato: l'estrazione può contenere tutta la tabella
+        // d'istituto, ma restano solo le mie coordinate (giorno+periodo+classe).
+        const scoped = restrictCurricularSlotsToCoordinates(extraction.slots, personalCoordinates);
+        setCurricular({ rows, ...extraction, slots: scoped.slots, droppedCount: scoped.droppedCount });
         setStep("review-curricular");
       } else if (captureFor === "registro") {
         const result = await analyzeStudentDocument({
@@ -413,6 +421,32 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     if (!personal || personal.confirmedRow === null) return [];
     return personalCellsToCandidates(personal.cells, [personal.confirmedRow]).skipped;
   }, [personal]);
+
+  /**
+   * Le coordinate (giorno + periodo + classe) del mio orario personale/sostegno:
+   * candidati di questa sessione + ore già salvate. Un orario curricolare d'istituto
+   * ha centinaia di ore: qui diventano SOLO la sorgente per le compresenze di queste
+   * coordinate. Nulla viene mostrato, incrociato o salvato fuori da questo ambito.
+   */
+  const personalCoordinates = useMemo(
+    () => buildPersonalCoordinateScope({
+      candidates: personalCandidates,
+      savedSlots: [...provisionalTimetable, ...definitiveTimetable],
+    }),
+    [personalCandidates, provisionalTimetable, definitiveTimetable]
+  );
+
+  /** Classi del mio orario: l'unico insieme cercato nella tabella d'istituto. */
+  const personalClassLabels = useMemo<string[]>(() => {
+    const labels = new Set<string>((personalCoordinates ?? []).map((c: PersonalCoordinate) => c.classLabel.toUpperCase()));
+    return Array.from(labels).sort((a, b) => a.localeCompare(b, "it"));
+  }, [personalCoordinates]);
+
+  /** Riepilogo "ore del tuo orario · trovate · ambigue · non identificate". */
+  const curricularCoverage = useMemo(
+    () => summarizeCurricularCoverage(personalCoordinates, curricular?.slots ?? []),
+    [personalCoordinates, curricular]
+  );
 
   const confirmPersonalRow = (rowIndex: number) => {
     if (!personal) return;
@@ -942,9 +976,30 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
           {/* STEP: revisione orario curricolare */}
           {step === "review-curricular" && curricular && (
             <div className="space-y-4">
-              <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 text-xs text-stone-600">
-                {curricular.rows.length} docenti, {curricular.slots.length} ore con classe e materia.
-                Il nome dei docenti curricolari non viene salvato: serve solo a ricostruire le tue compresenze.
+              <div id="scan-curricular-summary" className="p-3 rounded-xl bg-stone-50 border border-stone-200 text-xs text-stone-600 space-y-1.5">
+                <p id="scan-curricular-counts" className="font-semibold text-stone-900">
+                  {curricularCoverage.hours} {curricularCoverage.hours === 1 ? "ora del tuo orario" : "ore del tuo orario"}
+                  {" · "}{curricularCoverage.found} {curricularCoverage.found === 1 ? "materia trovata" : "materie trovate"}
+                  {" · "}{curricularCoverage.ambiguous} {curricularCoverage.ambiguous === 1 ? "ambigua" : "ambigue"}
+                  {" · "}{curricularCoverage.missing} {curricularCoverage.missing === 1 ? "non identificata" : "non identificate"}
+                </p>
+                {personalClassLabels.length > 0 && (
+                  <p className="text-[11px]">
+                    Le tue {personalClassLabels.length} {personalClassLabels.length === 1 ? "classe" : "classi"}:{" "}
+                    <span className="font-semibold text-emerald-900">{personalClassLabels.join(", ")}</span>
+                    {" — "}solo le ore curricolari di queste classi, nei tuoi giorni e orari, vengono considerate.
+                  </p>
+                )}
+                {curricular.droppedCount > 0 && (
+                  <p id="scan-curricular-filtered" className="text-[11px] text-stone-500">
+                    {curricular.droppedCount} {curricular.droppedCount === 1 ? "ora di altre classi è stata esclusa" : "ore di altre classi sono state escluse"}:
+                    non vengono né mostrate, né incrociate, né salvate.
+                  </p>
+                )}
+                <p className="text-[11px] text-stone-500">
+                  Il nome dei docenti curricolari non ti serve e non viene salvato: questa tabella è solo la sorgente
+                  per ricostruire le tue compresenze.
+                </p>
               </div>
               <div className="max-h-64 overflow-y-auto space-y-1 momentum-scroll">
                 {curricular.slots.slice(0, 60).map((slot, i) => (
@@ -959,7 +1014,9 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                 ))}
                 {curricular.slots.length === 0 && (
                   <p className="text-xs text-stone-500 p-3 rounded-xl bg-stone-50 border border-stone-200">
-                    Nessuna ora interpretabile: nessuna cella è stata inventata.
+                    {curricular.droppedCount > 0
+                      ? "Nessuna delle tue ore trova una materia corrispondente nella tabella curricolare: nessuna cella è stata inventata e nessuna ora di altre classi è stata aggiunta."
+                      : "Nessuna ora interpretabile: nessuna cella è stata inventata."}
                   </p>
                 )}
               </div>

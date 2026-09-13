@@ -645,6 +645,141 @@ test('privacy statica: DocumentScannerModal non importa storage e non logga cont
 });
 
 // ---------------------------------------------------------------------------
+// 11-bis. FASE CURRICOLARE FILTRATA SULLE MIE COMPRESENZE
+// ---------------------------------------------------------------------------
+
+/** Tabella d’istituto “vera”: molte classi, molte ore — e le mie due coordinate. */
+function noisyCurricularPayload() {
+  const otherClasses = ['1A', '1B', '2A', '2B', '3A', '3B', '3C', '4A', '4B', '5A', '5B'];
+  const curricularRows = [
+    { rowIndex: 0, rowLabel: 'Rossi', subject: 'Matematica', classes: ['3D'] },
+    { rowIndex: 1, rowLabel: 'Bianchi', subject: 'Italiano', classes: ['3E'] },
+    { rowIndex: 2, rowLabel: 'Neri', subject: 'Inglese', classes: ['3E'] },
+    { rowIndex: 3, rowLabel: 'Verdi', subject: 'Scienze', classes: ['1A'] },
+    ...otherClasses.map((className, i) => ({
+      rowIndex: 4 + i, rowLabel: `Docente ${i + 1}`, subject: `Materia ${i + 1}`, classes: [className],
+    })),
+  ];
+  const cells = [
+    // Le mie coordinate: martedì 1ª (una materia) e mercoledì 1ª (due materie -> ambigua).
+    { rowIndex: 0, dayOfWeek: 2, periodIndex: 1, raw: '3D' },
+    { rowIndex: 1, dayOfWeek: 3, periodIndex: 1, raw: '3E' },
+    { rowIndex: 2, dayOfWeek: 3, periodIndex: 1, raw: '3E' },
+    // Rumore: altre classi su tutta la settimana (e una 1A nel mio giorno/ora).
+    ...otherClasses.flatMap((className, i) =>
+      [1, 2, 3, 4, 5].flatMap(dayOfWeek => [1, 2, 3, 4, 5, 6].map(periodIndex => ({ rowIndex: 4 + i, dayOfWeek, periodIndex, raw: className })))
+    ),
+  ];
+  return { success: true, source: 'test-model', curricularRows, cells };
+}
+
+async function flowToCurricularReview(renderer: any, payload: unknown) {
+  fetchCalls.length = 0;
+  await goToSource(renderer, 'personal');
+  fetchResponse = { status: 200, json: personalResponse as any };
+  await chooseCameraAndPick(renderer, makeFile('orario-personale.jpg', 'image/jpeg', 20_000));
+  await analyzeWithConsent(renderer);
+  const radios = renderer.root.findAll((el: any) => el.props?.name === 'scan-personal-row');
+  await act(async () => { radios.find(r => r.props.value === '1')!.props.onChange(); });
+  await act(async () => { byId(renderer, 'scan-personal-add-curricular').props.onClick(); });
+  fetchResponse = { status: 200, json: payload as any };
+  await chooseCameraAndPick(renderer, makeFile('orario-istituto.jpg', 'image/jpeg', 300_000));
+  await analyzeWithConsent(renderer);
+  return renderer;
+}
+
+test('Fase B: la revisione curricolare mostra le MIE ore, non l’orario d’istituto', async () => {
+  const renderer = await renderModal({ provisionalTimetable: [], definitiveTimetable: [] });
+  await flowToCurricularReview(renderer, noisyCurricularPayload());
+
+  const counts = flatText(byId(renderer, 'scan-curricular-counts'));
+  assert.match(counts, /2 ore del tuo orario/, 'contesto: le mie coordinate, non “32 docenti, 430 ore”');
+  assert.match(counts, /1 materia trovata/);
+  assert.match(counts, /1 ambigua/, 'mercoledì ha due materie: scelta manuale');
+  assert.match(counts, /0 non identificate/);
+  assert.ok(!/docenti/.test(counts), 'il numero di docenti non è più l’intestazione');
+
+  const text = flatText(renderer.root);
+  assert.match(text, /Le tue 2 classi/, 'quante classi vengono cercate');
+  assert.match(text, /3D, 3E/, 'quali classi vengono cercate nella tabella');
+  assert.match(text, /330 ore di altre classi sono state escluse/, `${text.slice(0, 200)}`);
+  assert.match(text, /non vengono n\u00e9 mostrate, n\u00e9 incrociate, n\u00e9 salvate/);
+  assert.ok(!text.includes('Scienze') && !/Materia \d/.test(text), 'le materie delle altre classi non sono in lista');
+  assert.ok(!text.includes('1A') && !text.includes('5B'), 'le classi non mie non compaiono');
+  await act(async () => { renderer.unmount(); });
+});
+
+test('Fase B: l’incrocio e il salvataggio usano solo le mie coordinate (nessuna ora d’istituto salvata)', async () => {
+  const saved: SavedTimetable[] = [];
+  const renderer = await renderModal({
+    provisionalTimetable: [],
+    definitiveTimetable: [],
+    onSaveReconstructedTimetable: (slots, target, mode) => { saved.push({ slots, target, mode }); return true; },
+  });
+  await flowToCurricularReview(renderer, noisyCurricularPayload());
+  await act(async () => { byId(renderer, 'scan-curricular-reconstruct').props.onClick(); });
+
+  const cards = renderer.root.findAll((el: any) => String(el.props?.id ?? '').startsWith('recon-slot-'));
+  assert.equal(cards.length, 3, 'un solo slot per ogni ora personale (3D mar, 3E mer, sos gio)');
+  const subjectInputs = renderer.root.findAll((el: any) => el.props?.placeholder === 'es. Matematica');
+  assert.deepEqual(subjectInputs.map((el: any) => el.props.value), ['Matematica', ''],
+    'l’ora ambigua resta vuota: la scelta è manuale, mai automatica');
+  assert.match(flatText(renderer.root), /Italiano/, 'le due candidate della MIA classe sono proposte');
+  assert.match(flatText(renderer.root), /Inglese/);
+  assert.ok(!flatText(renderer.root).includes('Scienze'), 'nessuna materia di altre classi nell’incrocio');
+
+  await act(async () => { byId(renderer, 'recon-confirm-save').props.onClick(); });
+  assert.equal(saved.length, 1, 'salvataggio solo alla conferma');
+  const classNames = saved[0].slots.map(s => s.className).sort();
+  assert.deepEqual([...new Set(classNames)], ['3D', '3E'], 'salvate solo le mie classi');
+  assert.equal(saved[0].slots.length, 2, 'le ore dell’istituto non sono mai diventate slot');
+  assert.ok(saved[0].slots.every(s => s.subject === 'Sostegno'), 'la materia principale resta Sostegno');
+  await act(async () => { renderer.unmount(); });
+});
+
+test('Fase B con solo orario già salvato: l’ambito viene dall’archivio (modale riaperto)', async () => {
+  // Nessuna analisi personale in questa sessione: contano le ore salvate in Fase A.
+  const renderer = await renderModal({ provisionalTimetable: existingTimetable, definitiveTimetable: [] });
+  await goToSource(renderer, 'curricular');
+  fetchResponse = { status: 200, json: noisyCurricularPayload() as any };
+  await chooseCameraAndPick(renderer, makeFile('orario-istituto.jpg', 'image/jpeg', 300_000));
+  await analyzeWithConsent(renderer);
+
+  const counts = flatText(byId(renderer, 'scan-curricular-counts'));
+  assert.match(counts, /1 ora del tuo orario/, 'l’unica ora salvata (martedì 1ª, 3D)');
+  assert.match(counts, /1 materia trovata/);
+  assert.match(flatText(renderer.root), /di altre classi sono state escluse/, 'il resto della tabella d’istituto è fuori ambito');
+  const text = flatText(renderer.root);
+  assert.ok(!text.includes('Inglese') && !text.includes('Italiano'), 'le ore di altre classi non entrano nella revisione');
+  await act(async () => { renderer.unmount(); });
+});
+
+test('Fase B senza alcun orario personale: nessun filtro a vuoto, e nessun incrocio possibile', async () => {
+  const saved: SavedTimetable[] = [];
+  const renderer = await renderModal({
+    provisionalTimetable: [],
+    definitiveTimetable: [],
+    onSaveReconstructedTimetable: (slots, target, mode) => { saved.push({ slots, target, mode }); },
+  });
+  await goToSource(renderer, 'curricular');
+  fetchResponse = { status: 200, json: noisyCurricularPayload() as any };
+  await chooseCameraAndPick(renderer, makeFile('orario-istituto.jpg', 'image/jpeg', 300_000));
+  await analyzeWithConsent(renderer);
+
+  // Niente coordinate da rispettare: l’estratto NON viene svuotato (nessun dato perso),
+  // ma il riepilogo dice che le mie ore sono zero.
+  assert.match(flatText(byId(renderer, 'scan-curricular-counts')), /0 ore del tuo orario/);
+  assert.ok(!flatText(renderer.root).includes('sono state escluse'), 'nessuna esclusione dichiarata quando non c’è un ambito');
+  assert.match(flatText(renderer.root), /Ricostruisci il mio orario/);
+
+  // Senza riga personale confermata non si può incrociare: si torna alla Fase A.
+  await act(async () => { byId(renderer, 'scan-curricular-reconstruct').props.onClick(); });
+  assert.match(flatText(renderer.root), /Scatta foto/, 'si torna alla cattura dell’orario personale');
+  assert.equal(saved.length, 0, 'nessun salvataggio di ore d’istituto');
+  await act(async () => { renderer.unmount(); });
+});
+
+// ---------------------------------------------------------------------------
 // 11-ter. FASE A (salvataggio reale) → poi, facoltativa, FASE B (curricolare)
 // ---------------------------------------------------------------------------
 

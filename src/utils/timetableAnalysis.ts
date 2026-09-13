@@ -9,11 +9,12 @@
  * D/P/Co e gli altri codici interni non diventano mai classi.
  */
 
+import type { TimetableSlot } from "../types";
 import type { TimetableToken } from "./timetableTokens";
 import { classifyTimetableToken, extractClassesFromCell } from "./timetableTokens";
 import { foldName } from "./studentMatcher";
 import { isGenericSubject } from "./circularRelevance";
-import { normalizeSubjectName } from "./subjects";
+import { normalizeSubjectName, sameSubject } from "./subjects";
 import { isValidDate, isValidTime } from "./dates";
 
 // ---------------------------------------------------------------------------
@@ -324,4 +325,107 @@ export function curricularCellsToSlots(rows: CurricularRawRow[], cells: Timetabl
     return true;
   });
   return { slots: unique, skipped };
+}
+
+// ---------------------------------------------------------------------------
+// AMBITO DELLA RICOSTRUZIONE: l'orario curricolare d'istituto è solo una
+// SORGENTE per le compresenze, mai un orario da mostrare o da salvare.
+// ---------------------------------------------------------------------------
+
+/**
+ * Una coordinata del mio orario: giorno + periodo + classe. È l'unica grana
+ * con cui l'orario curricolare viene consultato.
+ */
+export interface PersonalCoordinate {
+  dayOfWeek: number;
+  periodIndex: number;
+  classLabel: string;
+  key: string;
+}
+
+/** "3 d", "3°D", " 3D " -> tutti alla stessa chiave di classe. */
+export function foldClassKey(classLabel: string): string {
+  return String(classLabel ?? "").trim().toUpperCase().replace(/\s+/g, "").replace(/[\^°ª]/g, "");
+}
+
+export function coordinateKey(dayOfWeek: number, periodIndex: number, classLabel: string): string {
+  return `${dayOfWeek}|${periodIndex}|${foldClassKey(classLabel)}`;
+}
+
+/**
+ * Le coordinate (giorno + periodo + classe) in cui il docente è davvero presente:
+ * candidati personali di QUESTA sessione + ore già salvate nel proprio orario
+ * (provvisorio e definitivo). Le ore salvate contano perché l'orario curricolare
+ * viene aggiunto dopo il salvataggio della Fase A — e anche quando il modale è
+ * stato chiuso e riaperto.
+ */
+export function buildPersonalCoordinateScope(input: {
+  candidates?: Array<Pick<PersonalTimetableSlotCandidate, "dayOfWeek" | "periodIndex" | "classLabel">>;
+  savedSlots?: Array<Pick<TimetableSlot, "dayOfWeek" | "periodNumber" | "className">>;
+}): PersonalCoordinate[] {
+  const coordinates: PersonalCoordinate[] = [];
+  const seen = new Set<string>();
+  const push = (dayOfWeek: number, periodIndex: number, classLabel: string | undefined) => {
+    const clean = String(classLabel ?? "").trim();
+    if (!clean) return; // ora personale senza classe: nessuna classe da cercare (mai inventata)
+    const key = coordinateKey(dayOfWeek, periodIndex, clean);
+    if (seen.has(key)) return;
+    seen.add(key);
+    coordinates.push({ dayOfWeek, periodIndex, classLabel: clean, key });
+  };
+  for (const candidate of input.candidates ?? []) push(candidate.dayOfWeek, candidate.periodIndex, candidate.classLabel);
+  for (const slot of input.savedSlots ?? []) push(slot.dayOfWeek, slot.periodNumber, slot.className);
+  return coordinates;
+}
+
+/**
+ * Tiene solo gli slot curricolari che cadono su una mia coordinata.
+ * - classe giusta ma giorno/periodo diversi -> esclusi;
+ * - giorno/periodo giusti ma classe diversa -> esclusi;
+ * - nulla viene aggiunto o inventato: il filtro può solo togliere.
+ */
+export function restrictCurricularSlotsToCoordinates(
+  slots: CurricularTimetableSlot[],
+  coordinates: PersonalCoordinate[]
+): { slots: CurricularTimetableSlot[]; droppedCount: number } {
+  if (coordinates.length === 0) return { slots, droppedCount: 0 }; // nessun orario personale: niente da filtrare
+  const scope = new Set(coordinates.map(c => c.key));
+  const kept = slots.filter(s => scope.has(coordinateKey(s.dayOfWeek, s.periodIndex, s.classLabel)));
+  return { slots: kept, droppedCount: slots.length - kept.length };
+}
+
+/**
+ * Riepilogo per il docente: quante delle MIE ore hanno una materia trovata,
+ * quante sono ambigue (scelta manuale), quante senza identificazione.
+ * Gli slot fuori ambito sono già stati scartati, quindi non compaiono qui.
+ */
+export interface CurricularCoverageSummary {
+  /** Ore del mio orario considerate. */
+  hours: number;
+  /** Ore con una sola materia curricolare trovata. */
+  found: number;
+  /** Ore con più materie possibili (l'utente deve scegliere). */
+  ambiguous: number;
+  /** Ore senza materia identificata: mai inventate. */
+  missing: number;
+}
+
+export function summarizeCurricularCoverage(
+  coordinates: PersonalCoordinate[],
+  slots: CurricularTimetableSlot[]
+): CurricularCoverageSummary {
+  const summary: CurricularCoverageSummary = { hours: coordinates.length, found: 0, ambiguous: 0, missing: 0 };
+  for (const coordinate of coordinates) {
+    const subjects: string[] = [];
+    for (const slot of slots) {
+      if (coordinateKey(slot.dayOfWeek, slot.periodIndex, slot.classLabel) !== coordinate.key) continue;
+      const value = String(slot.subject ?? "").trim();
+      if (!value) continue; // materia non indicata: non si inventa nulla
+      if (!subjects.some(existing => sameSubject(existing, value))) subjects.push(value);
+    }
+    if (subjects.length === 0) summary.missing++;
+    else if (subjects.length === 1) summary.found++;
+    else summary.ambiguous++;
+  }
+  return summary;
 }
