@@ -372,18 +372,166 @@ test('conferma: orario esistente NON sovrascritto (default "solo mancanti")', ()
   assert.ok(!('coTeachingSubjects' in kept), 'lo slot esistente resta intatto');
 });
 
-test('conferma: modalità sostituzione tocca SOLO gli slot selezionati (stesso giorno+periodo)', () => {
+test('conferma: "Sostituisci" è una sostituzione REALE nell’ambito della ricostruzione', () => {
   const recon = [{
     id: 'r1', dayOfWeek: 2, periodIndex: 1, classLabel: '3D', coTeachingSubjects: ['Matematica'],
     status: 'unique' as const, confidence: 'high' as const, selected: true, correctedClass: '3D', correctedSubject: 'Matematica',
   }];
   const incoming = reconstructedToTimetableSlots(recon, { profile, schoolId: 'school-x' });
-  const merged = applyReconstruction(existing, incoming, 'replace-selected');
+  const merged = applyReconstruction(existing, incoming, 'replace-scope', { profile });
   assert.equal(merged.replacedCount, 1);
   assert.equal(merged.addedCount, 0);
   const replaced = merged.slots.find(s => s.dayOfWeek === 2 && s.periodNumber === 1)!;
   assert.deepEqual(replaced.coTeachingSubjects, ['Matematica']);
-  assert.equal(merged.slots.find(s => s.id === 'ex-2')?.subject, 'Sostegno', 'gli altri slot restano intatti');
+  // Errore storico: "ex-2" (venerdì) sopravviveva perché nessuna coordinata coincideva.
+  assert.equal(merged.slots.find(s => s.id === 'ex-2'), undefined, 'le vecchie ore di sostegno non presenti nel nuovo orario vengono rimosse');
+  assert.equal(merged.removedCount, 1);
+  assert.equal(merged.untouchedCount, 0);
+});
+
+// ---------------------------------------------------------------------------
+// 11-bis. AMBITO DELLA SOSTITUZIONE: cosa deve restare intatto
+// ---------------------------------------------------------------------------
+
+const supportSlot = (
+  id: string, dayOfWeek: number, periodNumber: number, extra: Partial<TimetableSlot> = {}
+): TimetableSlot => ({
+  id, dayOfWeek: dayOfWeek as TimetableSlot["dayOfWeek"], periodNumber,
+  startTime: '08:15', endTime: '09:10', subject: SUPPORT_TEACHER_SUBJECT, className: '3D', ...extra,
+});
+
+test('replace: non tocca ore di materia dello stesso istituto né ore di altri istituti', () => {
+  const primary = normalizeTeacherProfile(profile).schools?.find(s => s.isPrimary)?.id;
+  const existingSlots = [
+    supportSlot('ex-match', 2, 1),
+    supportSlot('ex-solo-vecchia', 4, 1),
+    supportSlot('ex-materia', 3, 1, { subject: 'Matematica' }),
+    supportSlot('ex-altro-istituto-sostegno', 4, 1, { schoolId: 'school-b' }),
+    supportSlot('ex-altro-istituto-materia', 5, 1, { schoolId: 'school-b', subject: 'Fisica' }),
+  ];
+  const incoming = [supportSlot('new-1', 2, 1, { schoolId: primary })];
+  const merged = applyReconstruction(existingSlots, incoming, 'replace-scope', { profile });
+  assert.deepEqual(
+    merged.slots.map(s => s.id),
+    ['ex-materia', 'ex-altro-istituto-sostegno', 'ex-altro-istituto-materia', 'new-1']
+  );
+  assert.equal(merged.replacedCount, 1, 'martedì: l’ora esistente viene sostituita');
+  assert.equal(merged.removedCount, 1, 'giovedì: la vecchia ora di sostegno dello stesso istituto non sopravvive');
+  assert.equal(merged.untouchedCount, 3, 'materia dello stesso istituto e ore degli altri istituti intatte');
+  assert.equal(merged.slots.find(s => s.id === 'ex-materia')?.className, '3D', 'la materia curricolare resta com’era');
+  assert.equal(merged.slots.find(s => s.id === 'ex-altro-istituto-sostegno')?.schoolId, 'school-b', 'l’altro istituto non è nell’ambito');
+});
+
+test('replace: stessa coordinata ma natura diversa non viene cancellata', () => {
+  const existingSlots = [supportSlot('ex-materia', 2, 1, { subject: 'Matematica', className: '1A' })];
+  const incoming = [supportSlot('new-sostegno', 2, 1)];
+  const merged = applyReconstruction(existingSlots, incoming, 'replace-scope', { profile });
+  assert.ok(merged.slots.some(s => s.id === 'ex-materia'), 'un’ora di materia non è dell’orario di sostegno');
+  assert.equal(merged.removedCount, 0);
+  assert.equal(merged.slots.length, 2);
+});
+
+test('replace: gli slot legacy senza schoolId sono dell’istituto principale; senza profilo nessuna rimozione a sorpresa', () => {
+  const primary = normalizeTeacherProfile(profile).schools?.find(s => s.isPrimary)?.id;
+  const legacy = [supportSlot('ex-legacy', 4, 1)];
+  const incoming = [supportSlot('new-1', 2, 1, { schoolId: primary })];
+  assert.equal(applyReconstruction(legacy, incoming, 'replace-scope', { profile }).slots.length, 1, 'con il profilo l’ambito è determinato');
+  const cautious = applyReconstruction(legacy, incoming, 'replace-scope');
+  assert.equal(cautious.removedCount, 0, 'senza profilo non si eliminano dati incerti');
+  assert.equal(cautious.slots.length, 2);
+});
+
+test('replace: insieme misto (sostegno + materia) sostituisce entrambe le nature dello stesso istituto', () => {
+  const existingSlots = [
+    supportSlot('ex-sostegno', 2, 1),
+    supportSlot('ex-materia', 3, 1, { subject: 'Matematica' }),
+    supportSlot('ex-altro-istituto', 4, 1, { schoolId: 'school-b' }),
+  ];
+  const incoming = [supportSlot('new-1', 2, 1), supportSlot('new-2', 3, 1, { subject: 'Matematica' })];
+  const merged = applyReconstruction(existingSlots, incoming, 'replace-scope', { profile });
+  assert.deepEqual(merged.slots.map(s => s.id), ['ex-altro-istituto', 'new-1', 'new-2']);
+});
+
+test('merge "solo mancanti": nessuna sovrascrittura e nessuna coordinata duplicata', () => {
+  const existingSlots = [supportSlot('ex-1', 2, 1, { className: '3D' })];
+  const incoming = [supportSlot('new-dup', 2, 1, { className: '3E' }), supportSlot('new-2', 3, 1)];
+  const merged = applyReconstruction(existingSlots, incoming, 'missing-only', { profile });
+  assert.equal(merged.addedCount, 1);
+  assert.equal(merged.replacedCount, 0);
+  assert.equal(merged.slots.length, 2, 'lo slot già presente non viene duplicato');
+  assert.equal(merged.slots.find(s => s.dayOfWeek === 2)?.className, '3D', 'l’orario esistente non è toccato');
+  const keys = merged.slots.map(s => `${s.schoolId ?? ""}|${s.dayOfWeek}|${s.periodNumber}`);
+  assert.equal(new Set(keys).size, keys.length, 'nessuna coordinata due volte');
+});
+
+test('salvataggio reale: dopo la conferma gli orari persistono in archivio (anche chiudendo il modale)', async () => {
+  const { database } = await import('../src/services/db');
+  const { storage, initializeStorage } = await import('../src/services/storage');
+  // L’archivio richiede un localStorage (fallback legacy): stub in-memory del test.
+  const memory = new Map<string, string>();
+  const previousLocalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      get length() { return memory.size; },
+      key: (index: number) => [...memory.keys()][index] ?? null,
+      getItem: (key: string) => memory.get(key) ?? null,
+      setItem: (key: string, value: string) => { memory.set(key, String(value)); },
+      removeItem: (key: string) => { memory.delete(key); },
+    },
+  });
+  database.close();
+  await database.delete();
+  await initializeStorage();
+
+  const primary = normalizeTeacherProfile(profile).schools?.find(s => s.isPrimary)?.id;
+  await storage.saveProvisionalTimetable([
+    supportSlot('ex-old-thu', 4, 1, { schoolId: primary }),
+    supportSlot('ex-old-fri', 5, 2, { schoolId: primary }),
+    supportSlot('ex-materia', 2, 3, { subject: 'Matematica', schoolId: primary }),
+  ]);
+
+  // Esattamente quello che fa App.handleSaveReconstructedTimetable alla conferma.
+  const incoming = [supportSlot('recon-1', 2, 1, { schoolId: primary }), supportSlot('recon-2', 3, 1, { schoolId: primary })];
+  await database.atomic(async () => {
+    const current = await storage.getProvisionalTimetable();
+    const merged = applyReconstruction(current, incoming, 'replace-scope', { profile });
+    await storage.saveProvisionalTimetable(merged.slots);
+  });
+
+  const persisted = await storage.getProvisionalTimetable();
+  assert.deepEqual(persisted.map(s => s.id).sort(), ['ex-materia', 'recon-1', 'recon-2'], 'le vecchie ore di sostegno sono realmente sostituite');
+
+  // Lo snapshot che l’app legge all’avvio (dopo una chiusura/refresh): gli orari
+  // vengono dall’archivio, non dallo stato del modale.
+  const snapshot = await database.readSnapshot();
+  assert.deepEqual(snapshot.provisionalTimetable.map(s => s.id).sort(), ['ex-materia', 'recon-1', 'recon-2']);
+  assert.equal(snapshot.provisionalTimetable.some(s => s.id === 'ex-old-thu' || s.id === 'ex-old-fri'), false,
+    'le vecchie ore non sono più nell’archivio: la sostituzione è reale anche su disco');
+
+  // Ri-apertura dell’app (l’utente ha chiuso il modale): l’archivio viene riletto e
+  // contiene ancora gli slot confermati, perché il salvataggio è avvenuto alla conferma.
+  database.close();
+  await initializeStorage();
+  const afterReopen = (await storage.getProvisionalTimetable()).map(s => s.id).sort();
+  assert.deepEqual(afterReopen, ['ex-materia', 'recon-1', 'recon-2']);
+  await database.close();
+  if (previousLocalStorage) Object.defineProperty(globalThis, 'localStorage', previousLocalStorage);
+  else delete (globalThis as any).localStorage;
+});
+
+test('preview di merge: gli stessi conteggi del salvataggio, usati per avvisare l’utente', async () => {
+  const { previewReconstruction } = await import('../src/utils/reconstructTimetable');
+  const existingSlots = [supportSlot('ex-1', 2, 1), supportSlot('ex-2', 4, 1)];
+  const incoming = [supportSlot('new-1', 2, 1)];
+  assert.deepEqual(previewReconstruction(existingSlots, incoming, 'replace-scope', { profile }), {
+    addedCount: 0, replacedCount: 1, removedCount: 1, untouchedCount: 0,
+  });
+  assert.deepEqual(previewReconstruction(existingSlots, incoming, 'missing-only', { profile }), {
+    addedCount: 0, replacedCount: 0, removedCount: 0, untouchedCount: 2,
+  });
+  // L’anteprima non ha alcun effetto: i conteggi applicati sono identici.
+  assert.deepEqual(applyReconstruction(existingSlots, incoming, 'replace-scope', { profile }).slots.map(s => s.id), ['new-1']);
 });
 
 test('conferma: slot deselezionato non salvato; modifica manuale della materia rispettata', () => {

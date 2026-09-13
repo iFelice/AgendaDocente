@@ -474,15 +474,16 @@ test('orari esistente: opzioni sicure visibili, default "solo mancanti", niente 
 
   assert.match(text, /Esiste già un orario in questo archivio/);
   assert.match(text, /Aggiungi solo gli slot mancanti/);
-  assert.match(text, /Sostituisci gli slot selezionati/);
+  assert.match(text, /Sostituisci l.orario di sostegno di questo istituto/, 'sostituzione per ambito, non per singola coordinata');
   assert.match(text, /non viene mai cancellato/i, 'nessuna opzione di azzeramento');
   assert.equal(byId(renderer, 'recon-confirm-save').props.disabled, false);
 
-  // Cambia modalità -> il salvataggio la riceve (ma resta "sicura": niente wipe).
+  // Cambia modalità -> il salvataggio la riceve (ma resta "sicura": niente wipe totale).
   const replaceRadio = renderer.root.findAll((el: any) => el.props?.name === 'scan-merge-mode')[1];
   await act(async () => { replaceRadio.props.onChange(); });
+  assert.match(flatText(renderer.root), /Sostituzione reale/, 'anteprima di cosa cambia davvero');
   await act(async () => { byId(renderer, 'recon-confirm-save').props.onClick(); });
-  assert.equal(saved[0].mode, 'replace-selected');
+  assert.equal(saved[0].mode, 'replace-scope');
 });
 
 test('orari esistente: in "solo mancanti" gli slot esistenti restano intatti (App applica applyReconstruction)', async () => {
@@ -641,4 +642,193 @@ test('privacy statica: DocumentScannerModal non importa storage e non logga cont
   assert.ok(!/console\.(log|warn|error)\([^)]*(rawText|studentName|imageBase64)/.test(source), 'nessun log di contenuto documento');
   const service = readFileSync(join(process.cwd(), 'src', 'services', 'scanService.ts'), 'utf8');
   assert.ok(!/services\/storage/.test(service));
+});
+
+// ---------------------------------------------------------------------------
+// 11-ter. FASE A (salvataggio reale) → poi, facoltativa, FASE B (curricolare)
+// ---------------------------------------------------------------------------
+
+test('Fase A: azione esplicita «Salva questo orario», conferma visibile e nessuna perdita alla chiusura', async () => {
+  const saved: SavedTimetable[] = [];
+  let closed = 0;
+  const renderer = await renderModal({
+    onSaveReconstructedTimetable: (slots, target, mode) => { saved.push({ slots, target, mode }); },
+    onClose: () => { closed++; },
+  });
+
+  // Analisi + conferma della riga: nessun salvataggio, nessun banner di conferma.
+  await goToSource(renderer, 'personal');
+  fetchResponse = { status: 200, json: personalResponse as any };
+  await chooseCameraAndPick(renderer, makeFile('orario-personale.jpg', 'image/jpeg', 20_000));
+  await analyzeWithConsent(renderer);
+  const radios = renderer.root.findAll((el: any) => el.props?.name === 'scan-personal-row');
+  await act(async () => { radios.find(r => r.props.value === '1')!.props.onChange(); });
+  assert.equal(saved.length, 0, 'nessun salvataggio prima della conferma esplicita');
+  assert.equal(closed, 0, 'la revisione non chiude il modale');
+  assert.ok(!flatText(renderer.root).includes('Orario salvato'), 'nessuna conferma di salvataggio inventata');
+  assert.match(flatText(renderer.root), /Nessun salvataggio ancora effettuato/, 'l’utente sa che nulla è ancora salvato');
+
+  // L’azione richiesta porta alla revisione, dove avviene il salvataggio reale.
+  await act(async () => { byId(renderer, 'scan-personal-continue').props.onClick(); });
+  assert.match(flatText(byId(renderer, 'recon-confirm-save')), /Salva questo orario/, 'azione esplicita di salvataggio');
+  assert.match(flatText(renderer.root), /nessun salvataggio prima della conferma/);
+
+  await act(async () => { byId(renderer, 'recon-confirm-save').props.onClick(); });
+  assert.equal(saved.length, 1, 'salvato una sola volta, alla conferma');
+  assert.equal(closed, 0, 'il modale resta aperto sulla conferma: da qui chiudere non perde nulla');
+
+  const banner = flatText(byId(renderer, 'scan-timetable-saved'));
+  assert.match(banner, /Orario salvato/, 'conferma di salvataggio riuscito');
+  assert.match(banner, /Orario provvisorio/, 'archivio di destinazione dichiarato');
+  assert.match(banner, /vista Orario/, 'dove rivedere le ore');
+  assert.match(banner, /Vuoi aggiungere anche l.orario curricolare per ricostruire le compresenze\?/, 'Fase B offerta solo ora, come passo facoltativo');
+  assert.ok(byId(renderer, 'scan-add-curricular-after-save'), 'CTA separata per l’orario curricolare');
+  assert.match(flatText(byId(renderer, 'recon-close')), /Chiudi/, 'dopo il salvataggio non c’è più nulla da annullare');
+  assert.match(flatText(byId(renderer, 'recon-confirm-save')), /Salva di nuovo/);
+
+  // Chiudere dopo il salvataggio è sicuro: la chiusura è esplicita e i dati sono in archivio.
+  await act(async () => { byId(renderer, 'recon-close').props.onClick(); });
+  assert.equal(closed, 1);
+  await act(async () => { renderer.unmount(); });
+});
+
+test('Fase B: si raggiunge dopo il salvataggio e tornare indietro non rifà l’analisi', async () => {
+  const saved: SavedTimetable[] = [];
+  const renderer = await renderModal({
+    onSaveReconstructedTimetable: (slots, target, mode) => { saved.push({ slots, target, mode }); },
+  });
+  await goToSource(renderer, 'personal');
+  fetchResponse = { status: 200, json: personalResponse as any };
+  await chooseCameraAndPick(renderer, makeFile('orario-personale.jpg', 'image/jpeg', 20_000));
+  await analyzeWithConsent(renderer);
+  const radios = renderer.root.findAll((el: any) => el.props?.name === 'scan-personal-row');
+  await act(async () => { radios.find(r => r.props.value === '1')!.props.onChange(); });
+  await act(async () => { byId(renderer, 'scan-personal-continue').props.onClick(); });
+  await act(async () => { byId(renderer, 'recon-confirm-save').props.onClick(); });
+  assert.equal(saved.length, 1);
+
+  // CTA Fase B: nuova cattura del curricolare, senza ripetere nulla della Fase A.
+  await act(async () => { byId(renderer, 'scan-add-curricular-after-save').props.onClick(); });
+  assert.match(flatText(renderer.root), /Orario curricolare \/ istituto/, 'sorgente del documento curricolare');
+  fetchResponse = { status: 200, json: curricularResponse as any };
+  await chooseCameraAndPick(renderer, makeFile('orario-curricolare.jpg', 'image/jpeg', 25_000));
+  await analyzeWithConsent(renderer);
+
+  // Il ritorno alla riga personale è possibile e la revisione è ancora in memoria.
+  await act(async () => { byId(renderer, 'scan-curricular-back-personal').props.onClick(); });
+  const text = flatText(renderer.root);
+  assert.match(text, /Riga confermata/, 'la riga già confermata non va rifatta');
+  assert.match(text, /Orario personale già salvato/, 'stadio corrente dichiarato all’utente');
+  assert.equal(saved.length, 1, 'nessun doppio salvataggio nel navigare avanti/indietro');
+  await act(async () => { renderer.unmount(); });
+});
+
+test('Fase B dopo il salvataggio: l’incrocio parte in sostituzione e arricchisce le ore già salvate', async () => {
+  const { applyReconstruction } = await import('../src/utils/reconstructTimetable');
+  const saved: SavedTimetable[] = [];
+  const renderer = await renderModal({
+    provisionalTimetable: existingTimetable,
+    onSaveReconstructedTimetable: (slots, target, mode) => { saved.push({ slots, target, mode }); },
+  });
+  await goToSource(renderer, 'personal');
+  fetchResponse = { status: 200, json: personalResponse as any };
+  await chooseCameraAndPick(renderer, makeFile('orario-personale.jpg', 'image/jpeg', 20_000));
+  await analyzeWithConsent(renderer);
+  const radios = renderer.root.findAll((el: any) => el.props?.name === 'scan-personal-row');
+  await act(async () => { radios.find(r => r.props.value === '1')!.props.onChange(); });
+  await act(async () => { byId(renderer, 'scan-personal-continue').props.onClick(); });
+  await act(async () => { byId(renderer, 'recon-confirm-save').props.onClick(); });
+  assert.equal(saved[0].mode, 'missing-only', 'primo salvataggio: niente sovrascrittura automatica');
+
+  await act(async () => { byId(renderer, 'scan-add-curricular-after-save').props.onClick(); });
+  fetchResponse = { status: 200, json: curricularResponse as any };
+  await chooseCameraAndPick(renderer, makeFile('orario-curricolare.jpg', 'image/jpeg', 25_000));
+  await analyzeWithConsent(renderer);
+  await act(async () => { byId(renderer, 'scan-curricular-reconstruct').props.onClick(); });
+
+  // Default dopo un salvataggio: sostituzione dell’ambito. Con «solo mancanti» le
+  // compresenze troverebbero le ore già occupate e non verrebbero mai scritte.
+  const mergeRadios = renderer.root.findAll((el: any) => el.props?.name === 'scan-merge-mode');
+  assert.equal(mergeRadios[1].props.checked, true, 'sezione «Sostituisci» pre-selezionata dopo il salvataggio');
+  assert.equal(mergeRadios[0].props.checked, false);
+
+  await act(async () => { byId(renderer, 'recon-confirm-save').props.onClick(); });
+  assert.equal(saved.length, 2, 'secondo salvataggio: arricchimento compresenze');
+  assert.equal(saved[1].mode, 'replace-scope');
+  assert.equal(saved[1].target, 'provvisorio', 'stesso archivio del primo salvataggio');
+  assert.ok(saved[1].slots.some(s => (s.coTeachingSubjects ?? []).length > 0), 'gli slot arricchiti portano la materia in compresenza');
+
+  // Effetto reale sull’orario salvato in Fase A: nessuna duplicazione delle ore.
+  const phaseA = applyReconstruction(existingTimetable, saved[0].slots, 'missing-only', { profile });
+  const enriched = applyReconstruction(phaseA.slots, saved[1].slots, 'replace-scope', { profile });
+  const keys = enriched.slots.map(slot => `${slot.schoolId ?? ''}|${slot.dayOfWeek}|${slot.periodNumber}`);
+  assert.equal(new Set(keys).size, keys.length, 'nessuna coordinata duplicata dopo l’arricchimento');
+  assert.equal(enriched.removedCount, 0, 'le ore confermate coprono le stesse coordinate');
+  await act(async () => { renderer.unmount(); });
+});
+
+test('Fase A sostituisce davvero: anteprima delle vecchie ore rimosse e conteggio mostrato', async () => {
+  const withOldHours: TimetableSlot[] = [
+    { id: 'ex-tue', dayOfWeek: 2, periodNumber: 1, startTime: '08:15', endTime: '09:10', subject: 'Sostegno', className: '3A' },
+    { id: 'ex-thu', dayOfWeek: 4, periodNumber: 1, startTime: '08:15', endTime: '09:10', subject: 'Sostegno', className: '3B' },
+    { id: 'ex-math', dayOfWeek: 5, periodNumber: 2, startTime: '10:05', endTime: '11:00', subject: 'Matematica', className: '3C' },
+  ];
+  const saved: SavedTimetable[] = [];
+  const renderer = await renderModal({
+    provisionalTimetable: withOldHours,
+    onSaveReconstructedTimetable: (slots, target, mode) => { saved.push({ slots, target, mode }); },
+  });
+  await flowToReconstruction(renderer);
+  const replaceRadio = renderer.root.findAll((el: any) => el.props?.name === 'scan-merge-mode')[1];
+  await act(async () => { replaceRadio.props.onChange(); });
+
+  const preview = flatText(byId(renderer, 'recon-replace-preview'));
+  assert.match(preview, /2 ore esistenti di sostegno verranno sostituite/, 'martedì (aggiornata) + giovedì (rimossa)');
+  assert.match(preview, /1 aggiornate/, 'coordinata presente nel nuovo orario');
+  assert.match(preview, /1 rimosse perché non presenti nel nuovo orario/, 'ex-thu non sopravvive');
+  assert.match(preview, /1 ore non pertinenti restano intatte|1 ore non pertinenti/, 'ex-math (materia) esclusa dall’ambito');
+  assert.match(flatText(renderer.root), /ore di materia, di altri istituti o di altri archivi non vengono mai toccate/);
+
+  await act(async () => { byId(renderer, 'recon-confirm-save').props.onClick(); });
+  assert.equal(saved[0].mode, 'replace-scope');
+  await act(async () => { renderer.unmount(); });
+});
+
+test('i dati salvati non vivono nel modale: archivio aggiornato alla conferma, modale richiudibile', async () => {
+  const { applyReconstruction } = await import('../src/utils/reconstructTimetable');
+  // L’archivio è quello dell’app: il modale si limita a chiedere la scrittura.
+  const archive: TimetableSlot[] = [
+    { id: 'ex-thu', dayOfWeek: 4, periodNumber: 1, startTime: '08:15', endTime: '09:10', subject: 'Sostegno', className: '3B' },
+  ];
+  let closed = 0;
+  const props = modalProps({
+    provisionalTimetable: archive,
+    onClose: () => { closed++; },
+    onSaveReconstructedTimetable: (slots, _target, mode) => {
+      const merged = applyReconstruction(archive, slots, mode as any, { profile });
+      archive.length = 0;
+      archive.push(...merged.slots);
+    },
+  });
+  let renderer: any;
+  await act(async () => { renderer = create(React.createElement(DocumentScannerModal, props)); });
+  await flowToReconstruction(renderer);
+  assert.equal(archive.length, 1, 'prima della conferma l’archivio non cambia');
+  const replaceRadio = renderer.root.findAll((el: any) => el.props?.name === 'scan-merge-mode')[1];
+  await act(async () => { replaceRadio.props.onChange(); });
+  await act(async () => { byId(renderer, 'recon-confirm-save').props.onClick(); });
+
+  assert.equal(archive.filter(slot => slot.id.startsWith('tt-recon-')).length, 2, 'le ore confermate sono nell’archivio');
+  assert.equal(archive.find(slot => slot.id === 'ex-thu'), undefined, 'la vecchia ora non più nel nuovo orario è stata rimossa');
+  await act(async () => { renderer.unmount(); });
+
+  // Riapertura del modale: nessuno «stadio intermedio» da recuperare, e nessun
+  // banner residuo — l’orario vive solo nell’archivio dell’app.
+  let reopened: any;
+  await act(async () => { reopened = create(React.createElement(DocumentScannerModal, modalProps({ provisionalTimetable: archive }))); });
+  assert.equal(flatText(reopened.root).includes('Orario salvato'), false, 'il modale non conserva falsi stati di salvataggio');
+  assert.match(flatText(reopened.root), /Scansiona documento/, 'si riparte dalla scelta del documento');
+  assert.equal(archive.filter(s => s.id.startsWith('tt-recon-')).length, 2, 'le ore restano nell archivio dopo la chiusura del modale');
+  void closed;
+  await act(async () => { reopened.unmount(); });
 });

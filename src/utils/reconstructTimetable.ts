@@ -7,10 +7,16 @@
  * `coTeachingSubjects`. Il nome del docente curricolare non viene mai salvato.
  *
  * Gestione dell'orario esistente (mai sovrascrivere automaticamente):
- * - "missing-only":       aggiunge solo gli slot assenti (stesso giorno+periodo+sede);
- * - "replace-selected":   sostituisce SOLO gli slot corrispondenti a quelli
- *                         selezionati, aggiunge i nuovi, non toglie gli altri.
- * Non esiste alcuna opzione per azzerare l'intero orario da qui.
+ * - "missing-only":  aggiunge solo gli slot assenti (stesso giorno+periodo+istituto);
+ * - "replace-scope": SOSTITUZIONE REALE nell'ambito della ricostruzione: gli slot
+ *                    esistenti dello STESSO istituto e della STESSA natura (sostegno
+ *                    con sostegno, materia con materia) vengono rimossi e sostituiti
+ *                    da quelli confermati. Uno slot vecchio non più presente nel nuovo
+ *                    orario non sopravvive (era il bug «giovedì e venerdì restano
+ *                    pieni» segnalato su iPhone);
+ *                    gli slot di altri istituti o di altra natura non vengono toccati.
+ * Non esiste alcuna opzione per azzerare l'intero orario (tutti gli istituti, tutte
+ * le nature) da qui.
  */
 
 import type { TeacherProfile, TimeSlotConfig, TimetableSlot } from "../types";
@@ -113,48 +119,134 @@ function dedupePreservingOrder(values: string[]): string[] {
   return result;
 }
 
-export type TimetableMergeMode = "missing-only" | "replace-selected";
+export type TimetableMergeMode = "missing-only" | "replace-scope";
 
-/** Chiave di occupazione di uno slot: stessa sede, stesso giorno, stesso periodo. */
-export function slotOccupancyKey(slot: Pick<TimetableSlot, "dayOfWeek" | "periodNumber" | "schoolId">): string {
-  return `${slot.schoolId ?? ""}|${slot.dayOfWeek}|${slot.periodNumber}`;
+/**
+ * Istituto effettivo di uno slot. Gli slot legacy non hanno `schoolId`: appartengono
+ * all'istituto principale del profilo (stessa regola di `normalizeTeacherProfile`),
+ * così un orario esistente salvato prima del modello multi-istituto non resta
+ * "invisibile" né alla sostituzione né al controllo dei duplicati.
+ */
+export function slotSchoolKey(slot: Pick<TimetableSlot, "schoolId">, profile?: TeacherProfile): string {
+  const clean = (slot.schoolId ?? "").trim();
+  if (clean) return clean;
+  if (!profile) return "";
+  return normalizeTeacherProfile(profile).schools?.find(s => s.isPrimary)?.id ?? "";
+}
+
+/**
+ * Chiave di occupazione di uno slot: stesso istituto, stesso giorno, stesso periodo.
+ * Con il profilo la sede è normalizzata, quindi un archivio legacy (senza `schoolId`)
+ * e una ricostruzione che la portano NON vengono scambiati per due ore diverse.
+ */
+export function slotOccupancyKey(
+  slot: Pick<TimetableSlot, "dayOfWeek" | "periodNumber" | "schoolId">,
+  profile?: TeacherProfile
+): string {
+  return `${slotSchoolKey(slot, profile)}|${slot.dayOfWeek}|${slot.periodNumber}`;
+}
+
+/** Natura di uno slot: ore di sostegno oppure ore di materia curricolare. */
+export type TimetableSlotNature = "support" | "subject";
+export function slotNature(slot: Pick<TimetableSlot, "subject">): TimetableSlotNature {
+  return /sostegno/i.test(String(slot.subject ?? "")) ? "support" : "subject";
+}
+
+export interface ReconstructionScopeOptions {
+  /** Profilo del docente: serve a mappare gli slot legacy senza `schoolId` sull'istituto principale. */
+  profile?: TeacherProfile;
+}
+
+/**
+ * Gli slot esistenti che una sostituzione in ambito ("replace-scope") può rimuovere:
+ * stesso istituto E stessa natura degli slot in arrivo. Con un insieme misto
+ * (sostegno + materie) vengono considerate entrambe le nature, perché l'intero
+ * documento le copre. Slot di altri istituti o di altra natura NON sono mai inclusi.
+ */
+export function slotsInReplacementScope(
+  existing: TimetableSlot[],
+  incoming: TimetableSlot[],
+  options: ReconstructionScopeOptions = {}
+): TimetableSlot[] {
+  if (incoming.length === 0) return [];
+  const schools = new Set(incoming.map(s => slotSchoolKey(s, options.profile)));
+  const natures = new Set(incoming.map(s => slotNature(s)));
+  return existing.filter(s => schools.has(slotSchoolKey(s, options.profile)) && natures.has(slotNature(s)));
 }
 
 export interface ReconstructedTimetableResult {
   slots: TimetableSlot[];
   addedCount: number;
   replacedCount: number;
+  /** Slot esistenti rimossi dalla sostituzione perché assenti nel nuovo orario. */
+  removedCount: number;
   untouchedCount: number;
 }
 
 /**
- * Unisce la proposta (confermata) con l'orario esistente.
- * NIENTE sovrascrittura automatica: ogni slot esistente viene toccato solo
- * se la modalità lo prevede E lo slot proposto coincide per
- * giorno+periodo(+sede). Gli slot non corrispondenti restano intatti.
+ * Progetto della fusione: unica fonte dei conteggi, così l'anteprima mostrata prima
+ * di salvare e il salvataggio reale non possono divergere.
  */
-export function applyReconstruction(
+function planReconstruction(
   existing: TimetableSlot[],
   incoming: TimetableSlot[],
-  mode: TimetableMergeMode
-): ReconstructedTimetableResult {
+  mode: TimetableMergeMode,
+  options: ReconstructionScopeOptions
+): { slots: TimetableSlot[]; addedCount: number; replacedCount: number; removedCount: number; untouchedCount: number } {
+  if (mode === "replace-scope") {
+    const inScope = slotsInReplacementScope(existing, incoming, options);
+    const inScopeIds = new Set(inScope.map(s => s.id));
+    const incomingKeys = new Set(incoming.map(s => slotOccupancyKey(s, options.profile)));
+    const replacedCount = inScope.filter(s => incomingKeys.has(slotOccupancyKey(s, options.profile))).length;
+    // Gli slot fuori ambito restano intatti, anche se occupano la stessa coordinata
+    // (un'ora di materia non viene mai cancellata da una ricostruzione di sostegno).
+    return {
+      slots: [...existing.filter(s => !inScopeIds.has(s.id)), ...incoming],
+      addedCount: incoming.length - replacedCount,
+      replacedCount,
+      removedCount: inScope.length - replacedCount,
+      untouchedCount: existing.length - inScope.length,
+    };
+  }
+
   const result = [...existing];
   let addedCount = 0;
   let replacedCount = 0;
-
   for (const slot of incoming) {
-    const index = result.findIndex(s => slotOccupancyKey(s) === slotOccupancyKey(slot));
+    const index = result.findIndex(s => slotOccupancyKey(s, options.profile) === slotOccupancyKey(slot, options.profile));
     if (index >= 0) {
-      if (mode === "replace-selected") {
-        result[index] = slot;
-        replacedCount++;
-      }
-      // "missing-only": lo slot esiste già -> non toccato.
+      // "missing-only": lo slot esiste già -> non toccato (nessun duplicato).
       continue;
     }
     result.push(slot);
     addedCount++;
   }
+  return { slots: result, addedCount, replacedCount, removedCount: 0, untouchedCount: existing.length - replacedCount };
+}
 
-  return { slots: result, addedCount, replacedCount, untouchedCount: existing.length - replacedCount };
+/** Solo i conteggi, per l'anteprima nel modale (nessuna scrittura). */
+export function previewReconstruction(
+  existing: TimetableSlot[],
+  incoming: TimetableSlot[],
+  mode: TimetableMergeMode,
+  options: ReconstructionScopeOptions = {}
+): Omit<ReconstructedTimetableResult, "slots"> {
+  const { slots: _slots, ...counts } = planReconstruction(existing, incoming, mode, options);
+  return counts;
+}
+
+/**
+ * Unisce la proposta (confermata) con l'orario esistente.
+ * NIENTE sovrascrittura automatica in "missing-only": uno slot esistente viene
+ * toccato solo se coincide per istituto+giorno+periodo. In "replace-scope" la
+ * sostituzione è reale ma resta confinata all'ambito della ricostruzione
+ * (istituto + natura): vedi `slotsInReplacementScope`.
+ */
+export function applyReconstruction(
+  existing: TimetableSlot[],
+  incoming: TimetableSlot[],
+  mode: TimetableMergeMode,
+  options: ReconstructionScopeOptions = {}
+): ReconstructedTimetableResult {
+  return planReconstruction(existing, incoming, mode, options);
 }

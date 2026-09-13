@@ -15,7 +15,13 @@ import {
   revokePreviewUrl,
   type DocumentFileMeta,
 } from "../utils/documentScanner";
-import { isSupportTeacherProfile, periodTimesForIndex, reconstructedToTimetableSlots, type TimetableMergeMode } from "../utils/reconstructTimetable";
+import {
+  isSupportTeacherProfile,
+  periodTimesForIndex,
+  previewReconstruction,
+  reconstructedToTimetableSlots,
+  type TimetableMergeMode,
+} from "../utils/reconstructTimetable";
 import { RECON_NOTES, crossrefTimetables, reconSignal, type ReconstructedSlot } from "../utils/timetableCrossref";
 import {
   curricularCellsToSlots,
@@ -148,6 +154,19 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
   const [reconTarget, setReconTarget] = useState<TimetableType>("provvisorio");
   const [mergeMode, setMergeMode] = useState<TimetableMergeMode>("missing-only");
   const [reconWarning, setReconWarning] = useState<string | null>(null);
+  /**
+   * FASE A salvata (orario personale/sostegno realmente scritto): da qui in poi
+   * chiudere o tornare indietro NON perde l'orario, e viene offerta la Fase B
+   * (orario curricolare per le compresenze) come passo facoltativo.
+   */
+  const [phaseASaved, setPhaseASaved] = useState<{
+    hours: number;
+    target: TimetableType;
+    added: number;
+    replaced: number;
+    removed: number;
+  } | null>(null);
+  const [savedDirty, setSavedDirty] = useState(false);
 
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -162,9 +181,24 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
   };
 
   const support = isSupportTeacherProfile(profile);
+  /** Etichetta dell'ambito sostituito: "sostegno" per i docenti di sostegno. */
+  const natureLabel = support ? "sostegno" : "materia";
   const schools = useMemo(() => normalizeTeacherProfile(profile).schools ?? [], [profile]);
   const multiSchool = schools.length > 1;
   const existingTarget = reconTarget === "provvisorio" ? provisionalTimetable : definitiveTimetable;
+
+  /**
+   * Anteprima della fusione per la schermata di conferma: gli STESSI conteggi che
+   * l'applicazione produrrà (`previewReconstruction`), così l'utente sa cosa viene
+   * aggiunto, sostituito o rimosso prima di salvare. Nessuna scrittura.
+   */
+  const mergePreview = useMemo(() => {
+    const selected = (reconSlots ?? []).filter(s => s.selected !== false);
+    const toSave = selected.filter(s => (s.correctedClass ?? s.classLabel ?? "").trim());
+    if (toSave.length === 0) return null;
+    const incoming = reconstructedToTimetableSlots(toSave, { profile, timeSlotConfig, schoolId: reconSchoolId });
+    return previewReconstruction(existingTarget, incoming, mergeMode, { profile });
+  }, [reconSlots, existingTarget, mergeMode, reconSchoolId, profile, timeSlotConfig]);
 
   // Reset completo ad ogni apertura.
   useEffect(() => {
@@ -188,6 +222,8 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     setReconTarget("provvisorio");
     setMergeMode("missing-only");
     setReconWarning(null);
+    setPhaseASaved(null);
+    setSavedDirty(false);
   }, [isOpen]);
 
   // Privacy: a unmount si revoca SEMPRE l'object URL corrente (ref sempre aggiornato).
@@ -397,8 +433,12 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     }));
     setReconSlots(reconstruction);
     setReconSchoolId(multiSchool ? schools.find(s => s.isPrimary)?.id : undefined);
-    setReconTarget("provvisorio");
-    setMergeMode("missing-only");
+    // Dopo il salvataggio della Fase A l'arricchimento (compresenze) deve sostituire
+    // gli slot appena salvati: in "missing-only" li troverebbe già occupati e non
+    // li toccherebbe. Prima di qualsiasi salvataggio vale la regola storica: mai
+    // sovrascrivere automaticamente.
+    setReconTarget(phaseASaved ? phaseASaved.target : "provvisorio");
+    setMergeMode(phaseASaved ? "replace-scope" : "missing-only");
     setReconWarning(null);
     setStep("reconstruct");
   };
@@ -406,6 +446,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
   const updateReconSlot = (id: string, patch: Partial<ReconEditSlot>) => {
     setReconSlots(prev => (prev ? prev.map(s => (s.id === id ? { ...s, ...patch } : s)) : prev));
     setReconWarning(null);
+    if (phaseASaved) setSavedDirty(true);
   };
 
   const handleSaveReconstruction = async () => {
@@ -428,11 +469,23 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
       timeSlotConfig,
       schoolId: reconSchoolId,
     });
+    // Nessun salvataggio prima di qui: la conferma dell'utente è l'unico momento in
+    // cui gli slot (e solo quelli confermati) vengono scritti nell'archivio.
+    const preview = previewReconstruction(existingTarget, slots, mergeMode, { profile });
     if (!await save.run(() => onSaveReconstructedTimetable(slots, reconTarget, mergeMode))) return;
+    // Conferma VISIBILE e modale aperto: l'orario è già in archivio, quindi da qui
+    // in poi chiudere o tornare indietro non perde nulla (era il guasto su iPhone).
+    setPhaseASaved({
+      hours: slots.length,
+      target: reconTarget,
+      added: preview.addedCount,
+      replaced: preview.replacedCount,
+      removed: preview.removedCount,
+    });
+    setSavedDirty(false);
     if (withoutClass.length > 0) {
-      setReconWarning(`${withoutClass.length} slot senza classe non salvati: completali e conferma di nuovo.`);
+      setReconWarning(`${withoutClass.length} slot senza classe non salvati: completali e salva di nuovo.`);
     }
-    onClose();
   };
 
   // ---------------------------------------------------------------------------
@@ -853,6 +906,13 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                 </>
               )}
 
+              {personal.confirmedRow !== null && personalCandidates.length > 0 && (
+                <p className="text-[11px] text-stone-500">
+                  {phaseASaved
+                    ? "Orario personale già salvato: le ore sono nella vista Orario."
+                    : "Nessun salvataggio ancora effettuato: rivedi le ore e usa «Salva questo orario». L'orario curricolare è facoltativo e può essere aggiunto dopo il salvataggio."}
+                </p>
+              )}
               {personal.confirmedRow !== null && (
                 <div className="flex items-center justify-end gap-2">
                   {support && (docType === "personal" || docType === "ricostruisci") && (
@@ -872,7 +932,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                     disabled={personalCandidates.length === 0}
                     className="min-h-[44px] px-5 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white text-sm font-bold shadow-xs"
                   >
-                    {support ? "Prepara l'orario" : "Prepara la conferma"}
+                    {support ? "Revisiona e salva l'orario" : "Revisiona e conferma"}
                   </button>
                 </div>
               )}
@@ -904,7 +964,17 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                 )}
               </div>
               {support ? (
-                <div className="flex justify-end">
+                <div className="flex items-center justify-end gap-2">
+                  {personal && personal.confirmedRow !== null && (
+                    <button
+                      type="button"
+                      id="scan-curricular-back-personal"
+                      onClick={() => setStep("review-personal")}
+                      className="min-h-[44px] px-3 rounded-xl text-xs font-semibold text-stone-600 hover:bg-stone-100"
+                    >
+                      Torna alla tua riga
+                    </button>
+                  )}
                   <button
                     type="button"
                     id="scan-curricular-reconstruct"
@@ -1053,6 +1123,40 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
           {/* STEP: ORARIO RICOSTRUITO (conferma umana obbligatoria) */}
           {step === "reconstruct" && reconSlots && (
             <div className="space-y-4">
+              {phaseASaved && (
+                <div
+                  id="scan-timetable-saved"
+                  role="status"
+                  className="p-3 rounded-xl border border-emerald-300 bg-emerald-50 text-emerald-900 space-y-2"
+                >
+                  <p className="text-sm font-bold flex items-center gap-1.5">
+                    <Check className="w-4 h-4 shrink-0" />
+                    Orario salvato{savedDirty ? " · modifiche non ancora salvate" : ""}
+                  </p>
+                  <p className="text-xs">
+                    {phaseASaved.hours} ore in {phaseASaved.target === "provvisorio" ? "Orario provvisorio" : "Orario definitivo"}
+                    {phaseASaved.added > 0 && ` · ${phaseASaved.added} aggiunte`}
+                    {phaseASaved.replaced > 0 && `, ${phaseASaved.replaced} sostituite`}
+                    {phaseASaved.removed > 0 && `, ${phaseASaved.removed} vecchie rimosse`}
+                    . L'orario è già in archivio: puoi chiudere questa finestra e lo trovi nella vista Orario.
+                  </p>
+                  {!curricular && (
+                    <div className="pt-2 border-t border-emerald-200 space-y-2">
+                      <p className="text-[11px]">
+                        Vuoi aggiungere anche l'orario curricolare per ricostruire le compresenze?
+                      </p>
+                      <button
+                        type="button"
+                        id="scan-add-curricular-after-save"
+                        onClick={() => startCapture("curricular")}
+                        className="min-h-[44px] px-3 rounded-lg bg-white border border-emerald-300 text-xs font-bold text-emerald-800 hover:bg-emerald-100"
+                      >
+                        Aggiungi orario curricolare per le compresenze
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
               <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 text-xs text-stone-600 space-y-2">
                 <p>
                   Per ogni slot: giorno, ora, classe e materia di compresenza.
@@ -1086,7 +1190,11 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                 <span className="shrink-0">Salva in:</span>
                 <select
                   value={reconTarget}
-                  onChange={e => { setReconTarget(e.target.value as TimetableType); setMergeMode("missing-only"); }}
+                  onChange={e => {
+                    setReconTarget(e.target.value as TimetableType);
+                    setMergeMode("missing-only");
+                    if (phaseASaved) setSavedDirty(true);
+                  }}
                   className="flex-1 min-w-0 border border-stone-300 rounded-lg p-2 bg-white"
                 >
                   <option value="provvisorio">Orario provvisorio</option>
@@ -1100,14 +1208,29 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                     Esiste già un orario in questo archivio ({existingTarget.length} ore)
                   </legend>
                   <label className="flex items-start gap-2 text-xs text-stone-700 cursor-pointer">
-                    <input type="radio" name="scan-merge-mode" checked={mergeMode === "missing-only"} onChange={() => setMergeMode("missing-only")} className="mt-0.5 accent-emerald-700" />
+                    <input type="radio" name="scan-merge-mode" checked={mergeMode === "missing-only"} onChange={() => { setMergeMode("missing-only"); if (phaseASaved) setSavedDirty(true); }} className="mt-0.5 accent-emerald-700" />
                     <span><strong>Aggiungi solo gli slot mancanti</strong> (le ore esistenti non vengono toccate)</span>
                   </label>
                   <label className="flex items-start gap-2 text-xs text-stone-700 cursor-pointer">
-                    <input type="radio" name="scan-merge-mode" checked={mergeMode === "replace-selected"} onChange={() => setMergeMode("replace-selected")} className="mt-0.5 accent-emerald-700" />
-                    <span><strong>Sostituisci gli slot selezionati</strong> (solo dove stesso giorno e periodo)</span>
+                    <input type="radio" name="scan-merge-mode" checked={mergeMode === "replace-scope"} onChange={() => { setMergeMode("replace-scope"); if (phaseASaved) setSavedDirty(true); }} className="mt-0.5 accent-emerald-700" />
+                    <span>
+                      <strong>Sostituisci l'orario di {natureLabel} di questo istituto</strong> (le ore confermate sostituiscono le vecchie dello stesso tipo)
+                    </span>
                   </label>
-                  <p className="text-[11px] text-stone-500">L'intero orario non viene mai cancellato da qui.</p>
+                  {mergeMode === "replace-scope" && mergePreview && (
+                    <p id="recon-replace-preview" className="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1.5">
+                      Sostituzione reale: {mergePreview.replacedCount + mergePreview.removedCount} ore esistenti di {natureLabel} verranno sostituite
+                      ({mergePreview.replacedCount} aggiornate
+                      {mergePreview.removedCount > 0 ? `, ${mergePreview.removedCount} rimosse perché non presenti nel nuovo orario` : ""})
+                      {mergePreview.addedCount > 0 ? ` · ${mergePreview.addedCount} nuove` : ""}
+                      {mergePreview.untouchedCount > 0 ? ` · ${mergePreview.untouchedCount} ore non pertinenti restano intatte` : ""}.
+                    </p>
+                  )}
+                  <p className="text-[11px] text-stone-500">
+                    {mergeMode === "replace-scope"
+                      ? "Vengono sostituite solo le ore dello stesso istituto e della stessa natura; ore di materia, di altri istituti o di altri archivi non vengono mai toccate."
+                      : "L'intero orario non viene mai cancellato da qui."}
+                  </p>
                 </fieldset>
               )}
 
@@ -1223,11 +1346,17 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
             {step === "reconstruct" ? (
               <>
                 <div className="text-xs text-stone-600 min-w-0">
-                  <strong className="text-emerald-800">{reconSlots?.filter(s => s.selected !== false).length ?? 0}</strong> slot selezionati · nessun salvataggio prima della conferma
+                  <strong className="text-emerald-800">{reconSlots?.filter(s => s.selected !== false).length ?? 0}</strong> slot selezionati ·{" "}
+                  {phaseASaved ? "orario già in archivio, qui puoi salvare di nuovo" : "nessun salvataggio prima della conferma"}
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
-                  <button type="button" onClick={onClose} className="min-h-[44px] px-4 rounded-xl text-xs font-semibold text-stone-600 hover:bg-stone-100">
-                    Annulla
+                  <button
+                    type="button"
+                    id="recon-close"
+                    onClick={onClose}
+                    className="min-h-[44px] px-4 rounded-xl text-xs font-semibold text-stone-600 hover:bg-stone-100"
+                  >
+                    {phaseASaved ? "Chiudi" : "Annulla"}
                   </button>
                   <button
                     type="button"
@@ -1237,7 +1366,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                     className="min-h-[44px] px-4 sm:px-5 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white text-xs font-bold shadow-xs flex items-center gap-1.5"
                   >
                     <Check className="w-4 h-4" />
-                    Conferma e salva
+                    {phaseASaved ? "Salva di nuovo" : "Salva questo orario"}
                   </button>
                 </div>
               </>

@@ -493,11 +493,17 @@ export default function App({ initialData }: { initialData: LocalData }) {
   ) => {
     let added = 0;
     let replaced = 0;
+    let removed = 0;
     await database.atomic(async () => {
       const existing = type === "provvisorio" ? await storage.getProvisionalTimetable() : await storage.getDefinitiveTimetable();
-      const merged = applyReconstruction(existing, slots, mode);
+      // "replace-scope" è una sostituzione REALE nell'ambito della ricostruzione: le
+      // vecchie ore di sostegno dello stesso istituto spariscono (nessuno slot sopravvive
+      // solo perché in una coordinata assente nel nuovo orario). Il profilo serve a
+      // riconoscere come "stesso istituto" anche gli slot legacy privi di schoolId.
+      const merged = applyReconstruction(existing, slots, mode, { profile });
       added = merged.addedCount;
       replaced = merged.replacedCount;
+      removed = merged.removedCount;
       if (type === "provvisorio") await storage.saveProvisionalTimetable(merged.slots);
       else await storage.saveDefinitiveTimetable(merged.slots);
     });
@@ -505,7 +511,8 @@ export default function App({ initialData }: { initialData: LocalData }) {
     const parts: string[] = [];
     if (added) parts.push(`${added} aggiunte`);
     if (replaced) parts.push(`${replaced} sostituite`);
-    showToast(`Orario ricostruito salvato nel ${targetLabel}${parts.length ? ` (${parts.join(", ")})` : ""}.`);
+    if (removed) parts.push(`${removed} vecchie rimosse`);
+    showToast(`Orario salvato in ${targetLabel}${parts.length ? ` (${parts.join(", ")})` : ""}.`);
   });
 
   // Registro/appunti: impegni alunni confermati -> agenda (mai nuovi studenti).
