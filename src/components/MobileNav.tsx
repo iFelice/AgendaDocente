@@ -9,6 +9,7 @@ import {
   HelpCircle,
   MoreHorizontal,
   Plus,
+  ScanLine,
   Sparkles,
   User,
   Users,
@@ -60,6 +61,8 @@ export interface MobileNavProps {
   onOpenGoogleLogin?: () => void;
   onOpenTutorial?: () => void;
   onOpenCircularModal?: () => void;
+  /** Ingresso unificato "Scansiona documento" (fotocamera/file). */
+  onOpenScanner?: () => void;
   googleUser?: { email?: string | null } | null;
   stats?: { todayEventsCount: number; pendingDeadlinesCount: number };
 }
@@ -73,12 +76,15 @@ export const MobileNav: React.FC<MobileNavProps> = ({
   onOpenGoogleLogin,
   onOpenTutorial,
   onOpenCircularModal,
+  onOpenScanner,
   googleUser,
   stats,
 }) => {
   const [isMoreOpen, setMoreOpen] = useState(false);
+  const [isActionsOpen, setIsActionsOpen] = useState(false);
   const sheetRef = useRef<HTMLDivElement>(null);
   const moreButtonRef = useRef<HTMLButtonElement>(null);
+  const fabRef = useRef<HTMLButtonElement>(null);
 
   // Sheet behaviour: focus it on open, close on Escape, restore focus to "Altro".
   useEffect(() => {
@@ -93,6 +99,18 @@ export const MobileNav: React.FC<MobileNavProps> = ({
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [isMoreOpen]);
 
+  // Quick-actions sheet (pulsante +): chiudibile con Escape.
+  useEffect(() => {
+    if (!isActionsOpen || typeof document === "undefined") return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setIsActionsOpen(false);
+      fabRef.current?.focus();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [isActionsOpen]);
+
   const go = (view: ViewMode) => {
     setMoreOpen(false);
     onViewChange(view);
@@ -104,17 +122,65 @@ export const MobileNav: React.FC<MobileNavProps> = ({
 
   return (
     <div className="md:hidden">
-      {/* Primary action: always one thumb away, above the bar (never a sixth nav item). */}
+      {/* Primary action: always one thumb away, above the bar (never a sixth nav item).
+          The "+" opens the quick-actions sheet: new commitment OR scan a document. */}
       <button
+        ref={fabRef}
         type="button"
-        id="mobile-fab-new-event"
-        onClick={onOpenNewEvent}
+        id="mobile-fab-actions"
+        onClick={() => setIsActionsOpen(open => !open)}
         className="app-fab"
-        aria-label="Nuovo impegno"
-        title="Nuovo impegno"
+        aria-label="Azioni rapide"
+        title="Azioni rapide"
+        aria-haspopup="menu"
+        aria-expanded={isActionsOpen}
       >
         <Plus className="w-6 h-6" />
       </button>
+
+      {isActionsOpen && (
+        <>
+          <div
+            className="fixed inset-0 z-[44] bg-stone-950/45"
+            onClick={() => setIsActionsOpen(false)}
+            aria-hidden
+          />
+          <div
+            role="menu"
+            aria-label="Azioni rapide"
+            className="quick-actions-sheet"
+          >
+            <button
+              type="button"
+              id="mobile-fab-new-event"
+              role="menuitem"
+              onClick={() => {
+                setIsActionsOpen(false);
+                onOpenNewEvent();
+              }}
+              className="quick-actions-item"
+            >
+              <Plus className="h-5 w-5 shrink-0 text-emerald-700" />
+              <span className="text-sm font-semibold">Nuovo impegno</span>
+            </button>
+            {onOpenScanner && (
+              <button
+                type="button"
+                id="mobile-fab-scan-document"
+                role="menuitem"
+                onClick={() => {
+                  setIsActionsOpen(false);
+                  onOpenScanner();
+                }}
+                className="quick-actions-item"
+              >
+                <ScanLine className="h-5 w-5 shrink-0 text-emerald-700" />
+                <span className="text-sm font-semibold">Scansiona documento</span>
+              </button>
+            )}
+          </div>
+        </>
+      )}
 
       <nav aria-label="Navigazione principale" className="bottom-nav">
         {MOBILE_NAV_ITEMS.map((item) => {
@@ -222,6 +288,21 @@ export const MobileNav: React.FC<MobileNavProps> = ({
                   </button>
                 );
               })}
+
+              {onOpenScanner && (
+                <button
+                  type="button"
+                  id="mobile-more-scan-document"
+                  onClick={() => {
+                    setMoreOpen(false);
+                    onOpenScanner();
+                  }}
+                  className="more-sheet-item text-sm font-semibold text-stone-800 active:bg-stone-100"
+                >
+                  <ScanLine className="h-5 w-5 shrink-0 text-emerald-600" />
+                  <span className="truncate">Scansiona documento</span>
+                </button>
+              )}
 
               {onOpenCircularModal && (
                 <button

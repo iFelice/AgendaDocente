@@ -7,6 +7,7 @@ import {
   Grid,
   User,
   Plus,
+  ScanLine,
   Sparkles,
   School,
   CalendarDays,
@@ -26,6 +27,8 @@ interface NavbarProps {
   onOpenNewEventModal: () => void;
   onOpenProfileModal: () => void;
   onOpenTutorial?: () => void;
+  /** Ingresso unificato "Scansiona documento" (desktop/tablet). */
+  onOpenScanner?: () => void;
   googleUser?: FirebaseUser | null;
   onOpenGoogleLogin?: () => void;
   onOpenGoogleTab?: () => void;
@@ -43,6 +46,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenNewEventModal,
   onOpenProfileModal,
   onOpenTutorial,
+  onOpenScanner,
   googleUser,
   onOpenGoogleLogin,
   onOpenGoogleTab,
@@ -126,6 +130,19 @@ export const Navbar: React.FC<NavbarProps> = ({
               <Sparkles className="w-4 h-4" />
               <span className="hidden md:inline">Analizza Circolare</span>
             </button>
+
+            {onOpenScanner && (
+              <button
+                id="btn-scan-document"
+                onClick={onOpenScanner}
+                className="hidden md:inline-flex items-center justify-center gap-1.5 px-2.5 sm:px-3.5 min-h-[44px] min-w-[44px] rounded-lg text-sm font-medium bg-emerald-700 hover:bg-emerald-800 text-white transition-colors shadow-xs"
+                title="Scansiona documento (circolare, orari, registro) con fotocamera o file"
+                aria-label="Scansiona documento"
+              >
+                <ScanLine className="w-4 h-4" />
+                <span className="hidden md:inline">Scansiona Documento</span>
+              </button>
+            )}
 
             <button
               id="btn-new-event"

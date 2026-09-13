@@ -1,11 +1,25 @@
 import { circularAnalysisGuards, analysisErrorHandler } from "./server/circularAnalysisGuard";
+import { createAnalysisErrorHandler, createAnalysisGuards } from "./server/analysisGuards";
+import {
+  CURRICULAR_TIMETABLE_PROMPT,
+  PERSONAL_TIMETABLE_PROMPT,
+  STUDENT_DOCUMENT_PROMPT,
+  STUDENT_DOCUMENT_TIMEOUT_MS,
+  TIMETABLE_ANALYSIS_TIMEOUT_MS,
+  parseStudentDocumentAiResponse,
+  parseTimetableAiResponse,
+  studentDocumentSchema,
+  curricularTimetableSchema,
+  personalTimetableSchema,
+  validateStudentDocumentPayload,
+  validateTimetableAnalysisPayload,
+} from "./server/timetableAnalysis";
 import express from "express";
 import { parseCircularText, normalizeExtractedItems } from "./src/utils/circularParser";
 import http from "http";
 import path from "path";
 import { GoogleGenAI, Type } from "@google/genai";
 import { createServer as createViteServer } from "vite";
-
 
 export const app = express();
 export function serverPort(env = process.env): number {
@@ -16,8 +30,6 @@ export function serverPort(env = process.env): number {
   }
   return Number(value);
 }
-
-
 
 // Lazy Gemini client helper
 let aiClient: GoogleGenAI | null = null;
@@ -35,6 +47,67 @@ function getGeminiClient(): GoogleGenAI | null {
     });
   }
   return aiClient;
+}
+
+/**
+ * Esecuzione resiliente di una generazione JSON Gemini: stesso comportamento
+ * storico di analyze-circular (modelli a cascata, retry su 429/503, timeout
+ * http, abort esterno). I log restano generici: mai contenuto del documento.
+ */
+const GEMINI_CANDIDATE_MODELS = ["gemini-3.1-flash-lite", "gemini-3.8-flash"];
+async function runGeminiJson(opts: {
+  systemInstruction: string;
+  contents: unknown[];
+  responseSchema: unknown;
+  signal: AbortSignal;
+  label: string;
+}): Promise<{ ok: boolean; text: string; source: string }> {
+  const ai = getGeminiClient();
+  if (!ai) return { ok: false, text: "", source: "unconfigured" };
+  let text = "";
+  let source = GEMINI_CANDIDATE_MODELS[0];
+  let succeeded = false;
+  for (const model of GEMINI_CANDIDATE_MODELS) {
+    if (succeeded || opts.signal.aborted) break;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: opts.contents as any,
+          config: {
+            abortSignal: opts.signal,
+            httpOptions: { timeout: 20_000 },
+            systemInstruction: opts.systemInstruction,
+            temperature: 0.1,
+            responseMimeType: "application/json",
+            responseSchema: opts.responseSchema as any,
+          },
+        });
+        text = response.text || "";
+        source = model;
+        succeeded = true;
+        break;
+      } catch (err: any) {
+        const errMsg = err?.message || String(err);
+        const isHighDemand =
+          errMsg.includes("503") ||
+          errMsg.includes("429") ||
+          errMsg.includes("UNAVAILABLE") ||
+          errMsg.includes("high demand") ||
+          errMsg.includes("RESOURCE_EXHAUSTED");
+
+        console.warn(`[${opts.label}] Tentativo cloud non riuscito.`);
+        if (opts.signal.aborted) break;
+
+        if (isHighDemand && attempt < 2) {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          continue;
+        }
+        break;
+      }
+    }
+  }
+  return { ok: succeeded, text, source };
 }
 
 // API Health
@@ -136,61 +209,18 @@ Restituisci soltanto l'array JSON richiesto.`;
       },
     };
 
-    // Resilient generation with fallback across models and automatic retry for 503/429
+    const run = await runGeminiJson({ systemInstruction, contents, responseSchema, signal: controller.signal, label: "AI Circolari" });
     let parsed: any[] = [];
-    let source = "gemini-3.1-flash-lite";
-    // Prioritize high-availability gemini-3.1-flash-lite, with gemini-3.8-flash as fallback
-    const candidateModels = ["gemini-3.1-flash-lite", "gemini-3.8-flash"];
-    let succeeded = false;
-
-    for (const model of candidateModels) {
-      if (succeeded || controller.signal.aborted) break;
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        try {
-          const response = await ai.models.generateContent({
-            model,
-            contents,
-            config: {
-              abortSignal: controller.signal,
-              httpOptions: { timeout: 20_000 },
-              systemInstruction,
-              temperature: 0.1,
-              responseMimeType: "application/json",
-              responseSchema,
-            },
-          });
-
-          parsed = JSON.parse(response.text || "[]");
-          source = model;
-          succeeded = true;
-          break;
-        } catch (err: any) {
-          const errMsg = err?.message || String(err);
-          const isHighDemand =
-            errMsg.includes("503") ||
-            errMsg.includes("429") ||
-            errMsg.includes("UNAVAILABLE") ||
-            errMsg.includes("high demand") ||
-            errMsg.includes("RESOURCE_EXHAUSTED");
-
-          console.warn("[AI Circolari] Tentativo cloud non riuscito.");
-          if (controller.signal.aborted) break;
-
-          if (isHighDemand && attempt < 2) {
-            await new Promise((resolve) => setTimeout(resolve, 500));
-            continue;
-          }
-          break;
-        }
-      }
-    }
+    let source = run.source;
 
     // If models were busy, seamlessly apply enhanced heuristic parser
-    if (!succeeded) {
+    if (!run.ok) {
       if (imageBase64 || !text?.trim()) return res.status(503).json({ success: false, items: [], error: "Il documento non è stato elaborato. Riprova più tardi." });
       console.warn("[AI Circolari] Servizio cloud occupato: attivazione automatica motore di estrazione euristico locale.");
       parsed = parseCircularText(text || "", teacherProfile, effectiveCampus);
       source = "local-heuristic";
+    } else {
+      parsed = JSON.parse(run.text || "[]");
     }
 
     const items = normalizeExtractedItems(parsed, teacherProfile, effectiveCampus);
@@ -212,6 +242,98 @@ Restituisci soltanto l'array JSON richiesto.`;
   }
 });
 app.use("/api/analyze-circular", analysisErrorHandler);
+
+// Error handler generico per i nuovi endpoint (forma { success, error }).
+const scanAnalysisErrorHandler = createAnalysisErrorHandler(false);
+
+// ---------------------------------------------------------------------------
+// Scansiona documento: orari (personale/sostegno e curricolare)
+// ---------------------------------------------------------------------------
+
+app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnalysisPayload), async (req, res) => {
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(), TIMETABLE_ANALYSIS_TIMEOUT_MS);
+  const abort = () => controller.abort();
+  res.once("close", abort);
+  try {
+    const { documentType, imageBase64, mimeType } = req.body;
+    const ai = getGeminiClient();
+    if (!ai) {
+      return res.status(503).json({ success: false, error: "Il servizio di analisi non è disponibile. Riprova più tardi." });
+    }
+    const run = await runGeminiJson({
+      systemInstruction: documentType === "personal-support-timetable" ? PERSONAL_TIMETABLE_PROMPT : CURRICULAR_TIMETABLE_PROMPT,
+      contents: [
+        { inlineData: { data: imageBase64, mimeType } },
+        { text: "Analizza la tabella della foto/PDF allegata rispettando le regole del prompt." },
+      ],
+      responseSchema: documentType === "personal-support-timetable" ? personalTimetableSchema : curricularTimetableSchema,
+      signal: controller.signal,
+      label: "AI Orari",
+    });
+    if (!run.ok) {
+      return res.status(503).json({ success: false, error: "Il documento non è stato elaborato. Riprova più tardi." });
+    }
+    // Runtime validation obbligatoria: il JSON del modello è sempre verificato.
+    const outcome = parseTimetableAiResponse(documentType, JSON.parse(run.text || "null"));
+    return res.json({
+      success: true,
+      source: run.source,
+      rows: outcome.rows,
+      curricularRows: outcome.curricularRows,
+      cells: outcome.cells,
+    });
+  } catch {
+    console.warn("Analisi orario non riuscita.");
+    return res.status(500).json({ success: false, error: "Analisi non riuscita. Riprova." });
+  } finally {
+    clearTimeout(deadline);
+    res.off("close", abort);
+  }
+});
+app.use("/api/analyze-timetable", scanAnalysisErrorHandler);
+
+// ---------------------------------------------------------------------------
+// Scansiona documento: registro / appunti (impegni alunni)
+// ---------------------------------------------------------------------------
+
+app.post("/api/analyze-student-document", ...createAnalysisGuards(validateStudentDocumentPayload), async (req, res) => {
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(), STUDENT_DOCUMENT_TIMEOUT_MS);
+  const abort = () => controller.abort();
+  res.once("close", abort);
+  try {
+    const { imageBase64, mimeType } = req.body;
+    const ai = getGeminiClient();
+    if (!ai) {
+      return res.status(503).json({ success: false, error: "Il servizio di analisi non è disponibile. Riprova più tardi." });
+    }
+    const run = await runGeminiJson({
+      systemInstruction: STUDENT_DOCUMENT_PROMPT,
+      contents: [
+        { inlineData: { data: imageBase64, mimeType } },
+        { text: "Analizza il registro o gli appunti nella foto/PDF allegata rispettando le regole del prompt." },
+      ],
+      responseSchema: studentDocumentSchema,
+      signal: controller.signal,
+      label: "AI Registro",
+    });
+    if (!run.ok) {
+      return res.status(503).json({ success: false, error: "Il documento non è stato elaborato. Riprova più tardi." });
+    }
+    const commitments = parseStudentDocumentAiResponse(JSON.parse(run.text || "null"));
+    // Il contenuto estratto torna solo al client chiamante: nessun log del testo.
+    return res.json({ success: true, source: run.source, commitments });
+  } catch {
+    console.warn("Analisi registro non riuscita.");
+    return res.status(500).json({ success: false, error: "Analisi non riuscita. Riprova." });
+  } finally {
+    clearTimeout(deadline);
+    res.off("close", abort);
+  }
+});
+app.use("/api/analyze-student-document", scanAnalysisErrorHandler);
+
 // Unknown API routes must never become HTML, even for browser navigations.
 app.use("/api", (_req, res) => res.status(404).json({ error: "Endpoint non trovato." }));
 
