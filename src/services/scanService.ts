@@ -51,24 +51,74 @@ class OfflineAnalysisError extends Error {
   }
 }
 
+/** Attesa massima della risposta: oltre il timeout del server (45 s) più margine. */
+export const SCAN_REQUEST_TIMEOUT_MS = 90_000;
+
+export const NETWORK_ANALYSIS_MESSAGE =
+  "Impossibile raggiungere il servizio di analisi. Controlla la connessione e riprova.";
+export const TIMEOUT_ANALYSIS_MESSAGE =
+  "L'analisi sta richiedendo troppo tempo. Riprova con una foto più ravvicinata e leggibile.";
+
+/**
+ * Timeout portabile: `AbortSignal.timeout` non esiste su iOS Safari < 16, dove
+ * chiamarlo lanciava un TypeError che veniva scambiato per rete irraggiungibile.
+ * Il fallback con AbortController mantiene lo stesso comportamento.
+ */
+function createScanTimeout(ms: number): { signal: AbortSignal; expired: () => boolean; clear: () => void } {
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+    const signal = AbortSignal.timeout(ms);
+    return { signal, expired: () => signal.aborted, clear: () => undefined };
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  return { signal: controller.signal, expired: () => controller.signal.aborted, clear: () => clearTimeout(timer) };
+}
+
+/**
+ * Messaggio per una risposta non riuscita: una classe di errore per ogni caso,
+ * senza status code né dettagli tecnici. Il messaggio del server (già pensato
+ * per l'utente e privo di contenuto del documento) ha la precedenza.
+ */
+export function scanAnalysisErrorMessage(status: number, serverMessage: string): string {
+  if (serverMessage) return serverMessage;
+  switch (status) {
+    case 400: return "La richiesta non è stata accettata. Scatta di nuovo il documento e riprova.";
+    case 404: return "L'analisi documenti non è disponibile in questa versione del servizio. Aggiorna l'app e riprova.";
+    case 413: return "Il documento è troppo grande: massimo 5 MB.";
+    case 415: return "Formato non supportato: usa una foto (JPEG, PNG, WebP) o un PDF.";
+    case 429: return "Troppe analisi in questo momento: riprova tra un minuto.";
+    case 502: case 503: case 504: return "Il servizio di analisi è temporaneamente non disponibile: riprova più tardi.";
+    default: return status >= 500
+      ? "Il servizio di analisi ha restituito un errore: riprova più tardi."
+      : "Analisi non riuscita. Riprova.";
+  }
+}
+
 async function postScan(endpoint: string, body: unknown): Promise<Record<string, unknown>> {
   if (!isOnline()) throw new OfflineAnalysisError();
+  const timeout = createScanTimeout(SCAN_REQUEST_TIMEOUT_MS);
   let response: Response;
   try {
     response = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(90_000),
+      signal: timeout.signal,
     });
   } catch {
-    // Rete assente (o interrotta a metà): messaggio chiaro, nessun contenuto.
+    timeout.clear();
+    // Solo qui la richiesta non è mai arrivata a buon fine: offline, timeout o rete interrotta.
     if (!isOnline()) throw new OfflineAnalysisError();
-    throw new Error("Impossibile raggiungere il servizio di analisi. Riprova.");
+    if (timeout.expired()) throw new Error(TIMEOUT_ANALYSIS_MESSAGE);
+    throw new Error(NETWORK_ANALYSIS_MESSAGE);
   }
+  timeout.clear();
+  // Risposta non JSON (pagina di un proxy, errore HTML): mai "successo", mai un crash.
   const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;
   if (!response.ok || data.success !== true) {
-    throw new Error(typeof data.error === "string" && data.error ? data.error : "Analisi non riuscita. Riprova.");
+    // Diagnostica minima: solo lo stato HTTP, mai il contenuto del documento.
+    console.warn(`Analisi documento: risposta ${response.status} da ${endpoint}.`);
+    throw new Error(scanAnalysisErrorMessage(response.status, typeof data.error === "string" ? data.error.trim() : ""));
   }
   return data;
 }

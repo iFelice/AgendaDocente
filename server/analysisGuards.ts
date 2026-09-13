@@ -18,6 +18,22 @@ const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v ===
 const text = (v: unknown, max = 256): v is string => typeof v === 'string' && v.length <= max;
 const optional = (v: unknown, check: (v: unknown) => boolean) => v === undefined || check(v);
 const strings = (v: unknown) => Array.isArray(v) && v.length <= 100 && v.every(x => text(x));
+const SCHOOL_LEVELS = ['infanzia', 'primaria', 'ssig', 'ssiig'];
+const hours = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 40;
+
+/**
+ * Istituti del modello multi-scuola (SchoolProfile): forma nota e limitata,
+ * mai chiavi impreviste. È un campo reale del profilo salvato dall'app, quindi
+ * deve essere accettato: rifiutarlo blocca ogni analisi documentale.
+ */
+function schools(v: unknown): boolean {
+  const keys = ['id', 'name', 'institutionalEmail', 'campuses', 'schoolLevel', 'weeklyHours', 'isPrimary', 'active'];
+  return Array.isArray(v) && v.length <= 10 && v.every(s => record(s) && text(s.id) && text(s.name)
+    && optional(s.institutionalEmail, x => text(x)) && optional(s.campuses, strings)
+    && optional(s.schoolLevel, x => SCHOOL_LEVELS.includes(x as string)) && optional(s.weeklyHours, hours)
+    && optional(s.isPrimary, x => typeof x === 'boolean') && optional(s.active, x => typeof x === 'boolean')
+    && !Object.keys(s).some(k => !keys.includes(k)));
+}
 
 export class AnalysisInputError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -58,18 +74,25 @@ export function validateImageFields(body: Record<string, unknown>): void {
   if (!payloadMatchesSignature(body.mimeType as string, bytes)) return invalid();
 }
 
-/** Validazione del profilo docente (stessa forma attesa da analyze-circular). */
+/**
+ * Validazione del profilo docente (stessa forma attesa da analyze-circular).
+ * Accetta ESATTAMENTE i campi che l'app invia davvero: anche `schools` e
+ * `weeklyDeclaredHours`, aggiunti al profilo da normalizeTeacherProfile() al
+ * salvataggio in ProfileModal e dalla migrazione multi-scuola. Senza di essi
+ * ogni profilo reale veniva respinto con 400 "Richiesta di analisi non valida."
+ */
 export function validateTeacherProfile(p: unknown): void {
   if (!record(p) || !text(p.id) || !text(p.fullName) || !text(p.schoolName) || !text(p.schoolYear, 9)
     || !/^\d{4}\/\d{4}$/.test(p.schoolYear) || !['primarySubjects', 'classes', 'campuses'].every(k => strings(p[k]))
-    || !optional(p.schoolLevel, v => ['infanzia', 'primaria', 'ssig', 'ssiig'].includes(v as string))
+    || !optional(p.schoolLevel, v => SCHOOL_LEVELS.includes(v as string))
     || !optional(p.isSupportTeacher, v => typeof v === 'boolean') || !optional(p.assignedStudents, strings)
     || !['email', 'googleCalendarAccount'].every(k => optional(p[k], v => text(v)))
     || !optional(p.googleCalendarLinked, v => typeof v === 'boolean')
+    || !optional(p.weeklyDeclaredHours, hours) || !optional(p.schools, schools)
     || !Array.isArray(p.roles) || p.roles.length > 30
     || !p.roles.every(r => record(r) && TEACHER_ROLE_KINDS.includes(r.role as TeacherRoleKind)
       && optional(r.targetClass, v => text(v)) && optional(r.description, v => text(v, 1000)) && optional(r.label, v => text(v)))) return invalid();
-  const profileKeys = ['id', 'fullName', 'schoolName', 'schoolYear', 'primarySubjects', 'classes', 'campuses', 'schoolLevel', 'isSupportTeacher', 'assignedStudents', 'email', 'googleCalendarAccount', 'googleCalendarLinked', 'roles'];
+  const profileKeys = ['id', 'fullName', 'schoolName', 'schoolYear', 'primarySubjects', 'classes', 'campuses', 'schoolLevel', 'isSupportTeacher', 'assignedStudents', 'email', 'googleCalendarAccount', 'googleCalendarLinked', 'roles', 'weeklyDeclaredHours', 'schools'];
   if (Object.keys(p).some(k => !profileKeys.includes(k))) return invalid();
 }
 
