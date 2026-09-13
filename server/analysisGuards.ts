@@ -19,7 +19,14 @@ const text = (v: unknown, max = 256): v is string => typeof v === 'string' && v.
 const optional = (v: unknown, check: (v: unknown) => boolean) => v === undefined || check(v);
 const strings = (v: unknown) => Array.isArray(v) && v.length <= 100 && v.every(x => text(x));
 const SCHOOL_LEVELS = ['infanzia', 'primaria', 'ssig', 'ssiig'];
-const hours = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 40;
+/**
+ * Ore settimanali: numero finito e non negativo, come nello schema di sync
+ * (remoteSchema.isValidProfilePayload). Nessun tetto artificiale: l'editor del
+ * profilo accetta fino a 100 ore dichiarate e non limita le ore di un altro
+ * istituto, quindi un valore più alto è un profilo legittimo che l'analisi non
+ * deve respingere. I limiti strutturali restano allow-list e numero di istituti.
+ */
+const hours = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v >= 0;
 
 /**
  * Istituti del modello multi-scuola (SchoolProfile): forma nota e limitata,

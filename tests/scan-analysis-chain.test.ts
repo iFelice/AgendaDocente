@@ -114,19 +114,44 @@ test('validateTeacherProfile: accetta i campi reali, rifiuta chiavi e valori sco
   assert.equal(status(bare), 0, 'profilo minimo valido');
   assert.equal(status({ ...bare, weeklyDeclaredHours: 18 }), 0);
   assert.equal(status({ ...bare, weeklyDeclaredHours: 0 }), 0);
+  // Valori che l'editor del profilo produce davvero: l'input accetta 0-100 e le
+  // ore di un altro istituto non hanno massimo. Nessuno deve tornare 400.
+  assert.equal(status({ ...bare, weeklyDeclaredHours: 45 }), 0, 'monte ore oltre le 40 ore');
+  assert.equal(status({ ...bare, weeklyDeclaredHours: 100 }), 0, 'massimo ammesso dall\'editor del profilo');
   assert.equal(status({
     ...bare,
     schools: [{ id: 'school-1', name: 'Sede Centrale', campuses: ['Centrale'], schoolLevel: 'ssig', weeklyHours: 6, isPrimary: true, active: true }],
   }), 0, 'istituti del modello multi-scuola');
+  assert.equal(status({ ...bare, schools: [{ id: 'school-2', name: 'Altro istituto', weeklyHours: 60, active: true, isPrimary: false }] }), 0, 'ore settimanali di un altro istituto');
 
-  // La allow-list resta: niente campi imprevisti, niente valori assurdi.
+  // La allow-list resta: niente campi imprevisti, niente valori non numerici.
   assert.equal(status({ ...bare, isAdmin: true }), 400, 'chiave sconosciuta rifiutata');
-  assert.equal(status({ ...bare, weeklyDeclaredHours: 200 }), 400, 'ore fuori range');
+  assert.equal(status({ ...bare, weeklyDeclaredHours: -1 }), 400, 'ore negative');
+  assert.equal(status({ ...bare, weeklyDeclaredHours: Number.POSITIVE_INFINITY }), 400, 'ore non finite');
   assert.equal(status({ ...bare, weeklyDeclaredHours: '18' }), 400, 'ore non numeriche');
+  assert.equal(status({ ...bare, schools: [{ id: 'school-1', name: 'X', weeklyHours: 'sei' }] }), 400, 'ore istituto non numeriche');
   assert.equal(status({ ...bare, schools: [{ id: 'school-1', name: 'X', secret: 'payload' }] }), 400, 'istituto con chiave sconosciuta');
   assert.equal(status({ ...bare, schools: [{ id: 'school-1' }] }), 400, 'istituto senza nome');
   assert.equal(status({ ...bare, schools: 'no' }), 400, 'schools non array');
   assert.equal(status({ ...bare, schools: Array.from({ length: 11 }, (_, i) => ({ id: `s-${i}`, name: 'X' })) }), 400, 'troppi istituti');
+});
+
+test('validateTeacherProfile: profilo completo con tutti i campi di TeacherProfile accettato', () => {
+  // Copre l'intera forma del tipo: se TeacherProfile cresce, la allow-list deve crescere con esso.
+  const maximal: TeacherProfile = {
+    id: 'teacher-1', fullName: 'Felice Manganiello', email: 'felice@scuola.edu.it',
+    schoolName: 'Istituto Comprensivo Da Vinci', schoolLevel: 'ssig', schoolYear: '2026/2027',
+    primarySubjects: ['Sostegno'], classes: ['3D', '3E'], campuses: ['Sede Centrale'],
+    roles: [{ role: 'docente_sostegno', targetClass: '3D', description: 'Sostegno', label: 'Sostegno 3D' }],
+    isSupportTeacher: true, assignedStudents: ['Rossi Matteo'], googleCalendarLinked: true,
+    googleCalendarAccount: 'felice@scuola.edu.it', weeklyDeclaredHours: 18,
+    schools: [{
+      id: 'school-1a2b3c4d', name: 'Istituto Comprensivo Da Vinci', institutionalEmail: 'segreteria@scuola.edu.it',
+      campuses: ['Sede Centrale'], schoolLevel: 'ssig', weeklyHours: 18, isPrimary: true, active: true,
+    }],
+  };
+  assert.equal(Object.keys(maximal).length, 16, 'tutti i campi del tipo TeacherProfile sono coperti');
+  assert.doesNotThrow(() => validateTeacherProfile(maximal));
 });
 
 test('analyze-timetable: profilo con chiave sconosciuta -> ancora 400 generico (nessun contenuto)', async () => {
