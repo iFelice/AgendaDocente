@@ -5,9 +5,11 @@ import {
   validateTeacherProfile,
 } from './analysisGuards';
 import {
+  normalizePeriodsPerDay,
   validateCurricularTimetablePayload,
   validatePersonalTimetablePayload,
   validateStudentCommitmentsPayload,
+  TimetableShapeError,
   type TimetableDocumentType,
 } from '../src/utils/timetableAnalysis';
 
@@ -209,6 +211,26 @@ export function parseTimetableAiResponse(documentType: TimetableDocumentType, ra
   }
   const { rows, cells } = validateCurricularTimetablePayload(raw);
   return { curricularRows: rows.map(({ rowIndex, rowLabel, subject, classes }) => ({ rowIndex, rowLabel, subject, classes })), cells };
+}
+
+/**
+ * Diagnosi di un fallimento della fase di validazione, PRIVACY-SAFE per
+ * costruzione: nome del tipo di errore, il messaggio FISSO del validatore (una
+ * stringa nostra, mai testo del documento) e i CONTEGGI della risposta. Non
+ * compaiono mai nomi di docenti, classi, OCR, base64 o il JSON del modello.
+ */
+export function describeAnalysisFailure(error: unknown, value: unknown, documentType: TimetableDocumentType): string {
+  const shape = error instanceof TimetableShapeError;
+  const type = error instanceof Error ? error.name : 'UnknownError';
+  // Per gli errori inattesi (bug interni) si logga solo il tipo: il messaggio di
+  // un TypeError potrebbe contenere frammenti del payload.
+  const reason = shape ? String(error.message).replace(/\s+/g, ' ').trim().slice(0, 120) : 'errore interno di validazione';
+  const grid = record(value) ? value : {};
+  const rows = Array.isArray(grid.rows) ? grid.rows.length : -1;
+  const cells = Array.isArray(grid.cells) ? grid.cells.length : -1;
+  const periods = normalizePeriodsPerDay(grid.periodsPerDay);
+  const doc = documentType === 'personal-support-timetable' ? 'personale' : 'curricolare';
+  return `[AI Orari] fase=validazione documento=${doc} esito=fallito motivo=${reason} tipo=${type} righe=${rows} celle=${cells} periodsPerDay=${periods > 0 ? periods : 'assente'}`;
 }
 
 /** Valida la risposta AI del registro/appunti. */

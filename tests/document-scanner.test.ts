@@ -9,7 +9,10 @@ import {
   restrictCurricularSlotsToCoordinates,
   summarizeCurricularCoverage,
   anchorPersonalCellsToGrid,
+  MAX_PERSONAL_GRID_CELLS,
+  MAX_PERSONAL_GRID_ROWS,
   personalCellsToCandidates,
+  TimetableShapeError,
   teacherSurnames,
   validateCurricularTimetablePayload,
   validatePersonalTimetablePayload,
@@ -954,4 +957,152 @@ test('multi-istituto: mono istituto senza UI extra; multi istituto con schoolId 
   assert.equal(chosenSlots[0].schoolId, 'school-b', 'scelta esplicita rispettata');
   const singleSlots = reconstructedToTimetableSlots(recon, { profile: single });
   assert.equal(singleSlots[0].schoolId, primaryId, 'mono istituto: schoolId determinabile senza UI extra');
+});
+
+// ---------------------------------------------------------------------------
+// 9d. BUG REALE (iPhone, dopo il formato denso): la fase di parsing NON deve
+//     far finire l'analisi nel catch generico ("Analisi non riuscita. Riprova.")
+// ---------------------------------------------------------------------------
+
+/**
+ * Payload realistico nel formato denso richiesto all'AI: `teacherRows` righe
+ * docente, 5 giorni x `columns` colonne, celle vuote riportate ESPLICITE.
+ */
+function denseTeamPayload(
+  teacherRows: number,
+  columns = 5,
+  options: { periodsPerDay?: unknown; emptyStyle?: 'empty' | 'null' | 'omitted' } = {}
+) {
+  const cells: Array<Record<string, unknown>> = [];
+  for (let row = 0; row < teacherRows; row++) {
+    for (let day = 1; day <= 5; day++) {
+      for (let col = 1; col <= columns; col++) {
+        const filled = (row + day + col) % 3 !== 0;
+        if (!filled && options.emptyStyle === 'omitted') continue;
+        cells.push({
+          rowIndex: row,
+          dayOfWeek: day,
+          periodIndex: col,
+          raw: filled ? `${(row % 3) + 1}${'ABCDE'[col % 5]}` : options.emptyStyle === 'null' ? null : '',
+        });
+      }
+    }
+  }
+  const payload: Record<string, unknown> = {
+    rows: Array.from({ length: teacherRows }, (_, i) => `Docente ${i + 1}`),
+    cells,
+  };
+  if (options.periodsPerDay !== undefined) payload.periodsPerDay = options.periodsPerDay;
+  return payload;
+}
+
+test('formato denso: payload realistici dell\u2019orario personale non lanciano eccezioni', () => {
+  const payloads: Array<[string, unknown]> = [
+    ['una riga, 5 colonne, vuoti come raw ""', denseTeamPayload(1, 5, { periodsPerDay: 5 })],
+    ['team intero (25 righe x 5 giorni x 5 colonne = 625 celle dense)', denseTeamPayload(25, 5, { periodsPerDay: 5 })],
+    ['giorno da 6 ore, 20 righe', denseTeamPayload(20, 6, { periodsPerDay: 6 })],
+    ['periodsPerDay null', denseTeamPayload(3, 5, { periodsPerDay: null })],
+    ['periodsPerDay stringa "5"', denseTeamPayload(3, 5, { periodsPerDay: '5' })],
+    ['periodsPerDay assente', denseTeamPayload(3, 5)],
+    ['periodsPerDay assurdo (999, -2, "ciao")', denseTeamPayload(2, 5, { periodsPerDay: 999 })],
+    ['celle vuote come null', denseTeamPayload(4, 5, { periodsPerDay: 5, emptyStyle: 'null' })],
+    ['celle vuote omesse (payload pi\u00f9 corto del dichiarato)', denseTeamPayload(4, 5, { periodsPerDay: 5, emptyStyle: 'omitted' })],
+  ];
+  for (const [label, payload] of payloads) {
+    assert.doesNotThrow(() => parseTimetableAiResponse('personal-support-timetable', payload), label);
+  }
+  // Numeri assurdi vengono ignorati, non fatti pagare all\u2019intera analisi.
+  for (const junk of [999, -2, 'ciao', {}, []]) {
+    const outcome = parseTimetableAiResponse('personal-support-timetable', denseTeamPayload(2, 5, { periodsPerDay: junk }));
+    assert.equal(outcome.cells.length, 50, `periodsPerDay=${JSON.stringify(junk)}: celle conserve`);
+  }
+});
+
+test('formato denso: 625 celle di una pagina reale vengono analizzate (il vecchio limite di 500 le respingeva)', () => {
+  const payload = denseTeamPayload(25, 5, { periodsPerDay: 5 });
+  assert.equal((payload.cells as unknown[]).length, 625, 'la pagina reale del team \u00e8 oltre il limite sparse');
+  const outcome = parseTimetableAiResponse('personal-support-timetable', payload);
+  assert.equal(outcome.cells.length, 625);
+  assert.equal(outcome.periodsPerDay, 5, 'geometria riconosciuta dalle colonne');
+  assert.equal(outcome.positionIssues, 0);
+  assert.ok(MAX_PERSONAL_GRID_CELLS >= 625, 'il limite celle tiene conto del formato denso');
+  assert.equal(MAX_PERSONAL_GRID_ROWS, 100, 'le pagine reali di istituto non si fermano a 60 righe');
+});
+
+test('limiti di parsing: una pagina lunga resta analizzabile, il resto è rifiuto controllato', () => {
+  // 100 righe x 5 giorni x 2 colonne = 1000 celle: oltre i vecchi 60 righe / 500 celle.
+  const payload = denseTeamPayload(100, 2, { periodsPerDay: 2 });
+  assert.equal((payload.rows as string[]).length, 100);
+  assert.equal((payload.cells as unknown[]).length, 1000);
+  const outcome = parseTimetableAiResponse('personal-support-timetable', payload);
+  assert.equal(outcome.rows.length, 100, 'tutte le righe restano disponibili per la scelta del docente');
+  assert.equal(outcome.cells.length, 1000, 'nessuna cella scartata dal limite');
+
+  // Oltre il limite il rifiuto è un errore di forma (controllato, con conteggi nel
+  // log), non un crash senza indizi: è ciò che rendeva il bug incomprensibile.
+  const huge = denseTeamPayload(100, 24, { periodsPerDay: 24 });
+  assert.ok((huge.cells as unknown[]).length > MAX_PERSONAL_GRID_CELLS, 'payload oltre ogni griglia scolastica reale');
+  assert.throws(() => parseTimetableAiResponse('personal-support-timetable', huge), /Celle del documento non valide/);
+});
+
+test('formato denso: la dichiarazione delle colonne è ciò che rende riparabile una numerazione compattata', () => {
+  const compacted = [
+    { rowIndex: 0, dayOfWeek: 2, periodIndex: 1, raw: '3D' },
+    { rowIndex: 0, dayOfWeek: 2, periodIndex: 1, raw: '' },   // contatore dell’AI: duplicato
+    { rowIndex: 0, dayOfWeek: 2, periodIndex: 2, raw: '3D' },
+    { rowIndex: 0, dayOfWeek: 2, periodIndex: 3, raw: '3D' },
+    { rowIndex: 0, dayOfWeek: 2, periodIndex: 4, raw: '3E' },
+  ];
+  // Dichiarazione letta correttamente -> la griglia è da 5 colonne, le posizioni si riparano.
+  for (const declared of [5, '5', ' 5 ']) {
+    const outcome = parseTimetableAiResponse('personal-support-timetable', {
+      rows: ['Manganiello F.'], periodsPerDay: declared, cells: compacted,
+    });
+    assert.equal(outcome.periodsPerDay, 5, `periodsPerDay=${JSON.stringify(declared)}`);
+    assert.equal(outcome.positionIssues, 0, `${JSON.stringify(declared)}: griglia ricostruita, nessun avviso`);
+    assert.deepEqual(
+      outcome.cells.filter(c => c.raw).map(c => c.periodIndex),
+      [1, 3, 4, 5],
+      `${JSON.stringify(declared)}: martedì [3D, vuoto, 3D, 3D, 3E] -> 1, 3, 4, 5`
+    );
+  }
+  // Senza dichiarazione la stessa numerazione compattata non è riparabile:
+  // nessun riordino inventato, solo l’indicazione che le ore vanno verificate.
+  const undeclared = parseTimetableAiResponse('personal-support-timetable', { rows: ['X'], cells: compacted });
+  assert.equal(undeclared.positionIssues, 1, 'duplicato non risolvibile senza geometria: avviso');
+  assert.deepEqual(undeclared.cells.map(c => c.periodIndex), [1, 1, 2, 3, 4], 'nessuna ora spostata a forza');
+});
+
+test('formato denso: raw "" \u00e8 accettato e i buchi restano buchi (nessuna ora Compattata)', () => {
+  const payload = denseTeamPayload(1, 5, { periodsPerDay: 5 });
+  const outcome = parseTimetableAiResponse('personal-support-timetable', payload);
+  const empties = outcome.cells.filter(c => c.raw === '');
+  assert.equal(outcome.cells.length, 25, 'una cella per ogni colonna');
+  assert.ok(empties.length > 0, 'le colonne vuote sono nel payload');
+  const { candidates, skipped } = personalCellsToCandidates(outcome.cells, [0]);
+  assert.equal(skipped.length, 0, 'una colonna vuota non \u00e8 una cella da interpretare');
+  const occupied = new Set(candidates.map(c => `${c.dayOfWeek}|${c.periodIndex}`));
+  for (const empty of empties) {
+    assert.equal(occupied.has(`${empty.dayOfWeek}|${empty.periodIndex}`), false, `giorno ${empty.dayOfWeek} ora ${empty.periodIndex} resta vuoto`);
+  }
+  assert.equal(candidates.length + empties.length, 25, 'ogni colonna \u00e8 o un\u2019ora o un vuoto: niente duplicati, niente slittamenti');
+});
+
+test('payload malformato: fallimento controllato (TimetableShapeError), non eccezione non gestita', () => {
+  const bad: Array<[string, unknown, RegExp]> = [
+    ['cells non \u00e8 un array', { rows: [], cells: 'no' }, /Celle del documento non valide/],
+    ['cella senza raw', { rows: [], cells: [{ rowIndex: 0, dayOfWeek: 2, periodIndex: 1 }] }, /Cella orario non valida/],
+    ['giorno inesistente', { rows: [], cells: [{ rowIndex: 0, dayOfWeek: 9, periodIndex: 1, raw: '3D' }] }, /Cella orario non valida/],
+    ['payload non oggetto', 'ciao', /Risposta analisi non valida/],
+  ];
+  for (const [label, payload, pattern] of bad) {
+    let error: unknown = null;
+    try {
+      parseTimetableAiResponse('personal-support-timetable', payload);
+    } catch (caught) {
+      error = caught;
+    }
+    assert.ok(error instanceof TimetableShapeError, `${label}: errore tipizzato di forma, non un crash`);
+    assert.match((error as Error).message, pattern, label);
+  }
 });

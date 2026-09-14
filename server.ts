@@ -6,8 +6,10 @@ import {
   STUDENT_DOCUMENT_PROMPT,
   STUDENT_DOCUMENT_TIMEOUT_MS,
   TIMETABLE_ANALYSIS_TIMEOUT_MS,
+  describeAnalysisFailure,
   parseStudentDocumentAiResponse,
   parseTimetableAiResponse,
+  type TimetableAnalysisOutcome,
   studentDocumentSchema,
   curricularTimetableSchema,
   personalTimetableSchema,
@@ -497,7 +499,16 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
     if (!decoded.ok) {
       return res.status(503).json({ success: false, error: "Il documento non è stato elaborato. Riprova più tardi." });
     }
-    const outcome = parseTimetableAiResponse(documentType, decoded.value);
+    // Forma del payload: un rifiuto del validatore è un fallimento ATTESO e
+    // gestito (messaggio utente invariato, diagnostica privacy-safe), non un crash
+    // nel catch generico dell'endpoint — che era il sintomo su iPhone.
+    let outcome: TimetableAnalysisOutcome;
+    try {
+      outcome = parseTimetableAiResponse(documentType, decoded.value);
+    } catch (error: unknown) {
+      console.warn(describeAnalysisFailure(error, decoded.value, documentType));
+      return res.status(422).json({ success: false, error: "Analisi non riuscita. Riprova." });
+    }
     return res.json({
       success: true,
       source: run.source,
@@ -509,8 +520,9 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
       periodsPerDay: outcome.periodsPerDay,
       positionIssues: outcome.positionIssues,
     });
-  } catch {
-    console.warn("Analisi orario non riuscita.");
+  } catch (error: unknown) {
+    // Solo nome del tipo di errore: mai contenuto del documento o del modello.
+    console.warn(`[AI Orari] fase=endpoint esito=fallito tipo=${error instanceof Error ? error.name : "UnknownError"} analisi orario non riuscita.`);
     return res.status(500).json({ success: false, error: "Analisi non riuscita. Riprova." });
   } finally {
     clearTimeout(deadline);

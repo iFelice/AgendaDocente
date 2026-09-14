@@ -93,8 +93,19 @@ const intWithin = (v: unknown, min: number, max: number): v is number =>
 const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const str = (v: unknown, max: number): v is string => typeof v === "string" && v.length <= max;
 
+/**
+ * Errore di FORMA del payload AI: i messaggi sono stringhe fisse del validatore
+ * (mai testo del documento), quindi sono sicuri da mettere nei log del server.
+ */
+export class TimetableShapeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TimetableShapeError";
+  }
+}
+
 function invalidShape(message: string): never {
-  throw new Error(message);
+  throw new TimetableShapeError(message);
 }
 
 export function validateRawCell(v: unknown, index: number): TimetableRawCell {
@@ -106,6 +117,18 @@ export function validateRawCell(v: unknown, index: number): TimetableRawCell {
 /** Colonne-periodo massime plausibili in una griglia orario (geometria reale). */
 const MAX_GRID_PERIODS = 24;
 /**
+ * Celle massime dell'orario personale nel formato DENSO: righe x giorni x colonne
+ * (con le vuote incluse). 5000 copre una pagina reale di intero team docente
+ * (25 docenti x 5 giorni x 5 ore = 625) e resta un guard contro payload assurdi:
+ * il formato precedente, solo celle piene, si fermava a 500 e spezzava le
+ * analisi vere con «Celle del documento non valide.».
+ * Righe e celle sono due limiti indipendenti: stringerne uno e allargare l'altro
+ * produce comunque lo stesso crash, quindi vanno tenuti allineati.
+ */
+export const MAX_PERSONAL_GRID_CELLS = 5000;
+/** Righe docenti massime nell'orario personale (allineate al curricolare). */
+export const MAX_PERSONAL_GRID_ROWS = 100;
+/**
  * Limite alto per il `periodIndex` GREZZO dell'orario personale: il numero del
  * modello è dato non fidato (può essere un contatore progressivo su tutta la
  * riga) e viene ancorato alle colonne della griglia subito dopo. Quindi la forma
@@ -115,13 +138,48 @@ const MAX_GRID_PERIODS = 24;
 const MAX_GRID_INDEX_INPUT = 60;
 
 /**
- * Cella personale grezza: stessa validazione di `validateRawCell`, ma con range
- * ampio sul `periodIndex` (la numerazione verrà ancorata alle colonne della griglia).
+ * Cella personale grezza: stessa validazione di `validateRawCell`, ma con due
+ * tolleranze VOLUTE, introdotte dal formato denso (una cella per colonna):
+ *  - `periodIndex` accettato fino a 60: il numero grezzo del modello è dato non
+ *    fidato (può essere un contatore progressivo sulla riga) e viene ancorato alle
+ *    colonne subito dopo — rifiutarlo qui significava perdere l'intera analisi;
+ *  - `raw: null` vale come colonna vuota (`""`): `null` e `""` sono lo stesso
+ *    fatto nel documento, e nessun valore viene inventato.
+ * `raw` ASSENTE resta un errore: la cella non è descritta.
  */
 function validatePersonalRawCell(v: unknown, index: number): TimetableRawCell {
   if (!record(v) || !intWithin(v.rowIndex, 0, 100) || !intWithin(v.dayOfWeek, 1, 6)
-    || !intWithin(v.periodIndex, 1, MAX_GRID_INDEX_INPUT) || !str(v.raw, 60)) invalidShape(`Cella orario non valida (#${index}).`);
-  return { rowIndex: v.rowIndex, dayOfWeek: v.dayOfWeek, periodIndex: v.periodIndex, raw: v.raw.trim() };
+    || !intWithin(v.periodIndex, 1, MAX_GRID_INDEX_INPUT) || !(v.raw === null || str(v.raw, 60))) {
+    invalidShape(`Cella orario non valida (#${index}).`);
+  }
+  return {
+    rowIndex: v.rowIndex,
+    dayOfWeek: v.dayOfWeek,
+    periodIndex: v.periodIndex,
+    raw: typeof v.raw === "string" ? v.raw.trim() : "",
+  };
+}
+
+/**
+ * Colonne-periodo dichiarate dall'intestazione. Campo NUOVO e opzionale: il
+ * modello può ometterlo, scrivere `null` o un numero in forma di stringa. Qui si
+ * normalizza (mai si rifiuta l'intera analisi per un metadato: la geometria può
+ * essere recuperata dalle celle stesse).
+ */
+export function normalizePeriodsPerDay(value: unknown): number {
+  if (typeof value === "number" && Number.isInteger(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value.trim());
+    if (Number.isInteger(parsed)) return parsed;
+  }
+  return 0;
+}
+
+/** Etichetta di una riga docenti: `null`/`""` = riga senza etichetta leggibile. */
+function normalizeRowLabel(value: unknown, index: number): string {
+  if (value === null || value === undefined) return "";
+  if (!str(value, 80)) invalidShape(`Riga del documento non valida (#${index}).`);
+  return String(value).trim();
 }
 
 export interface PersonalGridAnchor {
@@ -216,15 +274,23 @@ export function validatePersonalTimetablePayload(raw: unknown): {
   positionIssues: number;
 } {
   if (!record(raw)) invalidShape("Risposta analisi non valida.");
-  if (!Array.isArray(raw.rows) || raw.rows.length > 60 || !raw.rows.every(r => str(r, 80))) invalidShape("Righe del documento non valide.");
-  if (!Array.isArray(raw.cells) || raw.cells.length > 500) invalidShape("Celle del documento non valide.");
-  if (raw.periodsPerDay !== undefined && !intWithin(raw.periodsPerDay, 0, MAX_GRID_PERIODS)) invalidShape("Colonne della griglia non valide.");
+  // Righe: stesso limite dell'orario curricolare (una pagina reale di istituto può
+  // superarne 60) — un limite troppo stretto qui significava analisi persa.
+  if (!Array.isArray(raw.rows) || raw.rows.length > MAX_PERSONAL_GRID_ROWS) invalidShape("Righe del documento non valide.");
+  // Il formato denso (una cella per colonna, vuote incluse) moltiplica le celle
+  // per il numero di colonne: il vecchio limite di 500, tarato sul formato che
+  // riportava solo le celle non vuote, scartava pagine reali di intero consiglio
+  // di classe (25 docenti x 5 giorni x 5 ore = 625) facendo fallire l'analisi.
+  if (!Array.isArray(raw.cells) || raw.cells.length > MAX_PERSONAL_GRID_CELLS) invalidShape("Celle del documento non valide.");
+  // Metadato NON critico: numeri assurdi vengono ignorati dall'ancoraggio
+  // (che ammette solo 1..MAX_GRID_PERIODS) invece di far fallire l'analisi.
+  const declared = normalizePeriodsPerDay(raw.periodsPerDay);
   const cells = raw.cells.map((c, i) => validatePersonalRawCell(c, i));
   // Le posizioni vengono ancorate alla griglia QUI: è l'unico punto in cui il
   // documento viene interpretato, così nessun chiamante può dimenticarlo.
-  const anchored = anchorPersonalCellsToGrid(cells, intWithin(raw.periodsPerDay, 1, MAX_GRID_PERIODS) ? raw.periodsPerDay : undefined);
+  const anchored = anchorPersonalCellsToGrid(cells, declared > 0 ? declared : undefined);
   return {
-    rows: raw.rows.map(r => String(r).trim()),
+    rows: raw.rows.map((r, i) => normalizeRowLabel(r, i)),
     cells: anchored.cells,
     periodsPerDay: anchored.periodsPerDay,
     positionIssues: anchored.positionIssues,

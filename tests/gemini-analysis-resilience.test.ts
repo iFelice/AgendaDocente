@@ -14,7 +14,12 @@ import {
   parseGeminiJson,
   runGeminiJson,
 } from '../server';
-import { TIMETABLE_ANALYSIS_TIMEOUT_MS, STUDENT_DOCUMENT_TIMEOUT_MS } from '../server/timetableAnalysis';
+import {
+  STUDENT_DOCUMENT_TIMEOUT_MS,
+  TIMETABLE_ANALYSIS_TIMEOUT_MS,
+  describeAnalysisFailure,
+  parseTimetableAiResponse,
+} from '../server/timetableAnalysis';
 import { SCAN_REQUEST_TIMEOUT_MS } from '../src/services/scanService';
 
 /**
@@ -339,4 +344,46 @@ test('i budget sono coerenti: endpoint < client, e il runner ha spazio per la ca
     assert.ok(SCAN_REQUEST_TIMEOUT_MS > budget, 'il client deve aspettare la risposta 503/200 del server');
   }
   assert.equal(TIMETABLE_ANALYSIS_TIMEOUT_MS, 45_000, 'deadline invariato: nessuna attesa extra per l\'utente');
+});
+
+// ---------------------------------------------------------------------------
+// DIAGNOSTICA DELLA FASE DI VALIDAZIONE (crash iPhone dopo il formato denso)
+// ---------------------------------------------------------------------------
+
+test('diagnostica validazione: esito controllato e log privacy-safe (solo tipi e conteggi)', () => {
+  // Cella senza `raw`: forma errata -> errore di forma con messaggio fisso.
+  const shapePayload = { rows: ['Rossi Matteo'], periodsPerDay: 5, cells: [{ rowIndex: 0, dayOfWeek: 2, periodIndex: 1 }] };
+  let shapeError: unknown = null;
+  try {
+    parseTimetableAiResponse('personal-support-timetable', shapePayload);
+    assert.fail('la forma errata deve essere rifiutata');
+  } catch (error) {
+    shapeError = error;
+  }
+  const shapeLog = describeAnalysisFailure(shapeError, shapePayload, 'personal-support-timetable');
+  assert.match(shapeLog, /\[AI Orari\] fase=validazione documento=personale esito=fallito motivo=Cella orario non valida/);
+  assert.match(shapeLog, /tipo=TimetableShapeError/);
+  assert.match(shapeLog, /righe=1 celle=1 periodsPerDay=5/, 'conteggi utili a capire il payload senza leggerlo');
+  assert.ok(!shapeLog.includes('Rossi'), 'nessun nome di docente nel log');
+  assert.ok(!shapeLog.includes('3D'), 'nessuna classe nel log');
+
+  // Errore interno inatteso: SOLO il tipo. Il messaggio di un TypeError pu\u00f2
+  // contenere frammenti del payload e non viene mai riportato.
+  const exploding = {
+    get rows(): never {
+      throw new TypeError('Cannot read properties of undefined (reading \u201cRossi Matteo 3D\u201d)');
+    },
+    cells: [],
+  };
+  let internalError: unknown = null;
+  try {
+    parseTimetableAiResponse('personal-support-timetable', exploding);
+    assert.fail('l\u2019errore interno deve propagarsi al catch dell\u2019endpoint');
+  } catch (error) {
+    internalError = error;
+  }
+  const internalLog = describeAnalysisFailure(internalError, { rows: 3, cells: 'no', periodsPerDay: 'x' }, 'personal-support-timetable');
+  assert.match(internalLog, /motivo=errore interno di validazione tipo=TypeError/);
+  assert.match(internalLog, /righe=-1 celle=-1 periodsPerDay=assente/, 'conteggi difensivi su payload non interpretabile');
+  assert.ok(!/Rossi|Matteo|3D|trim/.test(internalLog), 'nessun frammento di documento o di messaggio interno nel log');
 });
