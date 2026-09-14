@@ -1179,3 +1179,38 @@ test('progresso: chiusura durante l’attesa ferma l’animazione e ignora la ri
     if (reopened) await act(async () => { reopened.unmount(); });
   }
 });
+
+// ---------------------------------------------------------------------------
+// 23. ORDINE HOOK: il guard di chiusura non deve separare gli hook
+// ---------------------------------------------------------------------------
+
+test('isOpen true -> false -> true a componente montato: stesso ordine di hook, nessun errore React', async () => {
+  const renderer = await renderModal();
+  // Stato non vuoto: così gli useMemo che stanno sotto il guard hanno lavoro vero.
+  await goToSource(renderer, 'personal');
+  await pickFile(renderer, makeFile('orario.jpg', 'image/jpeg', 30_000));
+  await act(async () => { byId(renderer, 'scan-analyze-cta').props.onClick(); });
+
+  const consoleErrors: string[] = [];
+  const savedConsoleError = console.error;
+  console.error = (...args: unknown[]) => { consoleErrors.push(args.map(String).join(' ')); };
+  try {
+    // Chiusura SENZA smontare: è il caso che il vecchio guard rendeva illegale.
+    await act(async () => {
+      renderer.update(React.createElement(DocumentScannerModal, modalProps({ isOpen: false })));
+    });
+    assert.equal(renderer.toJSON(), null, 'chiuso: nessun nodo renderizzato, ma il componente è ancora montato');
+
+    // Riapertura sullo stesso instance: lo stato riparte da zero, gli hook pure.
+    await act(async () => {
+      renderer.update(React.createElement(DocumentScannerModal, modalProps({ isOpen: true })));
+    });
+    assert.match(flatText(renderer.root), /Scansiona documento/, 'riaperto: si riparte dalla scelta del documento');
+    assert.ok(byId(renderer, 'scan-type-personal'), 'la griglia dei tipi è di nuovo interattiva');
+  } finally {
+    console.error = savedConsoleError;
+    await act(async () => { renderer.unmount(); });
+  }
+
+  assert.deepEqual(consoleErrors.filter(line => /hook/i.test(line)), [], 'nessun «Rendered fewer/more hooks than expected»');
+});

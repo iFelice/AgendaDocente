@@ -251,8 +251,6 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     };
   }, []);
 
-  if (!isOpen) return null;
-
   const startCapture = (forWhat: CaptureFor) => {
     setCaptureFor(forWhat);
     setStep("source");
@@ -472,6 +470,12 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     () => summarizeCurricularCoverage(personalCoordinates, curricular?.slots ?? []),
     [personalCoordinates, curricular]
   );
+
+  // Guard di chiusura: sta DOPO l'ultimo hook del componente, così numero e ordine
+  // degli hook restano identici anche se il modale resta montato e isOpen passa
+  // true -> false (in React «Rendered fewer hooks than expected» sarebbe fatale).
+  // Sotto questo punto ci sono solo funzioni e JSX, nessun hook.
+  if (!isOpen) return null;
 
   const confirmPersonalRow = (rowIndex: number) => {
     if (!personal) return;
