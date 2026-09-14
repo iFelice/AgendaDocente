@@ -1,3 +1,4 @@
+import { useAnalysisProgress } from "../hooks/useAnalysisProgress";
 import { usePersistenceAction } from "../hooks/usePersistenceAction";
 import {
   analyzeStudentDocument,
@@ -22,6 +23,7 @@ import {
   reconstructedToTimetableSlots,
   type TimetableMergeMode,
 } from "../utils/reconstructTimetable";
+import { AnalysisProgressBar } from "./AnalysisProgressBar";
 import { RECON_NOTES, crossrefTimetables, reconSignal, type ReconstructedSlot } from "../utils/timetableCrossref";
 import {
   buildPersonalCoordinateScope,
@@ -140,6 +142,9 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
   onImportStudentCommitments,
 }) => {
   const save = usePersistenceAction();
+  /** Progresso UI stimato dell'analisi (nessuna percentuale reale del backend). */
+  const analysisProgress = useAnalysisProgress();
+  const { start: startProgress, complete: completeProgress, stop: stopProgress } = analysisProgress;
   const [docType, setDocType] = useState<ScanDocType | null>(null);
   const [captureFor, setCaptureFor] = useState<CaptureFor | null>(null);
   const [step, setStep] = useState<Step>("type");
@@ -205,9 +210,16 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     return previewReconstruction(existingTarget, incoming, mergeMode, { profile });
   }, [reconSlots, existingTarget, mergeMode, reconSchoolId, profile, timeSlotConfig]);
 
-  // Reset completo ad ogni apertura.
+  // Chiusura: nessuna animazione (e nessun timer) lascia il modale spento.
+  useEffect(() => {
+    if (isOpen) return;
+    stopProgress();
+  }, [isOpen, stopProgress]);
+
+  // Reset completo ad ogni apertura: il progresso riparte da 0.
   useEffect(() => {
     if (!isOpen) return;
+    stopProgress();
     setDocType(null);
     setCaptureFor(null);
     setStep("type");
@@ -340,6 +352,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     setIsAnalyzing(true);
     setAnalysisError(null);
     setStep("working");
+    startProgress();
     try {
       if (captureFor === "personal") {
         const result = await analyzeTimetableDocument({
@@ -351,8 +364,12 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
         if (revision !== readingRevision.current) return;
         const cells = result.cells ?? [];
         const rows = result.rows ?? [];
-        setPersonal({ rows, cells, matches: findTeacherRows(rows, profile.fullName), confirmedRow: null, skipped: [] });
-        setStep("review-personal");
+        const reviewState: PersonalReviewState = { rows, cells, matches: findTeacherRows(rows, profile.fullName), confirmedRow: null, skipped: [] };
+        completeProgress(() => {
+          if (revision !== readingRevision.current) return; // modale chiuso o analisi annullata: nulla da mostrare
+          setPersonal(reviewState);
+          setStep("review-personal");
+        });
       } else if (captureFor === "curricular") {
         const result = await analyzeTimetableDocument({
           imageBase64: fileBase64,
@@ -371,8 +388,12 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
         // Filtro locale immediato: l'estrazione può contenere tutta la tabella
         // d'istituto, ma restano solo le mie coordinate (giorno+periodo+classe).
         const scoped = restrictCurricularSlotsToCoordinates(extraction.slots, personalCoordinates);
-        setCurricular({ rows, ...extraction, slots: scoped.slots, droppedCount: scoped.droppedCount });
-        setStep("review-curricular");
+        const curricularState = { rows, ...extraction, slots: scoped.slots, droppedCount: scoped.droppedCount };
+        completeProgress(() => {
+          if (revision !== readingRevision.current) return;
+          setCurricular(curricularState);
+          setStep("review-curricular");
+        });
       } else if (captureFor === "registro") {
         const result = await analyzeStudentDocument({
           imageBase64: fileBase64,
@@ -393,12 +414,16 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
             selected: !!entry.date, // senza data visibile l'impegno non è salvabile
           };
         });
-        setStudentCandidates(candidates);
-        setStep("review-student");
+        completeProgress(() => {
+          if (revision !== readingRevision.current) return;
+          setStudentCandidates(candidates);
+          setStep("review-student");
+        });
       }
       releaseDocument();
     } catch (error: unknown) {
       if (revision !== readingRevision.current) return;
+      stopProgress(); // nessuna barra/animazione attiva sopra il messaggio di errore
       console.warn("Avviso analisi documento: richiesta cloud non completata.");
       setStep("preview");
       setAnalysisError(error instanceof Error ? error.message : "Analisi non riuscita. Riprova.");
@@ -625,7 +650,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
             {(step !== "type" && docType) && (
               <button
                 type="button"
-                onClick={() => { setStep("type"); resetCapture(); setPersonal(null); setCurricular(null); setStudentCandidates(null); setReconSlots(null); }}
+                onClick={() => { stopProgress(); setStep("type"); resetCapture(); setPersonal(null); setCurricular(null); setStudentCandidates(null); setReconSlots(null); }}
                 className="flex h-11 w-11 items-center justify-center rounded-lg text-stone-500 hover:bg-stone-100 active:bg-stone-200"
                 aria-label="Torna al tipo documento"
               >
@@ -848,9 +873,14 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
 
           {/* STEP: working */}
           {step === "working" && (
-            <div className="py-12 flex flex-col items-center gap-3 text-center">
+            <div className="py-8 sm:py-10 flex flex-col items-center gap-3 text-center">
               <CloudUpload className="w-10 h-10 text-emerald-700 animate-pulse" />
               <p className="text-sm font-semibold text-stone-900">Analisi del documento in corso…</p>
+              <AnalysisProgressBar
+                percent={analysisProgress.percent}
+                phase={analysisProgress.phase}
+                label={analysisProgress.label}
+              />
               <p className="text-xs text-stone-500 max-w-xs">Il documento non viene salvato: l'elaborazione può richiedere alcuni secondi.</p>
             </div>
           )}

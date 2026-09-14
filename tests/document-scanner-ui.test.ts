@@ -227,6 +227,21 @@ const studentResponse = {
   ],
 };
 
+/**
+ * Attende che l'analisi passi dallo schermo "Analisi in corso" (barra di progresso)
+ * alla schermata successiva: il 100% "Completato" è mostrato per un breve hold,
+ * quindi il cambio step non è istantaneo.
+ */
+async function waitForAnalysisSettled(renderer: any, timeoutMs = 4000) {
+  const start = Date.now();
+  for (;;) {
+    await act(async () => { await new Promise(r => setTimeout(r, 20)); });
+    const text = flatText(renderer.root);
+    if (!text.includes('Analisi del documento in corso')) return;
+    if (Date.now() - start > timeoutMs) throw new Error('l\'analisi non ha mai rilasciato lo schermo di attesa');
+  }
+}
+
 async function analyzeWithConsent(renderer: any) {
   await act(async () => { byId(renderer, 'scan-analyze-cta').props.onClick(); });
   // Consenso richiesto (checkbox NON preselezionata).
@@ -234,10 +249,16 @@ async function analyzeWithConsent(renderer: any) {
   assert.equal(consent.props.checked, false, 'il consenso non è mai preselezionato');
   assert.ok(byId(renderer, 'scan-consent-confirm').props.disabled, 'senza consenso l\'invio è bloccato');
   await act(async () => { consent.props.onChange({ target: { checked: true } }); });
+  await confirmAndSettleAnalysis(renderer);
+}
+
+/** Invio dell'analisi + attesa del completamento (rampa 100% inclusa). */
+async function confirmAndSettleAnalysis(renderer: any) {
   await act(async () => {
     byId(renderer, 'scan-consent-confirm').props.onClick();
     await new Promise(r => setTimeout(r, 0));
   });
+  await waitForAnalysisSettled(renderer);
 }
 
 /**
@@ -576,10 +597,7 @@ test('registro: candidati con matching locale (exact/probable/unmatched) e nessu
   await chooseCameraAndPick(renderer, makeFile('registro.jpg', 'image/jpeg', 30_000));
   await act(async () => { byId(renderer, 'scan-analyze-cta').props.onClick(); });
   await act(async () => { byId(renderer, 'scan-cloud-consent').props.onChange({ target: { checked: true } }); });
-  await act(async () => {
-    byId(renderer, 'scan-consent-confirm').props.onClick();
-    await new Promise(r => setTimeout(r, 0));
-  });
+  await confirmAndSettleAnalysis(renderer);
 
   const text = flatText(renderer.root);
   assert.ok(text.includes('Corrispondenza certa'), 'exact per "Rossi Matteo"');
@@ -612,10 +630,7 @@ test('registro: l\'utente può completare la data mancante e poi confermare', as
   await chooseCameraAndPick(renderer, makeFile('registro.jpg', 'image/jpeg', 30_000));
   await act(async () => { byId(renderer, 'scan-analyze-cta').props.onClick(); });
   await act(async () => { byId(renderer, 'scan-cloud-consent').props.onChange({ target: { checked: true } }); });
-  await act(async () => {
-    byId(renderer, 'scan-consent-confirm').props.onClick();
-    await new Promise(r => setTimeout(r, 0));
-  });
+  await confirmAndSettleAnalysis(renderer);
 
   // Impegno senza data: deselezionato + avviso.
   const checkboxes = renderer.root.findAll((el: any) => el.props?.type === 'checkbox');
@@ -966,4 +981,201 @@ test('i dati salvati non vivono nel modale: archivio aggiornato alla conferma, m
   assert.equal(archive.filter(s => s.id.startsWith('tt-recon-')).length, 2, 'le ore restano nell archivio dopo la chiusura del modale');
   void closed;
   await act(async () => { reopened.unmount(); });
+});
+
+// ---------------------------------------------------------------------------
+// 22. PROGRESSO VISIBILE DURANTE L'ANALISI (stima UI, mai una misura cloud)
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch «in volo»: permette di osservare la barra durante l'attesa reale e di
+ * decidere quando arriva la risposta. La risposta viene SEMPRE consegnata nel
+ * `finally`: un'attesa rimasta aperta lascerebbe il modale montato con il loop
+ * di tick attivo, e la suite non terminerebbe più (nessun test «appeso»).
+ */
+async function withPendingAnalysis(run: (gate: { respond: (json: unknown, status?: number) => void }) => Promise<void>) {
+  const savedFetch = globalThis.fetch;
+  let settle!: (response: Response) => void;
+  const pending = new Promise<Response>(resolve => { settle = resolve; });
+  globalThis.fetch = ((async (url: unknown) => {
+    fetchCalls.push({ url: String(url), body: undefined });
+    return pending;
+  }) as unknown) as typeof fetch;
+  try {
+    await run({ respond: (json, status = 200) => settle(new Response(JSON.stringify(json), { status })) });
+  } finally {
+    settle(new Response(JSON.stringify(personalResponse), { status: 200 }));
+    await act(async () => { await new Promise(r => setTimeout(r, 30)); });
+    globalThis.fetch = savedFetch;
+  }
+}
+
+/** Consenso + invio SENZA attendere l'esito: si è ancora nello step «working». */
+async function sendForAnalysis(renderer: any) {
+  await act(async () => { byId(renderer, 'scan-analyze-cta').props.onClick(); });
+  await act(async () => { byId(renderer, 'scan-cloud-consent').props.onChange({ target: { checked: true } }); });
+  await act(async () => {
+    byId(renderer, 'scan-consent-confirm').props.onClick();
+    await new Promise(r => setTimeout(r, 0));
+  });
+}
+
+/** Gli elementi progressbar presenti nel modale (vuoto = nessuna barra attiva). */
+function progressBar(renderer: any) {
+  return renderer.root.findAll((el: any) => el.props?.role === 'progressbar');
+}
+
+/**
+ * Dopo la risposta la barra deve arrivare al 100% «Completato» ed esserci
+ * VISIBILE un istante, prima che compaia la schermata successiva.
+ */
+async function expectCompletionFlash(renderer: any) {
+  for (let i = 0; i < 16; i++) {
+    await act(async () => { await new Promise(r => setTimeout(r, 40)); });
+    const bars = progressBar(renderer);
+    if (bars.length > 0 && Number(bars[0].props['aria-valuenow']) === 100) {
+      assert.match(flatText(renderer.root), /Completato/, 'il 100% è accompagnato dal suo stato');
+      assert.match(flatText(renderer.root), /Analisi del documento in corso/, 'la schermata di attesa resta finché il 100% è in corso');
+      return true;
+    }
+    if (!flatText(renderer.root).includes('Analisi del documento in corso')) return false;
+  }
+  return false;
+}
+
+test('progresso: durante l’attesa la barra è visibile, dichiarata stima e mai oltre 85%', async () => {
+  let renderer: any;
+  try {
+    renderer = await renderModal();
+    await goToSource(renderer, 'personal');
+    await pickFile(renderer, makeFile('orario.jpg', 'image/jpeg', 30_000));
+    await withPendingAnalysis(async gate => {
+      await sendForAnalysis(renderer);
+
+      assert.match(flatText(renderer.root), /Analisi del documento in corso/, 'lo schermo di attesa è in primo piano');
+      assert.equal(progressBar(renderer).length, 1, 'la barra di progresso è mostrata');
+
+      // Qualche tick reale: l'animazione deve muoversi senza toccare il tetto.
+      const values: number[] = [];
+      for (let i = 0; i < 6; i++) {
+        await act(async () => { await new Promise(r => setTimeout(r, 120)); });
+        const bar = progressBar(renderer)[0];
+        assert.ok(bar, 'la barra resta montata per tutta l’attesa');
+        const value = Number(bar.props['aria-valuenow']);
+        values.push(value);
+        assert.ok(Number.isInteger(value), `percentuale numerica intera (${value})`);
+        assert.ok(value >= 0 && value <= 85, `in attesa la stima resta fra 0 e 85% (è ${value})`);
+      }
+      assert.ok(values[values.length - 1] >= values[0], 'l’avanzamento cresce nel tempo');
+      assert.ok(values[values.length - 1] > 0, 'la barra si muove davvero, non è un indicatore fisso');
+
+      const bar = progressBar(renderer)[0];
+      assert.equal(bar.props['aria-valuemin'], 0, 'progressbar: minimo dichiarato');
+      assert.equal(bar.props['aria-valuemax'], 100, 'progressbar: massimo dichiarato');
+      assert.match(String(bar.props['aria-valuetext']), /avanzamento stimato \d+%/i, 'gli screen reader leggono una stima, non una misura certa');
+      const status = byId(renderer, 'analysis-progress-status');
+      assert.equal(status.props.role, 'status', 'lo stato è annunciato agli screen reader');
+      assert.equal(status.props['aria-live'], 'polite', 'senza interrompere la lettura in corso');
+      assert.match(flatText(status), /Preparazione documento|Invio sicuro|Analisi del documento/, 'testo di stato corto e leggibile');
+      assert.match(flatText(renderer.root), /non è una percentuale reale/, 'dichiara che il servizio cloud non espone una percentuale');
+      assert.ok(!flatText(renderer.root).includes('100%'), 'mai «completato» mentre si aspetta la risposta');
+
+      // La risposta arriva: la rampa chiude al 100% e si passa alla revisione.
+      gate.respond(personalResponse);
+      assert.ok(await expectCompletionFlash(renderer), 'il 100% compare solo a risposta arrivata');
+      await waitForAnalysisSettled(renderer);
+      assert.equal(progressBar(renderer).length, 0, 'finita l’analisi la barra non resta a schermo');
+      assert.match(flatText(renderer.root), /riga/, 'si vede la revisione dell’orario personale');
+    });
+  } finally {
+    if (renderer) await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('progresso: il 100% «Completato» appare solo dopo la risposta, prima dei risultati', async () => {
+  let renderer: any;
+  try {
+    renderer = await renderModal();
+    await goToSource(renderer, 'registro');
+    await pickFile(renderer, makeFile('registro.jpg', 'image/jpeg', 25_000));
+    await withPendingAnalysis(async gate => {
+      await sendForAnalysis(renderer);
+      await act(async () => { await new Promise(r => setTimeout(r, 200)); });
+      assert.ok(!flatText(renderer.root).includes('Completato'), 'nessun «Completato» prima della risposta');
+
+      gate.respond(studentResponse);
+      // Il 100% deve essere VISIBILE per un istante (hold), non bruciato in un frame.
+      assert.ok(await expectCompletionFlash(renderer), 'dopo la risposta la barra arriva al 100%');
+      await waitForAnalysisSettled(renderer);
+      assert.equal(progressBar(renderer).length, 0, 'poi lo schermo lascia il passo ai risultati');
+      assert.match(flatText(renderer.root), /Impegni estratti/, 'la schermata successiva mostra i candidati impegno');
+    });
+  } finally {
+    if (renderer) await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('progresso: errore = animazione fermata, messaggio esistente, retry che riparte', async () => {
+  fetchResponse = { status: 503, json: { success: false, error: 'Il documento non è stato elaborato. Riprova.' } };
+  let renderer: any;
+  try {
+    renderer = await renderModal();
+    await goToSource(renderer, 'personal');
+    await pickFile(renderer, makeFile('orario.jpg', 'image/jpeg', 30_000));
+    await analyzeWithConsent(renderer);
+
+    assert.equal(progressBar(renderer).length, 0, 'sopra il messaggio di errore non resta nessuna barra');
+    assert.ok(!flatText(renderer.root).includes('Analisi del documento in corso'), 'l’attesa non è più in primo piano');
+    const alert = renderer.root.findByProps({ role: 'alert' });
+    assert.match(flatText(alert), /non è stato elaborato/, 'il messaggio di errore esistente è visibile');
+    assert.match(flatText(renderer.root), /Controlla il documento/, 'si torna alla schermata da cui riprovare');
+
+    // Retry: l'animazione riparte da zero, non riprende il valore precedente.
+    fetchResponse = { status: 200, json: personalResponse };
+    await withPendingAnalysis(async gate => {
+      await sendForAnalysis(renderer);
+      await act(async () => { await new Promise(r => setTimeout(r, 150)); });
+      const bars = progressBar(renderer);
+      assert.equal(bars.length, 1, 'una nuova analisi mostra di nuovo la barra');
+      const value = Number(bars[0].props['aria-valuenow']);
+      assert.ok(value >= 0 && value <= 85, `la ripresa non parte da 100% (${value})`);
+      gate.respond(personalResponse);
+      await waitForAnalysisSettled(renderer);
+      assert.equal(progressBar(renderer).length, 0, 'e si chiude normalmente');
+      assert.match(flatText(renderer.root), /riga/, 'la retry arriva alla revisione');
+    });
+  } finally {
+    if (renderer) await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('progresso: chiusura durante l’attesa ferma l’animazione e ignora la risposta tardiva', async () => {
+  let renderer: any;
+  try {
+    renderer = await renderModal();
+    await goToSource(renderer, 'personal');
+    await pickFile(renderer, makeFile('orario.jpg', 'image/jpeg', 30_000));
+    await withPendingAnalysis(async () => {
+      await sendForAnalysis(renderer);
+      await act(async () => { await new Promise(r => setTimeout(r, 200)); });
+      assert.equal(progressBar(renderer).length, 1, 'l’analisi è in corso');
+      // L'utente chiude mentre aspetta (in App il modale viene spento e smontato).
+      const closing = renderer;
+      renderer = null;
+      await act(async () => { closing.unmount(); });
+    });
+  } finally {
+    if (renderer) await act(async () => { renderer.unmount(); });
+  }
+
+  // Nuova apertura: nessun progresso residuo, nessun «completato» ereditato.
+  let reopened: any;
+  try {
+    reopened = await renderModal();
+    assert.equal(progressBar(reopened).length, 0, 'nessuna barra animata alla riapertura');
+    assert.ok(!flatText(reopened.root).includes('Completato'), 'nessun 100% ereditato dalla sessione chiusa');
+    assert.match(flatText(reopened.root), /Scansiona documento/, 'si riparte dalla scelta del documento');
+  } finally {
+    if (reopened) await act(async () => { reopened.unmount(); });
+  }
 });
