@@ -104,6 +104,12 @@ interface PersonalReviewState {
   matches: Array<{ rowIndex: number; rowLabel: string }>;
   confirmedRow: number | null;
   skipped: SkippedCell[];
+  /**
+   * Righe/giorni del documento la cui numerazione delle ore non è ancorabile alla
+   * griglia (duplicati nei periodIndex): l'AI non è stata chiara, le ore vanno
+   * verificate a mano prima di salvare. 0 = posizioni coerenti con le colonne.
+   */
+  positionIssues: number;
 }
 
 export interface DocumentScannerModalProps {
@@ -362,7 +368,14 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
         if (revision !== readingRevision.current) return;
         const cells = result.cells ?? [];
         const rows = result.rows ?? [];
-        const reviewState: PersonalReviewState = { rows, cells, matches: findTeacherRows(rows, profile.fullName), confirmedRow: null, skipped: [] };
+        const reviewState: PersonalReviewState = {
+          rows,
+          cells,
+          matches: findTeacherRows(rows, profile.fullName),
+          confirmedRow: null,
+          skipped: [],
+          positionIssues: result.positionIssues ?? 0,
+        };
         completeProgress(() => {
           if (revision !== readingRevision.current) return; // modale chiuso o analisi annullata: nulla da mostrare
           setPersonal(reviewState);
@@ -892,6 +905,17 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
           {/* STEP: revisione orario personale */}
           {step === "review-personal" && personal && (
             <div className="space-y-4">
+              {personal.positionIssues > 0 && (
+                <p
+                  id="scan-personal-position-issues"
+                  role="alert"
+                  className="text-[11px] leading-snug p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-900"
+                >
+                  Nel documento l&apos;intestazione delle ore non è stata chiara per {personal.positionIssues}{" "}
+                  {personal.positionIssues === 1 ? "giorno" : "giorni"}: controlla tu il numero d&apos;ora di ogni
+                  lezione qui sotto prima di salvare (una colonna vuota non deve far scorrere le ore dopo).
+                </p>
+              )}
               {personal.confirmedRow === null ? (
                 <>
                   <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 text-xs text-stone-600 space-y-1">

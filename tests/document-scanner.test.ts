@@ -8,6 +8,7 @@ import {
   findTeacherRows,
   restrictCurricularSlotsToCoordinates,
   summarizeCurricularCoverage,
+  anchorPersonalCellsToGrid,
   personalCellsToCandidates,
   teacherSurnames,
   validateCurricularTimetablePayload,
@@ -17,6 +18,7 @@ import {
   type TimetableRawCell,
 } from '../src/utils/timetableAnalysis';
 import { crossrefTimetables, dedupeSubjects, reconSignal, sameClassLabel, RECON_NOTES } from '../src/utils/timetableCrossref';
+import { parseTimetableAiResponse } from '../server/timetableAnalysis';
 import {
   SUPPORT_TEACHER_SUBJECT,
   applyReconstruction,
@@ -178,6 +180,146 @@ test('orario personale Manganiello: preserva le 18 coordinate assolute e le colo
   assert.equal(candidates.some(c => c.dayOfWeek === 4 && c.periodIndex === 1), false, 'Giovedì 1 vuoto');
   assert.equal(candidates.find(c => c.dayOfWeek === 4 && c.periodIndex === 4)?.classLabel, '3E');
   assert.equal(candidates.some(c => c.dayOfWeek === 5 && (c.periodIndex === 4 || c.periodIndex === 5)), false, 'Venerdì 4 e 5 vuoti');
+});
+
+// ---------------------------------------------------------------------------
+// 9c. ORARIO PERSONALE: LA POSIZIONE NELLA GRIGLIA DETERMINA IL PERIODO
+//     Una cella vuota non deve mai far scorrere a sinistra le ore successive.
+//     Ground truth: documento reale del docente di sostegno, 18 ore su 5x5.
+// ---------------------------------------------------------------------------
+
+const REAL_GRID: Array<Array<string | undefined>> = [
+  [undefined, '3D', '3D', '3E', '3E'],        // LUNEDÌ
+  ['3D', undefined, '3D', '3D', '3E'],        // MARTEDÌ
+  [undefined, '3E', '3E', '3D', '3E'],        // MERCOLEDÌ
+  [undefined, '3E', '3D', '3E', undefined],   // GIOVEDÌ
+  ['3E', '3D', '3E', undefined, undefined],   // VENERDÌ
+];
+
+/** Le 18 coordinate (giorno, periodo, classe) del documento, 1-based come in archivio. */
+const REAL_COORDINATES = REAL_GRID.flatMap((periods, dayIndex) =>
+  periods
+    .map((raw, periodIndex) => ({ day: dayIndex + 1, period: periodIndex + 1, raw: raw as string }))
+    .filter(c => c.raw !== undefined)
+);
+
+/**
+ * Payload AI nel formato richiesto al modello per l'orario personale: UNA cella
+ * per OGNI colonna della griglia, anche vuote (`raw: ""`), in ordine da sinistra.
+ * `numbering` modella la numerazione che il modello restituisce (può essere
+ * sbagliata: è il parsing che deve ancorare le celle alle colonne).
+ */
+function densePersonalPayload(numbering: 'columns' | 'rowCounter' | 'reversed' | 'duplicates' = 'columns') {
+  const cells: Array<{ rowIndex: number; dayOfWeek: number; periodIndex: number; raw: string }> = [];
+  let running = 0;
+  REAL_GRID.forEach((periods, dayIndex) => {
+    periods.forEach((raw, periodIndex) => {
+      running += 1;
+      let period = periodIndex + 1;
+      if (numbering === 'rowCounter') period = running;                    // contatore progressivo sull'intera riga
+      if (numbering === 'reversed') period = periods.length - periodIndex; // colonne invertite
+      if (numbering === 'duplicates') period = Math.ceil(period / 2);      // due colonne sullo stesso numero
+      cells.push({ rowIndex: 0, dayOfWeek: dayIndex + 1, periodIndex: period, raw: raw ?? '' });
+    });
+  });
+  return { rows: ['Manganiello F.'], periodsPerDay: periodsPerDayOf(), cells };
+}
+
+function periodsPerDayOf(): number {
+  return REAL_GRID[0].length;
+}
+
+/** Pipeline reale: risposta AI -> celle validate/ancorate -> candidati -> slot salvati. */
+function personalFromPayload(payload: unknown) {
+  const outcome = parseTimetableAiResponse('personal-support-timetable', payload);
+  const extraction = personalCellsToCandidates(outcome.cells, [0]);
+  const recon = crossrefTimetables(extraction.candidates, []).map(s => ({ ...s, correctedClass: s.classLabel ?? '' }));
+  const slots = reconstructedToTimetableSlots(recon, { profile, timeSlotConfig: undefined });
+  return { outcome, candidates: extraction.candidates, skipped: extraction.skipped, slots };
+}
+
+const coords = (values: Array<{ day: number; period: number } | { dayOfWeek: number; periodNumber: number }>) =>
+  new Set(values.map(v => 'day' in v ? `${v.day}|${v.period}` : `${v.dayOfWeek}|${v.periodNumber}`));
+
+/** ASSERT OBBLIGATORI: 18 slot, nessuna ora sulle colonne vuote, classi sulle giuste coordinate. */
+function assertRealGrid(label: string, slots: Array<{ dayOfWeek: number; periodNumber: number; className?: string }>) {
+  const expected = coords(REAL_COORDINATES);
+  const got = coords(slots);
+  assert.equal(REAL_COORDINATES.length, 18, 'la griglia di riferimento ha 18 ore');
+  assert.equal(slots.length, 18, `${label}: 18 slot totali`);
+  assert.deepEqual([...got].sort(), [...expected].sort(), `${label}: le coordinate sono quelle del documento`);
+  assert.equal(got.has('2|2'), false, `${label}: nessuno slot Martídì periodo 2`);
+  assert.equal(got.has('1|1'), false, `${label}: nessuno slot Lunedì periodo 1`);
+  assert.equal(got.has('3|1'), false, `${label}: nessuno slot Mercoledì periodo 1`);
+  assert.equal(got.has('4|1'), false, `${label}: nessuno slot Giovedì periodo 1`);
+  assert.equal(got.has('4|5'), false, `${label}: nessuno slot Giovedì periodo 5`);
+  assert.equal(got.has('5|4'), false, `${label}: nessuno slot Venerdì periodo 4`);
+  assert.equal(got.has('5|5'), false, `${label}: nessuno slot Venerdì periodo 5`);
+  for (const c of REAL_COORDINATES) {
+    const slot = slots.find(s => s.dayOfWeek === c.day && s.periodNumber === c.period);
+    assert.equal(slot?.className, c.raw, `${label}: ${DAY_LABELS[c.day]} ${c.period}ª = ${c.raw}`);
+  }
+}
+
+test('orario personale (ground truth 18 ore): payload denso -> coordinate esatte, nessuna ora che slitta', () => {
+  const { outcome, candidates, skipped, slots } = personalFromPayload(densePersonalPayload());
+  assert.equal(outcome.periodsPerDay, 5, 'geometria della griglia riconosciuta');
+  assert.equal(outcome.positionIssues, 0, 'numerazione coerente: nessun avviso');
+  assert.equal(candidates.length, 18, 'solo le celle con un valore diventano candidati');
+  assert.equal(skipped.length, 0, 'le colonne vuote NON sono celle «non interpretate»');
+  assertRealGrid('denso', slots);
+});
+
+test('orario personale: numerazione AI rinumerata/invertita/duplicata non sposta le ore (vince la colonna)', () => {
+  for (const numbering of ['rowCounter', 'reversed', 'duplicates'] as const) {
+    const { outcome, slots } = personalFromPayload(densePersonalPayload(numbering));
+    assert.equal(outcome.positionIssues, 0, `${numbering}: griglia ricostruibile, nessuna posizione da verificare`);
+    assertRealGrid(numbering, slots);
+  }
+});
+
+test('orario personale: payload senza celle vuote (numeri assoluti) mantiene le 18 coordinate, mai ricompattate', () => {
+  const cells = REAL_GRID.flatMap((periods, dayIndex) => periods.flatMap((raw, periodIndex) =>
+    raw === undefined ? [] : [{ rowIndex: 0, dayOfWeek: dayIndex + 1, periodIndex: periodIndex + 1, raw }]
+  ));
+  const { outcome, candidates, slots } = personalFromPayload({ rows: ['Manganiello F.'], cells });
+  assert.equal(candidates.length, 18);
+  assert.equal(outcome.positionIssues, 0, 'nessun duplicato: posizioni già ancorate ai numeri del documento');
+  assertRealGrid('senza vuoti', slots);
+});
+
+test('orario personale: [3D, vuoto, 3D, 3D, 3E] produce i periodi 1, 3, 4, 5 (mai 1, 2, 3, 4)', () => {
+  const day = (cells: Array<{ periodIndex: number; raw: string }>) =>
+    anchorPersonalCellsToGrid(cells.map((c, i) => ({ rowIndex: 0, dayOfWeek: 2, periodIndex: c.periodIndex, raw: c.raw })), 5)
+      .cells.filter(c => c.raw).map(c => c.periodIndex);
+
+  assert.deepEqual(day([
+    { periodIndex: 1, raw: '3D' }, { periodIndex: 2, raw: '' }, { periodIndex: 3, raw: '3D' },
+    { periodIndex: 4, raw: '3D' }, { periodIndex: 5, raw: '3E' },
+  ]), [1, 3, 4, 5], 'colonna vuota in posizione 2: le ore dopo restano sulle loro colonne');
+
+  // Stessa griglia, ma con il contatore che salta le vuote: ancorare alle colonne la corregge.
+  assert.deepEqual(day([
+    { periodIndex: 1, raw: '3D' }, { periodIndex: 1, raw: '' }, { periodIndex: 2, raw: '3D' },
+    { periodIndex: 3, raw: '3D' }, { periodIndex: 4, raw: '3E' },
+  ]), [1, 3, 4, 5], 'una colonna vuota non fa scorrere le ore successive');
+});
+
+test('orario personale: numerazione incoerente -> avviso, ma nessuna ora spostata o inventata', () => {
+  const payload = {
+    rows: ['Manganiello F.'],
+    periodsPerDay: 2,
+    cells: [
+      { rowIndex: 0, dayOfWeek: 1, periodIndex: 1, raw: '3D' },
+      { rowIndex: 0, dayOfWeek: 1, periodIndex: 1, raw: '3E' },  // stesso periodo dichiarato due volte
+      { rowIndex: 0, dayOfWeek: 1, periodIndex: 7, raw: '3D' },  // fuori dalle colonne dell'intestazione
+    ],
+  };
+  const outcome = parseTimetableAiResponse('personal-support-timetable', payload);
+  assert.equal(outcome.positionIssues, 1, 'un giorno incoerente = un avviso (non una ricompattazione)');
+  assert.equal(outcome.cells.length, 3, 'nessuna cella scartata');
+  assert.deepEqual(outcome.cells.map(c => c.periodIndex), [1, 1, 7], 'le posizioni restano quelle del documento');
+  assert.deepEqual(outcome.cells.map(c => c.raw), ['3D', '3E', '3D'], 'nessun valore inventato o spostato');
 });
 
 test('orario personale: validazione runtime della risposta AI (shape obbligatoria)', () => {

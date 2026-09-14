@@ -504,6 +504,10 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
       rows: outcome.rows,
       curricularRows: outcome.curricularRows,
       cells: outcome.cells,
+      // Solo per l'orario personale: geometria della griglia e posizioni non ancorate.
+      // Nessun contenuto del documento: sono conteggi.
+      periodsPerDay: outcome.periodsPerDay,
+      positionIssues: outcome.positionIssues,
     });
   } catch {
     console.warn("Analisi orario non riuscita.");

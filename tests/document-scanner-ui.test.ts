@@ -1214,3 +1214,37 @@ test('isOpen true -> false -> true a componente montato: stesso ordine di hook, 
 
   assert.deepEqual(consoleErrors.filter(line => /hook/i.test(line)), [], 'nessun «Rendered fewer/more hooks than expected»');
 });
+
+// ---------------------------------------------------------------------------
+// 24. ORARIO PERSONALE: posizioni non ancorabili alla griglia = avviso, mai silenzioso
+// ---------------------------------------------------------------------------
+
+test('revisione personale: la nota sulle ore da verificare compare solo se il documento \u00e8 ambiguo', async () => {
+  // Payload con numerazione incoerente: il server conteggia i giorni non ancorabili.
+  fetchResponse = { status: 200, json: { ...personalResponse, positionIssues: 2, periodsPerDay: 5 } };
+  const renderer = await renderModal();
+  try {
+    await goToSource(renderer, 'personal');
+    await pickFile(renderer, makeFile('orario.jpg', 'image/jpeg', 30_000));
+    await analyzeWithConsent(renderer);
+    assert.match(flatText(renderer.root), /riga/, 'si \u00e8 nella revisione della riga');
+    const note = byId(renderer, 'scan-personal-position-issues');
+    assert.equal(note.props.role, 'alert', 'l\u2019avviso viene annunciato');
+    assert.match(flatText(note), /intestazione delle ore non \u00e8 stata chiara per 2 giorni/);
+    assert.match(flatText(note), /controlla tu il numero d.ora di ogni/, 'dice cosa fare, senza toccare i dati');
+    assert.match(flatText(note), /non deve far scorrere le ore dopo/);
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+
+  fetchResponse = { status: 200, json: personalResponse };
+  const clean = await renderModal();
+  try {
+    await goToSource(clean, 'personal');
+    await pickFile(clean, makeFile('orario.jpg', 'image/jpeg', 30_000));
+    await analyzeWithConsent(clean);
+    assert.equal(clean.root.findAll((el: any) => el.props?.id === 'scan-personal-position-issues').length, 0, 'nessun avviso con posizioni coerenti');
+  } finally {
+    await act(async () => { clean.unmount(); });
+  }
+});

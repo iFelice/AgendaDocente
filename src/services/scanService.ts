@@ -29,6 +29,10 @@ export interface ScanTimetableResult {
   curricularRows?: Array<{ rowIndex: number; rowLabel?: string; subject?: string; classes?: string[] }>;
   /** Celle grezze della griglia giorno/periodo (validate a runtime). */
   cells?: Array<{ rowIndex: number; dayOfWeek: number; periodIndex: number; raw: string }>;
+  /** Colonne-periodo della griglia personale (dal documento). */
+  periodsPerDay?: number;
+  /** Righe/giorni personali con posizioni non ancorabili: da verificare in revisione. */
+  positionIssues?: number;
 }
 
 export interface ScanStudentDocumentRequest {
@@ -133,6 +137,8 @@ export async function analyzeTimetableDocument(req: ScanTimetableRequest): Promi
   };
   if (Array.isArray(data.rows)) result.rows = data.rows.map(String);
   if (Array.isArray(data.curricularRows)) result.curricularRows = data.curricularRows as ScanTimetableResult["curricularRows"];
+  if (typeof data.periodsPerDay === "number") result.periodsPerDay = data.periodsPerDay;
+  if (typeof data.positionIssues === "number") result.positionIssues = data.positionIssues;
   return result;
 }
 

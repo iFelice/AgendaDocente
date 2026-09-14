@@ -103,12 +103,132 @@ export function validateRawCell(v: unknown, index: number): TimetableRawCell {
   return { rowIndex: v.rowIndex, dayOfWeek: v.dayOfWeek, periodIndex: v.periodIndex, raw: v.raw.trim() };
 }
 
+/** Colonne-periodo massime plausibili in una griglia orario (geometria reale). */
+const MAX_GRID_PERIODS = 24;
+/**
+ * Limite alto per il `periodIndex` GREZZO dell'orario personale: il numero del
+ * modello è dato non fidato (può essere un contatore progressivo su tutta la
+ * riga) e viene ancorato alle colonne della griglia subito dopo. Quindi la forma
+ * viene validata in un range ampio (60: oltre è un payload assurdo) e la coerenza
+ * con la griglia la verifica l'ancoraggio, non la validazione del singolo campo.
+ */
+const MAX_GRID_INDEX_INPUT = 60;
+
+/**
+ * Cella personale grezza: stessa validazione di `validateRawCell`, ma con range
+ * ampio sul `periodIndex` (la numerazione verrà ancorata alle colonne della griglia).
+ */
+function validatePersonalRawCell(v: unknown, index: number): TimetableRawCell {
+  if (!record(v) || !intWithin(v.rowIndex, 0, 100) || !intWithin(v.dayOfWeek, 1, 6)
+    || !intWithin(v.periodIndex, 1, MAX_GRID_INDEX_INPUT) || !str(v.raw, 60)) invalidShape(`Cella orario non valida (#${index}).`);
+  return { rowIndex: v.rowIndex, dayOfWeek: v.dayOfWeek, periodIndex: v.periodIndex, raw: v.raw.trim() };
+}
+
+export interface PersonalGridAnchor {
+  /** Celle con `periodIndex` ancorato alle colonne della griglia. */
+  cells: TimetableRawCell[];
+  /** Colonne per giorno usate per l'ancoraggio (0: griglia non determinabile). */
+  periodsPerDay: number;
+  /** (riga, giorno) con numerazione incoerente: posizioni da verificare a mano. */
+  positionIssues: number;
+}
+
+/**
+ * Àncora le celle estratte alla GRIGLIA del documento.
+ *
+ * Regola: **la posizione della cella determina il periodo**, non il numero di
+ * celle non vuote che la precedono. Una cella vuota non deve far scorrere a
+ * sinistra le ore successive ([3D, vuota, 3D, 3D, 3E] -> periodi 1, 3, 4, 5,
+ * mai 1, 2, 3, 4).
+ *
+ * Come funziona, senza alcuna inferenza sul contenuto:
+ * - la griglia di un orario è rettangolare, quindi le colonne per giorno sono
+ *   `periodsPerDay` dichiarato dal documento quando c'è, altrimenti il numero
+ *   di colonne osservato;
+ * - se una riga/giorno ha UNA cella per ogni colonna (anche le vuote, con
+ *   `raw: ""` — è il formato richiesto all'AI) il periodo è la POSIZIONE nella
+ *   griglia, cioè l'ordine con cui le colonne sono state lette da sinistra: la
+ *   numerazione del modello NON viene usata per decidere l'ora (è esattamente il
+ *   canale che sbaglia: contatore delle sole celle non vuote, progressione sulla
+ *   riga, duplicati) quindi non può far slittare nulla;
+ * - se una riga/giorno è incompleta (l'AI ha omesso le colonne vuote) la
+ *   posizione non è deducibile: i numeri assoluti del modello vengono mantenuti
+ *   così come sono (mai ricompattati) e, se sono incoerenti tra loro (stesso
+ *   periodo due volte), il gruppo viene contato in `positionIssues`: è l'unico
+ *   caso in cui l'UI deve avvisare che l'ora va verificata.
+ */
+export function anchorPersonalCellsToGrid(cells: TimetableRawCell[], declaredPeriodsPerDay?: number): PersonalGridAnchor {
+  const declared = intWithin(declaredPeriodsPerDay, 1, MAX_GRID_PERIODS) ? declaredPeriodsPerDay! : 0;
+  if (cells.length === 0) return { cells, periodsPerDay: declared, positionIssues: 0 };
+
+  let observed = 0;
+  for (const cell of cells) observed = Math.max(observed, cell.periodIndex);
+  // La geometria dichiarata dal documento (intestazione) prevale sul massimo
+  // osservato: è l'unica àncora indipendente dalla numerazione del modello.
+  const width = declared > 0 ? declared : observed;
+
+  const groups = new Map<string, TimetableRawCell[]>();
+  for (const cell of cells) {
+    const key = `${cell.rowIndex}|${cell.dayOfWeek}`;
+    const group = groups.get(key);
+    if (group) group.push(cell);
+    else groups.set(key, [cell]);
+  }
+
+  let positionIssues = 0;
+  const anchored: TimetableRawCell[] = [];
+  for (const group of groups.values()) {
+    if (group.length === width) {
+      // Densa: una cella per colonna, lette da sinistra. Il periodo è la posizione
+      // nella griglia — NON l'indice restituito dal modello, che qui viene ignorato.
+      group.forEach((cell, index) => anchored.push({ ...cell, periodIndex: index + 1 }));
+      continue;
+    }
+    // Incompleta: l'unico indizio disponibile è la numerazione del modello.
+    const ordered = [...group].sort((a, b) => a.periodIndex - b.periodIndex);
+    // (l'AI ha omesso le colonne vuote): la posizione esatta non è deducibile,
+    // quindi i numeri assoluti del modello restano gli unici usati e NON vengono
+    // mai ricompattati o rinumerati per "indovinare" le vuote.
+    const seen = new Set<number>();
+    let coherent = true;
+    for (const cell of ordered) {
+      // Numeri duplicati sulla stessa riga/giorno, o fuori dalle colonne dichiarate:
+      // la griglia non è ricostruibile e la posizione di quell'ora va verificata.
+      if (seen.has(cell.periodIndex) || cell.periodIndex > width) coherent = false;
+      seen.add(cell.periodIndex);
+    }
+    if (!coherent) positionIssues++;
+    anchored.push(...ordered);
+  }
+
+  return {
+    cells: anchored.sort((a, b) => a.rowIndex - b.rowIndex || a.dayOfWeek - b.dayOfWeek || a.periodIndex - b.periodIndex),
+    periodsPerDay: width,
+    positionIssues,
+  };
+}
+
 /** Valida la risposta grezza per l'orario personale/sostegno: { rows, cells }. */
-export function validatePersonalTimetablePayload(raw: unknown): { rows: string[]; cells: TimetableRawCell[] } {
+export function validatePersonalTimetablePayload(raw: unknown): {
+  rows: string[];
+  cells: TimetableRawCell[];
+  periodsPerDay: number;
+  positionIssues: number;
+} {
   if (!record(raw)) invalidShape("Risposta analisi non valida.");
   if (!Array.isArray(raw.rows) || raw.rows.length > 60 || !raw.rows.every(r => str(r, 80))) invalidShape("Righe del documento non valide.");
   if (!Array.isArray(raw.cells) || raw.cells.length > 500) invalidShape("Celle del documento non valide.");
-  return { rows: raw.rows.map(r => String(r).trim()), cells: raw.cells.map((c, i) => validateRawCell(c, i)) };
+  if (raw.periodsPerDay !== undefined && !intWithin(raw.periodsPerDay, 0, MAX_GRID_PERIODS)) invalidShape("Colonne della griglia non valide.");
+  const cells = raw.cells.map((c, i) => validatePersonalRawCell(c, i));
+  // Le posizioni vengono ancorate alla griglia QUI: è l'unico punto in cui il
+  // documento viene interpretato, così nessun chiamante può dimenticarlo.
+  const anchored = anchorPersonalCellsToGrid(cells, intWithin(raw.periodsPerDay, 1, MAX_GRID_PERIODS) ? raw.periodsPerDay : undefined);
+  return {
+    rows: raw.rows.map(r => String(r).trim()),
+    cells: anchored.cells,
+    periodsPerDay: anchored.periodsPerDay,
+    positionIssues: anchored.positionIssues,
+  };
 }
 
 /** Valida la risposta grezza per l'orario curricolare: { rows, cells }. */
@@ -251,6 +371,10 @@ export function personalCellsToCandidates(
 
   for (const cell of cells) {
     if (!rows.has(cell.rowIndex)) continue;
+    // Colonna vuota del documento (raw vuoto): serve ad ancorare le posizioni, ma
+    // non è un candidato e non è una cella da interpretare: nessun rumore in
+    // «skipped» (altrimenti ogni ora libera risulterebbe «non letta»).
+    if (!cell.raw.trim()) continue;
     const classes = extractClassesFromCell(cell.raw);
     const base = { id: `${idPrefix}-${cell.rowIndex}-${cell.dayOfWeek}-${cell.periodIndex}`, dayOfWeek: cell.dayOfWeek, periodIndex: cell.periodIndex, sourceType: "personal-support-timetable" as const };
     if (classes.length > 0) {
