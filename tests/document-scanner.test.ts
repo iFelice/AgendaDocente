@@ -273,12 +273,18 @@ test('orario personale (ground truth 18 ore): payload denso -> coordinate esatte
   assertRealGrid('denso', slots);
 });
 
-test('orario personale: numerazione AI rinumerata/invertita/duplicata non sposta le ore (vince la colonna)', () => {
-  for (const numbering of ['rowCounter', 'reversed', 'duplicates'] as const) {
-    const { outcome, slots } = personalFromPayload(densePersonalPayload(numbering));
-    assert.equal(outcome.positionIssues, 0, `${numbering}: griglia ricostruibile, nessuna posizione da verificare`);
-    assertRealGrid(numbering, slots);
-  }
+test('orario personale: numerazione CHE NON è una permutazione di 1..width -> fallback per posizione, MA con avviso', () => {
+  // 'duplicates': ogni giorno numerato 1,1,2,2,3 -> nessuna colonna dichiarata in modo
+  // completo -> si usa l’ordine di emissione e ogni giorno va verificato.
+  const dup = personalFromPayload(densePersonalPayload('duplicates'));
+  assertRealGrid('duplicates', dup.slots);
+  assert.equal(dup.outcome.positionIssues, 5, '5 giorni in fallback = 5 avvisi, mai silenzioso');
+
+  // 'rowCounter': contatore progressivo sulla riga. Il lunedì capitò su 1..5 (permutazione
+  // valida: i numeri comandano e non c’è nulla da verificare), gli altri giorni no.
+  const counter = personalFromPayload(densePersonalPayload('rowCounter'));
+  assertRealGrid('rowCounter', counter.slots);
+  assert.equal(counter.outcome.positionIssues, 4, 'solo i giorni fuori permutazione sono segnalati');
 });
 
 test('orario personale: payload senza celle vuote (numeri assoluti) mantiene le 18 coordinate, mai ricompattate', () => {
@@ -287,7 +293,7 @@ test('orario personale: payload senza celle vuote (numeri assoluti) mantiene le 
   ));
   const { outcome, candidates, slots } = personalFromPayload({ rows: ['Manganiello F.'], cells });
   assert.equal(candidates.length, 18);
-  assert.equal(outcome.positionIssues, 0, 'nessun duplicato: posizioni già ancorate ai numeri del documento');
+  assert.equal(outcome.positionIssues, 1, 'un solo giorno disegna 1..k (venerdì 1,2,3 su griglia da 5): avviso, coordinate però intatte');
   assertRealGrid('senza vuoti', slots);
 });
 
@@ -960,6 +966,105 @@ test('multi-istituto: mono istituto senza UI extra; multi istituto con schoolId 
 });
 
 // ---------------------------------------------------------------------------
+// 9e. ANCORAMENTO DEL FORMATO DENSO: comandano i periodIndex quando dichiarano
+//     ogni colonna una volta sola; il fallback per posizione non è mai silenzioso.
+//     (Caso reale iPhone: vuoto della 1ª ora emesso in coda -> giorno shiftato.)
+// ---------------------------------------------------------------------------
+
+const anchorDay = (cells: Array<{ periodIndex: number; raw: string }>, dayOfWeek = 3, width = 5) =>
+  anchorPersonalCellsToGrid(cells.map(c => ({ rowIndex: 0, dayOfWeek, periodIndex: c.periodIndex, raw: c.raw })), width);
+const dayLabel = (anchored: { cells: Array<{ periodIndex: number; raw: string }> }) =>
+  anchored.cells.map(c => `${c.periodIndex}${c.raw ? ":" + c.raw : ":(vuota)"}`);
+
+/** Stessa griglia reale, ma per ogni giorno la cella vuota è emessa PER ULTIMA. */
+function denseEmptiesLast() {
+  const cells: Array<{ rowIndex: number; dayOfWeek: number; periodIndex: number; raw: string }> = [];
+  REAL_GRID.forEach((periods, dayIndex) => {
+    const rotated = periods
+      .map((raw, i) => ({ raw: raw ?? "", periodIndex: i + 1 }))
+      .sort((a, b) => (a.raw ? 0 : 1) - (b.raw ? 0 : 1)); // valori in ordine, vuoti in coda
+    for (const cell of rotated) cells.push({ rowIndex: 0, dayOfWeek: dayIndex + 1, periodIndex: cell.periodIndex, raw: cell.raw });
+  });
+  return { rows: ["Manganiello F."], periodsPerDay: 5, cells };
+}
+
+test("ancoraggio A: denso ordinato 1..5 -> celle invariate, nessun avviso", () => {
+  const anchored = anchorDay([
+    { periodIndex: 1, raw: "3D" }, { periodIndex: 2, raw: "" }, { periodIndex: 3, raw: "3D" },
+    { periodIndex: 4, raw: "3E" }, { periodIndex: 5, raw: "3E" },
+  ]);
+  assert.deepEqual(dayLabel(anchored), ["1:3D", "2:(vuota)", "3:3D", "4:3E", "5:3E"], "nessuna cella toccata");
+  assert.equal(anchored.positionIssues, 0);
+});
+
+test("ancoraggio B: permutazione esatta ma vuoto emesso in coda -> nessun rispostamento", () => {
+  // Mercoledì reale: [vuota, 3E, 3E, 3D, 3E]. Il modello elenca i valori e chiude con la
+  // colonna vuota, numerandola però 1: la permutazione è completa e va rispettata.
+  const anchored = anchorDay([
+    { periodIndex: 2, raw: "3E" }, { periodIndex: 3, raw: "3E" }, { periodIndex: 4, raw: "3D" },
+    { periodIndex: 5, raw: "3E" }, { periodIndex: 1, raw: "" },
+  ]);
+  assert.deepEqual(dayLabel(anchored), ["1:(vuota)", "2:3E", "3:3E", "4:3D", "5:3E"], "il vuoto resta in 1ª, le ore sulle loro colonne");
+  assert.equal(anchored.positionIssues, 0, "payload che dichiara ogni colonna una volta sola è affidabile");
+  assert.equal(anchored.cells.filter(c => c.raw === "").length, 1, "la cella vuota partecipa all’ancoraggio (viene filtrata solo dopo)");
+});
+
+test("ancoraggio C: martedì reale (buco interno) corretto anche con i vuoti emessi in coda", () => {
+  const anchored = anchorDay([
+    { periodIndex: 1, raw: "3D" }, { periodIndex: 3, raw: "3D" }, { periodIndex: 4, raw: "3D" },
+    { periodIndex: 5, raw: "3E" }, { periodIndex: 2, raw: "" },
+  ], 2);
+  assert.deepEqual(dayLabel(anchored), ["1:3D", "2:(vuota)", "3:3D", "4:3D", "5:3E"]);
+  assert.equal(anchored.positionIssues, 0);
+});
+
+test("ancoraggio D: gruppo denso con numeri duplicati/mancanti -> fallback per posizione + avviso", () => {
+  const duplicated = anchorDay([
+    { periodIndex: 1, raw: "3D" }, { periodIndex: 1, raw: "" }, { periodIndex: 2, raw: "3D" },
+    { periodIndex: 3, raw: "3D" }, { periodIndex: 4, raw: "3E" },
+  ]);
+  assert.deepEqual(duplicated.cells.map(c => c.periodIndex), [1, 2, 3, 4, 5], "le posizioni vengono ricucite da sinistra");
+  assert.equal(duplicated.positionIssues, 1, "il fallback è consentito ma dichiarato");
+  assert.deepEqual(duplicated.cells.filter(c => c.raw).map(c => c.periodIndex), [1, 3, 4, 5], "martedì/giovedì-like: i buchi restano buchi");
+
+  const missingColumn = anchorDay([
+    { periodIndex: 2, raw: "3E" }, { periodIndex: 3, raw: "3E" }, { periodIndex: 4, raw: "3D" },
+    { periodIndex: 5, raw: "3E" }, { periodIndex: 5, raw: "" },
+  ]);
+  assert.equal(missingColumn.positionIssues, 1, "colonna 1 mai reclamata e 5 duplicata: numerazione incoerente");
+});
+
+test("ancoraggio E-F: sparse assoluto mantiene le coordinate; il pattern 1..k avvisa senza rinumerare", () => {
+  const absolute = anchorDay([
+    { periodIndex: 2, raw: "3E" }, { periodIndex: 3, raw: "3E" }, { periodIndex: 4, raw: "3D" },
+    { periodIndex: 5, raw: "3E" },
+  ]);
+  assert.deepEqual(absolute.cells.map(c => `${c.periodIndex}:${c.raw}`), ["2:3E", "3:3E", "4:3D", "5:3E"], "nessuna ricompattazione: i numeri assoluti restano");
+  assert.equal(absolute.positionIssues, 0, "1..k è solo il venerdì-like: qui le colonne partono da 2, nessun pattern sospetto");
+
+  const compact = anchorDay([
+    { periodIndex: 1, raw: "3E" }, { periodIndex: 2, raw: "3E" }, { periodIndex: 3, raw: "3D" },
+    { periodIndex: 4, raw: "3E" },
+  ]);
+  assert.deepEqual(compact.cells.map(c => c.periodIndex), [1, 2, 3, 4], "4 celle numerate 1..4 su griglia da 5: NON vengono spostate né allungate");
+  assert.equal(compact.positionIssues, 1, "pattern sospetto da ricompattazione: solo un avviso");
+});
+
+test("ancoraggio G: ground truth reale con i vuoti in coda -> 18 ore sulle coordinate giuste", () => {
+  const { outcome, candidates, skipped, slots } = personalFromPayload(denseEmptiesLast());
+  assert.equal(outcome.positionIssues, 0, "ogni giorno dichiara 1..5 una volta sola: nessuna posizione da verificare");
+  assert.equal(candidates.length, 18);
+  assert.equal(skipped.length, 0);
+  assertRealGrid("vuoti in coda", slots);
+  const at = (day: number, period: number) => slots.filter(s => s.dayOfWeek === day && s.periodNumber === period);
+  assert.equal(at(3, 1).length, 0, "Mercoledì 1ª resta vuota");
+  assert.equal(at(4, 1).length, 0, "Giovedì 1ª resta vuota: era il fantasma 3E del test reale");
+  assert.equal(at(4, 5).length, 0, "Giovedì 5ª resta vuota");
+  assert.equal(at(1, 1).length, 0, "Lunedì 1ª resta vuota");
+  assert.equal(slots.length, 18, "totale 18 ore");
+});
+
+// ---------------------------------------------------------------------------
 // 9d. BUG REALE (iPhone, dopo il formato denso): la fase di parsing NON deve
 //     far finire l'analisi nel catch generico ("Analisi non riuscita. Riprova.")
 // ---------------------------------------------------------------------------
@@ -1059,7 +1164,7 @@ test('formato denso: la dichiarazione delle colonne è ciò che rende riparabile
       rows: ['Manganiello F.'], periodsPerDay: declared, cells: compacted,
     });
     assert.equal(outcome.periodsPerDay, 5, `periodsPerDay=${JSON.stringify(declared)}`);
-    assert.equal(outcome.positionIssues, 0, `${JSON.stringify(declared)}: griglia ricostruita, nessun avviso`);
+    assert.equal(outcome.positionIssues, 1, `${JSON.stringify(declared)}: riparato per posizione, ma lintelligenza del giorno va verificata (avviso esplicito)`);
     assert.deepEqual(
       outcome.cells.filter(c => c.raw).map(c => c.periodIndex),
       [1, 3, 4, 5],

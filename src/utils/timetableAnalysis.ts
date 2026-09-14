@@ -187,33 +187,38 @@ export interface PersonalGridAnchor {
   cells: TimetableRawCell[];
   /** Colonne per giorno usate per l'ancoraggio (0: griglia non determinabile). */
   periodsPerDay: number;
-  /** (riga, giorno) con numerazione incoerente: posizioni da verificare a mano. */
+  /** (riga, giorno) da verificare a mano: numerazione incoerente o fallback per posizione. */
   positionIssues: number;
 }
 
 /**
  * Àncora le celle estratte alla GRIGLIA del documento.
  *
- * Regola: **la posizione della cella determina il periodo**, non il numero di
- * celle non vuote che la precedono. Una cella vuota non deve far scorrere a
- * sinistra le ore successive ([3D, vuota, 3D, 3D, 3E] -> periodi 1, 3, 4, 5,
- * mai 1, 2, 3, 4).
+ * Regola madre: **la colonna del documento determina il periodo**. Una cella
+ * vuota non deve mai far scorrere a sinistra le ore successive ([3D, vuota, 3D,
+ * 3D, 3E] -> 1, 3, 4, 5, mai 1, 2, 3, 4) e nessuna posizione viene mai
+ * ricostruita sul numero di celle non vuote.
  *
- * Come funziona, senza alcuna inferenza sul contenuto:
- * - la griglia di un orario è rettangolare, quindi le colonne per giorno sono
- *   `periodsPerDay` dichiarato dal documento quando c'è, altrimenti il numero
- *   di colonne osservato;
- * - se una riga/giorno ha UNA cella per ogni colonna (anche le vuote, con
- *   `raw: ""` — è il formato richiesto all'AI) il periodo è la POSIZIONE nella
- *   griglia, cioè l'ordine con cui le colonne sono state lette da sinistra: la
- *   numerazione del modello NON viene usata per decidere l'ora (è esattamente il
- *   canale che sbaglia: contatore delle sole celle non vuote, progressione sulla
- *   riga, duplicati) quindi non può far slittare nulla;
- * - se una riga/giorno è incompleta (l'AI ha omesso le colonne vuote) la
- *   posizione non è deducibile: i numeri assoluti del modello vengono mantenuti
- *   così come sono (mai ricompattati) e, se sono incoerenti tra loro (stesso
- *   periodo due volte), il gruppo viene contato in `positionIssues`: è l'unico
- *   caso in cui l'UI deve avvisare che l'ora va verificata.
+ * Come, senza alcuna inferenza sul contenuto:
+ * - le colonne per giorno sono `periodsPerDay` dichiarato dall'intestazione
+ *   quando c'è, altrimenti il numero di colonne osservato;
+ * - gruppo DENSO (una cella per colonna, vuote `raw: ""` incluse):
+ *   1. se i `periodIndex` sono una PERMUTAZIONE ESATTA di 1..width (ogni colonna
+ *      reclamata una e una sola volta) COMANDANO I NUMERI: il payload dice già
+ *      quale colonna è vuota, e sostituirli con l'ordine dell'array sposterebbe
+ *      l'intero giorno (caso reale: il vuoto della 1ª emesso in coda -> 3E in 1ª);
+ *   2. solo se i numeri NON sono una permutazione (duplicati, buchi, contatore
+ *      delle sole celle piene) si ripiega sull'ordine di emissione, e NON in
+ *      silenzio: `positionIssues++`, perché in quel caso l'unica informazione
+ *      disponibile è la posizione nell'array;
+ * - gruppo incompleto (l'AI ha omesso le colonne vuote): i numeri assoluti sono
+ *   gli unici usati e NON sono mai ricompattati o rinumerati; si conta in
+ *   `positionIssues` sia la numerazione incoerente (duplicati, colonna oltre
+ *   `width`) sia il pattern sospetto `1..k` con `k < width` — identico a un
+ *   giorno legittimamente più corto, quindi è un AVVISO e mai una correzione.
+ *
+ * Le celle vuote partecipano all'ancoraggio (sono la geometria della griglia) e
+ * vengono scartate solo dopo, in `personalCellsToCandidates`.
  */
 export function anchorPersonalCellsToGrid(cells: TimetableRawCell[], declaredPeriodsPerDay?: number): PersonalGridAnchor {
   const declared = intWithin(declaredPeriodsPerDay, 1, MAX_GRID_PERIODS) ? declaredPeriodsPerDay! : 0;
@@ -237,8 +242,20 @@ export function anchorPersonalCellsToGrid(cells: TimetableRawCell[], declaredPer
   const anchored: TimetableRawCell[] = [];
   for (const group of groups.values()) {
     if (group.length === width) {
-      // Densa: una cella per colonna, lette da sinistra. Il periodo è la posizione
-      // nella griglia — NON l'indice restituito dal modello, che qui viene ignorato.
+      // Denso: una cella per colonna, vuote incluse. È affidabile quando ogni
+      // colonna della griglia è reclamata ESATTAMENTE una volta (i periodIndex
+      // sono una permutazione di 1..width): in tal caso le celle restano sulla
+      // LORO colonna, qualunque sia l'ordine con cui l'AI le ha elencate.
+      const numbers = group.map(cell => cell.periodIndex);
+      const declaresEveryColumn = new Set(numbers).size === width && numbers.every(n => n >= 1 && n <= width);
+      if (declaresEveryColumn) {
+        for (const cell of group) anchored.push({ ...cell });
+        continue;
+      }
+      // Numeri incoerenti con la griglia (duplicati, buchi, contatore delle sole
+      // celle piene): resta l'ordine di lettura. Fallback ammesso ma MAI
+      // silenzioso: l'UI deve far verificare le ore del giorno.
+      positionIssues++;
       group.forEach((cell, index) => anchored.push({ ...cell, periodIndex: index + 1 }));
       continue;
     }
@@ -255,7 +272,12 @@ export function anchorPersonalCellsToGrid(cells: TimetableRawCell[], declaredPer
       if (seen.has(cell.periodIndex) || cell.periodIndex > width) coherent = false;
       seen.add(cell.periodIndex);
     }
-    if (!coherent) positionIssues++;
+    // Pattern sospetto da ricompattazione: k celle numerate esattamente 1..k su
+    // una griglia da `width` colonne. NON è distinguibile da un giorno
+    // legittimamente più corto, quindi si SEGNALA e basta: nessuna cella viene
+    // spostata e nessuna numerazione viene "corretta" (mai inventare).
+    const compactPrefix = group.length < width && ordered.every((cell, index) => cell.periodIndex === index + 1);
+    if (!coherent || compactPrefix) positionIssues++;
     anchored.push(...ordered);
   }
 
