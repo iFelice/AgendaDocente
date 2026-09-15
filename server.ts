@@ -77,6 +77,19 @@ export const GEMINI_RESPONSE_RESERVE_MS = 2_000;
 /** Sotto questa soglia un tentativo cloud non può concludersi: si risponde 503. */
 export const GEMINI_MIN_ATTEMPT_MS = 3_000;
 export const GEMINI_MAX_ATTEMPTS_PER_MODEL = 2;
+/**
+ * Quota di budget utile concessa a un modello quando NE RESTANO ALTRI da provare.
+ * Causa reale (log Render su `3546be6`): `categoria=deadline status=504
+ * timeoutMs=43000 durataMs=42555` seguito da `nota=budget di tempo terminato` —
+ * il primo modello si prendeva quasi tutto il budget e `gemini-3.8-flash` non
+ * riceveva nemmeno una chiamata. Con un solo modello da provare il budget resta
+ * invece intero (nessun regresso sulle analisi lente ma legittime).
+ */
+export const GEMINI_NON_LAST_MODEL_SHARE = 0.6;
+/** Tempo che ogni modello successivo deve trovare pronto: 12 s è un tentativo reale. */
+export const GEMINI_FALLBACK_RESERVE_MS = 12_000;
+/** Un retry sullo stesso modello sotto questa soglia sono briciole: si passa il testimone. */
+export const GEMINI_RETRY_MIN_ATTEMPT_MS = 10_000;
 const GEMINI_BACKOFF_BASE_MS = 1_000;
 const GEMINI_BACKOFF_MAX_MS = 8_000;
 const GEMINI_MODEL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{1,63}$/;
@@ -155,6 +168,28 @@ export function classifyGeminiError(error: unknown, options: { aborted: boolean 
 export function geminiAttemptTimeoutMs(remainingMs: number): number {
   const usable = Math.floor(remainingMs) - GEMINI_RESPONSE_RESERVE_MS;
   return usable >= GEMINI_MIN_ATTEMPT_MS ? usable : 0;
+}
+
+/**
+ * Budget di tempo concesso a UN MODELLO (somma dei suoi tentativi + backoff).
+ *
+ * `modelsLeft` è quanti modelli restano da provare, incluso quello corrente:
+ * - ultimo modello (o lista di uno): tutto il budget rimasto meno la riserva;
+ * - modello non ultimo: la quota `GEMINI_NON_LAST_MODEL_SHARE` del budget utile,
+ *   e comunque mai meno di `GEMINI_FALLBACK_RESERVE_MS` per ogni modello che verrà
+ *   (con liste lunghe la share geometrica lascerebbe briciole agli ultimi);
+ * - se il tempo utile è sotto `GEMINI_MIN_ATTEMPT_MS`: 0, nessun tentativo partente.
+ *
+ * È deterministica e non guarda il contenuto della risposta: nessuna micro-cascata,
+ * perché la quota è per MODELLO e non per tentativo.
+ */
+export function geminiModelBudgetMs(remainingMs: number, modelsLeft: number): number {
+  const usable = geminiAttemptTimeoutMs(remainingMs);
+  if (usable === 0) return 0;
+  if (modelsLeft <= 1) return usable;
+  const share = Math.floor(usable * GEMINI_NON_LAST_MODEL_SHARE);
+  const leaveForFallback = usable - (modelsLeft - 1) * GEMINI_FALLBACK_RESERVE_MS;
+  return Math.max(GEMINI_MIN_ATTEMPT_MS, Math.min(share, leaveForFallback));
 }
 
 export interface GeminiAttemptDiagnostic {
@@ -268,7 +303,13 @@ export async function runGeminiJson(opts: RunGeminiJsonOptions): Promise<GeminiJ
   let lastCategory: GeminiFailureCategory = "sconosciuta";
   let backoffMs = GEMINI_BACKOFF_BASE_MS;
 
-  for (const model of models) {
+  for (let modelIndex = 0; modelIndex < models.length; modelIndex += 1) {
+    const model = models[modelIndex];
+    const modelsLeft = models.length - modelIndex;
+    // Quota di tempo di QUESTO modello: se dopo ne restano altri non può prendersi
+    // tutto il budget, altrimenti il fallback arriva a fine corsa e non viene chiamato.
+    const modelStartedAt = now();
+    const modelBudgetMs = geminiModelBudgetMs(opts.budgetMs - (modelStartedAt - startedAt), modelsLeft);
     let useThinking = opts.thinkingLevel === "low";
     let attempt = 0;
     // Il degrado del thinking non consuma un tentativo: stesso modello, senza il
@@ -279,8 +320,16 @@ export async function runGeminiJson(opts: RunGeminiJsonOptions): Promise<GeminiJ
       else attempt += 1;
       if (opts.signal.aborted) return failed("annullata", "richiesta client interrotta o deadline scaduto");
       const remainingMs = opts.budgetMs - (now() - startedAt);
-      const timeoutMs = geminiAttemptTimeoutMs(remainingMs);
-      if (timeoutMs === 0) return failed(attempts.length === 0 ? "budget-esaurito" : lastCategory, "budget di tempo terminato");
+      if (geminiAttemptTimeoutMs(remainingMs) === 0) return failed(attempts.length === 0 ? "budget-esaurito" : lastCategory, "budget di tempo terminato");
+      // Il tentativo non supera MAI la quota del modello: il tempo restante è del fallback.
+      const timeoutMs = Math.min(geminiAttemptTimeoutMs(remainingMs), modelBudgetMs - (now() - modelStartedAt));
+      if (timeoutMs < GEMINI_MIN_ATTEMPT_MS) break; // quota esaurita: testimone al modello successivo
+      if (attempt >= 2 && timeoutMs < GEMINI_RETRY_MIN_ATTEMPT_MS) {
+        // Retry da pochi secondi: mai una micro-cascata. Si lascia il tempo al modello
+        // successivo; se è l'ultimo non c'è altro da provare, si risponde e basta.
+        if (modelsLeft > 1) break;
+        return failed(lastCategory, "budget di tempo terminato");
+      }
 
       const startedAttempt = now();
       const outcome = await attemptGeminiGeneration(client, opts, model, timeoutMs, useThinking);
@@ -302,7 +351,7 @@ export async function runGeminiJson(opts: RunGeminiJsonOptions): Promise<GeminiJ
       }
       if (!isTransientGeminiCategory(category)) break; // modello assente/chiave/schema: passa al modello successivo
       if (attempt >= GEMINI_MAX_ATTEMPTS_PER_MODEL) break; // nessun tentativo residuo: inutile bruciare budget in un'attesa
-      const waitMs = Math.min(backoffMs, Math.max(0, geminiAttemptTimeoutMs(opts.budgetMs - (now() - startedAt)) - GEMINI_MIN_ATTEMPT_MS));
+      const waitMs = Math.min(backoffMs, Math.max(0, Math.min(geminiAttemptTimeoutMs(opts.budgetMs - (now() - startedAt)), modelBudgetMs - (now() - modelStartedAt)) - GEMINI_MIN_ATTEMPT_MS));
       backoffMs = Math.min(backoffMs * 2, GEMINI_BACKOFF_MAX_MS);
       if (waitMs > 0) await sleep(waitMs);
     }

@@ -7,8 +7,12 @@ import {
   GEMINI_MIN_ATTEMPT_MS,
   GEMINI_RESPONSE_RESERVE_MS,
   classifyGeminiError,
+  GEMINI_FALLBACK_RESERVE_MS,
+  GEMINI_NON_LAST_MODEL_SHARE,
+  GEMINI_RETRY_MIN_ATTEMPT_MS,
   geminiAttemptTimeoutMs,
   geminiCandidateModels,
+  geminiModelBudgetMs,
   geminiErrorStatus,
   isTransientGeminiCategory,
   parseGeminiJson,
@@ -158,16 +162,33 @@ test('timeout del tentativo = budget rimasto meno il margine di risposta (mai i 
   assert.ok(geminiAttemptTimeoutMs(30_000) > geminiAttemptTimeoutMs(20_000), 'budget maggiore ⇒ tentativo maggiore');
 });
 
-test('regressione: una generazione da 26 s (limite storico 20 s) completa e l\'analisi riesce', async () => {
-  const { result, calls } = await run((call) => {
-    clock.now += 26_000; // più del vecchio timeout fisso, meno del budget
-    return { text: '{"rows":["Manganiello"],"cells":[]}' };
-  });
-  assert.equal(result.ok, true, 'il tentativo non deve essere tagliato a 20 s');
-  assert.equal(result.source, 'gemini-3.1-flash-lite');
-  assert.equal(attemptTimeout(calls)[0], 45_000 - GEMINI_RESPONSE_RESERVE_MS);
-  assert.equal(calls.length, 1, 'nessuna cascata quando il primo modello ce la fa');
-  assert.deepEqual(result.attempts, [{ model: 'gemini-3.1-flash-lite', attempt: 1, category: 'ok', status: null, durationMs: 26_000, thinking: 'default' }]);
+test('regressione: 26 s non è più tagliata a 20 s; oltre la quota del modello lo completa il fallback', async () => {
+  // Il client finto si comporta come il backend: la chiamata viene interrotta al
+  // timeout concessole (_abort locale + X-Server-Timeout_), non oltre.
+  const slowThenFast = (call: Call, index: number) => {
+    const cost = index === 0 ? 26_000 : 15_000;
+    clock.now += Math.min(cost, call.config.httpOptions.timeout as number);
+    return cost > (call.config.httpOptions.timeout as number)
+      ? apiError(504, 'Deadline exceeded before response.')
+      : { text: '{"rows":["Manganiello"],"cells":[]}' };
+  };
+
+  // Due modelli: il primo ha la sua quota (molto sopra il limite storico di 20 s),
+  // il resto del budget va al fallback, che completa.
+  const cascade = await run(slowThenFast);
+  assert.equal(attemptTimeout(cascade.calls)[0], Math.floor((45_000 - GEMINI_RESPONSE_RESERVE_MS) * GEMINI_NON_LAST_MODEL_SHARE));
+  assert.ok(attemptTimeout(cascade.calls)[0] > 20_000, 'mai più il vecchio tetto fisso di 20 s');
+  assert.equal(cascade.calls.length, 2, 'il modello successivo riceve un tentativo reale');
+  assert.equal(cascade.result.ok, true, 'l\'analisi riesce grazie al fallback');
+  assert.equal(cascade.result.source, GEMINI_CANDIDATE_MODELS_DEFAULT[1]);
+
+  // Un solo modello candidato (configurazione possibile su Render): nessun tetto,
+  // tutto il budget a lui, e la generazione da 26 s completa al primo colpo.
+  const solo = await run(slowThenFast, { models: [GEMINI_CANDIDATE_MODELS_DEFAULT[1]] });
+  assert.equal(attemptTimeout(solo.calls)[0], 45_000 - GEMINI_RESPONSE_RESERVE_MS);
+  assert.equal(solo.result.ok, true);
+  assert.equal(solo.calls.length, 1, 'nessuna cascata quando il modello ce la fa');
+  assert.deepEqual(solo.result.attempts, [{ model: 'gemini-3.8-flash', attempt: 1, category: 'ok', status: null, durationMs: 26_000, thinking: 'default' }]);
 });
 
 // ---------------------------------------------------------------------------
@@ -332,6 +353,137 @@ test('diagnostica leggibile su Render: modello, tentativo, status, categoria, du
     assert.ok(!all.includes(forbidden), `il log non deve contenere "${forbidden}"`);
   }
   assert.match(all.slice(-400), /analisi cloud non riuscita|esito=ok/, 'esito finale o successo registrato');
+});
+
+// ---------------------------------------------------------------------------
+// 8. RIPARTIZIONE DEL BUDGET: il fallback deve ricevere un tentativo reale
+// ---------------------------------------------------------------------------
+
+/**
+ * CAUSA REALE (log Render su `3546be6`, stessa foto PNG dei test precedenti):
+ *   [AI Orari] modello=gemini-3.1-flash-lite tentativo=1/2 esito=fallito
+ *   categoria=deadline status=504 thinking=basso timeoutMs=43000 durataMs=42555
+ *   [AI Orari] analisi cloud non riuscita categoria=deadline
+ *   tentativi=[gemini-3.1-flash-lite:deadline] nota=budget di tempo terminato
+ * Il primo tentativo aveva 43 s su 45: quando li ha esauriti (abort a 42,5 s)
+ * il secondo modello non è stato chiamato nemmeno una volta. I test qui sotto
+ * usano un orologio finto e un client che si interrompe al timeout concessogli,
+ * come fa il backend con `X-Server-Timeout`.
+ */
+
+/** Come il backend: consuma `cost` ma viene interrotto al timeout concesso. */
+const cutAtTimeout = (cost: number, onlyFirst = true) => (call: Call, index: number) => {
+  const timeoutMs = call.config.httpOptions.timeout as number;
+  const slow = !onlyFirst || index === 0;
+  clock.now += slow ? Math.min(cost, timeoutMs) : 12_000;
+  return slow && cost > timeoutMs ? apiError(504, 'Deadline exceeded before response.') : { text: '{"rows":[],"cells":[]}' };
+};
+
+test('deadline sul primo modello: il secondo viene chiamato davvero, con un tentativo utile', async () => {
+  // Entrambi i modelli sarebbero lenti (60 s reali): il primo viene interrotto alla
+  // sua quota, il secondo riceve comunque un tentativo da oltre 17 s.
+  const { result, calls } = await run(cutAtTimeout(60_000, false));
+  const quota = Math.floor((45_000 - GEMINI_RESPONSE_RESERVE_MS) * GEMINI_NON_LAST_MODEL_SHARE);
+  assert.equal(calls.length, 2, 'la cascata arriva al modello successivo');
+  assert.notEqual(attemptTimeout(calls)[0], 45_000 - GEMINI_RESPONSE_RESERVE_MS, 'il primo modello non prende più quasi tutto il budget');
+  assert.equal(attemptTimeout(calls)[0], quota, 'quota = 60% del budget utile');
+  assert.ok(attemptTimeout(calls)[1] >= GEMINI_FALLBACK_RESERVE_MS, `il fallback deve avere un tentativo reale, non ${attemptTimeout(calls)[1]}ms`);
+  assert.equal(result.ok, false, 'se anche il fallback scade, l\'esito resta un 503 classificato');
+  assert.equal(result.category, 'deadline');
+  assert.equal(result.attempts.length, 2, 'quota esaurita: nessun micro-tentativo di riserva sul primo modello');
+});
+
+test('deadline sul primo modello e successo sul secondo: runGeminiJson restituisce successo', async () => {
+  const { result, calls } = await run(cutAtTimeout(60_000));
+  assert.equal(calls[1].model, GEMINI_CANDIDATE_MODELS_DEFAULT[1], 'è stato chiamato il modello di fallback');
+  assert.equal(result.attempts[0].category, 'deadline');
+  // Il fallback ha 17,2 s: una generazione da 12 s sta nel tempo rimasto.
+  assert.equal(calls.length, 2);
+  assert.ok(attemptTimeout(calls)[1] > 12_000, 'il fallback ha spazio per completare');
+  const okRun = await run((call, index) => (index === 0 ? cutAtTimeout(60_000)(call, 0) : { text: '{"rows":["docente"],"cells":[]}' }));
+  assert.equal(okRun.result.ok, true, 'il caso Render: il secondo modello salva l\'analisi');
+  assert.equal(okRun.result.source, GEMINI_CANDIDATE_MODELS_DEFAULT[1]);
+  assert.equal(okRun.result.category, 'ok');
+});
+
+test('primo modello che fallisce in fretta (404): il secondo sfrutta il budget residuo', async () => {
+  const { result, calls } = await run((call, index) => {
+    if (index === 0) {
+      clock.now += 1_200;
+      return apiError(404, 'Publisher model `models/gemini-3.1-flash-lite` was not found.');
+    }
+    clock.now += 20_000; // un\'estrazione lunga, ma entro il tempo rimasto
+    return { text: '{"rows":["docente"],"cells":[]}' };
+  });
+  assert.ok(attemptTimeout(calls)[1] > 40_000, `il fallback riceve il tempo rimasto, non la quota: ${attemptTimeout(calls)[1]}ms`);
+  assert.equal(result.ok, true, 'un errore definitivo rapido non deve rubare tempo al modello valido');
+});
+
+test('ultimo modello: tutto il budget rimasto meno la riserva; la quota si applica solo ai non ultimi', () => {
+  assert.equal(geminiModelBudgetMs(TIMETABLE_ANALYSIS_TIMEOUT_MS, 1), TIMETABLE_ANALYSIS_TIMEOUT_MS - GEMINI_RESPONSE_RESERVE_MS);
+  assert.equal(geminiModelBudgetMs(TIMETABLE_ANALYSIS_TIMEOUT_MS, 2), Math.floor((45_000 - GEMINI_RESPONSE_RESERVE_MS) * GEMINI_NON_LAST_MODEL_SHARE));
+  assert.ok(geminiModelBudgetMs(TIMETABLE_ANALYSIS_TIMEOUT_MS, 2) < geminiModelBudgetMs(TIMETABLE_ANALYSIS_TIMEOUT_MS, 1));
+  const used = geminiModelBudgetMs(45_000, 2);
+  assert.ok(used + GEMINI_RESPONSE_RESERVE_MS + geminiModelBudgetMs(45_000 - used, 1) <= 45_000, 'quota + fallback + riserva stanno nel budget dell\'endpoint');
+  // Con liste lunghe (GEMINI_CANDIDATE_MODELS fino a 5 modelli) la riserva per il fallback
+  // ha la precedenza sulla share: nessuno viene chiamato per finta.
+  assert.equal(geminiModelBudgetMs(45_000, 5), GEMINI_MIN_ATTEMPT_MS, 'quota minima, non briciole casuali');
+});
+
+test('budget troppo basso: comportamento controllato, nessun tentativo sotto GEMINI_MIN_ATTEMPT_MS', async () => {
+  assert.equal(geminiModelBudgetMs(GEMINI_MIN_ATTEMPT_MS + GEMINI_RESPONSE_RESERVE_MS - 1, 2), 0);
+  assert.equal(geminiModelBudgetMs(1_000, 1), 0);
+
+  const nothing = await run(() => ({ text: '{}' }), { budgetMs: 3_000 });
+  assert.equal(nothing.calls.length, 0, 'non parte nessun tentativo destinato a morire a metà');
+  assert.equal(nothing.result.category, 'budget-esaurito');
+
+  const tight = await run((call) => {
+    clock.now += call.config.httpOptions.timeout as number;
+    return apiError(503, 'Model is currently unavailable.');
+  }, { budgetMs: 6_500 });
+  assert.equal(tight.calls.length, 1, 'un solo tentativo reale, poi si risponde 503');
+  assert.ok(attemptTimeout(tight.calls).every((timeout) => timeout >= GEMINI_MIN_ATTEMPT_MS), `nessun micro-tentativo: ${attemptTimeout(tight.calls).join(',')}`);
+  assert.equal(tight.result.category, 'sovraccarico');
+});
+
+test('nessuna regressione sulle categorie: deadline, quota, overload, 404, 400', async () => {
+  const cases: Array<[() => Error, string]> = [
+    [() => apiError(429, 'Resource has been exhausted (per-minute).'), 'quota'],
+    [() => apiError(503, 'Model is currently unavailable.'), 'sovraccarico'],
+    [() => apiError(404, 'Publisher model was not found.'), 'modello-non-trovato'],
+    [() => apiError(400, 'Invalid JSON payload received.'), 'richiesta-non-valida'],
+  ];
+  for (const [make, category] of cases) {
+    const { result } = await run(make);
+    assert.equal(result.category, category, `categoria di ${category}`);
+    assert.equal(result.ok, false);
+  }
+  const aborted = await run(() => {
+    clock.now += 20_000;
+    const error: any = new Error('This operation was aborted');
+    error.name = 'AbortError';
+    return error;
+  });
+  assert.equal(aborted.result.category, 'deadline', 'abort locale resta transitorio');
+  assert.equal(aborted.calls.length, 2, 'retry sul modello e poi cascata, come prima');
+  assert.ok(attemptTimeout(aborted.calls).every((timeout) => timeout > 20_000), `nessun tentativo più corto del limite storico: ${attemptTimeout(aborted.calls).join(',')}`);
+});
+
+test('lista lunga di modelli: ognuno riceve almeno un tentativo, nessuno micro-tentativo di riserva', async () => {
+  const models = ['m1', 'm2', 'm3', 'm4', 'm5'];
+  const { result, calls } = await run((call) => {
+    clock.now += Math.min(1_000, call.config.httpOptions.timeout as number);
+    return apiError(503, 'Model is currently unavailable.');
+  }, { models });
+  assert.deepEqual([...new Set(calls.map((call) => call.model))], models, 'tutti provati');
+  assert.ok(attemptTimeout(calls).every((timeout) => timeout >= GEMINI_MIN_ATTEMPT_MS), `sotto la soglia minima non si chiama Gemini: ${attemptTimeout(calls).join(',')}`);
+  assert.ok(calls.length <= 2 * models.length, `nessuna micro-cascata: ${calls.length} chiamate per ${models.length} modelli`);
+  const seen: Record<string, number> = {};
+  const retries = calls.filter((call) => (seen[call.model] = (seen[call.model] ?? 0) + 1) > 1);
+  assert.ok(retries.length > 0, 'i retry ci sono dove il tempo lo consente');
+  assert.ok(retries.every((call) => (call.config.httpOptions.timeout as number) >= GEMINI_RETRY_MIN_ATTEMPT_MS), `retry solo con tempo reale: ${retries.map((call) => call.config.httpOptions.timeout).join(',')}`);
+  assert.equal(result.category, 'sovraccarico');
 });
 
 // ---------------------------------------------------------------------------
