@@ -168,32 +168,51 @@ export const TodayView: React.FC<TodayViewProps> = ({
         quick actions live in the header/FAB and in "Altro", so they are desktop only.
       */}
       <div className="bg-white rounded-xl p-3 sm:p-5 border border-stone-200 shadow-xs">
-        <div className="flex items-center justify-between gap-2">
-          <div className="min-w-0 flex-1">
-            <span className="hidden sm:flex text-xs font-semibold text-emerald-800 uppercase tracking-wider items-center gap-2">
-              Panoramica della Giornata
-              <span
-                className={`px-1.5 py-0.5 rounded-md border text-[10px] font-bold normal-case tracking-normal ${dayStatus.badgeClass}`}
-                title={isToday ? "Stai visualizzando la data di oggi" : isFutureDay ? "Stai visualizzando una data futura" : "Stai visualizzando una data passata"}
-              >
-                {dayStatus.label}
+        {/*
+          Mobile: la data (riga 1, con il badge Oggi/Futuro/Passato) e la navigazione del
+          giorno (riga 2) vivono in contenitori *separati*, non in un flex che si divide lo
+          spazio. Una data lunga — "Mercoledì 30 settembre 2026" su un 320px — può andare a
+          capo sulle sue parole ma non può mai sovrapporsi a ← / Oggi / →, e il font resta
+          quello leggibile. Da sm in su lo spazio c'è e tutto torna sulla stessa riga.
+        */}
+        <div
+          id="today-header"
+          className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3"
+        >
+          <div id="today-date-line" className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 sm:flex-1 sm:flex-nowrap">
+            <div className="min-w-0">
+              <span className="hidden sm:flex text-xs font-semibold text-emerald-800 uppercase tracking-wider items-center gap-2">
+                Panoramica della Giornata
+                <span
+                  className={`px-1.5 py-0.5 rounded-md border text-[10px] font-bold normal-case tracking-normal ${dayStatus.badgeClass}`}
+                  title={isToday ? "Stai visualizzando la data di oggi" : isFutureDay ? "Stai visualizzando una data futura" : "Stai visualizzando una data passata"}
+                >
+                  {dayStatus.label}
+                </span>
               </span>
+              <h1 className="text-base sm:text-2xl font-bold text-stone-900 mt-0.5 break-words leading-snug">{displayDate}</h1>
+              <p className="text-xs sm:text-sm text-stone-500 mt-0.5 truncate">
+                {todayLessons.length > 0
+                  ? `${todayLessons.length} ore di lezione in programma`
+                  : "Nessuna lezione curricolare prevista"}
+                {todayEvents.length > 0 && ` • ${todayEvents.length} impegni/riunioni`}
+              </p>
+            </div>
+            <span
+              id="today-day-status"
+              className={`sm:hidden shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded-md border ${dayStatus.badgeClass}`}
+              title={isToday ? "Stai visualizzando la data di oggi" : isFutureDay ? "Stai visualizzando una data futura" : "Stai visualizzando una data passata"}
+            >
+              {dayStatus.label}
             </span>
-            <h1 className="text-base sm:text-2xl font-bold text-stone-900 mt-0.5 break-words leading-snug">
-              <span className="truncate">{displayDate}</span>
-              <span className={`sm:hidden ml-1.5 align-middle text-[10px] font-bold px-1.5 py-0.5 rounded-md border ${dayStatus.badgeClass}`}>
-                {dayStatus.label}
-              </span>
-            </h1>
-            <p className="text-xs sm:text-sm text-stone-500 mt-0.5 truncate">
-              {todayLessons.length > 0
-                ? `${todayLessons.length} ore di lezione in programma`
-                : "Nessuna lezione curricolare prevista"}
-              {todayEvents.length > 0 && ` • ${todayEvents.length} impegni/riunioni`}
-            </p>
           </div>
 
-          <div className="flex items-center gap-1 shrink-0" role="group" aria-label="Navigazione del giorno">
+          <div
+            id="today-day-nav"
+            className="flex items-center justify-center gap-1 shrink-0 sm:justify-end"
+            role="group"
+            aria-label="Navigazione del giorno"
+          >
             <button
               id="today-previous-day"
               type="button"

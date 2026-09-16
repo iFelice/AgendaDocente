@@ -1,3 +1,4 @@
+import { useAnalysisProgress } from "../hooks/useAnalysisProgress";
 import { usePersistenceAction } from "../hooks/usePersistenceAction";
 import {
   analyzeStudentDocument,
@@ -15,14 +16,28 @@ import {
   revokePreviewUrl,
   type DocumentFileMeta,
 } from "../utils/documentScanner";
-import { isSupportTeacherProfile, periodTimesForIndex, reconstructedToTimetableSlots, type TimetableMergeMode } from "../utils/reconstructTimetable";
+import {
+  isSupportTeacherProfile,
+  periodTimesForIndex,
+  previewReconstruction,
+  reconstructedToTimetableSlots,
+  slotsInReplacementScope,
+  type TimetableMergeMode,
+} from "../utils/reconstructTimetable";
+import { AnalysisProgressBar } from "./AnalysisProgressBar";
 import { RECON_NOTES, crossrefTimetables, reconSignal, type ReconstructedSlot } from "../utils/timetableCrossref";
 import {
+  MAX_GRID_PERIODS,
+  PERSONAL_SCHOOL_DAYS,
+  buildPersonalCoordinateScope,
   curricularCellsToSlots,
-  findTeacherRows,
+  expectedPersonalCellCount,
   personalCellsToCandidates,
+  restrictCurricularSlotsToCoordinates,
+  summarizeCurricularCoverage,
   validateStudentCommitmentsPayload,
   type CurricularRawRow,
+  type PersonalCoordinate,
   type CurricularTimetableSlot,
   type PersonalTimetableSlotCandidate,
   type SkippedCell,
@@ -87,11 +102,84 @@ interface ReconEditSlot extends ReconstructedSlot {
 }
 
 interface PersonalReviewState {
-  rows: string[];
+  /**
+   * Etichetta della riga letta dal modello. È già stata verificata sul server
+   * contro il cognome del profilo: qui è solo informazione per l'utente.
+   */
+  rowLabel: string;
+  /**
+   * Sequenza COMPLETA della riga del docente: una cella per posizione fisica,
+   * da sinistra a destra, celle vuote incluse. Giorno e periodo di ogni cella
+   * sono stati derivati dal server dalla posizione, non dal modello.
+   */
   cells: TimetableRawCell[];
-  matches: Array<{ rowIndex: number; rowLabel: string }>;
-  confirmedRow: number | null;
-  skipped: SkippedCell[];
+  /** Ore per giorno dichiarate dall'utente per questa analisi. */
+  periodsPerDay: number;
+}
+
+/**
+ * Riga sintetica dell'orario personale: il modello legge UNA sola riga e le
+ * coordinate nascono dall'indice della sequenza, quindi tutte le celle
+ * appartengono alla riga 0. È il valore atteso da `personalCellsToCandidates`.
+ */
+const PERSONAL_ROW_INDEX = 0;
+
+/** Domanda obbligatoria prima dell'analisi dell'orario personale. */
+export const PERIODS_PER_DAY_QUESTION = "Quante ore ci sono in ogni giornata scolastica?";
+/** Messaggio quando il valore non è (ancora) utilizzabile. */
+export const PERIODS_PER_DAY_QUESTION_ERROR =
+  `Indica quante ore ci sono in ogni giornata scolastica (numero intero da 1 a ${MAX_GRID_PERIODS}).`;
+
+/** Id del contenitore scrollabile del modale (fallback del ref, vedi `useEffect` di scroll). */
+export const SCAN_MODAL_BODY_ID = "scan-modal-body";
+
+/**
+ * Id della SEZIONE OPERATIVA con la scelta «Mantieni e aggiungi / Sovrascrivi
+ * orario esistente»: è la destinazione dello scroll quando la review dell'orario
+ * personale è pronta (fallback del ref, vedi `useEffect` di scroll).
+ */
+export const SCAN_MERGE_CHOICE_ID = "scan-merge-choice";
+
+/** Nodo su cui è possibile chiedere uno scroll (DOM reale o equivalente). */
+export type ScrollableNode = {
+  scrollTo?: (options: { top?: number; behavior?: string }) => void;
+  scrollTop?: number;
+};
+
+/** Nodo a cui si può chiedere di essere portato in vista (DOM reale o equivalente). */
+export type ScrollIntoViewNode = {
+  scrollIntoView?: (options?: { behavior?: string; block?: string }) => void;
+};
+
+/**
+ * Porta in vista una sezione del modale: `scrollIntoView` muove il PRIMO
+ * contenitore scrollabile — il corpo del modale — e `block: "start"` allinea
+ * l'inizio della sezione al suo bordo superiore (`scroll-mt-*` sulla sezione
+ * tiene il margine sotto l'header sticky). Non è uno scroll generico in cima al
+ * modale e non tocca mai `window`.
+ * @returns true se uno scroll è stato davvero richiesto.
+ */
+export function scrollSectionIntoView(node: ScrollIntoViewNode | null | undefined): boolean {
+  if (!node || typeof node.scrollIntoView !== "function") return false;
+  node.scrollIntoView({ behavior: "smooth", block: "start" });
+  return true;
+}
+
+/**
+ * Porta in cima il contenuto scrollabile del modale: dopo un salvataggio riuscito
+ * il messaggio di esito deve essere la prima cosa che l'utente vede (su mobile la
+ * schermata restava in fondo e non si capiva se il salvataggio fosse andato a buon
+ * fine). Lo scroll è del contenitore INTERNO del modale, mai di `window`.
+ * @returns true se uno scroll è stato davvero richiesto.
+ */
+export function scrollModalBodyToTop(node: ScrollableNode | null | undefined): boolean {
+  if (!node) return false;
+  if (typeof node.scrollTo === "function") {
+    node.scrollTo({ top: 0, behavior: "smooth" });
+    return true;
+  }
+  node.scrollTop = 0;
+  return true;
 }
 
 export interface DocumentScannerModalProps {
@@ -130,6 +218,9 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
   onImportStudentCommitments,
 }) => {
   const save = usePersistenceAction();
+  /** Progresso UI stimato dell'analisi (nessuna percentuale reale del backend). */
+  const analysisProgress = useAnalysisProgress();
+  const { start: startProgress, complete: completeProgress, stop: stopProgress } = analysisProgress;
   const [docType, setDocType] = useState<ScanDocType | null>(null);
   const [captureFor, setCaptureFor] = useState<CaptureFor | null>(null);
   const [step, setStep] = useState<Step>("type");
@@ -140,17 +231,88 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isReading, setIsReading] = useState(false);
   const [consentGiven, setConsentGiven] = useState(false);
+  /**
+   * Ore di ogni giornata scolastica, dichiarate dall'utente PRIMA dell'analisi
+   * dell'orario personale. È l'unico ingresso della geometria: determina quante
+   * celle deve contenere la sequenza (ore x giorni scolastici) e quindi il
+   * giorno e il periodo di ogni cella. Stringa perché è il valore di un input.
+   */
+  const [periodsPerDayInput, setPeriodsPerDayInput] = useState<string>("");
   const [personal, setPersonal] = useState<PersonalReviewState | null>(null);
-  const [curricular, setCurricular] = useState<{ rows: CurricularRawRow[]; slots: CurricularTimetableSlot[]; skipped: SkippedCell[] } | null>(null);
+  /** Ore curricolari GIÀ limitate alle mie coordinate: `droppedCount` è quanto è stato scartato. */
+  const [curricular, setCurricular] = useState<{ rows: CurricularRawRow[]; slots: CurricularTimetableSlot[]; skipped: SkippedCell[]; droppedCount: number } | null>(null);
   const [studentCandidates, setStudentCandidates] = useState<StudentCommitmentCandidate[] | null>(null);
   const [reconSlots, setReconSlots] = useState<ReconEditSlot[] | null>(null);
   const [reconSchoolId, setReconSchoolId] = useState<string | undefined>(undefined);
-  const [reconTarget, setReconTarget] = useState<TimetableType>("provvisorio");
+  /**
+   * Archivio di destinazione. `null` = non ancora scelto: succede solo quando
+   * esistono vecchie ore pertinenti in ENTRAMBI gli archivi, e in quel caso la
+   * scelta spetta all'utente (nessuna cancellazione cross-archive automatica).
+   */
+  const [reconTarget, setReconTarget] = useState<TimetableType | null>("provvisorio");
+  /**
+   * Modalità predefinita/automatica: è quella effettivamente usata quando la
+   * scelta esplicita non è richiesta (nessun vecchio orario pertinente, oppure
+   * Fase B che arricchisce l'orario appena salvato).
+   */
   const [mergeMode, setMergeMode] = useState<TimetableMergeMode>("missing-only");
+  /**
+   * Scelta ESPLICITA «sostituisci / mantieni e aggiungi» della Fase A: `null`
+   * finché l'utente non la fa. Non viene mai pre-selezionata dal codice.
+   */
+  const [mergeChoice, setMergeChoice] = useState<TimetableMergeMode | null>(null);
   const [reconWarning, setReconWarning] = useState<string | null>(null);
+  /**
+   * FASE A salvata (orario personale/sostegno realmente scritto): da qui in poi
+   * chiudere o tornare indietro NON perde l'orario, e viene offerta la Fase B
+   * (orario curricolare per le compresenze) come passo facoltativo.
+   */
+  const [phaseASaved, setPhaseASaved] = useState<{
+    hours: number;
+    target: TimetableType;
+    added: number;
+    replaced: number;
+    removed: number;
+  } | null>(null);
+  const [savedDirty, setSavedDirty] = useState(false);
+
+  /**
+   * Prefill della domanda sulle ore: la configurazione delle fasce orarie
+   * dell'utente (`timeSlotConfig.periodsPerDay`), quando è un numero sensato.
+   * Resta modificabile: il valore usato è solo quello confermato dall'utente.
+   */
+  const periodsPerDayPrefill =
+    typeof timeSlotConfig?.periodsPerDay === "number"
+    && Number.isInteger(timeSlotConfig.periodsPerDay)
+    && timeSlotConfig.periodsPerDay >= 1
+    && timeSlotConfig.periodsPerDay <= MAX_GRID_PERIODS
+      ? String(timeSlotConfig.periodsPerDay)
+      : "";
+
+  /** Ore per giorno dichiarate: 0 = valore assente o non accettabile. */
+  const periodsPerDay = useMemo(() => {
+    const trimmed = periodsPerDayInput.trim();
+    // Solo cifre: niente decimali, niente segni, niente testo.
+    if (!/^\d+$/.test(trimmed)) return 0;
+    const value = Number(trimmed);
+    return value >= 1 && value <= MAX_GRID_PERIODS ? value : 0;
+  }, [periodsPerDayInput]);
+  const periodsPerDayValid = periodsPerDay > 0;
+  /** Celle attese nella sequenza: ore per giorno x giorni scolastici (lun-ven). */
+  const expectedCellCount = expectedPersonalCellCount(periodsPerDay);
 
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  /** Contenitore scrollabile del corpo del modale: è lui a tornare in cima dopo un salvataggio. */
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  /** Sezione con la scelta Aggiungi/Sovrascrivi: portata in vista quando la review è pronta. */
+  const mergeChoiceRef = useRef<HTMLFieldSetElement | null>(null);
+  /**
+   * Lo scroll alla scelta è già avvenuto per QUESTA comparsa della sezione: un
+   * ref (non uno stato) perché non deve provocare render e perché i rerender
+   * successivi non devono ripetere lo scroll.
+   */
+  const mergeChoiceScrolled = useRef(false);
   const fileRef = useRef<File | null>(null);
   const readingRevision = useRef(0);
   // L'object URL corrente in un ref: il cleanup a unmount deve revocare SEMPRE
@@ -162,13 +324,129 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
   };
 
   const support = isSupportTeacherProfile(profile);
+  /** Etichetta dell'ambito sostituito: "sostegno" per i docenti di sostegno. */
+  const natureLabel = support ? "sostegno" : "materia";
   const schools = useMemo(() => normalizeTeacherProfile(profile).schools ?? [], [profile]);
   const multiSchool = schools.length > 1;
-  const existingTarget = reconTarget === "provvisorio" ? provisionalTimetable : definitiveTimetable;
+  /** Archivio su cui si sta per scrivere: vuoto finché l'utente non lo sceglie. */
+  const existingTarget = reconTarget === "provvisorio"
+    ? provisionalTimetable
+    : reconTarget === "definitivo"
+      ? definitiveTimetable
+      : [];
 
-  // Reset completo ad ogni apertura.
+  /**
+   * Gli slot che verrebbero REALMENTE salvati: stessa selezione e stesso filtro
+   * (nessuna classe -> nessuno slot) di `handleSaveReconstruction`. È l'input
+   * unico sia dell'anteprima sia del rilevamento del vecchio orario, così la
+   * domanda e la scrittura non possono divergere.
+   */
+  const saveableSlots = useMemo<TimetableSlot[]>(() => {
+    const selected = (reconSlots ?? []).filter(s => s.selected !== false);
+    const toSave = selected.filter(s => (s.correctedClass ?? s.classLabel ?? "").trim());
+    return reconstructedToTimetableSlots(toSave, { profile, timeSlotConfig, schoolId: reconSchoolId });
+  }, [reconSlots, profile, timeSlotConfig, reconSchoolId]);
+
+  /**
+   * Vecchie ore PERTINENTI nei due archivi, con la STESSA regola della
+   * sovrascrittura reale (`slotsInReplacementScope`: stesso istituto — gli slot
+   * legacy senza `schoolId` valgono l'istituto principale del profilo — e natura
+   * dell'orario personale, non dei singoli slot in arrivo). Materie normali, ore di
+   * altri istituti e dati fuori ambito non entrano qui, quindi non fanno comparire
+   * nessuna domanda.
+   */
+  const pertinentExisting = useMemo(() => ({
+    provvisorio: slotsInReplacementScope(provisionalTimetable, saveableSlots, { profile }),
+    definitivo: slotsInReplacementScope(definitiveTimetable, saveableSlots, { profile }),
+  }), [provisionalTimetable, definitiveTimetable, saveableSlots, profile]);
+
+  /** CASO D: ore pertinenti in entrambi gli archivi -> la scelta dell'archivio è dell'utente. */
+  const archiveChoiceRequired = pertinentExisting.provvisorio.length > 0 && pertinentExisting.definitivo.length > 0;
+
+  /** Ore pertinenti nell'archivio scelto (o in entrambi, se ancora da scegliere). */
+  const pertinentCount = reconTarget === "provvisorio"
+    ? pertinentExisting.provvisorio.length
+    : reconTarget === "definitivo"
+      ? pertinentExisting.definitivo.length
+      : pertinentExisting.provvisorio.length + pertinentExisting.definitivo.length;
+
+  /**
+   * La scelta «sostituisci / mantieni e aggiungi» è OBBLIGATORIA e senza default
+   * solo in Fase A, quando esistono vecchie ore pertinenti. La Fase B
+   * (`phaseASaved`) continua a usare la modalità preimpostata: serve ad
+   * arricchire con le compresenze l'orario appena salvato nello stesso archivio.
+   */
+  const mergeChoiceRequired = pertinentCount > 0 && !phaseASaved;
+  /** Modalità realmente applicata: `null` = scelta ancora dovuta, salvataggio bloccato. */
+  const effectiveMergeMode: TimetableMergeMode | null = mergeChoiceRequired ? mergeChoice : mergeMode;
+
+  /**
+   * Anteprima della fusione per la schermata di conferma: gli STESSI conteggi che
+   * l'applicazione produrrà (`previewReconstruction`), così l'utente sa cosa viene
+   * aggiunto, sostituito o rimosso prima di salvare. Nessuna scrittura.
+   */
+  const mergePreview = useMemo(() => {
+    if (saveableSlots.length === 0) return null;
+    return previewReconstruction(existingTarget, saveableSlots, effectiveMergeMode ?? "missing-only", { profile });
+  }, [saveableSlots, existingTarget, effectiveMergeMode, profile]);
+
+  /**
+   * Dopo un salvataggio RIUSCITO il contenuto del modale torna in cima: il messaggio
+   * di esito è la prima cosa visibile. `phaseASaved` viene impostato SOLO dopo che
+   * `save.run(...)` ha restituito true, quindi nessun salvataggio fallito (e nessuna
+   * fase di analisi o di revisione) può provocare questo scroll. Il ref è il
+   * percorso reale; il lookup per id è il fallback se il ref non è ancora agganciato.
+   */
+  useEffect(() => {
+    if (!phaseASaved) return;
+    const node = bodyRef.current
+      ?? (typeof document === "undefined" ? null : document.getElementById(SCAN_MODAL_BODY_ID));
+    scrollModalBodyToTop(node as ScrollableNode | null);
+  }, [phaseASaved]);
+
+  /**
+   * Review personale pronta: la sezione con la scelta «Mantieni e aggiungi /
+   * Sovrascrivi orario esistente» viene portata in vista, perché su mobile resta
+   * sotto la piega e l'utente doveva cercarla scorrendo a mano.
+   *
+   * Il trigger è la COMPARSA della sezione, non un render:
+   *  - solo a ricostruzione pronta (`reconSlots`) nella schermata di conferma;
+   *  - solo nel flusso personale (nessun curricolare incrociato: il percorso
+   *    curricolare resta esattamente com'è);
+   *  - solo se esistono vecchie ore pertinenti, cioè se la scelta c'è davvero;
+   *  - mai durante l'analisi e mai dopo il salvataggio, quando vale l'altro
+   *    scroll (in cima, al messaggio di esito).
+   * Il flag nel ref fa sì che lo scroll parta UNA sola volta: né i rerender, né
+   * un cambio di radio/select su una sezione già visibile lo ripetono.
+   */
+  const mergeChoiceVisible =
+    step === "reconstruct" && !!reconSlots && pertinentCount > 0 && !!personal && !curricular && !phaseASaved;
+  useEffect(() => {
+    if (!mergeChoiceVisible) {
+      // La sezione non è più a schermo (indietro, archivio senza ore pertinenti,
+      // salvataggio): una sua nuova comparsa potrà riportarla in vista.
+      mergeChoiceScrolled.current = false;
+      return;
+    }
+    if (isAnalyzing || mergeChoiceScrolled.current) return;
+    mergeChoiceScrolled.current = true;
+    // Il ref è il percorso reale; il lookup per id è il fallback se il ref non è
+    // ancora agganciato (stesso meccanismo dello scroll dopo il salvataggio).
+    const node = mergeChoiceRef.current
+      ?? (typeof document === "undefined" ? null : document.getElementById(SCAN_MERGE_CHOICE_ID));
+    scrollSectionIntoView(node as ScrollIntoViewNode | null);
+  }, [mergeChoiceVisible, isAnalyzing]);
+
+  // Chiusura: nessuna animazione (e nessun timer) lascia il modale spento.
+  useEffect(() => {
+    if (isOpen) return;
+    stopProgress();
+  }, [isOpen, stopProgress]);
+
+  // Reset completo ad ogni apertura: il progresso riparte da 0.
   useEffect(() => {
     if (!isOpen) return;
+    stopProgress();
     setDocType(null);
     setCaptureFor(null);
     setStep("type");
@@ -180,6 +458,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     setIsAnalyzing(false);
     setIsReading(false);
     setConsentGiven(false);
+    setPeriodsPerDayInput(periodsPerDayPrefill);
     setPersonal(null);
     setCurricular(null);
     setStudentCandidates(null);
@@ -187,7 +466,11 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     setReconSchoolId(undefined);
     setReconTarget("provvisorio");
     setMergeMode("missing-only");
+    setMergeChoice(null);
     setReconWarning(null);
+    setPhaseASaved(null);
+    setSavedDirty(false);
+    mergeChoiceScrolled.current = false;
   }, [isOpen]);
 
   // Privacy: a unmount si revoca SEMPRE l'object URL corrente (ref sempre aggiornato).
@@ -197,8 +480,6 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
       fileRef.current = null;
     };
   }, []);
-
-  if (!isOpen) return null;
 
   const startCapture = (forWhat: CaptureFor) => {
     setCaptureFor(forWhat);
@@ -295,10 +576,18 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
       setAnalysisError(OFFLINE_ANALYSIS_MESSAGE);
       return;
     }
+    // Orario personale: senza un numero di ore valido non esiste una lunghezza
+    // attesa da verificare, quindi l'analisi non parte (il pulsante è già
+    // disabilitato: questa è la stessa regola, difesa anche qui).
+    if (captureFor === "personal" && !periodsPerDayValid) {
+      setAnalysisError(PERIODS_PER_DAY_QUESTION_ERROR);
+      return;
+    }
     const revision = readingRevision.current;
     setIsAnalyzing(true);
     setAnalysisError(null);
     setStep("working");
+    startProgress();
     try {
       if (captureFor === "personal") {
         const result = await analyzeTimetableDocument({
@@ -306,12 +595,23 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
           mimeType: file.type,
           documentType: "personal-support-timetable",
           profile,
+          // Geometria dichiarata dall'utente: il server la usa per verificare la
+          // lunghezza della sequenza e per derivare giorno/periodo.
+          periodsPerDay,
         });
         if (revision !== readingRevision.current) return;
-        const cells = result.cells ?? [];
-        const rows = result.rows ?? [];
-        setPersonal({ rows, cells, matches: findTeacherRows(rows, profile.fullName), confirmedRow: null, skipped: [] });
-        setStep("review-personal");
+        // La riga è già stata identificata dal modello e verificata sul server
+        // contro il cognome del profilo: nessuna scelta della riga qui.
+        const reviewState: PersonalReviewState = {
+          rowLabel: result.rowLabel ?? "",
+          cells: result.cells ?? [],
+          periodsPerDay,
+        };
+        completeProgress(() => {
+          if (revision !== readingRevision.current) return; // modale chiuso o analisi annullata: nulla da mostrare
+          setPersonal(reviewState);
+          setStep("review-personal");
+        });
       } else if (captureFor === "curricular") {
         const result = await analyzeTimetableDocument({
           imageBase64: fileBase64,
@@ -327,8 +627,15 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
           classes: r.classes,
         }));
         const extraction = curricularCellsToSlots(rows, result.cells ?? []);
-        setCurricular({ rows, ...extraction });
-        setStep("review-curricular");
+        // Filtro locale immediato: l'estrazione può contenere tutta la tabella
+        // d'istituto, ma restano solo le mie coordinate (giorno+periodo+classe).
+        const scoped = restrictCurricularSlotsToCoordinates(extraction.slots, personalCoordinates);
+        const curricularState = { rows, ...extraction, slots: scoped.slots, droppedCount: scoped.droppedCount };
+        completeProgress(() => {
+          if (revision !== readingRevision.current) return;
+          setCurricular(curricularState);
+          setStep("review-curricular");
+        });
       } else if (captureFor === "registro") {
         const result = await analyzeStudentDocument({
           imageBase64: fileBase64,
@@ -349,12 +656,16 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
             selected: !!entry.date, // senza data visibile l'impegno non è salvabile
           };
         });
-        setStudentCandidates(candidates);
-        setStep("review-student");
+        completeProgress(() => {
+          if (revision !== readingRevision.current) return;
+          setStudentCandidates(candidates);
+          setStep("review-student");
+        });
       }
       releaseDocument();
     } catch (error: unknown) {
       if (revision !== readingRevision.current) return;
+      stopProgress(); // nessuna barra/animazione attiva sopra il messaggio di errore
       console.warn("Avviso analisi documento: richiesta cloud non completata.");
       setStep("preview");
       setAnalysisError(error instanceof Error ? error.message : "Analisi non riuscita. Riprova.");
@@ -364,24 +675,51 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
   };
 
   // ---------------------------------------------------------------------------
-  // Orario personale: conferma riga -> candidati (mai celle inventate)
+  // Orario personale: sequenza della riga -> candidati (mai celle inventate)
   // ---------------------------------------------------------------------------
 
   const personalCandidates: PersonalTimetableSlotCandidate[] = useMemo(() => {
-    if (!personal || personal.confirmedRow === null) return [];
-    const extraction = personalCellsToCandidates(personal.cells, [personal.confirmedRow]);
+    if (!personal) return [];
+    const extraction = personalCellsToCandidates(personal.cells, [PERSONAL_ROW_INDEX]);
     return extraction.candidates;
   }, [personal]);
 
   const personalSkipped: SkippedCell[] = useMemo(() => {
-    if (!personal || personal.confirmedRow === null) return [];
-    return personalCellsToCandidates(personal.cells, [personal.confirmedRow]).skipped;
+    if (!personal) return [];
+    return personalCellsToCandidates(personal.cells, [PERSONAL_ROW_INDEX]).skipped;
   }, [personal]);
 
-  const confirmPersonalRow = (rowIndex: number) => {
-    if (!personal) return;
-    setPersonal({ ...personal, confirmedRow: rowIndex });
-  };
+  /**
+   * Le coordinate (giorno + periodo + classe) del mio orario personale/sostegno:
+   * candidati di questa sessione + ore già salvate. Un orario curricolare d'istituto
+   * ha centinaia di ore: qui diventano SOLO la sorgente per le compresenze di queste
+   * coordinate. Nulla viene mostrato, incrociato o salvato fuori da questo ambito.
+   */
+  const personalCoordinates = useMemo(
+    () => buildPersonalCoordinateScope({
+      candidates: personalCandidates,
+      savedSlots: [...provisionalTimetable, ...definitiveTimetable],
+    }),
+    [personalCandidates, provisionalTimetable, definitiveTimetable]
+  );
+
+  /** Classi del mio orario: l'unico insieme cercato nella tabella d'istituto. */
+  const personalClassLabels = useMemo<string[]>(() => {
+    const labels = new Set<string>((personalCoordinates ?? []).map((c: PersonalCoordinate) => c.classLabel.toUpperCase()));
+    return Array.from(labels).sort((a, b) => a.localeCompare(b, "it"));
+  }, [personalCoordinates]);
+
+  /** Riepilogo "ore del tuo orario · trovate · ambigue · non identificate". */
+  const curricularCoverage = useMemo(
+    () => summarizeCurricularCoverage(personalCoordinates, curricular?.slots ?? []),
+    [personalCoordinates, curricular]
+  );
+
+  // Guard di chiusura: sta DOPO l'ultimo hook del componente, così numero e ordine
+  // degli hook restano identici anche se il modale resta montato e isOpen passa
+  // true -> false (in React «Rendered fewer hooks than expected» sarebbe fatale).
+  // Sotto questo punto ci sono solo funzioni e JSX, nessun hook.
+  if (!isOpen) return null;
 
   // ---------------------------------------------------------------------------
   // Incrocio multi-documento ("Ricostruisci il mio orario")
@@ -396,9 +734,46 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
       correctedSubject: slot.coTeachingSubjects.length === 1 ? slot.coTeachingSubjects[0] : "",
     }));
     setReconSlots(reconstruction);
-    setReconSchoolId(multiSchool ? schools.find(s => s.isPrimary)?.id : undefined);
-    setReconTarget("provvisorio");
-    setMergeMode("missing-only");
+    const nextSchoolId = multiSchool ? schools.find(s => s.isPrimary)?.id : undefined;
+    setReconSchoolId(nextSchoolId);
+    // Archivio di destinazione: lo decide la posizione del vecchio orario
+    // pertinente, non un default fisso. Gli slot in arrivo sono calcolati con la
+    // stessa regola del salvataggio (nessuna classe -> nessuno slot) e la
+    // pertinenza con `slotsInReplacementScope`, cioè la stessa della sostituzione.
+    const incoming = reconstructedToTimetableSlots(
+      reconstruction.filter(s => s.selected !== false && (s.correctedClass ?? s.classLabel ?? "").trim()),
+      { profile, timeSlotConfig, schoolId: nextSchoolId },
+    );
+    const oldInProvisional = slotsInReplacementScope(provisionalTimetable, incoming, { profile }).length;
+    const oldInDefinitive = slotsInReplacementScope(definitiveTimetable, incoming, { profile }).length;
+    // Dopo il salvataggio della Fase A l'arricchimento (compresenze) deve sostituire
+    // gli slot appena salvati: in "missing-only" li troverebbe già occupati e non
+    // li toccherebbe. Prima di qualsiasi salvataggio vale la regola storica: mai
+    // sovrascrivere automaticamente.
+    if (phaseASaved) {
+      // FASE B: stesso archivio della Fase A e sostituzione preimpostata (comportamento
+      // necessario all'aggiornamento delle ore appena salvate: nessuna scelta da rifare).
+      setReconTarget(phaseASaved.target);
+      setMergeMode("replace-scope");
+    } else if (oldInDefinitive > 0 && oldInProvisional === 0) {
+      // CASO B: il vecchio orario pertinente è solo nel definitivo -> si aggiorna lì,
+      // invece di scrivere il nuovo nel provvisorio e lasciare intatto il vecchio.
+      setReconTarget("definitivo");
+      setMergeMode("missing-only");
+    } else if (oldInDefinitive > 0 && oldInProvisional > 0) {
+      // CASO D: ore pertinenti in entrambi gli archivi. Nessuna cancellazione
+      // cross-archive automatica: l'archivio lo sceglie l'utente.
+      setReconTarget(null);
+      setMergeMode("missing-only");
+    } else {
+      // CASO A (vecchio orario solo nel provvisorio) e CASO C (nessun vecchio
+      // orario pertinente): archivio di default, nessuna domanda da rispondere.
+      setReconTarget("provvisorio");
+      setMergeMode("missing-only");
+    }
+    // La scelta esplicita riparte da zero ad ogni ingresso nella revisione: non
+    // viene mai ereditata né pre-selezionata.
+    setMergeChoice(null);
     setReconWarning(null);
     setStep("reconstruct");
   };
@@ -406,6 +781,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
   const updateReconSlot = (id: string, patch: Partial<ReconEditSlot>) => {
     setReconSlots(prev => (prev ? prev.map(s => (s.id === id ? { ...s, ...patch } : s)) : prev));
     setReconWarning(null);
+    if (phaseASaved) setSavedDirty(true);
   };
 
   const handleSaveReconstruction = async () => {
@@ -413,6 +789,17 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     const selected = reconSlots.filter(s => s.selected !== false);
     if (selected.length === 0) {
       setReconWarning("Seleziona almeno uno slot da salvare.");
+      return;
+    }
+    // Scelte obbligatorie: senza archivio o senza decisione sostituisci/mantieni
+    // non si scrive nulla (il pulsante è già disabilitato: stessa regola, difesa
+    // anche qui). Nessuna modalità viene dedotta in silenzio.
+    if (reconTarget === null) {
+      setReconWarning("Scegli quale archivio aggiornare: provvisorio o definitivo.");
+      return;
+    }
+    if (effectiveMergeMode === null) {
+      setReconWarning("Scegli se sostituire l'orario esistente o aggiungere le nuove ore.");
       return;
     }
     // Gli slot senza classe non vengono mai salvati (classe mai inventata):
@@ -423,16 +810,25 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
       setReconWarning("Nessuno slot selezionato ha una classe: completala oppure annulla.");
       return;
     }
-    const slots = reconstructedToTimetableSlots(toSave, {
-      profile,
-      timeSlotConfig,
-      schoolId: reconSchoolId,
+    // Gli stessi slot dell'anteprima e del rilevamento del vecchio orario.
+    const slots = saveableSlots;
+    // Nessun salvataggio prima di qui: la conferma dell'utente è l'unico momento in
+    // cui gli slot (e solo quelli confermati) vengono scritti nell'archivio.
+    const preview = previewReconstruction(existingTarget, slots, effectiveMergeMode, { profile });
+    if (!await save.run(() => onSaveReconstructedTimetable(slots, reconTarget, effectiveMergeMode))) return;
+    // Conferma VISIBILE e modale aperto: l'orario è già in archivio, quindi da qui
+    // in poi chiudere o tornare indietro non perde nulla (era il guasto su iPhone).
+    setPhaseASaved({
+      hours: slots.length,
+      target: reconTarget,
+      added: preview.addedCount,
+      replaced: preview.replacedCount,
+      removed: preview.removedCount,
     });
-    if (!await save.run(() => onSaveReconstructedTimetable(slots, reconTarget, mergeMode))) return;
+    setSavedDirty(false);
     if (withoutClass.length > 0) {
-      setReconWarning(`${withoutClass.length} slot senza classe non salvati: completali e conferma di nuovo.`);
+      setReconWarning(`${withoutClass.length} slot senza classe non salvati: completali e salva di nuovo.`);
     }
-    onClose();
   };
 
   // ---------------------------------------------------------------------------
@@ -538,7 +934,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
             {(step !== "type" && docType) && (
               <button
                 type="button"
-                onClick={() => { setStep("type"); resetCapture(); setPersonal(null); setCurricular(null); setStudentCandidates(null); setReconSlots(null); }}
+                onClick={() => { stopProgress(); setStep("type"); resetCapture(); setPersonal(null); setCurricular(null); setStudentCandidates(null); setReconSlots(null); }}
                 className="flex h-11 w-11 items-center justify-center rounded-lg text-stone-500 hover:bg-stone-100 active:bg-stone-200"
                 aria-label="Torna al tipo documento"
               >
@@ -556,7 +952,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-4 momentum-scroll">
+        <div id={SCAN_MODAL_BODY_ID} ref={bodyRef} className="flex-1 overflow-y-auto p-4 momentum-scroll">
           {analysisError && step !== "working" && (
             <div className="mb-3 p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2" role="alert">
               <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
@@ -718,8 +1114,38 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                     Il contenuto verrà inviato temporaneamente al servizio di analisi AI e non sarà salvato come immagine in AgendaDocente.
                   </p>
                 )}
-                <p className="text-amber-800">Dopo l'analisi il file viene scartato dall'app: nessun backup, nessuna copia sul server.</p>
+                <p className="text-amber-800">Dopo l&apos;analisi il file viene scartato dall&apos;app: nessun backup, nessuna copia sul server.</p>
               </div>
+
+              {/* Orario personale: la geometria della griglia è dichiarata
+                  dall'utente PRIMA dell'analisi. Da questo numero dipendono la
+                  lunghezza attesa della sequenza e il giorno/periodo di ogni
+                  cella: senza un valore valido l'analisi non parte. */}
+              {captureFor === "personal" && (
+                <div className="p-3 rounded-xl border border-stone-200 bg-white space-y-2">
+                  <label htmlFor="scan-periods-per-day" className="block text-xs font-semibold text-stone-900">
+                    {PERIODS_PER_DAY_QUESTION}
+                  </label>
+                  <input
+                    id="scan-periods-per-day"
+                    type="number"
+                    inputMode="numeric"
+                    min={1}
+                    max={MAX_GRID_PERIODS}
+                    step={1}
+                    value={periodsPerDayInput}
+                    onChange={event => setPeriodsPerDayInput(event.target.value)}
+                    className="w-24 min-h-[44px] px-3 rounded-lg border border-stone-300 text-sm text-stone-900"
+                    aria-describedby="scan-periods-per-day-help"
+                  />
+                  <p id="scan-periods-per-day-help" className="text-[11px] text-stone-500">
+                    {periodsPerDayValid
+                      ? `La tua riga sarà letta come ${expectedCellCount} posizioni: ${periodsPerDay} ${periodsPerDay === 1 ? "ora" : "ore"} per ${PERSONAL_SCHOOL_DAYS} giorni (lunedì-venerdì), celle libere incluse.`
+                      : PERIODS_PER_DAY_QUESTION_ERROR}
+                  </p>
+                </div>
+              )}
+
               <label className="flex items-start gap-3 p-3 rounded-xl border border-stone-200 bg-white cursor-pointer">
                 <input
                   type="checkbox"
@@ -749,7 +1175,12 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                   type="button"
                   id="scan-consent-confirm"
                   onClick={() => void handleStartAnalysis()}
-                  disabled={!consentGiven || isOffline || isAnalyzing}
+                  disabled={
+                    !consentGiven || isOffline || isAnalyzing
+                    // Orario personale: senza un numero di ore valido non esiste
+                    // una lunghezza attesa, quindi l'analisi non può partire.
+                    || (captureFor === "personal" && !periodsPerDayValid)
+                  }
                   className="min-h-[44px] px-5 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white text-sm font-bold shadow-xs flex items-center gap-2"
                 >
                   <CloudUpload className="w-4 h-4" />
@@ -761,130 +1192,160 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
 
           {/* STEP: working */}
           {step === "working" && (
-            <div className="py-12 flex flex-col items-center gap-3 text-center">
+            <div className="py-8 sm:py-10 flex flex-col items-center gap-3 text-center">
               <CloudUpload className="w-10 h-10 text-emerald-700 animate-pulse" />
               <p className="text-sm font-semibold text-stone-900">Analisi del documento in corso…</p>
+              <AnalysisProgressBar
+                percent={analysisProgress.percent}
+                phase={analysisProgress.phase}
+                label={analysisProgress.label}
+              />
               <p className="text-xs text-stone-500 max-w-xs">Il documento non viene salvato: l'elaborazione può richiedere alcuni secondi.</p>
             </div>
           )}
 
-          {/* STEP: revisione orario personale */}
+          {/* STEP: revisione orario personale (sequenza completa, vuoti inclusi) */}
           {step === "review-personal" && personal && (
             <div className="space-y-4">
-              {personal.confirmedRow === null ? (
-                <>
-                  <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 text-xs text-stone-600 space-y-1">
-                    <p className="font-semibold text-stone-900">
-                      {personal.matches.length === 0
-                        ? `Non ho trovato il tuo nome (${profile.fullName || "profilo"}) nelle righe del documento.`
-                        : personal.matches.length === 1
-                          ? `Riga trovata per ${profile.fullName}.`
-                          : `Trovate ${personal.matches.length} righe compatibili con ${profile.fullName}: scegli la tua.`}
-                    </p>
-                    {personal.matches.length > 1 && (
-                      <p>Per evitare errori il sistema non sceglie al posto tuo.</p>
-                    )}
-                  </div>
-                  <div className="space-y-2" role="radiogroup" aria-label="Riga del docente">
-                    {personal.rows.map((label, rowIndex) => {
-                      const isMatch = personal.matches.some(m => m.rowIndex === rowIndex);
-                      return (
-                        <label
-                          key={rowIndex}
-                          className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer text-sm ${
-                            isMatch ? "border-emerald-400 bg-emerald-50/50" : "border-stone-200 bg-white"
-                          }`}
-                        >
-                          <input
-                            type="radio"
-                            name="scan-personal-row"
-                            value={String(rowIndex)}
-                            checked={false}
-                            onChange={() => confirmPersonalRow(rowIndex)}
-                            className="w-4 h-4 accent-emerald-700"
-                          />
-                          <span className="font-medium text-stone-900 truncate">{label || `Riga ${rowIndex + 1}`}</span>
-                          {isMatch && <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded-full shrink-0">compatibile</span>}
-                        </label>
-                      );
-                    })}
-                    {personal.rows.length === 0 && (
-                      <p className="text-xs text-stone-500 p-3 rounded-xl bg-stone-50 border border-stone-200">
-                        Nessuna riga leggibile: riprova con una foto più nitida.
-                      </p>
-                    )}
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 flex items-center justify-between gap-2">
-                    <span>
-                      Riga confermata: <strong>{personal.rows[personal.confirmedRow]}</strong>
-                    </span>
-                    <button type="button" onClick={() => setPersonal({ ...personal, confirmedRow: null })} className="font-semibold underline shrink-0">
-                      Cambia
-                    </button>
-                  </div>
-                  {personalCandidates.length === 0 ? (
-                    <p className="text-xs text-stone-600 p-4 rounded-xl bg-stone-50 border border-stone-200">
-                      Nessuna cella interpretabile nella riga: nessuna ora è stata inventata. Puoi riprovare con un'altra foto.
-                    </p>
-                  ) : (
-                    <div className="space-y-2">
-                      {personalCandidates.map(slot => (
-                        <div key={slot.id} className="flex items-center gap-3 p-3 rounded-xl border border-stone-200 bg-white text-sm">
-                          <span className="font-semibold text-stone-900 w-24 shrink-0 truncate">{DAY_LABELS[slot.dayOfWeek]}</span>
-                          <span className="text-stone-600 w-16 shrink-0">{slot.periodIndex}ª ora</span>
-                          <span className={`px-2 py-0.5 rounded-md text-xs font-bold ${slot.classLabel ? "bg-emerald-100 text-emerald-900" : "bg-stone-100 text-stone-500"}`}>
-                            {slot.classLabel ?? "classe n.d."}
-                          </span>
-                          <span className={`ml-auto text-[10px] font-semibold ${slot.confidence === "high" ? "text-emerald-700" : "text-amber-700"}`}>
-                            {slot.confidence === "high" ? "certezza alta" : "da verificare"}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {personalSkipped.length > 0 && (
-                    <p className="text-[11px] text-stone-500">
-                      {personalSkipped.length} celle non interpretate (codici D/P/Co o testo non leggibile): non sono state trasformate in orari.
-                    </p>
-                  )}
-                </>
-              )}
+              <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 space-y-1">
+                <p className="font-semibold">
+                  Riga letta nel documento: <strong>{personal.rowLabel || "etichetta non leggibile"}</strong>
+                </p>
+                <p id="scan-personal-sequence-count">
+                  {personal.cells.length} posizioni ({personal.periodsPerDay} {personal.periodsPerDay === 1 ? "ora" : "ore"} x {PERSONAL_SCHOOL_DAYS} giorni):{" "}
+                  {personal.cells.filter(cell => cell.raw.trim()).length} occupate,{" "}
+                  {personal.cells.filter(cell => !cell.raw.trim()).length} vuote.
+                </p>
+                <p className="text-[11px] text-emerald-800">
+                  Giorno e numero d&apos;ora derivano dalla posizione nella sequenza: controlla qui sotto le ore libere
+                  prima di salvare. Nessuna ora viene salvata automaticamente.
+                </p>
+              </div>
 
-              {personal.confirmedRow !== null && (
-                <div className="flex items-center justify-end gap-2">
-                  {support && (docType === "personal" || docType === "ricostruisci") && (
-                    <button
-                      type="button"
-                      id="scan-personal-add-curricular"
-                      onClick={() => startCapture("curricular")}
-                      className="min-h-[44px] px-4 rounded-xl text-sm font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100"
-                    >
-                      Aggiungi orario curricolare
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    id="scan-personal-continue"
-                    onClick={buildReconstruction}
-                    disabled={personalCandidates.length === 0}
-                    className="min-h-[44px] px-5 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white text-sm font-bold shadow-xs"
-                  >
-                    {support ? "Prepara l'orario" : "Prepara la conferma"}
-                  </button>
+              {/* Sequenza COMPLETA della riga: una riga per ogni posizione fisica,
+                  celle vuote incluse e visibili. */}
+              <div id="scan-personal-sequence" className="space-y-3">
+                {Array.from({ length: PERSONAL_SCHOOL_DAYS }, (_, dayOffset) => {
+                  const day = dayOffset + 1;
+                  const cellsOfDay = personal.cells.filter(cell => cell.dayOfWeek === day);
+                  return (
+                    <div key={day} className="rounded-xl border border-stone-200 bg-white p-3">
+                      <p className="text-xs font-bold text-stone-900 mb-2">{DAY_LABELS[day]}</p>
+                      <div className="space-y-1.5">
+                        {cellsOfDay.map(cell => {
+                          const free = !cell.raw.trim();
+                          return (
+                            <div
+                              key={`${cell.dayOfWeek}-${cell.periodIndex}`}
+                              className="flex items-center gap-3 text-xs"
+                              data-day={cell.dayOfWeek}
+                              data-period={cell.periodIndex}
+                            >
+                              <span className="w-16 shrink-0 text-stone-500">{cell.periodIndex}ª ora</span>
+                              <span
+                                className={`px-2 py-0.5 rounded-md font-bold ${free ? "bg-stone-100 text-stone-400 italic" : "bg-emerald-100 text-emerald-900"}`}
+                              >
+                                {free ? "libera" : cell.raw}
+                              </span>
+                            </div>
+                          );
+                        })}
+                        {cellsOfDay.length === 0 && (
+                          <p className="text-[11px] text-stone-400">Nessuna posizione per questo giorno.</p>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {personalCandidates.length === 0 ? (
+                <p className="text-xs text-stone-600 p-4 rounded-xl bg-stone-50 border border-stone-200">
+                  Nessuna cella interpretabile nella riga: nessuna ora è stata inventata. Puoi riprovare con un&apos;altra foto.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  <p className="text-[11px] font-semibold text-stone-600">
+                    Ore che verranno salvate ({personalCandidates.length}):
+                  </p>
+                  {personalCandidates.map(slot => (
+                    <div key={slot.id} className="flex items-center gap-3 p-3 rounded-xl border border-stone-200 bg-white text-sm">
+                      <span className="font-semibold text-stone-900 w-24 shrink-0 truncate">{DAY_LABELS[slot.dayOfWeek]}</span>
+                      <span className="text-stone-600 w-16 shrink-0">{slot.periodIndex}ª ora</span>
+                      <span className={`px-2 py-0.5 rounded-md text-xs font-bold ${slot.classLabel ? "bg-emerald-100 text-emerald-900" : "bg-stone-100 text-stone-500"}`}>
+                        {slot.classLabel ?? "classe n.d."}
+                      </span>
+                      <span className={`ml-auto text-[10px] font-semibold ${slot.confidence === "high" ? "text-emerald-700" : "text-amber-700"}`}>
+                        {slot.confidence === "high" ? "certezza alta" : "da verificare"}
+                      </span>
+                    </div>
+                  ))}
                 </div>
               )}
+              {personalSkipped.length > 0 && (
+                <p className="text-[11px] text-stone-500">
+                  {personalSkipped.length} celle non interpretate (codici D/P/Co o testo non leggibile): non sono state trasformate in orari.
+                </p>
+              )}
+
+              {personalCandidates.length > 0 && (
+                <p className="text-[11px] text-stone-500">
+                  {phaseASaved
+                    ? "Orario personale già salvato: le ore sono nella vista Orario."
+                    : "Nessun salvataggio ancora effettuato: rivedi le ore e usa «Salva questo orario». L'orario curricolare è facoltativo e può essere aggiunto dopo il salvataggio."}
+                </p>
+              )}
+              <div className="flex items-center justify-end gap-2">
+                {support && (docType === "personal" || docType === "ricostruisci") && (
+                  <button
+                    type="button"
+                    id="scan-personal-add-curricular"
+                    onClick={() => startCapture("curricular")}
+                    className="min-h-[44px] px-4 rounded-xl text-sm font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100"
+                  >
+                    Aggiungi orario curricolare
+                  </button>
+                )}
+                <button
+                  type="button"
+                  id="scan-personal-continue"
+                  onClick={buildReconstruction}
+                  disabled={personalCandidates.length === 0}
+                  className="min-h-[44px] px-5 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white text-sm font-bold shadow-xs"
+                >
+                  {support ? "Revisiona e salva l'orario" : "Revisiona e conferma"}
+                </button>
+              </div>
             </div>
           )}
 
           {/* STEP: revisione orario curricolare */}
           {step === "review-curricular" && curricular && (
             <div className="space-y-4">
-              <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 text-xs text-stone-600">
-                {curricular.rows.length} docenti, {curricular.slots.length} ore con classe e materia.
-                Il nome dei docenti curricolari non viene salvato: serve solo a ricostruire le tue compresenze.
+              <div id="scan-curricular-summary" className="p-3 rounded-xl bg-stone-50 border border-stone-200 text-xs text-stone-600 space-y-1.5">
+                <p id="scan-curricular-counts" className="font-semibold text-stone-900">
+                  {curricularCoverage.hours} {curricularCoverage.hours === 1 ? "ora del tuo orario" : "ore del tuo orario"}
+                  {" · "}{curricularCoverage.found} {curricularCoverage.found === 1 ? "materia trovata" : "materie trovate"}
+                  {" · "}{curricularCoverage.ambiguous} {curricularCoverage.ambiguous === 1 ? "ambigua" : "ambigue"}
+                  {" · "}{curricularCoverage.missing} {curricularCoverage.missing === 1 ? "non identificata" : "non identificate"}
+                </p>
+                {personalClassLabels.length > 0 && (
+                  <p className="text-[11px]">
+                    Le tue {personalClassLabels.length} {personalClassLabels.length === 1 ? "classe" : "classi"}:{" "}
+                    <span className="font-semibold text-emerald-900">{personalClassLabels.join(", ")}</span>
+                    {" — "}solo le ore curricolari di queste classi, nei tuoi giorni e orari, vengono considerate.
+                  </p>
+                )}
+                {curricular.droppedCount > 0 && (
+                  <p id="scan-curricular-filtered" className="text-[11px] text-stone-500">
+                    {curricular.droppedCount} {curricular.droppedCount === 1 ? "ora di altre classi è stata esclusa" : "ore di altre classi sono state escluse"}:
+                    non vengono né mostrate, né incrociate, né salvate.
+                  </p>
+                )}
+                <p className="text-[11px] text-stone-500">
+                  Il nome dei docenti curricolari non ti serve e non viene salvato: questa tabella è solo la sorgente
+                  per ricostruire le tue compresenze.
+                </p>
               </div>
               <div className="max-h-64 overflow-y-auto space-y-1 momentum-scroll">
                 {curricular.slots.slice(0, 60).map((slot, i) => (
@@ -899,17 +1360,29 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                 ))}
                 {curricular.slots.length === 0 && (
                   <p className="text-xs text-stone-500 p-3 rounded-xl bg-stone-50 border border-stone-200">
-                    Nessuna ora interpretabile: nessuna cella è stata inventata.
+                    {curricular.droppedCount > 0
+                      ? "Nessuna delle tue ore trova una materia corrispondente nella tabella curricolare: nessuna cella è stata inventata e nessuna ora di altre classi è stata aggiunta."
+                      : "Nessuna ora interpretabile: nessuna cella è stata inventata."}
                   </p>
                 )}
               </div>
               {support ? (
-                <div className="flex justify-end">
+                <div className="flex items-center justify-end gap-2">
+                  {personal !== null && (
+                    <button
+                      type="button"
+                      id="scan-curricular-back-personal"
+                      onClick={() => setStep("review-personal")}
+                      className="min-h-[44px] px-3 rounded-xl text-xs font-semibold text-stone-600 hover:bg-stone-100"
+                    >
+                      Torna alla tua riga
+                    </button>
+                  )}
                   <button
                     type="button"
                     id="scan-curricular-reconstruct"
                     onClick={() => {
-                      if (personal && personal.confirmedRow !== null && personalCandidates.length > 0) {
+                      if (personal !== null && personalCandidates.length > 0) {
                         buildReconstruction();
                       } else {
                         startCapture("personal");
@@ -1053,6 +1526,40 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
           {/* STEP: ORARIO RICOSTRUITO (conferma umana obbligatoria) */}
           {step === "reconstruct" && reconSlots && (
             <div className="space-y-4">
+              {phaseASaved && (
+                <div
+                  id="scan-timetable-saved"
+                  role="status"
+                  className="p-3 rounded-xl border border-emerald-300 bg-emerald-50 text-emerald-900 space-y-2"
+                >
+                  <p className="text-sm font-bold flex items-center gap-1.5">
+                    <Check className="w-4 h-4 shrink-0" />
+                    Orario salvato{savedDirty ? " · modifiche non ancora salvate" : ""}
+                  </p>
+                  <p className="text-xs">
+                    {phaseASaved.hours} ore in {phaseASaved.target === "provvisorio" ? "Orario provvisorio" : "Orario definitivo"}
+                    {phaseASaved.added > 0 && ` · ${phaseASaved.added} aggiunte`}
+                    {phaseASaved.replaced > 0 && `, ${phaseASaved.replaced} sostituite`}
+                    {phaseASaved.removed > 0 && `, ${phaseASaved.removed} vecchie rimosse`}
+                    . L'orario è già in archivio: puoi chiudere questa finestra e lo trovi nella vista Orario.
+                  </p>
+                  {!curricular && (
+                    <div className="pt-2 border-t border-emerald-200 space-y-2">
+                      <p className="text-[11px]">
+                        Vuoi aggiungere anche l'orario curricolare per ricostruire le compresenze?
+                      </p>
+                      <button
+                        type="button"
+                        id="scan-add-curricular-after-save"
+                        onClick={() => startCapture("curricular")}
+                        className="min-h-[44px] px-3 rounded-lg bg-white border border-emerald-300 text-xs font-bold text-emerald-800 hover:bg-emerald-100"
+                      >
+                        Aggiungi orario curricolare per le compresenze
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
               <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 text-xs text-stone-600 space-y-2">
                 <p>
                   Per ogni slot: giorno, ora, classe e materia di compresenza.
@@ -1085,29 +1592,78 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
               <label className="flex items-center gap-2 text-xs font-medium text-stone-700">
                 <span className="shrink-0">Salva in:</span>
                 <select
-                  value={reconTarget}
-                  onChange={e => { setReconTarget(e.target.value as TimetableType); setMergeMode("missing-only"); }}
+                  id="recon-target"
+                  aria-label="Archivio di destinazione"
+                  value={reconTarget ?? ""}
+                  onChange={e => {
+                    const next = e.target.value as TimetableType | "";
+                    setReconTarget(next === "" ? null : next);
+                    // Cambiando archivio la decisione va rifatta su quello nuovo.
+                    setMergeChoice(null);
+                    if (phaseASaved) setSavedDirty(true);
+                  }}
                   className="flex-1 min-w-0 border border-stone-300 rounded-lg p-2 bg-white"
                 >
+                  {reconTarget === null && <option value="">Scegli l'archivio…</option>}
                   <option value="provvisorio">Orario provvisorio</option>
                   <option value="definitivo">Orario definitivo</option>
                 </select>
               </label>
 
-              {existingTarget.length > 0 && (
-                <fieldset className="p-3 rounded-xl border border-stone-200 space-y-2">
+              {archiveChoiceRequired && (
+                <p id="recon-archive-choice" className="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1.5">
+                  Vecchie ore di {natureLabel} presenti in <strong>entrambi</strong> gli archivi
+                  ({pertinentExisting.provvisorio.length} nel provvisorio, {pertinentExisting.definitivo.length} nel definitivo):
+                  scegli quale aggiornare. L&apos;altro archivio non viene toccato.
+                </p>
+              )}
+
+              {pertinentCount > 0 && (
+                <fieldset
+                  id={SCAN_MERGE_CHOICE_ID}
+                  ref={mergeChoiceRef}
+                  className="p-3 rounded-xl border border-stone-200 space-y-2 scroll-mt-3"
+                >
                   <legend className="text-xs font-semibold text-stone-700 px-1">
-                    Esiste già un orario in questo archivio ({existingTarget.length} ore)
+                    Esiste già un orario di {natureLabel} salvato.
                   </legend>
+                  <p className="text-[11px] text-stone-500">
+                    Archivio: {reconTarget === "definitivo" ? "Definitivo" : reconTarget === "provvisorio" ? "Provvisorio" : "da scegliere"}
+                    {" · "}{pertinentCount} {pertinentCount === 1 ? "ora pertinente" : "ore pertinenti"}
+                  </p>
                   <label className="flex items-start gap-2 text-xs text-stone-700 cursor-pointer">
-                    <input type="radio" name="scan-merge-mode" checked={mergeMode === "missing-only"} onChange={() => setMergeMode("missing-only")} className="mt-0.5 accent-emerald-700" />
-                    <span><strong>Aggiungi solo gli slot mancanti</strong> (le ore esistenti non vengono toccate)</span>
+                    <input type="radio" name="scan-merge-mode" checked={effectiveMergeMode === "replace-scope"} onChange={() => { setMergeChoice("replace-scope"); setMergeMode("replace-scope"); if (phaseASaved) setSavedDirty(true); }} className="mt-0.5 accent-emerald-700" />
+                    <span>
+                      <strong>Sovrascrivi orario esistente</strong>
+                      <span className="block text-[11px] text-stone-500">Tutte le vecchie ore di {natureLabel} di questo istituto vengono sostituite da quelle scansionate.</span>
+                    </span>
                   </label>
                   <label className="flex items-start gap-2 text-xs text-stone-700 cursor-pointer">
-                    <input type="radio" name="scan-merge-mode" checked={mergeMode === "replace-selected"} onChange={() => setMergeMode("replace-selected")} className="mt-0.5 accent-emerald-700" />
-                    <span><strong>Sostituisci gli slot selezionati</strong> (solo dove stesso giorno e periodo)</span>
+                    <input type="radio" name="scan-merge-mode" checked={effectiveMergeMode === "missing-only"} onChange={() => { setMergeChoice("missing-only"); setMergeMode("missing-only"); if (phaseASaved) setSavedDirty(true); }} className="mt-0.5 accent-emerald-700" />
+                    <span>
+                      <strong>Mantieni e aggiungi</strong>
+                      <span className="block text-[11px] text-stone-500">Le nuove ore verranno aggiunte senza eliminare quelle esistenti.</span>
+                    </span>
                   </label>
-                  <p className="text-[11px] text-stone-500">L'intero orario non viene mai cancellato da qui.</p>
+                  {effectiveMergeMode === null && (
+                    <p id="recon-merge-choice-required" className="text-[11px] font-semibold text-stone-700">
+                      Scegli una delle due opzioni per poter salvare.
+                    </p>
+                  )}
+                  {effectiveMergeMode === "replace-scope" && mergePreview && (
+                    <p id="recon-replace-preview" className="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1.5">
+                      Sostituzione reale: {mergePreview.replacedCount + mergePreview.removedCount} ore esistenti di {natureLabel} verranno sostituite
+                      ({mergePreview.replacedCount} aggiornate
+                      {mergePreview.removedCount > 0 ? `, ${mergePreview.removedCount} rimosse perché non presenti nel nuovo orario` : ""})
+                      {mergePreview.addedCount > 0 ? ` · ${mergePreview.addedCount} nuove` : ""}
+                      {mergePreview.untouchedCount > 0 ? ` · ${mergePreview.untouchedCount} ore non pertinenti restano intatte` : ""}.
+                    </p>
+                  )}
+                  <p className="text-[11px] text-stone-500">
+                    {effectiveMergeMode === "replace-scope"
+                      ? "La sovrascrittura elimina tutte le vecchie ore di sostegno di questo istituto in questo archivio, anche quelle in giorni o classi assenti nel nuovo orario. Ore di materia, di altri istituti e l'altro archivio non vengono toccati."
+                      : "L'intero orario non viene mai cancellato da qui."}
+                  </p>
                 </fieldset>
               )}
 
@@ -1223,21 +1779,27 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
             {step === "reconstruct" ? (
               <>
                 <div className="text-xs text-stone-600 min-w-0">
-                  <strong className="text-emerald-800">{reconSlots?.filter(s => s.selected !== false).length ?? 0}</strong> slot selezionati · nessun salvataggio prima della conferma
+                  <strong className="text-emerald-800">{reconSlots?.filter(s => s.selected !== false).length ?? 0}</strong> slot selezionati ·{" "}
+                  {phaseASaved ? "orario già in archivio, qui puoi salvare di nuovo" : "nessun salvataggio prima della conferma"}
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
-                  <button type="button" onClick={onClose} className="min-h-[44px] px-4 rounded-xl text-xs font-semibold text-stone-600 hover:bg-stone-100">
-                    Annulla
+                  <button
+                    type="button"
+                    id="recon-close"
+                    onClick={onClose}
+                    className="min-h-[44px] px-4 rounded-xl text-xs font-semibold text-stone-600 hover:bg-stone-100"
+                  >
+                    {phaseASaved ? "Chiudi" : "Annulla"}
                   </button>
                   <button
                     type="button"
                     id="recon-confirm-save"
                     onClick={() => void handleSaveReconstruction()}
-                    disabled={save.pending}
+                    disabled={save.pending || reconTarget === null || effectiveMergeMode === null}
                     className="min-h-[44px] px-4 sm:px-5 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white text-xs font-bold shadow-xs flex items-center gap-1.5"
                   >
                     <Check className="w-4 h-4" />
-                    Conferma e salva
+                    {phaseASaved ? "Salva di nuovo" : "Salva questo orario"}
                   </button>
                 </div>
               </>
