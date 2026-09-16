@@ -193,17 +193,52 @@ async function chooseCameraAndPick(renderer: any, file?: File) {
   await pickFile(renderer, file);
 }
 
-const personalResponse = {
-  success: true,
-  source: 'test-model',
-  rows: ['Bianchi', 'Manganiello F.'],
-  cells: [
-    { rowIndex: 1, dayOfWeek: 2, periodIndex: 1, raw: '3D' },
-    { rowIndex: 1, dayOfWeek: 3, periodIndex: 1, raw: '3E' },
-    { rowIndex: 1, dayOfWeek: 4, periodIndex: 1, raw: 'sos' },
-    { rowIndex: 0, dayOfWeek: 2, periodIndex: 1, raw: '1A' },
-  ],
-};
+/** Ore per giorno del timeSlotConfig usato da modalProps (prefill della domanda). */
+const PERSONAL_PERIODS_PER_DAY = 6;
+/** Giorni scolastici del percorso personale. */
+const PERSONAL_SCHOOL_DAYS = 5;
+/** Posizioni della sequenza personale: lun-ven x ore per giorno. */
+const PERSONAL_SEQUENCE_LENGTH = PERSONAL_PERIODS_PER_DAY * PERSONAL_SCHOOL_DAYS;
+
+/**
+ * Celle come le restituisce l'endpoint: la sequenza è già stata convertita dal
+ * server, quindi giorno e periodo derivano dall'indice (riga sintetica 0).
+ */
+function personalSequenceCells(raws: string[], periodsPerDay = PERSONAL_PERIODS_PER_DAY) {
+  return raws.map((raw, index) => ({
+    rowIndex: 0,
+    dayOfWeek: Math.floor(index / periodsPerDay) + 1,
+    periodIndex: (index % periodsPerDay) + 1,
+    raw,
+  }));
+}
+
+/**
+ * Sequenza della riga del docente: una stringa per posizione fisica, vuoti inclusi.
+ * `values` indicizza le posizioni non vuote (0 = lunedì 1ª).
+ */
+function personalSequence(values: Record<number, string> = {}, periodsPerDay = PERSONAL_PERIODS_PER_DAY): string[] {
+  return Array.from({ length: periodsPerDay * PERSONAL_SCHOOL_DAYS }, (_, index) => values[index] ?? '');
+}
+
+/** Risposta dell'endpoint personale: etichetta della riga + celle già posizionate. */
+function personalTimetableResponse(values: Record<number, string> = { 6: '3D', 12: '3E', 18: 'sos' }) {
+  return {
+    success: true,
+    source: 'test-model',
+    rowLabel: 'Manganiello F.',
+    cells: personalSequenceCells(personalSequence(values)),
+  };
+}
+
+/** 3D martedì 1ª, 3E mercoledì 1ª, sos giovedì 1ª (con 6 ore: indici 6, 12, 18). */
+const personalResponse = personalTimetableResponse();
+
+/** Imposta le ore per giorno dichiarate dall'utente nello schermo di consenso. */
+async function setPeriodsPerDay(renderer: any, value: string) {
+  const input = byId(renderer, 'scan-periods-per-day');
+  await act(async () => { input.props.onChange({ target: { value } }); });
+}
 
 const curricularResponse = {
   success: true,
@@ -242,8 +277,11 @@ async function waitForAnalysisSettled(renderer: any, timeoutMs = 4000) {
   }
 }
 
-async function analyzeWithConsent(renderer: any) {
+async function analyzeWithConsent(renderer: any, periodsPerDay?: string) {
   await act(async () => { byId(renderer, 'scan-analyze-cta').props.onClick(); });
+  // Orario personale: le ore per giorno dichiarate (se il test le vuole diverse
+  // dal prefill) prima dell'invio.
+  if (periodsPerDay !== undefined) await setPeriodsPerDay(renderer, periodsPerDay);
   // Consenso richiesto (checkbox NON preselezionata).
   const consent = byId(renderer, 'scan-cloud-consent');
   assert.equal(consent.props.checked, false, 'il consenso non è mai preselezionato');
@@ -273,10 +311,9 @@ async function flowToReconstruction(renderer: any) {
   // Preview: mai analisi automatica.
   assert.equal(fetchCalls.length, 0, 'nessun invio automatico: serve la CTA');
   await analyzeWithConsent(renderer);
-  // Riga docente: 1 compatibile -> l'utente la conferma esplicitamente.
-  const radios = renderer.root.findAll((el: any) => el.props?.name === 'scan-personal-row');
-  assert.ok(radios.length >= 1);
-  await act(async () => { radios.find(r => r.props.value === '1')!.props.onChange(); });
+  // Nessuna conferma della riga: il server l'ha già verificata col cognome del profilo.
+  assert.ok(flatText(renderer.root).includes('Manganiello F.'), 'riga letta mostrata in revisione');
+  assert.equal(renderer.root.findAll((el: any) => el.props?.name === 'scan-personal-row').length, 0, 'nessuna scelta della riga');
   // Aggiungi l'orario curricolare (incrocio multi-documento).
   await act(async () => { byId(renderer, 'scan-personal-add-curricular').props.onClick(); });
   fetchResponse = { status: 200, json: curricularResponse as any };
@@ -694,8 +731,9 @@ async function flowToCurricularReview(renderer: any, payload: unknown) {
   fetchResponse = { status: 200, json: personalResponse as any };
   await chooseCameraAndPick(renderer, makeFile('orario-personale.jpg', 'image/jpeg', 20_000));
   await analyzeWithConsent(renderer);
-  const radios = renderer.root.findAll((el: any) => el.props?.name === 'scan-personal-row');
-  await act(async () => { radios.find(r => r.props.value === '1')!.props.onChange(); });
+  // Nessuna scelta della riga: l'ha letta il modello e il server l'ha verificata
+  // contro il cognome del profilo. La revisione delle ore resta obbligatoria.
+  assert.ok(flatText(renderer.root).includes('Manganiello F.'), 'riga letta mostrata in revisione');
   await act(async () => { byId(renderer, 'scan-personal-add-curricular').props.onClick(); });
   fetchResponse = { status: 200, json: payload as any };
   await chooseCameraAndPick(renderer, makeFile('orario-istituto.jpg', 'image/jpeg', 300_000));
@@ -811,8 +849,9 @@ test('Fase A: azione esplicita «Salva questo orario», conferma visibile e ness
   fetchResponse = { status: 200, json: personalResponse as any };
   await chooseCameraAndPick(renderer, makeFile('orario-personale.jpg', 'image/jpeg', 20_000));
   await analyzeWithConsent(renderer);
-  const radios = renderer.root.findAll((el: any) => el.props?.name === 'scan-personal-row');
-  await act(async () => { radios.find(r => r.props.value === '1')!.props.onChange(); });
+  // Nessuna scelta della riga: l'ha letta il modello e il server l'ha verificata
+  // contro il cognome del profilo. La revisione delle ore resta obbligatoria.
+  assert.ok(flatText(renderer.root).includes('Manganiello F.'), 'riga letta mostrata in revisione');
   assert.equal(saved.length, 0, 'nessun salvataggio prima della conferma esplicita');
   assert.equal(closed, 0, 'la revisione non chiude il modale');
   assert.ok(!flatText(renderer.root).includes('Orario salvato'), 'nessuna conferma di salvataggio inventata');
@@ -851,8 +890,9 @@ test('Fase B: si raggiunge dopo il salvataggio e tornare indietro non rifà l’
   fetchResponse = { status: 200, json: personalResponse as any };
   await chooseCameraAndPick(renderer, makeFile('orario-personale.jpg', 'image/jpeg', 20_000));
   await analyzeWithConsent(renderer);
-  const radios = renderer.root.findAll((el: any) => el.props?.name === 'scan-personal-row');
-  await act(async () => { radios.find(r => r.props.value === '1')!.props.onChange(); });
+  // Nessuna scelta della riga: l'ha letta il modello e il server l'ha verificata
+  // contro il cognome del profilo. La revisione delle ore resta obbligatoria.
+  assert.ok(flatText(renderer.root).includes('Manganiello F.'), 'riga letta mostrata in revisione');
   await act(async () => { byId(renderer, 'scan-personal-continue').props.onClick(); });
   await act(async () => { byId(renderer, 'recon-confirm-save').props.onClick(); });
   assert.equal(saved.length, 1);
@@ -867,7 +907,7 @@ test('Fase B: si raggiunge dopo il salvataggio e tornare indietro non rifà l’
   // Il ritorno alla riga personale è possibile e la revisione è ancora in memoria.
   await act(async () => { byId(renderer, 'scan-curricular-back-personal').props.onClick(); });
   const text = flatText(renderer.root);
-  assert.match(text, /Riga confermata/, 'la riga già confermata non va rifatta');
+  assert.match(text, /Riga letta nel documento: Manganiello F\./, 'la riga già letta e verificata non va rifatta');
   assert.match(text, /Orario personale già salvato/, 'stadio corrente dichiarato all’utente');
   assert.equal(saved.length, 1, 'nessun doppio salvataggio nel navigare avanti/indietro');
   await act(async () => { renderer.unmount(); });
@@ -884,8 +924,9 @@ test('Fase B dopo il salvataggio: l’incrocio parte in sostituzione e arricchis
   fetchResponse = { status: 200, json: personalResponse as any };
   await chooseCameraAndPick(renderer, makeFile('orario-personale.jpg', 'image/jpeg', 20_000));
   await analyzeWithConsent(renderer);
-  const radios = renderer.root.findAll((el: any) => el.props?.name === 'scan-personal-row');
-  await act(async () => { radios.find(r => r.props.value === '1')!.props.onChange(); });
+  // Nessuna scelta della riga: l'ha letta il modello e il server l'ha verificata
+  // contro il cognome del profilo. La revisione delle ore resta obbligatoria.
+  assert.ok(flatText(renderer.root).includes('Manganiello F.'), 'riga letta mostrata in revisione');
   await act(async () => { byId(renderer, 'scan-personal-continue').props.onClick(); });
   await act(async () => { byId(renderer, 'recon-confirm-save').props.onClick(); });
   assert.equal(saved[0].mode, 'missing-only', 'primo salvataggio: niente sovrascrittura automatica');
@@ -1216,94 +1257,109 @@ test('isOpen true -> false -> true a componente montato: stesso ordine di hook, 
 });
 
 // ---------------------------------------------------------------------------
-// 24. ORARIO PERSONALE: posizioni non ancorabili alla griglia = avviso, mai silenzioso
+// 24. ORARIO PERSONALE: domanda sulle ore, sequenza completa e vuoti visibili
 // ---------------------------------------------------------------------------
 
-test('revisione personale: la nota sulle ore da verificare compare solo se il documento \u00e8 ambiguo', async () => {
-  // Payload con numerazione incoerente: il server conteggia i giorni non ancorabili.
-  fetchResponse = { status: 200, json: { ...personalResponse, positionIssues: 2, periodsPerDay: 5 } };
+/** Griglia reale 5x5 del documento di test: 18 ore, 7 posizioni libere. */
+const REAL_TEAM_GRID: Array<Array<string>> = [
+  ['', '3D', '3D', '3E', '3E'],
+  ['3D', '', '3D', '3D', '3E'],
+  ['', '3E', '3E', '3D', '3E'],
+  ['', '3E', '3D', '3E', ''],
+  ['3E', '3D', '3E', '', ''],
+];
+const REAL_SEQUENCE_FLAT = REAL_TEAM_GRID.flat();
+
+test('orario personale: la domanda sulle ore blocca l analisi finché il valore non è valido', async () => {
+  fetchResponse = { status: 200, json: personalResponse as any };
   const renderer = await renderModal();
   try {
     await goToSource(renderer, 'personal');
     await pickFile(renderer, makeFile('orario.jpg', 'image/jpeg', 30_000));
-    await analyzeWithConsent(renderer);
-    assert.match(flatText(renderer.root), /riga/, 'si \u00e8 nella revisione della riga');
-    const note = byId(renderer, 'scan-personal-position-issues');
-    assert.equal(note.props.role, 'alert', 'l\u2019avviso viene annunciato');
-    assert.match(flatText(note), /intestazione delle ore non \u00e8 stata chiara per 2 giorni/);
-    assert.match(flatText(note), /controlla tu il numero d.ora di ogni/, 'dice cosa fare, senza toccare i dati');
-    assert.match(flatText(note), /non deve far scorrere le ore dopo/);
+    await act(async () => { byId(renderer, 'scan-analyze-cta').props.onClick(); });
+
+    // Prefill dalla configurazione delle fasce orarie dell'utente.
+    assert.equal(byId(renderer, 'scan-periods-per-day').props.value, String(PERSONAL_PERIODS_PER_DAY), 'prefill da timeSlotConfig');
+    assert.match(flatText(renderer.root), /Quante ore ci sono in ogni giornata scolastica\?/);
+    assert.match(flatText(renderer.root), /30 posizioni/, 'la lunghezza attesa è mostrata prima dell invio');
+
+    // Valore non valido: invio bloccato, nessuna richiesta.
+    for (const bad of ['', '0', '-2', '2,5', 'abc', '25']) {
+      await setPeriodsPerDay(renderer, bad);
+      assert.equal(byId(renderer, 'scan-consent-confirm').props.disabled, true, `invio bloccato con "${bad}"`);
+    }
+    assert.equal(fetchCalls.length, 0, 'nessuna analisi partita senza un valore valido');
+
+    // Valore valido: l invio si sblocca (serve comunque il consenso).
+    await setPeriodsPerDay(renderer, '5');
+    await act(async () => { byId(renderer, 'scan-cloud-consent').props.onChange({ target: { checked: true } }); });
+    assert.equal(byId(renderer, 'scan-consent-confirm').props.disabled, false, 'consenso + ore valide: si può inviare');
+    await confirmAndSettleAnalysis(renderer);
+    assert.equal(fetchCalls.length, 1, 'una sola chiamata');
+    assert.equal(fetchCalls[0].body.periodsPerDay, 5, 'le ore dichiarate viaggiano nella richiesta');
   } finally {
     await act(async () => { renderer.unmount(); });
   }
+});
 
-  fetchResponse = { status: 200, json: personalResponse };
-  const clean = await renderModal();
+test('revisione personale: sequenza completa visibile, vuoti inclusi, nessuna auto-salvataggio', async () => {
+  fetchResponse = {
+    status: 200,
+    json: {
+      success: true,
+      source: 'test-model',
+      rowLabel: 'Manganiello F.',
+      cells: personalSequenceCells(REAL_SEQUENCE_FLAT, 5),
+    } as any,
+  };
+  const renderer = await renderModal();
   try {
-    await goToSource(clean, 'personal');
-    await pickFile(clean, makeFile('orario.jpg', 'image/jpeg', 30_000));
-    await analyzeWithConsent(clean);
-    assert.equal(clean.root.findAll((el: any) => el.props?.id === 'scan-personal-position-issues').length, 0, 'nessun avviso con posizioni coerenti');
+    await goToSource(renderer, 'personal');
+    await pickFile(renderer, makeFile('orario.jpg', 'image/jpeg', 30_000));
+    await analyzeWithConsent(renderer, '5');
+
+    // Nessuna scelta della riga: è già verificata, ed è mostrata all'utente.
+    assert.equal(renderer.root.findAll((el: any) => el.props?.name === 'scan-personal-row').length, 0, 'nessuna scelta della riga');
+    assert.match(flatText(renderer.root), /Riga letta nel documento: Manganiello F\./);
+    assert.match(
+      flatText(byId(renderer, 'scan-personal-sequence-count')),
+      /25 posizioni \( ?5 ore x 5 giorni\): 18 occupate, 7 vuote/,
+    );
+
+    // Le 25 posizioni sono visibili, una per ora, con le libere evidenziate.
+    const sequence = flatText(byId(renderer, 'scan-personal-sequence'));
+    assert.equal((sequence.match(/ª ora/g) ?? []).length, 25, 'ogni posizione fisica è mostrata');
+    assert.equal((sequence.match(/libera/g) ?? []).length, 7, 'i vuoti restano visibili');
+    for (const day of ['Lunedì', 'Martedì', 'Mercoledì', 'Giovedì', 'Venerdì']) {
+      assert.ok(sequence.includes(day), `giorno ${day} presente`);
+    }
+
+    // Le ore che verrebbero salvate sono solo le 18 con un valore.
+    assert.match(flatText(renderer.root), /Ore che verranno salvate \( ?18 ?\)/);
+    assert.equal(fetchCalls.length, 1, 'una sola chiamata: nessuna estrazione o salvataggio automatico');
+    assert.ok(!flatText(renderer.root).includes('Orario salvato'), 'nessun salvataggio prima della conferma');
+    assert.match(flatText(renderer.root), /Nessun salvataggio ancora effettuato/);
   } finally {
-    await act(async () => { clean.unmount(); });
+    await act(async () => { renderer.unmount(); });
   }
 });
 
-// ---------------------------------------------------------------------------
-// 25. CONTRATTO "celle solo della riga candidata": scelta umana, e riga senza celle
-// ---------------------------------------------------------------------------
-
-const REAL_TEAM_GRID = [
-  [undefined, '3D', '3D', '3E', '3E'],
-  ['3D', undefined, '3D', '3D', '3E'],
-  [undefined, '3E', '3E', '3D', '3E'],
-  [undefined, '3E', '3D', '3E', undefined],
-  ['3E', '3D', '3E', undefined, undefined],
-];
-
-test('revisione personale: solo la riga candidata ha ore, e nessuna riga viene auto-confermata', async () => {
-  // Risposta conforme al nuovo contratto: 25 etichette, griglia densa 5x5 della SOLA
-  // riga del profilo (índice 7). Le altre righe non hanno celle per contratto.
-  const rows = Array.from({ length: 25 }, (_, i) => (i === 7 ? 'Manganiello F.' : `Collega ${i + 1}`));
-  const cells = REAL_TEAM_GRID.flatMap((periods, d) =>
-    periods.map((raw, p) => ({ rowIndex: 7, dayOfWeek: d + 1, periodIndex: p + 1, raw: raw ?? '' })));
-  fetchResponse = { status: 200, json: { success: true, source: 'test-model', rows, periodsPerDay: 5, cells, positionIssues: 0 } };
+test('revisione personale: riga senza ore interpretabili -> esito controllato e CTA disabilitata', async () => {
+  fetchResponse = {
+    status: 200,
+    json: { success: true, source: 'test-model', rowLabel: 'Manganiello F.', cells: personalSequenceCells(personalSequence()) } as any,
+  };
   const renderer = await renderModal();
   try {
     await goToSource(renderer, 'personal');
     await pickFile(renderer, makeFile('orario.jpg', 'image/jpeg', 30_000));
     await analyzeWithConsent(renderer);
 
-    assert.match(flatText(renderer.root), /Riga trovata per/, 'il matching locale lavora sulle etichette complete');
-    assert.equal(
-      renderer.root.findAll((el: any) => el.props?.id === 'scan-personal-continue').length,
-      0,
-      'nessuna auto-conferma: la riga compatibile NON è già scelta dal sistema',
-    );
-    const radios = renderer.root.findAll((el: any) => el.props?.name === 'scan-personal-row');
-    assert.equal(radios.length, 25, 'tutte le etichette restano scegliibili, nessuna nascosta');
-
-    // Conferma manuale della riga candidata -> le sue 18 ore (i 7 vuoti non diventano ore).
-    await act(async () => { radios.find((r: any) => r.props.value === '7')!.props.onChange(); });
-    assert.match(flatText(renderer.root), /Riga confermata/);
-    const hours = (flatText(renderer.root).match(/\u00aa ora/g) ?? []).length;
-    assert.equal(hours, 18, 'solo le celle con un valore diventano ore');
-
-    // Riga scelta senza celle: esito controllato, nessun salvataggio, nessuna ora inventata.
-    const change = renderer.root.findAll((el: any) => el.props?.children === 'Cambia');
-    assert.equal(change.length, 1, 'il pulsante per ricominciare la scelta c\u00e8');
-    await act(async () => { change[0].props.onClick(); });
-    const afterChange = renderer.root.findAll((el: any) => el.props?.name === 'scan-personal-row');
-    await act(async () => { afterChange.find((r: any) => r.props.value === '0')!.props.onChange(); });
     assert.match(flatText(renderer.root), /Nessuna cella interpretabile nella riga: nessuna ora è stata inventata/);
-    // "Aggiungi orario curricolare" resta raggiungibile (non crea ore): ciò che deve
-    // essere bloccato è il salvataggio, e infatti la CTA sotto è disabilitata.
-    const disabled = renderer.root.findAll(
-      (el: any) => el.props?.id === 'scan-personal-continue' && el.props?.disabled === true,
-    );
-    assert.equal(disabled.length, 1, 'la CTA di salvataggio è disabilitata, non nascosta');
-    assert.equal(fetchCalls.length, 1, 'una sola chiamata, quella dell\'analisi: nessun salvataggio e nessuna estrazione automatica');
-    assert.match(flatText(renderer.root), /Riga confermata/, 'si resta nella revisione, nessuna schermata vuota');
+    assert.equal((flatText(byId(renderer, 'scan-personal-sequence')).match(/libera/g) ?? []).length, PERSONAL_SEQUENCE_LENGTH, 'tutte le posizioni sono libere');
+    const disabled = renderer.root.findAll((el: any) => el.props?.id === 'scan-personal-continue' && el.props?.disabled === true);
+    assert.equal(disabled.length, 1, 'la CTA di prosecuzione è disabilitata, non nascosta');
+    assert.equal(fetchCalls.length, 1, 'nessun salvataggio');
   } finally {
     await act(async () => { renderer.unmount(); });
   }

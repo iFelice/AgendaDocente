@@ -45,6 +45,8 @@ const timetableRequest = (profile: unknown) => ({
   imageBase64: pngBase64,
   mimeType: 'image/png',
   documentType: 'personal-support-timetable',
+  // Ore per giorno dichiarate dall'utente: obbligatorie per l'orario personale.
+  periodsPerDay: 5,
   profile,
 });
 
@@ -215,7 +217,7 @@ async function withStub(impl: (url: any, init: any) => Promise<Response>, option
   if (options.withoutAbortSignalTimeout) delete (AbortSignal as any).timeout;
   globalThis.fetch = impl as any;
   try {
-    return await analyzeTimetableDocument({ imageBase64: 'AAAA', mimeType: 'image/png', documentType: 'personal-support-timetable', profile: clientProfile });
+    return await analyzeTimetableDocument({ imageBase64: 'AAAA', mimeType: 'image/png', documentType: 'personal-support-timetable', periodsPerDay: 5, profile: clientProfile });
   } finally {
     globalThis.fetch = savedFetch;
     (AbortSignal as any).timeout = savedTimeout;
@@ -286,10 +288,10 @@ test('client: senza AbortSignal.timeout (iOS Safari < 16) la richiesta parte com
   let called = 0;
   const result = await withStub(async () => {
     called++;
-    return jsonResponse(200, { success: true, source: 'gemini', rows: ['Manganiello'], cells: [] });
+    return jsonResponse(200, { success: true, source: 'gemini', rowLabel: 'Manganiello F.', cells: [] });
   }, { withoutAbortSignalTimeout: true });
   assert.equal(called, 1, 'fetch invocata: prima veniva lanciato un TypeError scambiato per rete assente');
-  assert.deepEqual(result.rows, ['Manganiello']);
+  assert.equal(result.rowLabel, 'Manganiello F.');
   assert.equal(result.success, true);
 });
 

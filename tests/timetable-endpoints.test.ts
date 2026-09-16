@@ -57,6 +57,7 @@ test('analyze-timetable: PDF valido senza chiave AI -> 503 generico, no-store, f
     imageBase64: validPdfBase64,
     mimeType: 'application/pdf',
     documentType: 'personal-support-timetable',
+    periodsPerDay: 5,
     profile,
   });
   assert.equal(res.status, 503);
@@ -119,9 +120,44 @@ test('analyze-timetable: payload invalidi -> 400/415 con messaggi generici', asy
     imageBase64: validPdfBase64,
     mimeType: 'application/pdf',
     documentType: 'personal-support-timetable',
+    periodsPerDay: 5,
     profile: { classes: '1A' },
   });
   assert.equal(badProfile.status, 400);
+});
+
+test('analyze-timetable: ore per giorno obbligatorie e valide per l orario personale', async () => {
+  // Endpoint isolato: contatore rate-limit dedicato (la validazione è la stessa).
+  await withIsolatedEndpoint(async post => {
+    const base = { imageBase64: validPdfBase64, mimeType: 'application/pdf', documentType: 'personal-support-timetable', profile };
+
+    // Assente: l'analisi non può partire (nessuna lunghezza attesa verificabile).
+    const missing = await post(base);
+    assert.equal(missing.status, 400);
+    assert.match((await missing.json()).error, /ore/i);
+
+    // Non intero, non positivo, non numerico: sempre 400 con messaggio per l'utente.
+    for (const bad of [0, 2.5, '5']) {
+      const res = await post({ ...base, periodsPerDay: bad });
+      assert.equal(res.status, 400, `periodsPerDay=${JSON.stringify(bad)} deve essere rifiutato`);
+      const body = await res.json();
+      assert.match(body.error, /ore/i);
+      assert.doesNotMatch(JSON.stringify(body), /stack|Error:|TypeError/i, 'nessun dettaglio tecnico nel corpo');
+    }
+
+    // Valido: supera i guard e arriva all'handler.
+    const ok = await post({ ...base, periodsPerDay: 5 });
+    assert.equal(ok.status, 200);
+  });
+
+  // Curricolare: le ore per giorno non sono richieste (503 senza chiave AI).
+  const curricular = await post('/api/analyze-timetable', {
+    imageBase64: validPdfBase64,
+    mimeType: 'application/pdf',
+    documentType: 'curricular-timetable',
+    profile,
+  });
+  assert.equal(curricular.status, 503);
 });
 
 test('analyze-student-document: PDF valido senza chiave AI -> 503; immagine mancante -> 400', async () => {

@@ -8,7 +8,6 @@ import {
   STUDENT_DOCUMENT_TIMEOUT_MS,
   TIMETABLE_ANALYSIS_TIMEOUT_MS,
   describeAnalysisFailure,
-  describePersonalRowFilter,
   parseStudentDocumentAiResponse,
   parseTimetableAiResponse,
   type TimetableAnalysisOutcome,
@@ -18,6 +17,7 @@ import {
   validateStudentDocumentPayload,
   validateTimetableAnalysisPayload,
 } from "./server/timetableAnalysis";
+import { expectedPersonalCellCount } from "./src/utils/timetableAnalysis";
 import express from "express";
 import { parseCircularText, normalizeExtractedItems } from "./src/utils/circularParser";
 import http from "http";
@@ -525,7 +525,7 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
   const abort = () => controller.abort();
   res.once("close", abort);
   try {
-    const { documentType, imageBase64, mimeType, profile } = req.body;
+    const { documentType, imageBase64, mimeType, profile, periodsPerDay } = req.body;
     const ai = getGeminiClient();
     if (!ai) {
       return res.status(503).json({ success: false, error: "Il servizio di analisi non è disponibile. Riprova più tardi." });
@@ -533,14 +533,19 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
     // Solo il cognome serve al modello per individuare la riga: nessun altro campo
     // del profilo (email, scuola, classi, alunni, account Google, ruoli) finisce
     // nel prompt, e il cognome non finisce nei log.
-    const targetSurname = documentType === "personal-support-timetable" ? personalTargetSurname(profile) : "";
+    const isPersonal = documentType === "personal-support-timetable";
+    const targetSurname = isPersonal ? personalTargetSurname(profile) : "";
+    // Geometria dell'orario personale: ore per giorno dichiarate dall'UTENTE
+    // (già validate nella request) x giorni scolastici. Il modello non la
+    // dichiara e non può influenzarla.
+    const expectedCellCount = isPersonal ? expectedPersonalCellCount(periodsPerDay) : 0;
     const run = await runGeminiJson({
-      systemInstruction: documentType === "personal-support-timetable" ? buildPersonalTimetablePrompt(targetSurname) : CURRICULAR_TIMETABLE_PROMPT,
+      systemInstruction: isPersonal ? buildPersonalTimetablePrompt(targetSurname, expectedCellCount) : CURRICULAR_TIMETABLE_PROMPT,
       contents: [
         { inlineData: { data: imageBase64, mimeType } },
         { text: "Analizza la tabella della foto/PDF allegata rispettando le regole del prompt." },
       ],
-      responseSchema: documentType === "personal-support-timetable" ? personalTimetableSchema : curricularTimetableSchema,
+      responseSchema: isPersonal ? personalTimetableSchema : curricularTimetableSchema,
       signal: controller.signal,
       label: "AI Orari",
       budgetMs: TIMETABLE_ANALYSIS_TIMEOUT_MS,
@@ -557,26 +562,24 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
     // Forma del payload: un rifiuto del validatore è un fallimento ATTESO e
     // gestito (messaggio utente invariato, diagnostica privacy-safe), non un crash
     // nel catch generico dell'endpoint — che era il sintomo su iPhone.
+    // Nell'orario personale sono rifiuti anche la sequenza di lunghezza diversa
+    // dall'attesa e una riga non compatibile col cognome del profilo.
     let outcome: TimetableAnalysisOutcome;
     try {
-      outcome = parseTimetableAiResponse(documentType, decoded.value, targetSurname);
+      outcome = parseTimetableAiResponse(documentType, decoded.value, targetSurname, periodsPerDay);
     } catch (error: unknown) {
       console.warn(describeAnalysisFailure(error, decoded.value, documentType));
       return res.status(422).json({ success: false, error: "Analisi non riuscita. Riprova." });
     }
-    // Il modello ha incluso celle di righe non candidate: scartate server-side.
-    // Solo conteggi nei log (mai etichette, cognomi o contenuti).
-    if ((outcome.droppedForeignCells ?? 0) > 0) console.log(describePersonalRowFilter(outcome));
     return res.json({
       success: true,
       source: run.source,
-      rows: outcome.rows,
+      // Solo per l'orario personale: etichetta della riga letta, già verificata
+      // contro il cognome del profilo. Nessuna coordinata: giorno e periodo sono
+      // derivati dal codice.
+      rowLabel: outcome.rowLabel,
       curricularRows: outcome.curricularRows,
       cells: outcome.cells,
-      // Solo per l'orario personale: geometria della griglia e posizioni non ancorate.
-      // Nessun contenuto del documento: sono conteggi.
-      periodsPerDay: outcome.periodsPerDay,
-      positionIssues: outcome.positionIssues,
     });
   } catch (error: unknown) {
     // Solo nome del tipo di errore: mai contenuto del documento o del modello.

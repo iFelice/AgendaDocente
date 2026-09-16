@@ -26,9 +26,11 @@ import {
 import { AnalysisProgressBar } from "./AnalysisProgressBar";
 import { RECON_NOTES, crossrefTimetables, reconSignal, type ReconstructedSlot } from "../utils/timetableCrossref";
 import {
+  MAX_GRID_PERIODS,
+  PERSONAL_SCHOOL_DAYS,
   buildPersonalCoordinateScope,
   curricularCellsToSlots,
-  findTeacherRows,
+  expectedPersonalCellCount,
   personalCellsToCandidates,
   restrictCurricularSlotsToCoordinates,
   summarizeCurricularCoverage,
@@ -99,18 +101,33 @@ interface ReconEditSlot extends ReconstructedSlot {
 }
 
 interface PersonalReviewState {
-  rows: string[];
-  cells: TimetableRawCell[];
-  matches: Array<{ rowIndex: number; rowLabel: string }>;
-  confirmedRow: number | null;
-  skipped: SkippedCell[];
   /**
-   * Righe/giorni del documento la cui numerazione delle ore non è ancorabile alla
-   * griglia (duplicati nei periodIndex): l'AI non è stata chiara, le ore vanno
-   * verificate a mano prima di salvare. 0 = posizioni coerenti con le colonne.
+   * Etichetta della riga letta dal modello. È già stata verificata sul server
+   * contro il cognome del profilo: qui è solo informazione per l'utente.
    */
-  positionIssues: number;
+  rowLabel: string;
+  /**
+   * Sequenza COMPLETA della riga del docente: una cella per posizione fisica,
+   * da sinistra a destra, celle vuote incluse. Giorno e periodo di ogni cella
+   * sono stati derivati dal server dalla posizione, non dal modello.
+   */
+  cells: TimetableRawCell[];
+  /** Ore per giorno dichiarate dall'utente per questa analisi. */
+  periodsPerDay: number;
 }
+
+/**
+ * Riga sintetica dell'orario personale: il modello legge UNA sola riga e le
+ * coordinate nascono dall'indice della sequenza, quindi tutte le celle
+ * appartengono alla riga 0. È il valore atteso da `personalCellsToCandidates`.
+ */
+const PERSONAL_ROW_INDEX = 0;
+
+/** Domanda obbligatoria prima dell'analisi dell'orario personale. */
+export const PERIODS_PER_DAY_QUESTION = "Quante ore ci sono in ogni giornata scolastica?";
+/** Messaggio quando il valore non è (ancora) utilizzabile. */
+export const PERIODS_PER_DAY_QUESTION_ERROR =
+  "Indica quante ore ci sono in ogni giornata scolastica (numero intero da 1 a 24).";
 
 export interface DocumentScannerModalProps {
   isOpen: boolean;
@@ -161,6 +178,13 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isReading, setIsReading] = useState(false);
   const [consentGiven, setConsentGiven] = useState(false);
+  /**
+   * Ore di ogni giornata scolastica, dichiarate dall'utente PRIMA dell'analisi
+   * dell'orario personale. È l'unico ingresso della geometria: determina quante
+   * celle deve contenere la sequenza (ore x giorni scolastici) e quindi il
+   * giorno e il periodo di ogni cella. Stringa perché è il valore di un input.
+   */
+  const [periodsPerDayInput, setPeriodsPerDayInput] = useState<string>("");
   const [personal, setPersonal] = useState<PersonalReviewState | null>(null);
   /** Ore curricolari GIÀ limitate alle mie coordinate: `droppedCount` è quanto è stato scartato. */
   const [curricular, setCurricular] = useState<{ rows: CurricularRawRow[]; slots: CurricularTimetableSlot[]; skipped: SkippedCell[]; droppedCount: number } | null>(null);
@@ -183,6 +207,31 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     removed: number;
   } | null>(null);
   const [savedDirty, setSavedDirty] = useState(false);
+
+  /**
+   * Prefill della domanda sulle ore: la configurazione delle fasce orarie
+   * dell'utente (`timeSlotConfig.periodsPerDay`), quando è un numero sensato.
+   * Resta modificabile: il valore usato è solo quello confermato dall'utente.
+   */
+  const periodsPerDayPrefill =
+    typeof timeSlotConfig?.periodsPerDay === "number"
+    && Number.isInteger(timeSlotConfig.periodsPerDay)
+    && timeSlotConfig.periodsPerDay >= 1
+    && timeSlotConfig.periodsPerDay <= MAX_GRID_PERIODS
+      ? String(timeSlotConfig.periodsPerDay)
+      : "";
+
+  /** Ore per giorno dichiarate: 0 = valore assente o non accettabile. */
+  const periodsPerDay = useMemo(() => {
+    const trimmed = periodsPerDayInput.trim();
+    // Solo cifre: niente decimali, niente segni, niente testo.
+    if (!/^\d+$/.test(trimmed)) return 0;
+    const value = Number(trimmed);
+    return value >= 1 && value <= MAX_GRID_PERIODS ? value : 0;
+  }, [periodsPerDayInput]);
+  const periodsPerDayValid = periodsPerDay > 0;
+  /** Celle attese nella sequenza: ore per giorno x giorni scolastici (lun-ven). */
+  const expectedCellCount = expectedPersonalCellCount(periodsPerDay);
 
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -237,6 +286,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     setIsAnalyzing(false);
     setIsReading(false);
     setConsentGiven(false);
+    setPeriodsPerDayInput(periodsPerDayPrefill);
     setPersonal(null);
     setCurricular(null);
     setStudentCandidates(null);
@@ -352,6 +402,13 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
       setAnalysisError(OFFLINE_ANALYSIS_MESSAGE);
       return;
     }
+    // Orario personale: senza un numero di ore valido non esiste una lunghezza
+    // attesa da verificare, quindi l'analisi non parte (il pulsante è già
+    // disabilitato: questa è la stessa regola, difesa anche qui).
+    if (captureFor === "personal" && !periodsPerDayValid) {
+      setAnalysisError(PERIODS_PER_DAY_QUESTION_ERROR);
+      return;
+    }
     const revision = readingRevision.current;
     setIsAnalyzing(true);
     setAnalysisError(null);
@@ -364,17 +421,17 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
           mimeType: file.type,
           documentType: "personal-support-timetable",
           profile,
+          // Geometria dichiarata dall'utente: il server la usa per verificare la
+          // lunghezza della sequenza e per derivare giorno/periodo.
+          periodsPerDay,
         });
         if (revision !== readingRevision.current) return;
-        const cells = result.cells ?? [];
-        const rows = result.rows ?? [];
+        // La riga è già stata identificata dal modello e verificata sul server
+        // contro il cognome del profilo: nessuna scelta della riga qui.
         const reviewState: PersonalReviewState = {
-          rows,
-          cells,
-          matches: findTeacherRows(rows, profile.fullName),
-          confirmedRow: null,
-          skipped: [],
-          positionIssues: result.positionIssues ?? 0,
+          rowLabel: result.rowLabel ?? "",
+          cells: result.cells ?? [],
+          periodsPerDay,
         };
         completeProgress(() => {
           if (revision !== readingRevision.current) return; // modale chiuso o analisi annullata: nulla da mostrare
@@ -444,18 +501,18 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
   };
 
   // ---------------------------------------------------------------------------
-  // Orario personale: conferma riga -> candidati (mai celle inventate)
+  // Orario personale: sequenza della riga -> candidati (mai celle inventate)
   // ---------------------------------------------------------------------------
 
   const personalCandidates: PersonalTimetableSlotCandidate[] = useMemo(() => {
-    if (!personal || personal.confirmedRow === null) return [];
-    const extraction = personalCellsToCandidates(personal.cells, [personal.confirmedRow]);
+    if (!personal) return [];
+    const extraction = personalCellsToCandidates(personal.cells, [PERSONAL_ROW_INDEX]);
     return extraction.candidates;
   }, [personal]);
 
   const personalSkipped: SkippedCell[] = useMemo(() => {
-    if (!personal || personal.confirmedRow === null) return [];
-    return personalCellsToCandidates(personal.cells, [personal.confirmedRow]).skipped;
+    if (!personal) return [];
+    return personalCellsToCandidates(personal.cells, [PERSONAL_ROW_INDEX]).skipped;
   }, [personal]);
 
   /**
@@ -489,11 +546,6 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
   // true -> false (in React «Rendered fewer hooks than expected» sarebbe fatale).
   // Sotto questo punto ci sono solo funzioni e JSX, nessun hook.
   if (!isOpen) return null;
-
-  const confirmPersonalRow = (rowIndex: number) => {
-    if (!personal) return;
-    setPersonal({ ...personal, confirmedRow: rowIndex });
-  };
 
   // ---------------------------------------------------------------------------
   // Incrocio multi-documento ("Ricostruisci il mio orario")
@@ -847,8 +899,38 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                     Il contenuto verrà inviato temporaneamente al servizio di analisi AI e non sarà salvato come immagine in AgendaDocente.
                   </p>
                 )}
-                <p className="text-amber-800">Dopo l'analisi il file viene scartato dall'app: nessun backup, nessuna copia sul server.</p>
+                <p className="text-amber-800">Dopo l&apos;analisi il file viene scartato dall&apos;app: nessun backup, nessuna copia sul server.</p>
               </div>
+
+              {/* Orario personale: la geometria della griglia è dichiarata
+                  dall'utente PRIMA dell'analisi. Da questo numero dipendono la
+                  lunghezza attesa della sequenza e il giorno/periodo di ogni
+                  cella: senza un valore valido l'analisi non parte. */}
+              {captureFor === "personal" && (
+                <div className="p-3 rounded-xl border border-stone-200 bg-white space-y-2">
+                  <label htmlFor="scan-periods-per-day" className="block text-xs font-semibold text-stone-900">
+                    {PERIODS_PER_DAY_QUESTION}
+                  </label>
+                  <input
+                    id="scan-periods-per-day"
+                    type="number"
+                    inputMode="numeric"
+                    min={1}
+                    max={MAX_GRID_PERIODS}
+                    step={1}
+                    value={periodsPerDayInput}
+                    onChange={event => setPeriodsPerDayInput(event.target.value)}
+                    className="w-24 min-h-[44px] px-3 rounded-lg border border-stone-300 text-sm text-stone-900"
+                    aria-describedby="scan-periods-per-day-help"
+                  />
+                  <p id="scan-periods-per-day-help" className="text-[11px] text-stone-500">
+                    {periodsPerDayValid
+                      ? `La tua riga sarà letta come ${expectedCellCount} posizioni: ${periodsPerDay} ${periodsPerDay === 1 ? "ora" : "ore"} per ${PERSONAL_SCHOOL_DAYS} giorni (lunedì-venerdì), celle libere incluse.`
+                      : PERIODS_PER_DAY_QUESTION_ERROR}
+                  </p>
+                </div>
+              )}
+
               <label className="flex items-start gap-3 p-3 rounded-xl border border-stone-200 bg-white cursor-pointer">
                 <input
                   type="checkbox"
@@ -878,7 +960,12 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                   type="button"
                   id="scan-consent-confirm"
                   onClick={() => void handleStartAnalysis()}
-                  disabled={!consentGiven || isOffline || isAnalyzing}
+                  disabled={
+                    !consentGiven || isOffline || isAnalyzing
+                    // Orario personale: senza un numero di ore valido non esiste
+                    // una lunghezza attesa, quindi l'analisi non può partire.
+                    || (captureFor === "personal" && !periodsPerDayValid)
+                  }
                   className="min-h-[44px] px-5 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white text-sm font-bold shadow-xs flex items-center gap-2"
                 >
                   <CloudUpload className="w-4 h-4" />
@@ -902,132 +989,118 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
             </div>
           )}
 
-          {/* STEP: revisione orario personale */}
+          {/* STEP: revisione orario personale (sequenza completa, vuoti inclusi) */}
           {step === "review-personal" && personal && (
             <div className="space-y-4">
-              {personal.positionIssues > 0 && (
-                <p
-                  id="scan-personal-position-issues"
-                  role="alert"
-                  className="text-[11px] leading-snug p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-900"
-                >
-                  Nel documento l&apos;intestazione delle ore non è stata chiara per {personal.positionIssues}{" "}
-                  {personal.positionIssues === 1 ? "giorno" : "giorni"}: controlla tu il numero d&apos;ora di ogni
-                  lezione qui sotto prima di salvare (una colonna vuota non deve far scorrere le ore dopo).
+              <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 space-y-1">
+                <p className="font-semibold">
+                  Riga letta nel documento: <strong>{personal.rowLabel || "etichetta non leggibile"}</strong>
+                </p>
+                <p id="scan-personal-sequence-count">
+                  {personal.cells.length} posizioni ({personal.periodsPerDay} {personal.periodsPerDay === 1 ? "ora" : "ore"} x {PERSONAL_SCHOOL_DAYS} giorni):{" "}
+                  {personal.cells.filter(cell => cell.raw.trim()).length} occupate,{" "}
+                  {personal.cells.filter(cell => !cell.raw.trim()).length} vuote.
+                </p>
+                <p className="text-[11px] text-emerald-800">
+                  Giorno e numero d&apos;ora derivano dalla posizione nella sequenza: controlla qui sotto le ore libere
+                  prima di salvare. Nessuna ora viene salvata automaticamente.
+                </p>
+              </div>
+
+              {/* Sequenza COMPLETA della riga: una riga per ogni posizione fisica,
+                  celle vuote incluse e visibili. */}
+              <div id="scan-personal-sequence" className="space-y-3">
+                {Array.from({ length: PERSONAL_SCHOOL_DAYS }, (_, dayOffset) => {
+                  const day = dayOffset + 1;
+                  const cellsOfDay = personal.cells.filter(cell => cell.dayOfWeek === day);
+                  return (
+                    <div key={day} className="rounded-xl border border-stone-200 bg-white p-3">
+                      <p className="text-xs font-bold text-stone-900 mb-2">{DAY_LABELS[day]}</p>
+                      <div className="space-y-1.5">
+                        {cellsOfDay.map(cell => {
+                          const free = !cell.raw.trim();
+                          return (
+                            <div
+                              key={`${cell.dayOfWeek}-${cell.periodIndex}`}
+                              className="flex items-center gap-3 text-xs"
+                              data-day={cell.dayOfWeek}
+                              data-period={cell.periodIndex}
+                            >
+                              <span className="w-16 shrink-0 text-stone-500">{cell.periodIndex}ª ora</span>
+                              <span
+                                className={`px-2 py-0.5 rounded-md font-bold ${free ? "bg-stone-100 text-stone-400 italic" : "bg-emerald-100 text-emerald-900"}`}
+                              >
+                                {free ? "libera" : cell.raw}
+                              </span>
+                            </div>
+                          );
+                        })}
+                        {cellsOfDay.length === 0 && (
+                          <p className="text-[11px] text-stone-400">Nessuna posizione per questo giorno.</p>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {personalCandidates.length === 0 ? (
+                <p className="text-xs text-stone-600 p-4 rounded-xl bg-stone-50 border border-stone-200">
+                  Nessuna cella interpretabile nella riga: nessuna ora è stata inventata. Puoi riprovare con un&apos;altra foto.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  <p className="text-[11px] font-semibold text-stone-600">
+                    Ore che verranno salvate ({personalCandidates.length}):
+                  </p>
+                  {personalCandidates.map(slot => (
+                    <div key={slot.id} className="flex items-center gap-3 p-3 rounded-xl border border-stone-200 bg-white text-sm">
+                      <span className="font-semibold text-stone-900 w-24 shrink-0 truncate">{DAY_LABELS[slot.dayOfWeek]}</span>
+                      <span className="text-stone-600 w-16 shrink-0">{slot.periodIndex}ª ora</span>
+                      <span className={`px-2 py-0.5 rounded-md text-xs font-bold ${slot.classLabel ? "bg-emerald-100 text-emerald-900" : "bg-stone-100 text-stone-500"}`}>
+                        {slot.classLabel ?? "classe n.d."}
+                      </span>
+                      <span className={`ml-auto text-[10px] font-semibold ${slot.confidence === "high" ? "text-emerald-700" : "text-amber-700"}`}>
+                        {slot.confidence === "high" ? "certezza alta" : "da verificare"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {personalSkipped.length > 0 && (
+                <p className="text-[11px] text-stone-500">
+                  {personalSkipped.length} celle non interpretate (codici D/P/Co o testo non leggibile): non sono state trasformate in orari.
                 </p>
               )}
-              {personal.confirmedRow === null ? (
-                <>
-                  <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 text-xs text-stone-600 space-y-1">
-                    <p className="font-semibold text-stone-900">
-                      {personal.matches.length === 0
-                        ? `Non ho trovato il tuo nome (${profile.fullName || "profilo"}) nelle righe del documento.`
-                        : personal.matches.length === 1
-                          ? `Riga trovata per ${profile.fullName}.`
-                          : `Trovate ${personal.matches.length} righe compatibili con ${profile.fullName}: scegli la tua.`}
-                    </p>
-                    {personal.matches.length > 1 && (
-                      <p>Per evitare errori il sistema non sceglie al posto tuo.</p>
-                    )}
-                  </div>
-                  <div className="space-y-2" role="radiogroup" aria-label="Riga del docente">
-                    {personal.rows.map((label, rowIndex) => {
-                      const isMatch = personal.matches.some(m => m.rowIndex === rowIndex);
-                      return (
-                        <label
-                          key={rowIndex}
-                          className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer text-sm ${
-                            isMatch ? "border-emerald-400 bg-emerald-50/50" : "border-stone-200 bg-white"
-                          }`}
-                        >
-                          <input
-                            type="radio"
-                            name="scan-personal-row"
-                            value={String(rowIndex)}
-                            checked={false}
-                            onChange={() => confirmPersonalRow(rowIndex)}
-                            className="w-4 h-4 accent-emerald-700"
-                          />
-                          <span className="font-medium text-stone-900 truncate">{label || `Riga ${rowIndex + 1}`}</span>
-                          {isMatch && <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded-full shrink-0">compatibile</span>}
-                        </label>
-                      );
-                    })}
-                    {personal.rows.length === 0 && (
-                      <p className="text-xs text-stone-500 p-3 rounded-xl bg-stone-50 border border-stone-200">
-                        Nessuna riga leggibile: riprova con una foto più nitida.
-                      </p>
-                    )}
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 flex items-center justify-between gap-2">
-                    <span>
-                      Riga confermata: <strong>{personal.rows[personal.confirmedRow]}</strong>
-                    </span>
-                    <button type="button" onClick={() => setPersonal({ ...personal, confirmedRow: null })} className="font-semibold underline shrink-0">
-                      Cambia
-                    </button>
-                  </div>
-                  {personalCandidates.length === 0 ? (
-                    <p className="text-xs text-stone-600 p-4 rounded-xl bg-stone-50 border border-stone-200">
-                      Nessuna cella interpretabile nella riga: nessuna ora è stata inventata. Puoi riprovare con un'altra foto.
-                    </p>
-                  ) : (
-                    <div className="space-y-2">
-                      {personalCandidates.map(slot => (
-                        <div key={slot.id} className="flex items-center gap-3 p-3 rounded-xl border border-stone-200 bg-white text-sm">
-                          <span className="font-semibold text-stone-900 w-24 shrink-0 truncate">{DAY_LABELS[slot.dayOfWeek]}</span>
-                          <span className="text-stone-600 w-16 shrink-0">{slot.periodIndex}ª ora</span>
-                          <span className={`px-2 py-0.5 rounded-md text-xs font-bold ${slot.classLabel ? "bg-emerald-100 text-emerald-900" : "bg-stone-100 text-stone-500"}`}>
-                            {slot.classLabel ?? "classe n.d."}
-                          </span>
-                          <span className={`ml-auto text-[10px] font-semibold ${slot.confidence === "high" ? "text-emerald-700" : "text-amber-700"}`}>
-                            {slot.confidence === "high" ? "certezza alta" : "da verificare"}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {personalSkipped.length > 0 && (
-                    <p className="text-[11px] text-stone-500">
-                      {personalSkipped.length} celle non interpretate (codici D/P/Co o testo non leggibile): non sono state trasformate in orari.
-                    </p>
-                  )}
-                </>
-              )}
 
-              {personal.confirmedRow !== null && personalCandidates.length > 0 && (
+              {personalCandidates.length > 0 && (
                 <p className="text-[11px] text-stone-500">
                   {phaseASaved
                     ? "Orario personale già salvato: le ore sono nella vista Orario."
                     : "Nessun salvataggio ancora effettuato: rivedi le ore e usa «Salva questo orario». L'orario curricolare è facoltativo e può essere aggiunto dopo il salvataggio."}
                 </p>
               )}
-              {personal.confirmedRow !== null && (
-                <div className="flex items-center justify-end gap-2">
-                  {support && (docType === "personal" || docType === "ricostruisci") && (
-                    <button
-                      type="button"
-                      id="scan-personal-add-curricular"
-                      onClick={() => startCapture("curricular")}
-                      className="min-h-[44px] px-4 rounded-xl text-sm font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100"
-                    >
-                      Aggiungi orario curricolare
-                    </button>
-                  )}
+              <div className="flex items-center justify-end gap-2">
+                {support && (docType === "personal" || docType === "ricostruisci") && (
                   <button
                     type="button"
-                    id="scan-personal-continue"
-                    onClick={buildReconstruction}
-                    disabled={personalCandidates.length === 0}
-                    className="min-h-[44px] px-5 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white text-sm font-bold shadow-xs"
+                    id="scan-personal-add-curricular"
+                    onClick={() => startCapture("curricular")}
+                    className="min-h-[44px] px-4 rounded-xl text-sm font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100"
                   >
-                    {support ? "Revisiona e salva l'orario" : "Revisiona e conferma"}
+                    Aggiungi orario curricolare
                   </button>
-                </div>
-              )}
+                )}
+                <button
+                  type="button"
+                  id="scan-personal-continue"
+                  onClick={buildReconstruction}
+                  disabled={personalCandidates.length === 0}
+                  className="min-h-[44px] px-5 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white text-sm font-bold shadow-xs"
+                >
+                  {support ? "Revisiona e salva l'orario" : "Revisiona e conferma"}
+                </button>
+              </div>
             </div>
           )}
 
@@ -1080,7 +1153,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
               </div>
               {support ? (
                 <div className="flex items-center justify-end gap-2">
-                  {personal && personal.confirmedRow !== null && (
+                  {personal !== null && (
                     <button
                       type="button"
                       id="scan-curricular-back-personal"
@@ -1094,7 +1167,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                     type="button"
                     id="scan-curricular-reconstruct"
                     onClick={() => {
-                      if (personal && personal.confirmedRow !== null && personalCandidates.length > 0) {
+                      if (personal !== null && personalCandidates.length > 0) {
                         buildReconstruction();
                       } else {
                         startCapture("personal");

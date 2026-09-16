@@ -5,11 +5,11 @@ import {
   validateTeacherProfile,
 } from './analysisGuards';
 import {
-  findTeacherRows,
-  normalizePeriodsPerDay,
+  MAX_GRID_PERIODS,
+  expectedPersonalCellCount,
   teacherSurnames,
   validateCurricularTimetablePayload,
-  validatePersonalTimetablePayload,
+  validatePersonalSequencePayload,
   validateStudentCommitmentsPayload,
   TimetableShapeError,
   type TimetableDocumentType,
@@ -20,25 +20,53 @@ const invalid = () => { throw new AnalysisInputError(400, 'Richiesta di analisi 
 
 export const TIMETABLE_DOCUMENT_TYPES: TimetableDocumentType[] = ['personal-support-timetable', 'curricular-timetable'];
 
+/** Chiavi ammesse nel corpo di POST /api/analyze-timetable (allow-list chiusa). */
+const TIMETABLE_REQUEST_KEYS = ['imageBase64', 'mimeType', 'documentType', 'profile', 'periodsPerDay'];
+
+/**
+ * Ore per giorno dichiarate dall'UTENTE per l'orario personale.
+ *
+ * È un dato di input, non un metadato del modello: intero, positivo e dentro il
+ * tetto di geometria dell'app (`MAX_GRID_PERIODS`). Stringhe, decimali, zero e
+ * negativi sono rifiutati: senza un numero certo non esiste una lunghezza
+ * attesa da verificare, e una lunghezza attesa sbagliata farebbe passare o
+ * scartare un'analisi intera.
+ */
+function isPeriodsPerDayInput(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= MAX_GRID_PERIODS;
+}
+
 /**
  * POST /api/analyze-timetable
- * { imageBase64, mimeType, documentType, profile } — solo immagini/PDF:
- * le tabelle orari non hanno un parser testuale locale affidabile.
+ * { imageBase64, mimeType, documentType, profile, periodsPerDay? } — solo
+ * immagini/PDF: le tabelle orari non hanno un parser testuale locale affidabile.
+ * `periodsPerDay` è OBBLIGATORIO per l'orario personale (determina la lunghezza
+ * attesa della sequenza) e ignorato per il curricolare.
  */
-export function validateTimetableAnalysisPayload(body: unknown): { documentType: TimetableDocumentType; imageBase64: string; mimeType: string; profile: Record<string, unknown> } {
+export function validateTimetableAnalysisPayload(body: unknown): { documentType: TimetableDocumentType; imageBase64: string; mimeType: string; profile: Record<string, unknown>; periodsPerDay?: number } {
   if (!record(body)) return invalid();
-  if (Object.keys(body).some(k => !['imageBase64', 'mimeType', 'documentType', 'profile'].includes(k))) return invalid();
+  if (Object.keys(body).some(k => !TIMETABLE_REQUEST_KEYS.includes(k))) return invalid();
   if (typeof body.documentType !== 'string' || !TIMETABLE_DOCUMENT_TYPES.includes(body.documentType as TimetableDocumentType)) {
     throw new AnalysisInputError(400, 'Tipo documento non valido.');
   }
   if (body.imageBase64 === undefined) throw new AnalysisInputError(400, 'Carica una foto o un PDF del documento.');
+  // Il documento viene verificato PRIMA delle ore per giorno: i codici di errore
+  // del file (413/415) restano quelli storici e più specifici per l'utente.
   validateImageFields(body);
+  const personal = body.documentType === 'personal-support-timetable';
+  if (body.periodsPerDay !== undefined && !isPeriodsPerDayInput(body.periodsPerDay)) {
+    throw new AnalysisInputError(400, 'Indica quante ore ci sono in ogni giornata scolastica (numero intero da 1 a 24).');
+  }
+  if (personal && body.periodsPerDay === undefined) {
+    throw new AnalysisInputError(400, 'Indica quante ore ci sono in ogni giornata scolastica.');
+  }
   validateTeacherProfile(body.profile);
   return {
     documentType: body.documentType as TimetableDocumentType,
     imageBase64: body.imageBase64 as string,
     mimeType: body.mimeType as string,
     profile: body.profile as Record<string, unknown>, // già validata sopra
+    periodsPerDay: personal ? (body.periodsPerDay as number) : undefined,
   };
 }
 
@@ -78,8 +106,10 @@ REGOLE OBBLIGATORIE:
  *
  * `foldName` (usato da `teacherSurnames`) toglie accenti, maiuscole e punteggiatura:
  * il valore che esce è un token `[a-z ]` curto, quindi interpolabile nel prompt senza
- * rischio di iniezione. Serve anche al filtro server-side (`findTeacherRows`), così
- * prompt e validazione usano ESATTAMENTE lo stesso cognome.
+ * rischio di iniezione. Serve anche alla guardia d'identità server-side
+ * (`findTeacherRows` dentro `validatePersonalSequencePayload`, che verifica il
+ * `rowLabel` restituito dal modello), così prompt e validazione usano ESATTAMENTE
+ * lo stesso cognome.
  */
 export function personalTargetSurname(profile: unknown): string {
   const fullName = record(profile) ? (profile as { fullName?: unknown }).fullName : undefined;
@@ -88,34 +118,40 @@ export function personalTargetSurname(profile: unknown): string {
 }
 
 /**
- * Prompt dell'orario PERSONALE: è dinamico perché contiene il solo cognome target.
+ * Prompt dell'orario PERSONALE: dinamico perché contiene il cognome target e la
+ * lunghezza ATTESA della sequenza (entrambi determinati dal server).
  *
- * perché: il contratto "griglia densa di TUTTE le righe" valeva ~9 500 token di output
- * su una pagina da 25 docenti (625 celle) e la decodifica non stava nel budget
- * dell'endpoint (log reali: 504 `deadline` a 25,8 s). Del documento, all'app serve
- * solo la riga del docente: le etichette di tutte le righe restano obbligatorie
- * (costano ~14 char l'una) perché alimentano il matching locale e la scelta umana.
- * `TABLE_RULES` è condivisa col curricolare e NON viene toccata.
+ * perché questo contratto: il modello legge una sola riga e restituisce la
+ * sequenza lineare delle sue celle. Giorno, periodo e indice di riga NON sono
+ * più dichiarati dal modello: sono derivati dal codice dall'indice dell'array
+ * (vedi `validatePersonalSequencePayload`). Così lo spostamento delle ore
+ * causato dalle celle vuote — il difetto che l'ancoraggio provava a segnalare —
+ * diventa strutturalmente impossibile, e l'output si riduce a poche centinaia di
+ * byte invece della griglia densa con le coordinate ripetute per ogni cella.
+ *
+ * `TABLE_RULES` è condivisa col curricolare e NON viene toccata: le sue regole
+ * 3-5 (riga/colonna/periodo) qui sono disattivate dal contratto di formato, che
+ * è dichiarato prevalente.
  */
-export function buildPersonalTimetablePrompt(teacherSurname: string): string {
+export function buildPersonalTimetablePrompt(teacherSurname: string, expectedCellCount: number): string {
   const target = teacherSurname.trim();
-  return `Estrai la struttura della tabella dell'ORARIO PERSONALE del docente dalla foto/PDF allegata.
+  const count = Number.isInteger(expectedCellCount) && expectedCellCount > 0 ? expectedCellCount : 0;
+  return `Estrai la riga del docente dall'ORARIO PERSONALE nella foto/PDF allegata.
 La tabella ha una colonna docenti (una riga per docente, con eventuali colonne MATERIA e CLASSI) e una griglia giorno (LUNEDÌ..VENERDÌ) x periodo (1ª ora, 2ª ora, ...).
 ${TABLE_RULES}
-REGOLE AGGIUNTIVE OBBLIGATORIE PER L'ORARIO PERSONALE (la posizione delle ore è critica):
-P1. "rows" deve contenere TUTTE le etichette della colonna docenti, nell'ordine del documento: una stringa per riga, ANCHE per le righe di cui non estrai nessuna cella.
-P2. "rowIndex" è SEMPRE l'indice 0-based della riga DENTRO l'array COMPLETO "rows": NON è l'indice relativo fra le sole righe candidate. Se "rows" contiene 10 etichette e il docente è l'ottava, allora rowIndex = 7 anche se quella è l'unica riga per cui restituisci celle.
-P3. ${target ? `Il docente da estrarre ha cognome "${target}". Cercalo come PAROLA INTERA nelle etichette: mai una sottostringa ("Bianchi" NON combacia con "Bianchini").` : "Nessun cognome target disponibile: considera l'unica riga della griglia, se una sola riga è visibile."}
-P4. In "cells" riporta la griglia densa SOLO delle righe compatibili col cognome, massimo 3 righe: le altre righe esistono solo come etichette in "rows" e per esse NON devi restituire celle.
-P5. Per ogni riga candidata e per ogni giorno, restituisci ESATTAMENTE periodsPerDay celle: una per colonna, in ordine da sinistra, incluse le colonne vuote con "raw": "".
-P6. Una colonna vuota va emessa NELLA SUA POSIZIONE reale: se la 1ª ora è vuota la cella con periodIndex 1 e raw "" DEVE esserci. Ometterla, spostarla in fondo al giorno o rinumerare le ore successive è VIETATO.
-P7. periodIndex = numero ASSOLUTO della colonna partendo da 1 (vuoti contati), mai il progressivo delle sole celle non vuote.
-P8. Se nessuna riga è compatibile con sufficiente sicurezza, o se le righe compatibili sono più di 3 (cognome ambiguo), restituisci "cells": []: MAI scegliere un'altra riga perché è la più probabile.
-P9. Se la griglia ha UNA SOLA riga (foglio personale ritagliato, o colonna docenti non leggibile), riporta le celle dense di quell'unica riga: la conferma della riga resta comunque umana.
-P10. periodsPerDay = quante colonne-periodo ha la griglia per ogni giorno, contate sull'intestazione (NON sul numero di celle con valore); usa 0 solo se l'intestazione non è leggibile.
-Formato richiesto (esempio: 10 etichette e docente all'ottava riga -> rowIndex = 7):
-{ "rows": ["Bianchi M.", "Ferrari A.", "Riva C.", "Costa L.", "Greco P.", "Bruno T.", "Galbiati S.", "Manganiello F.", "Neri E.", "Pini U."], "periodsPerDay": 5, "cells": [{ "rowIndex": 7, "dayOfWeek": 1, "periodIndex": 1, "raw": "" }, { "rowIndex": 7, "dayOfWeek": 1, "periodIndex": 2, "raw": "3D" }] }
-Riepilogo: "rows" = tutte le etichette; "rowIndex" = indice della riga dentro "rows" (lista completa); "cells" = al massimo 3 righe x 5 giorni x periodsPerDay celle, vuoti inclusi al loro posto.`;
+CONTRATTO DI FORMATO DELL'ORARIO PERSONALE — PREVALE sulle regole 3, 4 e 5 qui sopra: in questo formato le coordinate NON esistono.
+S1. ${target ? `Individua la riga del docente con cognome "${target}". Cercalo come PAROLA INTERA nelle etichette: mai una sottostringa ("Bianchi" NON combacia con "Bianchini").` : "Nessun cognome target disponibile: restituisci \"cells\": [] e NON scegliere una riga a caso."}
+S2. In "rowLabel" riporta l'etichetta ESATTA della riga che hai letto (solo il testo dell'etichetta: nessun numero di riga).
+S3. Leggi SOLO quella riga: nessuna cella di altre righe.
+S4. In "cells" restituisci ESATTAMENTE ${count} celle, in ordine rigoroso da sinistra verso destra: tutte le ore di LUNEDÌ dalla 1ª all'ultima, poi MARTEDÌ, poi MERCOLEDÌ, GIOVEDÌ e infine VENERDÌ.
+S5. Ogni posizione fisica della riga deve comparire nell'array UNA sola volta: NON omettere celle, NON aggiungerne, NON spostarle, NON riordinarle.
+S6. Una cella vuota è la stringa vuota "": va scritta nella SUA posizione, mai omessa e mai spostata in fondo al giorno.
+S7. NON assegnare il giorno e NON assegnare il periodo o l'ora: nel formato richiesto non esistono dayOfWeek, periodIndex o rowIndex.
+S8. Riporta in ogni cella il testo ESATTO come scritto: "3D" resta "3D", "sos" resta "sos", "D"/"P"/"Co" restano tali e NON diventano classi.
+S9. Se la riga del docente non è individuabile, o se la sua riga non ha esattamente ${count} posizioni, restituisci "cells": []: MAI scegliere un'altra riga e MAI completare, accorciare o rinumerare la sequenza.
+Formato richiesto (nessun altro campo):
+{ "rowLabel": "Cognome N.", "cells": ["", "3D", "3D", "3E", "3E", "..."] }
+Riepilogo: "rowLabel" = etichetta della riga letta; "cells" = ${count} stringhe, una per ogni posizione fisica della riga da sinistra a destra, vuoti inclusi al loro posto.`;
 }
 
 export const CURRICULAR_TIMETABLE_PROMPT = `Estrai la struttura della tabella dell'ORARIO CURRICOLARE/ISTITUTO dalla foto/PDF allegata.
@@ -128,26 +164,30 @@ Formato richiesto:
 }
 In "rows" riporta ogni docente con materia e classi di riferimento (stringhe vuote/ liste vuote se assenti, MAI inventate). In "cells" riporta TUTTE le celle non vuote della griglia.`;
 
+/**
+ * Schema dell'orario personale: SEQUENZA lineare, senza coordinate.
+ *
+ * `cells` è un array di stringhe: una per posizione fisica della riga del
+ * docente. Nessun `rowIndex`, `dayOfWeek`, `periodIndex` o `periodsPerDay`,
+ * quindi il modello non ha alcun modo di dichiarare (e sbagliare) la posizione
+ * di un'ora. `rowLabel` è la sola informazione non testuale-orario richiesta e
+ * serve esclusivamente come guardia d'identità verificata sul server.
+ *
+ * La lunghezza esatta (`expectedCellCount`) NON è esprimibile qui in modo
+ * affidabile: il gate duro è l'uguaglianza verificata nel server
+ * (`validatePersonalSequencePayload`).
+ */
 export const personalTimetableSchema = {
   type: Type.OBJECT,
   properties: {
-    rows: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'TUTTE le etichette della colonna docenti, in ordine (anche le righe senza celle)' },
-    periodsPerDay: { type: Type.INTEGER, description: 'Colonne-periodo della griglia per ogni giorno, contate dall intestazione (1..24); 0 se non leggibile' },
+    rowLabel: { type: Type.STRING, description: 'Etichetta ESATTA della riga del docente letta nel documento (solo testo, nessun numero di riga)' },
     cells: {
       type: Type.ARRAY,
-      items: {
-        type: Type.OBJECT,
-        properties: {
-          rowIndex: { type: Type.INTEGER, description: 'Indice 0-based della riga DENTRO rows, cioè la lista COMPLETA di tutte le etichette; NON è un indice relativo alle sole righe candidate' },
-          dayOfWeek: { type: Type.INTEGER, description: '1=lunedì..5=venerdì (6=sabato se presente)' },
-          periodIndex: { type: Type.INTEGER, description: 'Numero di periodo assoluto della colonna 1..periodsPerDay; conta anche le colonne vuote precedenti, non rinumerare le sole celle non vuote, mai spostare i vuoti in coda' },
-          raw: { type: Type.STRING, description: 'Testo esatto della cella; stringa vuota per una colonna vuota (obbligatorio: la geometria della griglia non deve perdersi)' },
-        },
-        required: ['rowIndex', 'dayOfWeek', 'periodIndex', 'raw'],
-      },
+      items: { type: Type.STRING },
+      description: 'Sequenza delle celle della sola riga del docente, da sinistra a destra: prima tutte le ore di lunedì, poi martedì, mercoledì, giovedì, venerdì. Una stringa per ogni posizione fisica, cella vuota inclusa come ""',
     },
   },
-  required: ['rows', 'cells'],
+  required: ['rowLabel', 'cells'],
 };
 
 export const curricularTimetableSchema = {
@@ -228,29 +268,34 @@ export const studentDocumentSchema = {
 // ---------------------------------------------------------------------------
 
 export interface TimetableAnalysisOutcome {
-  rows?: string[];
+  /**
+   * Etichetta della riga letta dal modello (orario personale): SOLO guardia
+   * d'identità già verificata contro il cognome del profilo. Nessuna coordinata.
+   */
+  rowLabel?: string;
   curricularRows?: Array<{ rowIndex: number; rowLabel?: string; subject?: string; classes?: string[] }>;
   cells: Array<{ rowIndex: number; dayOfWeek: number; periodIndex: number; raw: string }>;
-  /** Colonne-periodo della griglia personale (0: non determinabile). */
-  periodsPerDay?: number;
-  /** (riga, giorno) del personale con posizioni non ancorabili: da verificare. */
-  positionIssues?: number;
-  /** Celle di righe non candidate scartate dal filtro server-side (contratto personale). */
-  droppedForeignCells?: number;
 }
 
-/** Valida la risposta AI dell'orario a seconda del tipo documento. */
+/**
+ * Valida la risposta AI dell'orario a seconda del tipo documento.
+ *
+ * Per l'orario personale `periodsPerDay` arriva dalla REQUEST (dichiarato
+ * dall'utente): determina la lunghezza attesa della sequenza ed è l'unico
+ * ingresso della geometria. Il modello non può influenzarlo.
+ */
 export function parseTimetableAiResponse(
   documentType: TimetableDocumentType,
   raw: unknown,
   targetTeacherSurname = '',
+  periodsPerDay = 0,
 ): TimetableAnalysisOutcome {
   if (documentType === 'personal-support-timetable') {
-    // Valida, seleziona la riga candidata e àncora le celle alle colonne della
-    // griglia (vedi anchorPersonalCellsToGrid): il cognome arriva dallo STESSO
-    // valore usato nel prompt, quindi prompt e validazione non possono divergere.
-    const { rows, cells, periodsPerDay, positionIssues, droppedForeignCells } = validatePersonalTimetablePayload(raw, targetTeacherSurname);
-    return { rows, cells, periodsPerDay, positionIssues, droppedForeignCells };
+    // Sequenza lineare: valida forma, lunghezza e identità della riga, poi
+    // deriva giorno/periodo dall'indice. Il cognome è lo STESSO valore usato nel
+    // prompt, quindi prompt e validazione non possono divergere.
+    const { rowLabel, cells } = validatePersonalSequencePayload(raw, targetTeacherSurname, periodsPerDay);
+    return { rowLabel, cells };
   }
   const { rows, cells } = validateCurricularTimetablePayload(raw);
   return { curricularRows: rows.map(({ rowIndex, rowLabel, subject, classes }) => ({ rowIndex, rowLabel, subject, classes })), cells };
@@ -260,7 +305,8 @@ export function parseTimetableAiResponse(
  * Diagnosi di un fallimento della fase di validazione, PRIVACY-SAFE per
  * costruzione: nome del tipo di errore, il messaggio FISSO del validatore (una
  * stringa nostra, mai testo del documento) e i CONTEGGI della risposta. Non
- * compaiono mai nomi di docenti, classi, OCR, base64 o il JSON del modello.
+ * compaiono mai nomi di docenti, etichette di riga, classi, OCR, base64 o il
+ * JSON del modello.
  */
 export function describeAnalysisFailure(error: unknown, value: unknown, documentType: TimetableDocumentType): string {
   const shape = error instanceof TimetableShapeError;
@@ -271,21 +317,8 @@ export function describeAnalysisFailure(error: unknown, value: unknown, document
   const grid = record(value) ? value : {};
   const rows = Array.isArray(grid.rows) ? grid.rows.length : -1;
   const cells = Array.isArray(grid.cells) ? grid.cells.length : -1;
-  const periods = normalizePeriodsPerDay(grid.periodsPerDay);
   const doc = documentType === 'personal-support-timetable' ? 'personale' : 'curricolare';
-  return `[AI Orari] fase=validazione documento=${doc} esito=fallito motivo=${reason} tipo=${type} righe=${rows} celle=${cells} periodsPerDay=${periods > 0 ? periods : 'assente'}`;
-}
-
-/**
- * Righe di log per il filtro del contratto personale: SOLO conteggi. Il cognome
- * target, le etichette delle righe e i `raw` non vengono mai scritti nei log.
- */
-export function describePersonalRowFilter(outcome: TimetableAnalysisOutcome): string {
-  const rows = outcome.rows?.length ?? 0;
-  const kept = outcome.cells?.length ?? 0;
-  const dropped = outcome.droppedForeignCells ?? 0;
-  const days = new Set((outcome.cells ?? []).map(c => `${c.rowIndex}|${c.dayOfWeek}`)).size;
-  return `[AI Orari] fase=contratto-personale celleTenute=${kept} celleScartate=${dropped} righe=${rows} giorniConCelle=${days}`;
+  return `[AI Orari] fase=validazione documento=${doc} esito=fallito motivo=${reason} tipo=${type} righe=${rows} celle=${cells}`;
 }
 
 /** Valida la risposta AI del registro/appunti. */

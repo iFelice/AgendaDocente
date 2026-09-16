@@ -17,22 +17,28 @@ export interface ScanTimetableRequest {
   mimeType: string;
   documentType: ScanTimetableDocumentType;
   profile: TeacherProfile;
+  /**
+   * Ore per giorno dichiarate dall'utente. OBBLIGATORIO per l'orario personale:
+   * determina la lunghezza attesa della sequenza di celle (ore x giorni
+   * scolastici) e quindi la derivazione di giorno e periodo.
+   */
+  periodsPerDay?: number;
 }
 
 export interface ScanTimetableResult {
   success: boolean;
   source?: string;
   error?: string;
-  /** Righe della colonna docenti (orario personale). */
-  rows?: string[];
+  /** Etichetta della riga letta (orario personale), già verificata sul server. */
+  rowLabel?: string;
   /** Righe docente curricolare: label/materia/classi (orario curricolare). */
   curricularRows?: Array<{ rowIndex: number; rowLabel?: string; subject?: string; classes?: string[] }>;
-  /** Celle grezze della griglia giorno/periodo (validate a runtime). */
+  /**
+   * Celle grezze della griglia giorno/periodo (validate a runtime). Nell'orario
+   * personale giorno e periodo sono derivati dal server dalla posizione nella
+   * sequenza, non dal modello.
+   */
   cells?: Array<{ rowIndex: number; dayOfWeek: number; periodIndex: number; raw: string }>;
-  /** Colonne-periodo della griglia personale (dal documento). */
-  periodsPerDay?: number;
-  /** Righe/giorni personali con posizioni non ancorabili: da verificare in revisione. */
-  positionIssues?: number;
 }
 
 export interface ScanStudentDocumentRequest {
@@ -135,10 +141,8 @@ export async function analyzeTimetableDocument(req: ScanTimetableRequest): Promi
     source: typeof data.source === "string" ? data.source : undefined,
     cells: Array.isArray(data.cells) ? (data.cells as ScanTimetableResult["cells"]) : [],
   };
-  if (Array.isArray(data.rows)) result.rows = data.rows.map(String);
+  if (typeof data.rowLabel === "string") result.rowLabel = data.rowLabel;
   if (Array.isArray(data.curricularRows)) result.curricularRows = data.curricularRows as ScanTimetableResult["curricularRows"];
-  if (typeof data.periodsPerDay === "number") result.periodsPerDay = data.periodsPerDay;
-  if (typeof data.positionIssues === "number") result.positionIssues = data.positionIssues;
   return result;
 }
 

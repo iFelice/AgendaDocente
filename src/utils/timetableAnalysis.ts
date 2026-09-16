@@ -5,6 +5,11 @@
  *    senza matching aggressivo);
  *  - conversione celle -> candidati (mai inventare celle mancanti).
  *
+ * ORARIO PERSONALE: il modello restituisce una SEQUENZA lineare di celle
+ * (`{ rowLabel, cells: string[] }`) — nessun giorno, nessun periodo, nessun
+ * indice di riga. Le coordinate sono derivate dal codice dall'indice
+ * dell'array (vedi `validatePersonalSequencePayload`).
+ *
  * Il matching delle classi usa SOLO le regole esplicite di timetableTokens:
  * D/P/Co e gli altri codici interni non diventano mai classi.
  */
@@ -114,255 +119,119 @@ export function validateRawCell(v: unknown, index: number): TimetableRawCell {
   return { rowIndex: v.rowIndex, dayOfWeek: v.dayOfWeek, periodIndex: v.periodIndex, raw: v.raw.trim() };
 }
 
-/** Colonne-periodo massime plausibili in una griglia orario (geometria reale). */
-const MAX_GRID_PERIODS = 24;
 /**
- * Celle massime dell'orario personale nel formato DENSO: righe x giorni x colonne
- * (con le vuote incluse). 5000 copre una pagina reale di intero team docente
- * (25 docenti x 5 giorni x 5 ore = 625) e resta un guard contro payload assurdi:
- * il formato precedente, solo celle piene, si fermava a 500 e spezzava le
- * analisi vere con «Celle del documento non valide.».
- * Righe e celle sono due limiti indipendenti: stringerne uno e allargare l'altro
- * produce comunque lo stesso crash, quindi vanno tenuti allineati.
+ * Colonne-periodo massime plausibili in una griglia orario (geometria reale).
+ * È anche il tetto del numero di ore per giorno dichiarabile dall'utente per
+ * l'orario personale: oltre non esiste alcuna griglia scolastica reale, e
+ * `generateDefaultPeriodSlots` non genera comunque più di 12 fasce.
  */
-export const MAX_PERSONAL_GRID_CELLS = 5000;
-/** Righe docenti massime nell'orario personale (allineate al curricolare). */
-export const MAX_PERSONAL_GRID_ROWS = 100;
-/**
- * Limite alto per il `periodIndex` GREZZO dell'orario personale: il numero del
- * modello è dato non fidato (può essere un contatore progressivo su tutta la
- * riga) e viene ancorato alle colonne della griglia subito dopo. Quindi la forma
- * viene validata in un range ampio (60: oltre è un payload assurdo) e la coerenza
- * con la griglia la verifica l'ancoraggio, non la validazione del singolo campo.
- */
-const MAX_GRID_INDEX_INPUT = 60;
+export const MAX_GRID_PERIODS = 24;
 
 /**
- * Cella personale grezza: stessa validazione di `validateRawCell`, ma con due
- * tolleranze VOLUTE, introdotte dal formato denso (una cella per colonna):
- *  - `periodIndex` accettato fino a 60: il numero grezzo del modello è dato non
- *    fidato (può essere un contatore progressivo sulla riga) e viene ancorato alle
- *    colonne subito dopo — rifiutarlo qui significava perdere l'intera analisi;
- *  - `raw: null` vale come colonna vuota (`""`): `null` e `""` sono lo stesso
- *    fatto nel documento, e nessun valore viene inventato.
- * `raw` ASSENTE resta un errore: la cella non è descritta.
+ * Giorni scolastici del percorso personale corrente: lunedì-venerdì.
+ *
+ * Unico moltiplicatore della geometria ammesso da questo contratto: il sabato
+ * non ne fa parte (nessuna domanda sui giorni, nessuna UI dedicata).
  */
-function validatePersonalRawCell(v: unknown, index: number): TimetableRawCell {
-  if (!record(v) || !intWithin(v.rowIndex, 0, 100) || !intWithin(v.dayOfWeek, 1, 6)
-    || !intWithin(v.periodIndex, 1, MAX_GRID_INDEX_INPUT) || !(v.raw === null || str(v.raw, 60))) {
-    invalidShape(`Cella orario non valida (#${index}).`);
-  }
-  return {
-    rowIndex: v.rowIndex,
-    dayOfWeek: v.dayOfWeek,
-    periodIndex: v.periodIndex,
-    raw: typeof v.raw === "string" ? v.raw.trim() : "",
-  };
+export const PERSONAL_SCHOOL_DAYS = 5;
+
+/**
+ * Celle attese nella sequenza dell'orario personale.
+ *
+ * È l'UNICA geometria ammessa e NON è una costante: il numero di celle non
+ * compare mai scritto a mano, è il prodotto fra le ore per giorno dichiarate
+ * dall'UTENTE e i giorni scolastici del percorso (5 ore x 5 giorni = 25
+ * posizioni fisiche).
+ */
+export function expectedPersonalCellCount(periodsPerDay: number): number {
+  return periodsPerDay * PERSONAL_SCHOOL_DAYS;
 }
 
-/**
- * Colonne-periodo dichiarate dall'intestazione. Campo NUOVO e opzionale: il
- * modello può ometterlo, scrivere `null` o un numero in forma di stringa. Qui si
- * normalizza (mai si rifiuta l'intera analisi per un metadato: la geometria può
- * essere recuperata dalle celle stesse).
- */
-export function normalizePeriodsPerDay(value: unknown): number {
-  if (typeof value === "number" && Number.isInteger(value)) return value;
-  if (typeof value === "string") {
-    const parsed = Number(value.trim());
-    if (Number.isInteger(parsed)) return parsed;
-  }
-  return 0;
-}
-
-/** Etichetta di una riga docenti: `null`/`""` = riga senza etichetta leggibile. */
+/** Etichetta della riga docenti: `null`/`""` = riga senza etichetta leggibile. */
 function normalizeRowLabel(value: unknown, index: number): string {
   if (value === null || value === undefined) return "";
   if (!str(value, 80)) invalidShape(`Riga del documento non valida (#${index}).`);
   return String(value).trim();
 }
 
-export interface PersonalGridAnchor {
-  /** Celle con `periodIndex` ancorato alle colonne della griglia. */
+/**
+ * Una posizione della sequenza personale: il testo ESATTO della cella.
+ *
+ * `null` vale come cella vuota (`""`): nel documento sono lo stesso fatto e
+ * nessuna geometria dipende da questo campo (dipende dall'indice). Un valore
+ * non stringa — `undefined` incluso — resta un errore: la posizione non è
+ * descritta e non viene inventata.
+ */
+function normalizeSequenceCell(value: unknown, index: number): string {
+  if (value === null) return "";
+  if (!str(value, 60)) invalidShape(`Cella orario non valida (#${index}).`);
+  return value.trim();
+}
+
+export interface PersonalSequence {
+  /**
+   * Etichetta della riga letta dal modello. È SOLO una guardia d'identità:
+   * non contiene e non produce coordinate.
+   */
+  rowLabel: string;
+  /** Una cella per posizione fisica, da sinistra a destra, vuoti inclusi. */
   cells: TimetableRawCell[];
-  /** Colonne per giorno usate per l'ancoraggio (0: griglia non determinabile). */
-  periodsPerDay: number;
-  /** (riga, giorno) da verificare a mano: geometria incoerente, posizioni NON riparate. */
-  positionIssues: number;
 }
 
 /**
- * Àncora le celle estratte alla GRIGLIA del documento.
+ * Valida la risposta grezza dell'orario personale: `{ rowLabel, cells: string[] }`.
  *
- * Regola madre: **la colonna del documento determina il periodo**. Una cella
- * vuota non deve mai far scorrere a sinistra le ore successive ([3D, vuota, 3D,
- * 3D, 3E] -> 1, 3, 4, 5, mai 1, 2, 3, 4) e nessuna posizione viene mai
- * ricostruita sul numero di celle non vuote.
+ * Il modello NON dichiara più giorno, periodo, indice di riga né ore per
+ * giorno: restituisce soltanto la sequenza ordinata delle celle della riga del
+ * docente, da sinistra a destra, con le celle vuote al loro posto.
  *
- * Come, senza alcuna inferenza sul contenuto:
- * - le colonne per giorno sono `periodsPerDay` dichiarato dall'intestazione
- *   quando c'è, altrimenti il numero di colonne osservato;
- * - gruppo DENSO (una cella per colonna, vuote `raw: ""` incluse):
- *   1. se i `periodIndex` sono una PERMUTAZIONE ESATTA di 1..width (ogni colonna
- *      reclamata una e una sola volta) COMANDANO I NUMERI: il payload dice già
- *      quale colonna è vuota, e sostituirli con l'ordine dell'array sposterebbe
- *      l'intero giorno (caso reale: il vuoto della 1ª emesso in coda -> 3E in 1ª);
- *   2. se i numeri NON sono una permutazione (duplicati, buchi, contatore delle
- *      sole celle piene) le celle restano COI LORO NUMERI e il giorno è contato in
- *      `positionIssues`: nessuna posizione viene mai ricostruita dall'ordine
- *      dell'array, perché sarebbe un'invenzione e nasconderebbe il difetto.
- * - gruppo incompleto (l'AI ha omesso le colonne vuote): i numeri assoluti sono
- *   gli unici usati e NON sono mai ricompattati o rinumerati; si conta in
- *   `positionIssues` sia la numerazione incoerente (duplicati, colonna oltre
- *   `width`) sia il pattern sospetto `1..k` con `k < width` — identico a un
- *   giorno legittimamente più corto, quindi è un AVVISO e mai una correzione.
+ * Gate duri (nessuna compensazione, nessuna rinumerazione, nessun anchoring):
+ *  1. `cells` è un array di stringhe;
+ *  2. `cells.length === expectedPersonalCellCount(periodsPerDay)` — altrimenti
+ *     `TimetableShapeError`, cioè 422 e analisi da rifare: una sequenza più
+ *     corta o più lunga non è "riparabile" senza inventare o buttare via ore;
+ *  3. `rowLabel` deve combaciare col cognome del profilo tramite il matcher
+ *     già esistente (`findTeacherRows`, cognome come parola intera): se non è
+ *     compatibile l'analisi è rifiutata e NESSUN'altra riga viene scelta.
  *
- * Le celle vuote partecipano all'ancoraggio (sono la geometria della griglia) e
- * vengono scartate solo dopo, in `personalCellsToCandidates`.
+ * Solo DOPO questi gate l'indice dell'array diventa coordinata:
+ * `dayOfWeek = floor(index / periodsPerDay) + 1`, `periodIndex = index %
+ * periodsPerDay + 1`, su una riga sintetica `rowIndex = 0`. È l'unica sorgente
+ * di coordinate del percorso personale: il modello non può influenzarla.
+ *
+ * `periodsPerDay` arriva dalla REQUEST (dichiarato dall'utente), mai dal
+ * payload del modello.
  */
-export function anchorPersonalCellsToGrid(cells: TimetableRawCell[], declaredPeriodsPerDay?: number): PersonalGridAnchor {
-  const declared = intWithin(declaredPeriodsPerDay, 1, MAX_GRID_PERIODS) ? declaredPeriodsPerDay! : 0;
-  if (cells.length === 0) return { cells, periodsPerDay: declared, positionIssues: 0 };
-
-  let observed = 0;
-  for (const cell of cells) observed = Math.max(observed, cell.periodIndex);
-  // La geometria dichiarata dal documento (intestazione) prevale sul massimo
-  // osservato: è l'unica àncora indipendente dalla numerazione del modello.
-  const width = declared > 0 ? declared : observed;
-
-  const groups = new Map<string, TimetableRawCell[]>();
-  for (const cell of cells) {
-    const key = `${cell.rowIndex}|${cell.dayOfWeek}`;
-    const group = groups.get(key);
-    if (group) group.push(cell);
-    else groups.set(key, [cell]);
-  }
-
-  let positionIssues = 0;
-  const anchored: TimetableRawCell[] = [];
-  for (const group of groups.values()) {
-    if (group.length === width) {
-      // Denso: una cella per colonna, vuote incluse. È affidabile quando ogni
-      // colonna della griglia è reclamata ESATTAMENTE una volta (i periodIndex
-      // sono una permutazione di 1..width): in tal caso le celle restano sulla
-      // LORO colonna, qualunque sia l'ordine con cui l'AI le ha elencate.
-      const numbers = group.map(cell => cell.periodIndex);
-      const declaresEveryColumn = new Set(numbers).size === width && numbers.every(n => n >= 1 && n <= width);
-      if (!declaresEveryColumn) {
-        // Numeri incoerenti con la griglia (duplicati, buchi, contatore delle sole
-        // celle piene): le celle restano sui LORO periodIndex e il giorno viene
-        // contato in `positionIssues`. Prima si rinumerava per ordine di emissione
-        // (`index + 1`), e un giorno ruotato dal modello diventava un orario
-        // apparentemente valido (caso reale: martedì [3E,3D,3D,3D,3E] numerati
-        // [1,2,3,4,4] -> «3E in 1ª ora»). Mostrare l'incoerenza vale più che
-        // inventare una posizione: l'anchoring NON tocca mai i periodIndex.
-        positionIssues++;
-      } else {
-        // Geometria coerente: i numeri del modello SONO la griglia e l'ordine di
-        // emissione è irrilevante (payload conforme -> celle esattamente invariate).
-      }
-      for (const cell of group) anchored.push({ ...cell });
-      continue;
-    }
-    // Incompleta: l'unico indizio disponibile è la numerazione del modello.
-    const ordered = [...group].sort((a, b) => a.periodIndex - b.periodIndex);
-    // (l'AI ha omesso le colonne vuote): la posizione esatta non è deducibile,
-    // quindi i numeri assoluti del modello restano gli unici usati e NON vengono
-    // mai ricompattati o rinumerati per "indovinare" le vuote.
-    const seen = new Set<number>();
-    let coherent = true;
-    for (const cell of ordered) {
-      // Numeri duplicati sulla stessa riga/giorno, o fuori dalle colonne dichiarate:
-      // la griglia non è ricostruibile e la posizione di quell'ora va verificata.
-      if (seen.has(cell.periodIndex) || cell.periodIndex > width) coherent = false;
-      seen.add(cell.periodIndex);
-    }
-    // Pattern sospetto da ricompattazione: k celle numerate esattamente 1..k su
-    // una griglia da `width` colonne. NON è distinguibile da un giorno
-    // legittimamente più corto, quindi si SEGNALA e basta: nessuna cella viene
-    // spostata e nessuna numerazione viene "corretta" (mai inventare).
-    const compactPrefix = group.length < width && ordered.every((cell, index) => cell.periodIndex === index + 1);
-    if (!coherent || compactPrefix) positionIssues++;
-    anchored.push(...ordered);
-  }
-
-  return {
-    cells: anchored.sort((a, b) => a.rowIndex - b.rowIndex || a.dayOfWeek - b.dayOfWeek || a.periodIndex - b.periodIndex),
-    periodsPerDay: width,
-    positionIssues,
-  };
-}
-
-/**
- * Filtro difensivo del contratto "celle SOLO delle righe candidate".
- *
- * Il prompt chiede a Gemini le etichette di TUTTE le righe (costano ~14 char
- * l'una) e la griglia densa solo delle righe compatibili col cognome: sono le
- * righe altre a valere ~95% dell'output (625 celle su una pagina da 25 docenti).
- * Se il modello ne ha comunque incluse altre, qui vengono scartate PRIMA di
- * ancorare e PRIMA di rispondere, così nessun chiamante può dimenticarlo.
- *
- * Regola conservativa (mai peggiorare un caso che oggi funziona):
- * - `matches.length >= 1` -> restano solo le celle delle righe localmente
- *   candidate: il modello non può far entrare in archivio la riga di un collega;
- * - `matches.length === 0` -> le celle ricevute RESTANO: il matcher locale
- *   confronta il cognome come parola intera e un'etichetta letta male
- *   ("Manganiello F.") non combacia, mentre il modello potrebbe aver azzeccato
- *   la riga. La scelta resta umana (`confirmedRow` parte null) e nessuna ora è
- *   creata automaticamente: qui non si scarta, e non si aggiunge fuzzy matching.
- * Senza cognome target (chiamanti senza profilo, test, payload legacy) il
- * comportamento è esattamente quello storico: nessuna selezione per riga.
- */
-export function restrictPersonalCellsToTargetRows(
-  cells: TimetableRawCell[],
-  rowLabels: string[],
-  targetTeacherSurname?: string,
-): { cells: TimetableRawCell[]; dropped: number } {
-  const target = String(targetTeacherSurname ?? "").trim();
-  if (!target || cells.length === 0) return { cells, dropped: 0 };
-  const matches = findTeacherRows(rowLabels, target);
-  if (matches.length === 0) return { cells, dropped: 0 };
-  const allowed = new Set(matches.map(m => m.rowIndex));
-  const kept = cells.filter(cell => allowed.has(cell.rowIndex));
-  return { cells: kept, dropped: cells.length - kept.length };
-}
-
-/** Valida la risposta grezza per l'orario personale/sostegno: { rows, cells }. */
-export function validatePersonalTimetablePayload(raw: unknown, targetTeacherSurname?: string): {
-  rows: string[];
-  cells: TimetableRawCell[];
-  periodsPerDay: number;
-  positionIssues: number;
-  /** Celle di righe non candidate scartate dal contratto (0: nessun filtro applicato). */
-  droppedForeignCells: number;
-} {
+export function validatePersonalSequencePayload(
+  raw: unknown,
+  targetTeacherSurname: string,
+  periodsPerDay: number,
+): PersonalSequence {
   if (!record(raw)) invalidShape("Risposta analisi non valida.");
-  // Righe: stesso limite dell'orario curricolare (una pagina reale di istituto può
-  // superarne 60) — un limite troppo stretto qui significava analisi persa.
-  if (!Array.isArray(raw.rows) || raw.rows.length > MAX_PERSONAL_GRID_ROWS) invalidShape("Righe del documento non valide.");
-  // Il formato denso (una cella per colonna, vuote incluse) moltiplica le celle
-  // per il numero di colonne: il vecchio limite di 500, tarato sul formato che
-  // riportava solo le celle non vuote, scartava pagine reali di intero consiglio
-  // di classe (25 docenti x 5 giorni x 5 ore = 625) facendo fallire l'analisi.
-  if (!Array.isArray(raw.cells) || raw.cells.length > MAX_PERSONAL_GRID_CELLS) invalidShape("Celle del documento non valide.");
-  // Metadato NON critico: numeri assurdi vengono ignorati dall'ancoraggio
-  // (che ammette solo 1..MAX_GRID_PERIODS) invece di far fallire l'analisi.
-  const declared = normalizePeriodsPerDay(raw.periodsPerDay);
-  const cells = raw.cells.map((c, i) => validatePersonalRawCell(c, i));
-  const rows = raw.rows.map((r, i) => normalizeRowLabel(r, i));
-  // Prima si seleziona la riga (contratto "celle solo delle candidate"), POI si
-  // àncora: l'ancoraggio deve vedere solo la geometria che verrà mostrata.
-  const scoped = restrictPersonalCellsToTargetRows(cells, rows, targetTeacherSurname);
-  // Le posizioni vengono ancorate alla griglia QUI: è l'unico punto in cui il
-  // documento viene interpretato, così nessun chiamante può dimenticarlo.
-  const anchored = anchorPersonalCellsToGrid(scoped.cells, declared > 0 ? declared : undefined);
-  return {
-    rows,
-    cells: anchored.cells,
-    periodsPerDay: anchored.periodsPerDay,
-    positionIssues: anchored.positionIssues,
-    droppedForeignCells: scoped.dropped,
-  };
+  const periods = intWithin(periodsPerDay, 1, MAX_GRID_PERIODS) ? periodsPerDay : 0;
+  if (periods === 0) invalidShape("Ore per giorno non valide.");
+
+  const rowLabel = normalizeRowLabel(raw.rowLabel, 0);
+  // Guardia d'identità col matcher esistente (cognome intero, mai sottostringa):
+  // senza una riga compatibile non si sceglie un'altra riga, si rifiuta.
+  if (findTeacherRows([rowLabel], targetTeacherSurname).length !== 1) {
+    invalidShape("Riga del documento non compatibile col docente.");
+  }
+
+  if (!Array.isArray(raw.cells)) invalidShape("Celle del documento non valide.");
+  const values = Array.from(raw.cells).map((value, index) => normalizeSequenceCell(value, index));
+  if (values.length !== expectedPersonalCellCount(periods)) {
+    invalidShape("Lunghezza della sequenza orario non valida.");
+  }
+
+  // Derivazione deterministica: unica origine di giorno e periodo.
+  const cells: TimetableRawCell[] = values.map((value, index) => ({
+    rowIndex: 0,
+    dayOfWeek: Math.floor(index / periods) + 1,
+    periodIndex: (index % periods) + 1,
+    raw: value,
+  }));
+  return { rowLabel, cells };
 }
 
 /** Valida la risposta grezza per l'orario curricolare: { rows, cells }. */
