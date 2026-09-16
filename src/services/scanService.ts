@@ -9,6 +9,7 @@
 
 import type { TeacherProfile } from "../types";
 import { OFFLINE_ANALYSIS_MESSAGE, isOnline } from "../utils/documentScanner";
+import type { CurricularScopeCoordinate } from "../utils/timetableAnalysis";
 
 export type ScanTimetableDocumentType = "personal-support-timetable" | "curricular-timetable";
 
@@ -23,6 +24,13 @@ export interface ScanTimetableRequest {
    * scolastici) e quindi la derivazione di giorno e periodo.
    */
   periodsPerDay?: number;
+  /**
+   * SOLO orario curricolare: le coordinate (giorno + periodo assoluto + classe)
+   * in cui il docente è presente, già costruite dal client. Il server le usa per
+   * chiedere al modello esclusivamente quelle celle, invece dell'intera tabella
+   * d'istituto. Non contengono la `key` interna (dettaglio di implementazione).
+   */
+  coordinateScope?: CurricularScopeCoordinate[];
 }
 
 export interface ScanTimetableResult {

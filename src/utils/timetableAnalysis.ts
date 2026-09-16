@@ -18,7 +18,7 @@
 
 import type { TimetableSlot } from "../types";
 import type { TimetableToken } from "./timetableTokens";
-import { classifyTimetableToken, extractClassesFromCell } from "./timetableTokens";
+import { classifyTimetableToken, extractClassesFromCell, normalizeClassLabel } from "./timetableTokens";
 import { foldName } from "./studentMatcher";
 import { isGenericSubject } from "./circularRelevance";
 import { normalizeSubjectName, sameSubject } from "./subjects";
@@ -267,25 +267,187 @@ export function validatePersonalSequencePayload(
   return { rowLabel, cells };
 }
 
-/** Valida la risposta grezza per l'orario curricolare: { rows, cells }. */
-export function validateCurricularTimetablePayload(raw: unknown): { rows: CurricularRawRow[]; cells: TimetableRawCell[] } {
-  if (!record(raw)) invalidShape("Risposta analisi non valida.");
-  if (!Array.isArray(raw.rows) || raw.rows.length > 100) invalidShape("Righe del documento non valide.");
-  const rows: CurricularRawRow[] = raw.rows.map((r, i) => {
-    // subject e classes sono obbligatori nella risposta AI (valori vuoti ammessi, inventati no).
-    if (!record(r) || !intWithin(r.rowIndex, 0, 100) || !str(r.subject, 80)
-      || !Array.isArray(r.classes) || r.classes.length > 10 || !r.classes.every(c => str(c, 20))) {
-      invalidShape(`Riga docente non valida (#${i}).`);
+// ---------------------------------------------------------------------------
+// AMBITO DELL'ANALISI CURRICOLARE: le coordinate richieste al modello
+//
+// La tabella d'istituto ha centinaia di celle, ma al docente di sostegno ne
+// servono pochissime: solo quelle in cui È presente (giorno + periodo + classe).
+// Quelle coordinate sono già calcolate dal client (`buildPersonalCoordinateScope`)
+// e da qui viaggiano nella request, così il modello riceve un ELENCO di celle da
+// cercare invece dell'istruzione a trascrivere l'intera griglia.
+// ---------------------------------------------------------------------------
+
+/**
+ * Una coordinata richiesta all'analisi curricolare: giorno + periodo assoluto +
+ * classe. È la FORMA WIRE (nessuna `key` interna) con cui il client dichiara al
+ * server quali celle della tabella d'istituto servono davvero.
+ */
+export interface CurricularScopeCoordinate {
+  dayOfWeek: number;
+  periodIndex: number;
+  classLabel: string;
+}
+
+/** Esito del modello su UNA coordinata richiesta: 0, 1 o più materie candidate. */
+export interface CurricularTarget {
+  dayOfWeek: number;
+  periodIndex: number;
+  classLabel: string;
+  subjects: string[];
+}
+
+/**
+ * Tetto delle coordinate richiedibili, legato alla geometria massima della
+ * griglia: 6 giorni x `MAX_GRID_PERIODS` ore, con al più due classi per cella
+ * (una cella dell'orario personale può elencare "3D 3E"). Oltre non esiste
+ * richiesta legittima: meglio un 400 che un prompt chilometrico.
+ */
+export const MAX_CURRICULAR_SCOPE_SIZE = 6 * MAX_GRID_PERIODS * 2;
+/** Tetto difensivo sulla lunghezza dell'array PRIMA della de-duplicazione. */
+export const MAX_CURRICULAR_SCOPE_INPUT = MAX_CURRICULAR_SCOPE_SIZE * 4;
+/** Materie massime riportate su una singola coordinata. */
+export const MAX_CURRICULAR_SUBJECTS_PER_COORDINATE = 6;
+/** Campi ammessi in una coordinata della request (allow-list chiusa). */
+const CURRICULAR_SCOPE_COORDINATE_KEYS = ['dayOfWeek', 'periodIndex', 'classLabel'];
+
+/**
+ * Legge i tre campi di una coordinata da un oggetto: `null` se non è
+ * utilizzabile.
+ *
+ * La classe passa dalla STESSA utility usata per leggere le celle
+ * (`normalizeClassLabel`), così request, prompt e risposta non possono divergere:
+ * "3 d", "3°D" e "classe 3D" diventano "3D", mentre D/P/Co, "sos" e il testo
+ * libero restano `null` (una classe non si inventa).
+ *
+ * NON applica l'allow-list delle chiavi, quindi è riutilizzabile anche sulla
+ * risposta del modello, dove la coordinata viaggia insieme a "subjects".
+ */
+function readCoordinateFields(value: unknown): CurricularScopeCoordinate | null {
+  if (!record(value)) return null;
+  // Stesso intervallo di giorno usato per le celle dell'orario (1=lunedì..6=sabato).
+  if (!intWithin(value.dayOfWeek, 1, 6)) return null;
+  if (!intWithin(value.periodIndex, 1, MAX_GRID_PERIODS)) return null;
+  const classLabel = normalizeClassLabel(value.classLabel);
+  if (!classLabel) return null;
+  return { dayOfWeek: value.dayOfWeek, periodIndex: value.periodIndex, classLabel };
+}
+
+/** Normalizza UNA coordinata della request: `null` quando non è utilizzabile. */
+export function normalizeCurricularScopeCoordinate(value: unknown): CurricularScopeCoordinate | null {
+  if (!record(value)) return null;
+  // Allow-list chiusa anche sull'elemento: la `key` interna e qualsiasi altro
+  // campo non fanno parte del contratto e non vengono accettati per tolleranza.
+  if (Object.keys(value).some(k => !CURRICULAR_SCOPE_COORDINATE_KEYS.includes(k))) return null;
+  return readCoordinateFields(value);
+}
+
+/**
+ * Valida e normalizza l'intero `coordinateScope` della request curricolare.
+ *
+ * `null` = scope non utilizzabile (non è un array, è vuoto, supera il tetto, o
+ * contiene anche un solo elemento invalido): il server risponde 400 PRIMA di
+ * chiamare Gemini. Nessun ambito parziale: una richiesta a metà chiederebbe al
+ * modello celle che il client scarterebbe comunque.
+ *
+ * I duplicati (stessa coordinata scritta due volte, o con grafie diverse della
+ * stessa classe) collassano in una sola richiesta.
+ */
+export function normalizeCurricularCoordinateScope(value: unknown): CurricularScopeCoordinate[] | null {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_CURRICULAR_SCOPE_INPUT) return null;
+  const coordinates: CurricularScopeCoordinate[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    const coordinate = normalizeCurricularScopeCoordinate(item);
+    if (!coordinate) return null;
+    const key = coordinateKey(coordinate.dayOfWeek, coordinate.periodIndex, coordinate.classLabel);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    coordinates.push(coordinate);
+  }
+  return coordinates.length > 0 && coordinates.length <= MAX_CURRICULAR_SCOPE_SIZE ? coordinates : null;
+}
+
+/**
+ * Forma wire dello scope: le coordinate personali già costruite dal client,
+ * senza la `key` interna (dettaglio di implementazione, non dato inviato).
+ */
+export function curricularScopeToRequestPayload(coordinates: PersonalCoordinate[]): CurricularScopeCoordinate[] {
+  return coordinates.map(({ dayOfWeek, periodIndex, classLabel }) => ({ dayOfWeek, periodIndex, classLabel }));
+}
+
+/**
+ * Valida la risposta del modello sull'orario curricolare: `{ targets: [...] }`.
+ *
+ * Regole (mai inventare):
+ *  - sopravvivono SOLO le coordinate richieste: una voce su un giorno/periodo/
+ *    classe fuori elenco viene SCARTATA, mai ricollocata o "corretta";
+ *  - `subjects` può essere vuoto (coordinata non leggibile o materia non
+ *    determinabile), avere una materia, o averne più di una: in compresenza più
+ *    docenti insistono sulla stessa classe/ora, e il crossref esistente deve
+ *    poterle vedere tutte per produrre lo stato "ambiguo";
+ *  - materie vuote, generiche o duplicate vengono tolte; le altre restano come
+ *    scritte (nessuna normalizzazione del testo oltre al trim).
+ */
+export function validateCurricularTargetsPayload(raw: unknown, scope: CurricularScopeCoordinate[]): CurricularTarget[] {
+  if (scope.length === 0) invalidShape("Coordinate di analisi non valide.");
+  if (!record(raw) || !Array.isArray(raw.targets) || raw.targets.length > MAX_CURRICULAR_SCOPE_SIZE) {
+    invalidShape("Risposta analisi non valida.");
+  }
+  const requested = new Set(scope.map(c => coordinateKey(c.dayOfWeek, c.periodIndex, c.classLabel)));
+  const targets: CurricularTarget[] = [];
+  const seen = new Set<string>();
+  raw.targets.forEach((item, index) => {
+    // Stessi vincoli della request (giorno, ora, classe reale) ma senza
+    // allow-list delle chiavi: qui la coordinata viaggia insieme a "subjects".
+    const coordinate = readCoordinateFields(item);
+    if (!coordinate) invalidShape(`Coordinata non valida (#${index}).`);
+    const key = coordinateKey(coordinate.dayOfWeek, coordinate.periodIndex, coordinate.classLabel);
+    if (!requested.has(key)) return; // coordinata non richiesta: scartata (mai inventata)
+    if (seen.has(key)) return;       // una sola voce per coordinata
+    if (!Array.isArray(item.subjects) || item.subjects.length > MAX_CURRICULAR_SUBJECTS_PER_COORDINATE) {
+      invalidShape(`Materie della coordinata non valide (#${index}).`);
     }
-    return {
-      rowIndex: r.rowIndex,
-      rowLabel: r.rowLabel === undefined ? undefined : (str(r.rowLabel, 80) ? r.rowLabel.trim() : invalidShape("Etichetta riga non valida.")),
-      subject: r.subject.trim(),
-      classes: r.classes.map(c => c.trim()),
-    };
+    seen.add(key);
+    const subjects: string[] = [];
+    for (const value of item.subjects) {
+      if (!str(value, 80)) invalidShape(`Materia non valida (#${index}).`);
+      const subject = value.trim();
+      if (!subject || isGenericSubject(subject)) continue; // vuota/generica: non è una disciplina
+      if (subjects.some(existing => sameSubject(existing, subject))) continue;
+      subjects.push(subject);
+    }
+    targets.push({ ...coordinate, subjects });
   });
-  if (!Array.isArray(raw.cells) || raw.cells.length > 1500) invalidShape("Celle del documento non valide.");
-  return { rows, cells: raw.cells.map((c, i) => validateRawCell(c, i)) };
+  return targets;
+}
+
+/**
+ * Adatta la risposta per coordinate alla struttura `{ rows, cells }` già
+ * consumata da `curricularCellsToSlots`: è il punto PIÙ STRETTO in cui il nuovo
+ * output del modello entra nella pipeline esistente, quindi filtro client-side,
+ * riepilogo di copertura e crossref restano esattamente quelli di prima.
+ *
+ * Una riga sintetica per ogni coppia (coordinata, materia), con `rowIndex`
+ * progressivo e UNIVOCO: `curricularCellsToSlots` indicizza le righe per
+ * `rowIndex`, quindi due materie della stessa coordinata devono stare su due
+ * righe diverse per sopravvivere entrambe (e diventare "ambigue" nel crossref).
+ * `rowLabel` resta vuoto: il nome del docente curricolare non serve e non viene
+ * mai salvato.
+ */
+export function curricularTargetsToRowsAndCells(targets: CurricularTarget[]): { rows: CurricularRawRow[]; cells: TimetableRawCell[] } {
+  const rows: CurricularRawRow[] = [];
+  const cells: TimetableRawCell[] = [];
+  let rowIndex = 0;
+  for (const target of targets) {
+    for (const subject of target.subjects) {
+      rows.push({ rowIndex, rowLabel: "", subject, classes: [target.classLabel] });
+      // La cella sintetizzata ripassa dalla stessa guardia delle celle reali:
+      // giorno, periodo e testo restano dentro il contratto di TimetableRawCell.
+      cells.push(validateRawCell({ rowIndex, dayOfWeek: target.dayOfWeek, periodIndex: target.periodIndex, raw: target.classLabel }, cells.length));
+      rowIndex += 1;
+    }
+  }
+  return { rows, cells };
 }
 
 const COMMITMENT_TYPES: StudentCommitmentType[] = ["oral_test", "written_test", "recovery", "meeting", "assignment", "other"];

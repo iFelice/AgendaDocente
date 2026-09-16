@@ -295,6 +295,43 @@ test('client: senza AbortSignal.timeout (iOS Safari < 16) la richiesta parte com
   assert.equal(result.success, true);
 });
 
+test('client: la request curricolare porta le coordinate (senza key), quella personale no', async () => {
+  const bodies: Array<Record<string, unknown>> = [];
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: unknown, init: { body: string }) => {
+    bodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+    return jsonResponse(200, { success: true, source: 'gemini', cells: [], curricularRows: [] });
+  }) as any;
+  try {
+    await analyzeTimetableDocument({
+      imageBase64: 'AAAA', mimeType: 'image/png', documentType: 'curricular-timetable', profile: clientProfile,
+      coordinateScope: [
+        { dayOfWeek: 2, periodIndex: 1, classLabel: '3D' },
+        { dayOfWeek: 3, periodIndex: 2, classLabel: '3E' },
+      ],
+    });
+    await analyzeTimetableDocument({
+      imageBase64: 'AAAA', mimeType: 'image/png', documentType: 'personal-support-timetable',
+      periodsPerDay: 5, profile: clientProfile,
+    });
+  } finally {
+    globalThis.fetch = savedFetch;
+  }
+
+  assert.deepEqual(bodies[0].coordinateScope, [
+    { dayOfWeek: 2, periodIndex: 1, classLabel: '3D' },
+    { dayOfWeek: 3, periodIndex: 2, classLabel: '3E' },
+  ], 'le coordinate da cercare viaggiano nella request curricolare');
+  assert.ok(!JSON.stringify(bodies[0]).includes('"key"'), 'nessuna key interna nel corpo inviato');
+  assert.deepEqual(Object.keys(bodies[0].coordinateScope as object[]).length > 0
+    ? Object.keys((bodies[0].coordinateScope as Array<Record<string, unknown>>)[0]).sort()
+    : [], ['classLabel', 'dayOfWeek', 'periodIndex'], 'solo i tre campi del contratto');
+  assert.equal(bodies[0].periodsPerDay, undefined, 'il curricolare non dichiara la geometria personale');
+
+  assert.equal('coordinateScope' in bodies[1], false, 'la request personale non contiene coordinateScope (il server la rifiuta)');
+  assert.equal(bodies[1].periodsPerDay, 5, 'la request personale conserva le ore per giorno');
+});
+
 test('client: registro/offline — messaggio offline distinto, endpoint registro sulla stessa catena', async () => {
   const offline = await (async () => {
     const savedNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');

@@ -1,8 +1,8 @@
 import { circularAnalysisGuards, analysisErrorHandler } from "./server/circularAnalysisGuard";
 import { createAnalysisErrorHandler, createAnalysisGuards } from "./server/analysisGuards";
 import {
-  CURRICULAR_TIMETABLE_PROMPT,
   STUDENT_DOCUMENT_PROMPT,
+  buildCurricularTimetablePrompt,
   buildPersonalTimetablePrompt,
   personalTargetSurname,
   STUDENT_DOCUMENT_TIMEOUT_MS,
@@ -524,7 +524,7 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
   const abort = () => controller.abort();
   res.once("close", abort);
   try {
-    const { documentType, imageBase64, mimeType, profile, periodsPerDay } = req.body;
+    const { documentType, imageBase64, mimeType, profile, periodsPerDay, coordinateScope } = req.body;
     const ai = getGeminiClient();
     if (!ai) {
       return res.status(503).json({ success: false, error: "Il servizio di analisi non è disponibile. Riprova più tardi." });
@@ -539,8 +539,13 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
     // modello quante colonne fisiche ha ogni blocco giornaliero. Il modello non
     // dichiara la geometria e non può influenzarla: il server verifica poi che
     // ogni blocco abbia esattamente quella lunghezza.
+    // Orario curricolare: il prompt riceve l'ELENCO delle coordinate richieste
+    // (giorno + periodo + classe, già validate nella request) e chiede solo
+    // quelle, invece della trascrizione dell'intera tabella d'istituto.
     const run = await runGeminiJson({
-      systemInstruction: isPersonal ? buildPersonalTimetablePrompt(targetSurname, periodsPerDay) : CURRICULAR_TIMETABLE_PROMPT,
+      systemInstruction: isPersonal
+        ? buildPersonalTimetablePrompt(targetSurname, periodsPerDay)
+        : buildCurricularTimetablePrompt(coordinateScope),
       contents: [
         { inlineData: { data: imageBase64, mimeType } },
         { text: "Analizza la tabella della foto/PDF allegata rispettando le regole del prompt." },
@@ -567,10 +572,16 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
     // giorno e una riga non compatibile col cognome del profilo.
     let outcome: TimetableAnalysisOutcome;
     try {
-      outcome = parseTimetableAiResponse(documentType, decoded.value, targetSurname, periodsPerDay);
+      outcome = parseTimetableAiResponse(documentType, decoded.value, targetSurname, periodsPerDay, coordinateScope);
     } catch (error: unknown) {
       console.warn(describeAnalysisFailure(error, decoded.value, documentType));
       return res.status(422).json({ success: false, error: "Analisi non riuscita. Riprova." });
+    }
+    if (!isPersonal) {
+      // Diagnostica privacy-safe: SOLO conteggi. Mai classi, coordinate, materie,
+      // nomi di docenti, OCR o JSON del modello.
+      const returned = new Set(outcome.cells.map((cell) => `${cell.dayOfWeek}|${cell.periodIndex}`)).size;
+      console.log(`[AI Orari] fase=curricolare esito=ok coordinateRichieste=${coordinateScope.length} coordinateRestituite=${returned} celle=${outcome.cells.length}`);
     }
     return res.json({
       success: true,

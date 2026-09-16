@@ -31,6 +31,7 @@ import {
   PERSONAL_SCHOOL_DAYS,
   buildPersonalCoordinateScope,
   curricularCellsToSlots,
+  curricularScopeToRequestPayload,
   expectedPersonalCellCount,
   personalCellsToCandidates,
   restrictCurricularSlotsToCoordinates,
@@ -129,6 +130,17 @@ export const PERIODS_PER_DAY_QUESTION = "Quante ore ci sono in ogni giornata sco
 /** Messaggio quando il valore non è (ancora) utilizzabile. */
 export const PERIODS_PER_DAY_QUESTION_ERROR =
   `Indica quante ore ci sono in ogni giornata scolastica (numero intero da 1 a ${MAX_GRID_PERIODS}).`;
+
+/**
+ * Messaggio quando l'orario curricolare viene chiesto senza alcuna coordinata.
+ *
+ * L'analisi curricolare non chiede più al modello l'intera tabella d'istituto:
+ * cerca SOLO le coordinate (giorno + periodo + classe) in cui il docente è
+ * presente. Senza coordinate non esiste nulla da cercare, quindi la richiesta
+ * non parte (il server la rifiuterebbe comunque con 400).
+ */
+export const CURRICULAR_SCOPE_EMPTY_MESSAGE =
+  "Nessuna coordinata da cercare: analizza e salva prima il tuo orario personale, poi ripeti con l'orario curricolare.";
 
 /** Id del contenitore scrollabile del modale (fallback del ref, vedi `useEffect` di scroll). */
 export const SCAN_MODAL_BODY_ID = "scan-modal-body";
@@ -583,6 +595,13 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
       setAnalysisError(PERIODS_PER_DAY_QUESTION_ERROR);
       return;
     }
+    // Orario curricolare: senza coordinate non c'è nulla da cercare, quindi
+    // l'analisi non parte (stessa regola del server, difesa anche qui per non
+    // spendere una richiesta destinata a un 400).
+    if (captureFor === "curricular" && personalCoordinates.length === 0) {
+      setAnalysisError(CURRICULAR_SCOPE_EMPTY_MESSAGE);
+      return;
+    }
     const revision = readingRevision.current;
     setIsAnalyzing(true);
     setAnalysisError(null);
@@ -618,6 +637,11 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
           mimeType: file.type,
           documentType: "curricular-timetable",
           profile,
+          // Le MIE coordinate (giorno + periodo + classe), già costruite da
+          // `buildPersonalCoordinateScope`: il modello cerca solo queste celle
+          // invece di trascrivere l'intera tabella d'istituto. La `key` interna
+          // non viene inviata.
+          coordinateScope: curricularScopeToRequestPayload(personalCoordinates),
         });
         if (revision !== readingRevision.current) return;
         const rows: CurricularRawRow[] = (result.curricularRows ?? []).map((r, i) => ({

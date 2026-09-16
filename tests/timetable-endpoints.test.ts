@@ -74,10 +74,99 @@ test('analyze-timetable: funziona anche con documentType curricolare (stesso 503
     imageBase64: validPdfBase64,
     mimeType: 'application/pdf',
     documentType: 'curricular-timetable',
+    coordinateScope: [{ dayOfWeek: 2, periodIndex: 1, classLabel: '3D' }],
     profile,
   });
   assert.equal(res.status, 503);
   assert.equal((await res.json()).success, false);
+});
+
+/**
+ * `coordinateScope`: l'elenco delle celle da cercare nell'orario curricolare.
+ * Validato PRIMA di chiamare Gemini, quindi ogni rifiuto è un 400 senza analisi.
+ */
+test('analyze-timetable: coordinateScope accettato solo per il curricolare, normalizzato e mai vuoto', async () => {
+  await withIsolatedEndpoint(async post => {
+    const base = { imageBase64: validPdfBase64, mimeType: 'application/pdf', profile };
+    const curricular = (coordinateScope: unknown) => post({ ...base, documentType: 'curricular-timetable', coordinateScope });
+    const personal = (extra: Record<string, unknown> = {}) =>
+      post({ ...base, documentType: 'personal-support-timetable', periodsPerDay: 5, ...extra });
+
+    // Accettato: i guard passano e la richiesta arriva all'handler dell'endpoint
+    // isolato (che risponde 200 senza chiamare Gemini).
+    const ok = await curricular([{ dayOfWeek: 2, periodIndex: 1, classLabel: '3D' }]);
+    assert.equal(ok.status, 200, 'scope valido: nessuna rejection dei guard');
+
+    // Rifiutato per l'orario personale: la geometria personale nasce dalla posizione.
+    const onPersonal = await personal({ coordinateScope: [{ dayOfWeek: 2, periodIndex: 1, classLabel: '3D' }] });
+    assert.equal(onPersonal.status, 400);
+    assert.match((await onPersonal.json()).error, /non sono previste per l'orario personale/i);
+
+    // Obbligatorio e mai vuoto per il curricolare.
+    for (const empty of [undefined, [], null, 'none', {}]) {
+      const res = await curricular(empty);
+      assert.equal(res.status, 400, `scope ${JSON.stringify(empty)} rifiutato`);
+      assert.match((await res.json()).error, /Nessuna coordinata da cercare/i);
+    }
+
+    // Ogni elemento è validato rigidamente: forma, intervalli, classe reale.
+    const invalidElements: unknown[] = [
+      [{ dayOfWeek: 2, periodIndex: 1 }],                                   // classe assente
+      [{ dayOfWeek: 2, periodIndex: 1, classLabel: 'Co' }],                  // codice interno, non una classe
+      [{ dayOfWeek: 0, periodIndex: 1, classLabel: '3D' }],                  // giorno fuori intervallo
+      [{ dayOfWeek: 2, periodIndex: 0, classLabel: '3D' }],                  // ora fuori intervallo
+      [{ dayOfWeek: 2, periodIndex: 99, classLabel: '3D' }],                 // oltre MAX_GRID_PERIODS
+      [{ dayOfWeek: '2', periodIndex: 1, classLabel: '3D' }],                // giorno non intero
+      [{ dayOfWeek: 2, periodIndex: 1, classLabel: '3D', key: '2|1|3D' }],   // chiave interna non ammessa
+      'non-un-array',
+    ];
+    for (const element of invalidElements) {
+      const res = await curricular(element);
+      assert.equal(res.status, 400, `elemento ${JSON.stringify(element)} rifiutato`);
+    }
+
+    // Tetto coerente con la geometria massima della griglia.
+    const tooMany = Array.from({ length: 200 }, (_, i) => ({
+      dayOfWeek: (i % 6) + 1, periodIndex: (i % 12) + 1, classLabel: `${(i % 5) + 1}${String.fromCharCode(65 + (i % 26))}`,
+    }));
+    assert.equal((await curricular(tooMany)).status, 400, 'oltre il tetto: nessuna richiesta chilometrica');
+  }, { perIp: 200, global: 200 });
+});
+
+test('analyze-timetable: coordinateScope duplicato e con grafie diverse collassa in una sola richiesta', async () => {
+  const scope = validateTimetableAnalysisPayload({
+    imageBase64: validPdfBase64,
+    mimeType: 'application/pdf',
+    documentType: 'curricular-timetable',
+    profile,
+    coordinateScope: [
+      { dayOfWeek: 2, periodIndex: 1, classLabel: '3D' },
+      { dayOfWeek: 2, periodIndex: 1, classLabel: '3 D' },     // stessa classe, altra grafia
+      { dayOfWeek: 2, periodIndex: 1, classLabel: '3°D' },     // e un'altra ancora
+      { dayOfWeek: 3, periodIndex: 2, classLabel: 'classe 3E' },
+    ],
+  }).coordinateScope;
+  assert.deepEqual(scope, [
+    { dayOfWeek: 2, periodIndex: 1, classLabel: '3D' },
+    { dayOfWeek: 3, periodIndex: 2, classLabel: '3E' },
+  ], 'una sola coordinata per celle uguali, con la sigla normalizzata');
+});
+
+test('analyze-timetable: il personale non restituisce coordinateScope e il curricolare non riceve ore per giorno', async () => {
+  const personal = validateTimetableAnalysisPayload({
+    imageBase64: validPdfBase64, mimeType: 'application/pdf',
+    documentType: 'personal-support-timetable', periodsPerDay: 5, profile,
+  });
+  assert.equal(personal.periodsPerDay, 5);
+  assert.equal(personal.coordinateScope, undefined);
+
+  const curricular = validateTimetableAnalysisPayload({
+    imageBase64: validPdfBase64, mimeType: 'application/pdf',
+    documentType: 'curricular-timetable', periodsPerDay: 5,
+    coordinateScope: [{ dayOfWeek: 2, periodIndex: 1, classLabel: '3D' }], profile,
+  });
+  assert.equal(curricular.periodsPerDay, undefined, 'le ore per giorno restano un dato del personale');
+  assert.equal(curricular.coordinateScope?.length, 1);
 });
 
 test('analyze-timetable: payload invalidi -> 400/415 con messaggi generici', async () => {
@@ -150,11 +239,13 @@ test('analyze-timetable: ore per giorno obbligatorie e valide per l orario perso
     assert.equal(ok.status, 200);
   });
 
-  // Curricolare: le ore per giorno non sono richieste (503 senza chiave AI).
+  // Curricolare: le ore per giorno non sono richieste (503 senza chiave AI);
+  // servono invece le coordinate da cercare.
   const curricular = await post('/api/analyze-timetable', {
     imageBase64: validPdfBase64,
     mimeType: 'application/pdf',
     documentType: 'curricular-timetable',
+    coordinateScope: [{ dayOfWeek: 2, periodIndex: 1, classLabel: '3D' }],
     profile,
   });
   assert.equal(curricular.status, 503);
@@ -183,9 +274,16 @@ test('route sconosciute /api e GET sugli endpoint -> 404 JSON (mai HTML)', async
  * Limiti di volume e corpo (413/415/malformed JSON) su un'app isolata con gli
  * stessi guard: evita di consumare il budget rate-limit dell'app reale.
  */
-async function withIsolatedEndpoint(run: (post: (body: unknown, raw?: string, headers?: Record<string, string>) => Promise<Response>) => Promise<void>) {
+/**
+ * `guardOptions` alza i contatori del rate limit quando un test deve provare molti
+ * payload in fila: la validazione è la stessa, cambia solo il budget del bucket.
+ */
+async function withIsolatedEndpoint(
+  run: (post: (body: unknown, raw?: string, headers?: Record<string, string>) => Promise<Response>) => Promise<void>,
+  guardOptions: { perIp?: number; global?: number; concurrent?: number } = {},
+) {
   const isolated = express();
-  isolated.post('/api/analyze-timetable', ...createAnalysisGuards(validateTimetableAnalysisPayload), (_req, res) => res.json({ success: true }));
+  isolated.post('/api/analyze-timetable', ...createAnalysisGuards(validateTimetableAnalysisPayload, guardOptions), (_req, res) => res.json({ success: true }));
   isolated.use('/api/analyze-timetable', createAnalysisErrorHandler(false));
   const local = isolated.listen(0, '127.0.0.1');
   await once(local, 'listening');

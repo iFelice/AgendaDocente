@@ -2,7 +2,7 @@ import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
 import { create, act } from 'react-test-renderer';
-import { DocumentScannerModal, SCAN_MODAL_BODY_ID, SCAN_MERGE_CHOICE_ID, scrollModalBodyToTop, scrollSectionIntoView } from '../src/components/DocumentScannerModal';
+import { CURRICULAR_SCOPE_EMPTY_MESSAGE, DocumentScannerModal, SCAN_MODAL_BODY_ID, SCAN_MERGE_CHOICE_ID, scrollModalBodyToTop, scrollSectionIntoView } from '../src/components/DocumentScannerModal';
 import { OFFLINE_ANALYSIS_MESSAGE, MAX_DOCUMENT_BYTES } from '../src/utils/documentScanner';
 import type { Student, TeacherProfile, TimetableSlot } from '../src/types';
 
@@ -764,6 +764,13 @@ async function flowToCurricularReview(renderer: any, payload: unknown) {
   fetchResponse = { status: 200, json: payload as any };
   await chooseCameraAndPick(renderer, makeFile('orario-istituto.jpg', 'image/jpeg', 300_000));
   await analyzeWithConsent(renderer);
+  // La richiesta curricolare dichiara le MIE coordinate (senza la key interna):
+  // è ciò che permette al server di chiedere al modello solo quelle celle.
+  const curricularRequest = fetchCalls.find(call => call.body?.documentType === 'curricular-timetable');
+  assert.deepEqual(curricularRequest?.body.coordinateScope, [
+    { dayOfWeek: 2, periodIndex: 1, classLabel: '3D' },
+    { dayOfWeek: 3, periodIndex: 1, classLabel: '3E' },
+  ], 'scope = le coordinate del mio orario personale, senza key');
   return renderer;
 }
 
@@ -835,7 +842,7 @@ test('Fase B con solo orario già salvato: l’ambito viene dall’archivio (mod
   await act(async () => { renderer.unmount(); });
 });
 
-test('Fase B senza alcun orario personale: nessun filtro a vuoto, e nessun incrocio possibile', async () => {
+test('Fase B senza alcun orario personale: l’analisi non parte, nessuna richiesta senza coordinate', async () => {
   const saved: SavedTimetable[] = [];
   const renderer = await renderModal({
     provisionalTimetable: [],
@@ -845,17 +852,15 @@ test('Fase B senza alcun orario personale: nessun filtro a vuoto, e nessun incro
   await goToSource(renderer, 'curricular');
   fetchResponse = { status: 200, json: noisyCurricularPayload() as any };
   await chooseCameraAndPick(renderer, makeFile('orario-istituto.jpg', 'image/jpeg', 300_000));
+  fetchCalls.length = 0;
   await analyzeWithConsent(renderer);
 
-  // Niente coordinate da rispettare: l’estratto NON viene svuotato (nessun dato perso),
-  // ma il riepilogo dice che le mie ore sono zero.
-  assert.match(flatText(byId(renderer, 'scan-curricular-counts')), /0 ore del tuo orario/);
-  assert.ok(!flatText(renderer.root).includes('sono state escluse'), 'nessuna esclusione dichiarata quando non c’è un ambito');
-  assert.match(flatText(renderer.root), /Ricostruisci il mio orario/);
-
-  // Senza riga personale confermata non si può incrociare: si torna alla Fase A.
-  await act(async () => { byId(renderer, 'scan-curricular-reconstruct').props.onClick(); });
-  assert.match(flatText(renderer.root), /Scatta foto/, 'si torna alla cattura dell’orario personale');
+  // L'analisi curricolare non chiede più l'intera tabella d'istituto: cerca solo
+  // le coordinate in cui il docente è presente. Senza coordinate non esiste nulla
+  // da cercare, quindi nessuna richiesta parte (il server risponderebbe 400) e
+  // l'utente riceve l'istruzione su cosa fare prima.
+  assert.equal(fetchCalls.length, 0, 'nessuna richiesta cloud senza coordinate');
+  assert.match(flatText(renderer.root), new RegExp(CURRICULAR_SCOPE_EMPTY_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), 'motivo spiegato all’utente');
   assert.equal(saved.length, 0, 'nessun salvataggio di ore d’istituto');
   await act(async () => { renderer.unmount(); });
 });
