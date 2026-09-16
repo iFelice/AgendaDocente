@@ -65,18 +65,21 @@ const pdfBase64 = () => Buffer.from('%PDF-1.7\n%%EOF').toString('base64');
 // 1. PROMPT CURRICOLARE: SOLO LE COORDINATE RICHIESTE
 // ---------------------------------------------------------------------------
 
-test('prompt curricolare: elenca esattamente le coordinate richieste, e nessuna altra', () => {
+/**
+ * Riga dell'elenco per una coordinata che OCCUPA DA SOLA la sua colonna fisica.
+ */
+function columnLine(coordinate: { dayOfWeek: number; periodIndex: number; classLabel: string }): string {
+  return `- ${DAY_LABELS[coordinate.dayOfWeek]}, ${coordinate.periodIndex}\u00aa ora \u2192 classe: ${coordinate.classLabel}`;
+}
+
+test('prompt curricolare: elenca esattamente le colonne fisiche richieste, e nessuna altra', () => {
   const prompt = buildCurricularTimetablePrompt(SCOPE);
   for (const coordinate of SCOPE) {
-    const line = `- ${DAY_LABELS[coordinate.dayOfWeek]}, ${coordinate.periodIndex}ª ora, classe ${coordinate.classLabel}`;
+    const line = columnLine(coordinate);
     assert.ok(prompt.includes(line), `coordinata elencata: ${line}`);
-  }
-  assert.ok(prompt.includes(`COORDINATE RICHIESTE (${SCOPE.length})`), 'il numero di coordinate è dichiarato');
-  // Una sola riga per coordinata: nessuna duplicazione nell'elenco.
-  for (const coordinate of SCOPE) {
-    const line = `- ${DAY_LABELS[coordinate.dayOfWeek]}, ${coordinate.periodIndex}ª ora, classe ${coordinate.classLabel}`;
     assert.equal(prompt.split(line).length - 1, 1, `una sola occorrenza per ${line}`);
   }
+  assert.ok(prompt.includes(`COLONNE FISICHE DA LEGGERE (${SCOPE.length} colonne per ${SCOPE.length} coordinate)`), 'colonne e coordinate sono contate');
   for (const absent of ['4D', '5E', '1B', '3A', '2C']) {
     assert.ok(!prompt.includes(absent), `la classe non richiesta ${absent} non compare nel prompt`);
   }
@@ -90,6 +93,7 @@ test('prompt curricolare: non chiede più di trascrivere la tabella', () => {
     '"raw"',
     'Ogni riga rappresenta un docente curricolare',
     'Estrai la struttura della tabella',
+    'TABLE_RULES',
   ]) {
     assert.ok(!prompt.includes(forbidden), `non contiene più: ${forbidden}`);
   }
@@ -100,14 +104,84 @@ test('prompt curricolare: non chiede più di trascrivere la tabella', () => {
   assert.ok(prompt.includes('una colonna vuota fa comunque avanzare il conteggio'), 'le colonne vuote contano');
 });
 
-test('prompt curricolare: più materie ammesse, nessuna materia inventata', () => {
+test('prompt curricolare: procedura esplicita giorno -> colonna fisica -> classe -> riga -> materia', () => {
   const prompt = buildCurricularTimetablePrompt(SCOPE);
-  assert.ok(prompt.includes('TUTTE le materie leggibili'), 'in compresenza restituisce tutte le materie');
-  assert.ok(prompt.includes('Non sceglierne una sola e non scartare le altre'), 'nessuna risposta unica forzata');
-  assert.ok(prompt.includes('"subjects": []'), 'coordinata non leggibile -> array vuoto');
-  assert.ok(prompt.includes('NON inventare materie e NON copiarle da coordinate vicine'), 'divieto di inventare');
+  // I cinque passi nell'ordine esatto: l'ordine è il contenuto del vincolo.
+  const steps = [
+    'a) individua nell\'intestazione la COLONNA DEL GIORNO richiesto;',
+    'b) dentro quel giorno individua la COLONNA FISICA corrispondente al numero d\'ora richiesto, contando anche le colonne e le celle vuote;',
+    'c) da qui in avanti considera SOLO quella colonna fisica: ignora completamente le altre ore dello stesso giorno e tutti gli altri giorni;',
+    'd) scorri SOLO quella colonna e seleziona le celle in cui compare la classe richiesta, anche quando la stessa cella elenca più classi (es. "2B 3C");',
+    'e) per ciascuna cella selezionata risali alla SUA riga e riporta la MATERIA/DISCIPLINA associata a quella riga.',
+  ];
+  let previous = -1;
+  for (const step of steps) {
+    const at = prompt.indexOf(step);
+    assert.ok(at >= 0, `passo presente: ${step.slice(0, 3)}`);
+    assert.ok(at > previous, `passo ${step.slice(0, 3)} dopo il precedente`);
+    previous = at;
+  }
+  assert.ok(prompt.includes('procedi ESATTAMENTE in questo ordine, senza scorciatoie'), 'l\'ordine è dichiarato vincolante');
+  // Vocabolario geometrico che il contratto target-oriented aveva perso: senza di
+  // esso "colonna" restava un concetto non nominato e la ricerca si allargava.
+  for (const term of ['COLONNE FISICHE', 'COLONNA FISICA', 'colonna fisica', 'SOLO quella colonna', 'PIÙ RIGHE', 'cella']) {
+    assert.ok(prompt.includes(term), `contiene il termine geometrico: ${term}`);
+  }
+});
+
+test('prompt curricolare: vieta di leggere altre ore dello stesso giorno e altri giorni', () => {
+  const prompt = buildCurricularTimetablePrompt(SCOPE);
+  assert.ok(prompt.includes('considera SOLO quella colonna fisica'), 'ambito ristretto a una colonna');
+  assert.ok(prompt.includes('ignora completamente le altre ore dello stesso giorno e tutti gli altri giorni'), 'divieto esplicito su ore e giorni');
+  assert.ok(prompt.includes('scorri SOLO quella colonna'), 'la ricerca resta dentro la colonna');
+  assert.ok(prompt.includes('quelle occorrenze NON producono materie'), 'le occorrenze altrove non valgono');
+  assert.ok(prompt.includes('NON copiarle da altre coordinate'), 'nessun riporto fra coordinate');
+});
+
+test('prompt curricolare: materie multiple SOLO se la classe è in più righe della stessa colonna', () => {
+  const prompt = buildCurricularTimetablePrompt(SCOPE);
+  assert.ok(prompt.includes('Più materie sono ammesse SOLO se la classe richiesta compare in PIÙ RIGHE della STESSA colonna fisica'), 'il multiplo è condizionato');
+  assert.ok(prompt.includes('compresenza, classi aperte o più docenti su quella classe/ora'), 'i casi legittimi restano nominati');
+  assert.ok(prompt.includes('Se la classe compare una sola volta in quella colonna, "subjects" contiene al massimo una materia'), 'una riga -> al più una materia');
+  assert.ok(prompt.includes('una materia per ogni riga trovata al passo e)'), 'una materia per riga, non una a caso');
+  // Regressione: l'invito incondizionato del contratto precedente è rimosso. Era
+  // ciò che rendeva conveniente raccogliere le materie della classe ovunque.
+  for (const gone of [
+    'TUTTE le materie leggibili',
+    'Non sceglierne una sola e non scartare le altre',
+    'Una coordinata può avere PIÙ materie',
+  ]) {
+    assert.ok(!prompt.includes(gone), `non contiene più l'invito incondizionato: ${gone}`);
+  }
+});
+
+test('prompt curricolare: subjects vuoto se la classe non compare nella colonna richiesta', () => {
+  const prompt = buildCurricularTimetablePrompt(SCOPE);
+  assert.ok(prompt.includes('Se la classe richiesta NON compare in quella colonna fisica, restituisci quella coordinata con "subjects": []'), 'assenza nella colonna -> array vuoto');
+  assert.ok(prompt.includes('ANCHE quando la stessa classe compare in altre ore dello stesso giorno o in altri giorni'), 'la classe presente altrove non basta');
+  assert.ok(prompt.includes('NON inventare materie'), 'nessuna materia inventata');
   assert.ok(prompt.includes('NESSUNA voce per coordinate non richieste'), 'elenco chiuso');
   assert.ok(prompt.includes('{ "targets": [ { "dayOfWeek": 2, "periodIndex": 1, "classLabel": "3D", "subjects": ["Matematica"] } ] }'), 'formato dichiarato');
+});
+
+test('prompt curricolare: coordinate con stesso giorno+periodo raggruppate in una colonna', () => {
+  const shared = [
+    { dayOfWeek: 2, periodIndex: 3, classLabel: '2B' },
+    { dayOfWeek: 2, periodIndex: 3, classLabel: '3C' },
+    { dayOfWeek: 2, periodIndex: 3, classLabel: '1A' },
+    { dayOfWeek: 3, periodIndex: 1, classLabel: '2B' },
+  ];
+  const prompt = buildCurricularTimetablePrompt(shared);
+  assert.ok(prompt.includes('- Martedì, 3\u00aa ora \u2192 classi: 2B, 3C, 1A'), 'una riga sola per la colonna condivisa');
+  assert.equal(prompt.split('- Martedì, 3\u00aa ora').length - 1, 1, 'la colonna è nominata una volta sola');
+  assert.ok(prompt.includes('COLONNE FISICHE DA LEGGERE (2 colonne per 4 coordinate)'), 'colonne e coordinate contate separatamente');
+  assert.ok(prompt.includes('due coordinate che condividono giorno e ora restano DUE voci distinte'), 'il JSON resta un target per coordinata');
+  assert.ok(!prompt.includes('- Martedì, 3\u00aa ora, classe 2B'), 'nessuna riga separata per coordinata');
+  // La stessa classe in due periodi diversi del giorno NON è la stessa colonna.
+  const sameClassOtherPeriod = buildCurricularTimetablePrompt(SCOPE);
+  assert.ok(sameClassOtherPeriod.includes('- Martedì, 1\u00aa ora \u2192 classe: 2B'), 'martedì 1ª ora resta una colonna');
+  assert.ok(sameClassOtherPeriod.includes('- Martedì, 3\u00aa ora \u2192 classe: 2B'), 'martedì 3ª ora è un\'altra colonna');
+  assert.ok(!sameClassOtherPeriod.includes('classi: 2B'), 'nessun raggruppamento fra periodi diversi');
 });
 
 test('prompt curricolare: cresce con le coordinate, non con la dimensione dell istituto', () => {
@@ -338,6 +412,7 @@ test('flusso personale invariato: prompt, validazione e request non conoscono le
   const prompt = buildPersonalTimetablePrompt('rossi', 5);
   assert.ok(prompt.includes('cognome "rossi"'), 'il personale continua a ricevere il cognome');
   assert.ok(prompt.includes('ESATTAMENTE 5 celle'), 'geometria personale invariata');
+  assert.ok(!prompt.includes('COLONNE FISICHE DA LEGGERE'), 'il personale non riceve alcuno elenco di colonne');
   assert.ok(!prompt.includes('COORDINATE RICHIESTE'), 'il personale non riceve alcuno scope');
   assert.ok(!prompt.includes('targets'), 'nessun formato curricolare nel prompt personale');
 
