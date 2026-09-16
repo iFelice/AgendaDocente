@@ -127,7 +127,7 @@ const PERSONAL_ROW_INDEX = 0;
 export const PERIODS_PER_DAY_QUESTION = "Quante ore ci sono in ogni giornata scolastica?";
 /** Messaggio quando il valore non è (ancora) utilizzabile. */
 export const PERIODS_PER_DAY_QUESTION_ERROR =
-  "Indica quante ore ci sono in ogni giornata scolastica (numero intero da 1 a 24).";
+  `Indica quante ore ci sono in ogni giornata scolastica (numero intero da 1 a ${MAX_GRID_PERIODS}).`;
 
 export interface DocumentScannerModalProps {
   isOpen: boolean;

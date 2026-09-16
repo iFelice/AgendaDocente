@@ -120,12 +120,16 @@ export function validateRawCell(v: unknown, index: number): TimetableRawCell {
 }
 
 /**
- * Colonne-periodo massime plausibili in una griglia orario (geometria reale).
- * È anche il tetto del numero di ore per giorno dichiarabile dall'utente per
- * l'orario personale: oltre non esiste alcuna griglia scolastica reale, e
- * `generateDefaultPeriodSlots` non genera comunque più di 12 fasce.
+ * Ore per giorno massime dichiarabili per l'orario personale.
+ *
+ * Il tetto coincide con le fasce orarie dell'app: la configurazione dichiara al
+ * massimo 12 periodi per giorno, quindi un periodo dal 13º in poi normalmente
+ * non ha una fascia propria e `periodTimesForIndex` lo farebbe ricadere sugli
+ * orari della 1ª ora (ore duplicate o sbagliate in archivio). Meglio rifiutare
+ * la dichiarazione dell'utente che salvare un orario incoerente: oltre 12
+ * l'analisi non parte.
  */
-export const MAX_GRID_PERIODS = 24;
+export const MAX_GRID_PERIODS = 12;
 
 /**
  * Giorni scolastici del percorso personale corrente: lunedì-venerdì.
