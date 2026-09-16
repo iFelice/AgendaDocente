@@ -104,17 +104,18 @@ La tabella ha una colonna docenti (una riga per docente, con eventuali colonne M
 ${TABLE_RULES}
 REGOLE AGGIUNTIVE OBBLIGATORIE PER L'ORARIO PERSONALE (la posizione delle ore è critica):
 P1. "rows" deve contenere TUTTE le etichette della colonna docenti, nell'ordine del documento: una stringa per riga, ANCHE per le righe di cui non estrai nessuna cella.
-P2. ${target ? `Il docente da estrarre ha cognome "${target}". Cercalo come PAROLA INTERA nelle etichette: mai una sottostringa ("Bianchi" NON combacia con "Bianchini").` : "Nessun cognome target disponibile: considera l'unica riga della griglia, se una sola riga è visibile."}
-P3. In "cells" riporta la griglia densa SOLO delle righe compatibili col cognome, massimo 3 righe: le altre righe esistono solo come etichette in "rows" e per esse NON devi restituire celle.
-P4. Per ogni riga candidata e per ogni giorno, restituisci ESATTAMENTE periodsPerDay celle: una per colonna, in ordine da sinistra, incluse le colonne vuote con \"raw\": \"".
-P5. Una colonna vuota va emessa NELLA SUA POSIZIONE reale: se la 1ª ora è vuota la cella con periodIndex 1 e raw \"\" DEVE esserci. Ometterla, spostarla in fondo al giorno o rinumerare le ore successive è VIETATO.
-P6. periodIndex = numero ASSOLUTO della colonna partendo da 1 (vuoti contati), mai il progressivo delle sole celle non vuote.
-P7. Se nessuna riga è compatibile con sufficiente sicurezza, o se le righe compatibili sono più di 3 (cognome ambiguo), restituisci \"cells\": []: MAI scegliere un'altra riga perché è la più probabile.
-P8. Se la griglia ha UNA SOLA riga (foglio personale ritagliato, o colonna docenti non leggibile), riporta le celle dense di quell'unica riga: la conferma della riga resta comunque umana.
-P9. periodsPerDay = quante colonne-periodo ha la griglia per ogni giorno, contate sull'intestazione (NON sul numero di celle con valore); usa 0 solo se l'intestazione non è leggibile.
-Formato richiesto:
-{ "rows": ["Bianchi M.", "Manganiello F.", "...tutte le etichette..."], "periodsPerDay": 5, "cells": [{ "rowIndex": 1, "dayOfWeek": 1, "periodIndex": 1, "raw": "" }, { "rowIndex": 1, "dayOfWeek": 1, "periodIndex": 2, "raw": "3D" }] }
-Riepilogo: "rows" = tutte le etichette; "cells" = al massimo 3 righe x 5 giorni x periodsPerDay celle, vuoti inclusi al loro posto.`;
+P2. "rowIndex" è SEMPRE l'indice 0-based della riga DENTRO l'array COMPLETO "rows": NON è l'indice relativo fra le sole righe candidate. Se "rows" contiene 10 etichette e il docente è l'ottava, allora rowIndex = 7 anche se quella è l'unica riga per cui restituisci celle.
+P3. ${target ? `Il docente da estrarre ha cognome "${target}". Cercalo come PAROLA INTERA nelle etichette: mai una sottostringa ("Bianchi" NON combacia con "Bianchini").` : "Nessun cognome target disponibile: considera l'unica riga della griglia, se una sola riga è visibile."}
+P4. In "cells" riporta la griglia densa SOLO delle righe compatibili col cognome, massimo 3 righe: le altre righe esistono solo come etichette in "rows" e per esse NON devi restituire celle.
+P5. Per ogni riga candidata e per ogni giorno, restituisci ESATTAMENTE periodsPerDay celle: una per colonna, in ordine da sinistra, incluse le colonne vuote con "raw": "".
+P6. Una colonna vuota va emessa NELLA SUA POSIZIONE reale: se la 1ª ora è vuota la cella con periodIndex 1 e raw "" DEVE esserci. Ometterla, spostarla in fondo al giorno o rinumerare le ore successive è VIETATO.
+P7. periodIndex = numero ASSOLUTO della colonna partendo da 1 (vuoti contati), mai il progressivo delle sole celle non vuote.
+P8. Se nessuna riga è compatibile con sufficiente sicurezza, o se le righe compatibili sono più di 3 (cognome ambiguo), restituisci "cells": []: MAI scegliere un'altra riga perché è la più probabile.
+P9. Se la griglia ha UNA SOLA riga (foglio personale ritagliato, o colonna docenti non leggibile), riporta le celle dense di quell'unica riga: la conferma della riga resta comunque umana.
+P10. periodsPerDay = quante colonne-periodo ha la griglia per ogni giorno, contate sull'intestazione (NON sul numero di celle con valore); usa 0 solo se l'intestazione non è leggibile.
+Formato richiesto (esempio: 10 etichette e docente all'ottava riga -> rowIndex = 7):
+{ "rows": ["Bianchi M.", "Ferrari A.", "Riva C.", "Costa L.", "Greco P.", "Bruno T.", "Galbiati S.", "Manganiello F.", "Neri E.", "Pini U."], "periodsPerDay": 5, "cells": [{ "rowIndex": 7, "dayOfWeek": 1, "periodIndex": 1, "raw": "" }, { "rowIndex": 7, "dayOfWeek": 1, "periodIndex": 2, "raw": "3D" }] }
+Riepilogo: "rows" = tutte le etichette; "rowIndex" = indice della riga dentro "rows" (lista completa); "cells" = al massimo 3 righe x 5 giorni x periodsPerDay celle, vuoti inclusi al loro posto.`;
 }
 
 export const CURRICULAR_TIMETABLE_PROMPT = `Estrai la struttura della tabella dell'ORARIO CURRICOLARE/ISTITUTO dalla foto/PDF allegata.
@@ -137,7 +138,7 @@ export const personalTimetableSchema = {
       items: {
         type: Type.OBJECT,
         properties: {
-          rowIndex: { type: Type.INTEGER, description: 'Riga 0-based della riga candidata' },
+          rowIndex: { type: Type.INTEGER, description: 'Indice 0-based della riga DENTRO rows, cioè la lista COMPLETA di tutte le etichette; NON è un indice relativo alle sole righe candidate' },
           dayOfWeek: { type: Type.INTEGER, description: '1=lunedì..5=venerdì (6=sabato se presente)' },
           periodIndex: { type: Type.INTEGER, description: 'Numero di periodo assoluto della colonna 1..periodsPerDay; conta anche le colonne vuote precedenti, non rinumerare le sole celle non vuote, mai spostare i vuoti in coda' },
           raw: { type: Type.STRING, description: 'Testo esatto della cella; stringa vuota per una colonna vuota (obbligatorio: la geometria della griglia non deve perdersi)' },

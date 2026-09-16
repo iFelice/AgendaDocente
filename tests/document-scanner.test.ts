@@ -22,7 +22,7 @@ import {
   type TimetableRawCell,
 } from '../src/utils/timetableAnalysis';
 import { crossrefTimetables, dedupeSubjects, reconSignal, sameClassLabel, RECON_NOTES } from '../src/utils/timetableCrossref';
-import { CURRICULAR_TIMETABLE_PROMPT, buildPersonalTimetablePrompt, describePersonalRowFilter, parseTimetableAiResponse, personalTargetSurname } from '../server/timetableAnalysis';
+import { CURRICULAR_TIMETABLE_PROMPT, buildPersonalTimetablePrompt, describePersonalRowFilter, parseTimetableAiResponse, personalTargetSurname, personalTimetableSchema } from '../server/timetableAnalysis';
 import {
   SUPPORT_TEACHER_SUBJECT,
   applyReconstruction,
@@ -274,18 +274,27 @@ test('orario personale (ground truth 18 ore): payload denso -> coordinate esatte
   assertRealGrid('denso', slots);
 });
 
-test('orario personale: numerazione CHE NON è una permutazione di 1..width -> fallback per posizione, MA con avviso', () => {
-  // 'duplicates': ogni giorno numerato 1,1,2,2,3 -> nessuna colonna dichiarata in modo
-  // completo -> si usa l’ordine di emissione e ogni giorno va verificato.
+test('orario personale: numerazione NON permutazione di 1..width -> mai riparata, solo segnalata', () => {
+  // Il contratto è: geometria coerente -> comandano i periodIndex; geometria
+  // incoerente -> i periodIndex restano QUELLI DEL MODELLO e il giorno è contato
+  // in `positionIssues`. Rinumerare per ordine di emissione produceva un orario
+  // apparentemente valido partendo da un payload rotto (è il Martè dello screenshot).
   const dup = personalFromPayload(densePersonalPayload('duplicates'));
-  assertRealGrid('duplicates', dup.slots);
-  assert.equal(dup.outcome.positionIssues, 5, '5 giorni in fallback = 5 avvisi, mai silenzioso');
+  assert.equal(dup.outcome.positionIssues, 5, 'ogni giorno incoerente è un avviso, non una correzione');
+  const dayNumbers = (cells: Array<{ dayOfWeek: number; periodIndex: number }>, day: number) =>
+    cells.filter(c => c.dayOfWeek === day).map(c => c.periodIndex);
+  for (const day of [1, 2, 3, 4, 5]) {
+    assert.deepEqual(dayNumbers(dup.outcome.cells, day), [1, 1, 2, 2, 3], `giorno ${day}: numeri intatti, mai [1,2,3,4,5]`);
+  }
 
-  // 'rowCounter': contatore progressivo sulla riga. Il lunedì capitò su 1..5 (permutazione
-  // valida: i numeri comandano e non c’è nulla da verificare), gli altri giorni no.
+  // 'rowCounter': contatore progressivo sull'intera riga. Il lunedì capitò su 1..5
+  // (permutazione esatta: numeri autoritativi, nessun avviso); gli altri giorni no,
+  // e i loro numeri fuori griglia vengono MANTENUTI (0 ore ricostruibili → l'utente
+  // deve verificare), non riscritti in 1..5.
   const counter = personalFromPayload(densePersonalPayload('rowCounter'));
-  assertRealGrid('rowCounter', counter.slots);
   assert.equal(counter.outcome.positionIssues, 4, 'solo i giorni fuori permutazione sono segnalati');
+  assert.deepEqual(dayNumbers(counter.outcome.cells, 1), [1, 2, 3, 4, 5], 'lunedì: permutazione esatta respected');
+  assert.deepEqual(dayNumbers(counter.outcome.cells, 2), [6, 7, 8, 9, 10], 'martedì: 6..10 restano 6..10 (nessuna invenzione)');
 });
 
 test('orario personale: payload senza celle vuote (numeri assoluti) mantiene le 18 coordinate, mai ricompattate', () => {
@@ -308,11 +317,15 @@ test('orario personale: [3D, vuoto, 3D, 3D, 3E] produce i periodi 1, 3, 4, 5 (ma
     { periodIndex: 4, raw: '3D' }, { periodIndex: 5, raw: '3E' },
   ]), [1, 3, 4, 5], 'colonna vuota in posizione 2: le ore dopo restano sulle loro colonne');
 
-  // Stessa griglia, ma con il contatore che salta le vuote: ancorare alle colonne la corregge.
-  assert.deepEqual(day([
-    { periodIndex: 1, raw: '3D' }, { periodIndex: 1, raw: '' }, { periodIndex: 2, raw: '3D' },
-    { periodIndex: 3, raw: '3D' }, { periodIndex: 4, raw: '3E' },
-  ]), [1, 3, 4, 5], 'una colonna vuota non fa scorrere le ore successive');
+  // Stessa griglia col contatore che salta le vuote: il difetto NON viene riparato
+  // per posizione (sarebbe un'invenzione), viene segnalato.
+  const broken = anchorPersonalCellsToGrid([
+    { rowIndex: 0, dayOfWeek: 2, periodIndex: 1, raw: '3D' }, { rowIndex: 0, dayOfWeek: 2, periodIndex: 1, raw: '' },
+    { rowIndex: 0, dayOfWeek: 2, periodIndex: 2, raw: '3D' }, { rowIndex: 0, dayOfWeek: 2, periodIndex: 3, raw: '3D' },
+    { rowIndex: 0, dayOfWeek: 2, periodIndex: 4, raw: '3E' },
+  ], 5);
+  assert.deepEqual(broken.cells.filter(c => c.raw).map(c => c.periodIndex), [1, 2, 3, 4], 'nessuna rinumerazione: i numeri del modello restano');
+  assert.equal(broken.positionIssues, 1, 'il giorno incoerente è segnalato, non corretto');
 });
 
 test('orario personale: numerazione incoerente -> avviso, ma nessuna ora spostata o inventata', () => {
@@ -1019,20 +1032,21 @@ test("ancoraggio C: martedì reale (buco interno) corretto anche con i vuoti eme
   assert.equal(anchored.positionIssues, 0);
 });
 
-test("ancoraggio D: gruppo denso con numeri duplicati/mancanti -> fallback per posizione + avviso", () => {
+test("ancoraggio D: gruppo denso con numeri duplicati/mancanti -> numeri intatti + avviso", () => {
   const duplicated = anchorDay([
     { periodIndex: 1, raw: "3D" }, { periodIndex: 1, raw: "" }, { periodIndex: 2, raw: "3D" },
     { periodIndex: 3, raw: "3D" }, { periodIndex: 4, raw: "3E" },
   ]);
-  assert.deepEqual(duplicated.cells.map(c => c.periodIndex), [1, 2, 3, 4, 5], "le posizioni vengono ricucite da sinistra");
-  assert.equal(duplicated.positionIssues, 1, "il fallback è consentito ma dichiarato");
-  assert.deepEqual(duplicated.cells.filter(c => c.raw).map(c => c.periodIndex), [1, 3, 4, 5], "martedì/giovedì-like: i buchi restano buchi");
+  assert.deepEqual(duplicated.cells.map(c => c.periodIndex), [1, 1, 2, 3, 4], "MAI [1,2,3,4,5]: l'ordine di emissione non diventa una posizione");
+  assert.equal(duplicated.positionIssues, 1, "l'incoerenza resta visibile come avviso");
+  assert.deepEqual(duplicated.cells.filter(c => c.raw).map(c => c.periodIndex), [1, 2, 3, 4], "le ore restano dove il modello le ha messe");
 
   const missingColumn = anchorDay([
     { periodIndex: 2, raw: "3E" }, { periodIndex: 3, raw: "3E" }, { periodIndex: 4, raw: "3D" },
     { periodIndex: 5, raw: "3E" }, { periodIndex: 5, raw: "" },
   ]);
-  assert.equal(missingColumn.positionIssues, 1, "colonna 1 mai reclamata e 5 duplicata: numerazione incoerente");
+  assert.deepEqual(missingColumn.cells.map(c => c.periodIndex), [2, 3, 4, 5, 5], "colonna 1 mai reclamata e 5 duplicata: duplicato conservato, non sistemato");
+  assert.equal(missingColumn.positionIssues, 1, "numerazione incoerente: un avviso per il giorno");
 });
 
 test("ancoraggio E-F: sparse assoluto mantiene le coordinate; il pattern 1..k avvisa senza rinumerare", () => {
@@ -1256,6 +1270,77 @@ test('wiring endpoint personale: lo STESSO cognome alimenta prompt e filtro dife
 });
 
 // ---------------------------------------------------------------------------
+// 9g. NESSUNA INVENZIONE DI POSIZIONI + rowIndex ASSOLUTO (micro-fix dopo il
+//     micro-audit: duplicato "Mercoledì 5ª" e "Martedì 1=3E" dello screenshot)
+// ---------------------------------------------------------------------------
+
+const PERM_ROWS = [{ periodIndex: 2, raw: "3E" }, { periodIndex: 3, raw: "3E" }, { periodIndex: 4, raw: "3D" },
+  { periodIndex: 5, raw: "3E" }, { periodIndex: 1, raw: "" }];
+
+test("anchoring 1: permutazione esatta fuori ordine [2,3,4,5,1] -> invariata, nessun avviso", () => {
+  const anchored = anchorDay(PERM_ROWS);
+  // L'ancoraggio ordina l'output per colonna: cio che va preservato e la MAPPA
+  // periodo -> cella, non la posizione nell'array di input.
+  assert.deepEqual(anchored.cells.map(c => `${c.periodIndex}:${c.raw || "\u2205"}`),
+    ["1:\u2205", "2:3E", "3:3E", "4:3D", "5:3E"], "ogni cella resta sulla colonna che ha dichiarato");
+  assert.deepEqual(PERM_ROWS.map(r => anchored.cells.find(c => c.periodIndex === r.periodIndex)?.raw ?? null),
+    ["3E", "3E", "3D", "3E", ""], "input [2,3,4,5,1] -> nessuna riassegnazione per emission order");
+  assert.equal(anchored.positionIssues, 0, "geometria affidabile: nessuna segnalazione");
+});
+
+test("anchoring 2: denso con duplicato [1,2,3,4,4] -> resta [1,2,3,4,4], MAI [1,2,3,4,5]", () => {
+  const anchored = anchorDay([{ periodIndex: 1, raw: "3E" }, { periodIndex: 2, raw: "3D" }, { periodIndex: 3, raw: "3D" },
+    { periodIndex: 4, raw: "3D" }, { periodIndex: 4, raw: "3E" }]);
+  assert.deepEqual(anchored.cells.map(c => c.periodIndex), [1, 2, 3, 4, 4], "nessuna rinumerazione per emission order");
+  assert.equal(anchored.positionIssues, 1, "il duplicato deve restare visibile come avviso");
+});
+
+test("anchoring 3: sparse [1,2,3,5] -> mai compattato in [1,2,3,4]", () => {
+  const anchored = anchorDay([{ periodIndex: 1, raw: "3D" }, { periodIndex: 2, raw: "3D" },
+    { periodIndex: 3, raw: "3E" }, { periodIndex: 5, raw: "3E" }]);
+  assert.deepEqual(anchored.cells.map(c => c.periodIndex), [1, 2, 3, 5], "il buco resta un buco");
+});
+
+test("anchoring 4: vuoto della 1\u00aa emesso in coda ma ben numerato -> ground truth intatta (fix 3546be6)", () => {
+  const anchored = anchorDay(PERM_ROWS, 3);
+  assert.deepEqual(anchored.cells.map(c => `${c.periodIndex}${c.raw ? ":" + c.raw : ":\u2205"}`),
+    ["1:\u2205", "2:3E", "3:3E", "4:3D", "5:3E"], "mercoled\u00ec reale: nessuna ora slitta");
+  assert.equal(anchored.positionIssues, 0);
+  const extraction = personalCellsToCandidates(anchored.cells, [0]);
+  assert.deepEqual(extraction.candidates.map(c => c.periodIndex), [2, 3, 4, 5], "4 ore, nessuna inventata in 1\u00aa");
+});
+
+test("prompt e schema: rowIndex = indice assoluto dentro rows, mai relativo alle candidate", () => {
+  const prompt = buildPersonalTimetablePrompt("manganiello");
+  assert.ok(prompt.includes(`rowIndex" è SEMPRE l'indice 0-based della riga DENTRO l'array COMPLETO "rows"`), "regola esplicita presente");
+  assert.ok(prompt.includes(`NON è l'indice relativo fra le sole righe candidate`), "il fraintendimento è negato esplicitamente");
+  assert.ok(prompt.includes("10 etichette") && prompt.includes("rowIndex = 7"), "l'esempio imposto (8\u00aa etichetta -> 7) c'è");
+  assert.ok(prompt.includes('{ "rowIndex": 7, "dayOfWeek": 1'), "l'esempio JSON usa un indice assoluto");
+  assert.doesNotMatch(JSON.stringify(personalTimetableSchema), /della riga candidata/, "la descrizione ambigua non deve tornare");
+  assert.match(JSON.stringify(personalTimetableSchema), /DENTRO rows/);
+});
+
+test("payload reale 25 righe: target alla quarta etichetta -> le sue 25 celle sopravvivono al filtro", () => {
+  const payload = { rows: TEAM_ROWS(3), periodsPerDay: 5, cells: denseCellsOf(3) };
+  const outcome = parseTimetableAiResponse("personal-support-timetable", payload, "manganiello");
+  assert.equal(outcome.rows.length, 25, "tutte le etichette restano nella risposta");
+  assert.equal(outcome.cells.length, 25, "la riga candidata passa intatta");
+  assert.equal(outcome.droppedForeignCells, 0);
+  assert.equal(outcome.positionIssues, 0);
+});
+
+test("regressione: celle con rowIndex relativo alle candidate NON vengono reinterpretate", () => {
+  // Il modello ha numerato la riga come "prima candidata" (0) mentre in `rows` il
+  // docente è la quarta etichetta: le celle non corrispondono a nessuna riga
+  // compatibile -> si scartano, MAI riassegnandole alla riga 3 (sarebbe un'invenzione).
+  const outcome = parseTimetableAiResponse("personal-support-timetable",
+    { rows: TEAM_ROWS(3), periodsPerDay: 5, cells: denseCellsOf(0) }, "manganiello");
+  assert.equal(outcome.cells.length, 0, "nessuna cella trattenuta per la riga target");
+  assert.equal(outcome.droppedForeignCells, 25, "il discostamento è contato");
+  assert.deepEqual(personalCellsToCandidates(outcome.cells, [3]).candidates, [], "nessuna ora creata sulla riga sbagliata");
+});
+
+// ---------------------------------------------------------------------------
 // 9d. BUG REALE (iPhone, dopo il formato denso): la fase di parsing NON deve
 //     far finire l'analisi nel catch generico ("Analisi non riuscita. Riprova.")
 // ---------------------------------------------------------------------------
@@ -1341,31 +1426,27 @@ test('limiti di parsing: una pagina lunga resta analizzabile, il resto è rifiut
   assert.throws(() => parseTimetableAiResponse('personal-support-timetable', huge), /Celle del documento non valide/);
 });
 
-test('formato denso: la dichiarazione delle colonne è ciò che rende riparabile una numerazione compattata', () => {
+test('formato denso: la dichiarazione delle colonne rende RILEVABILE (non riparabile) una numerazione compattata', () => {
   const compacted = [
     { rowIndex: 0, dayOfWeek: 2, periodIndex: 1, raw: '3D' },
-    { rowIndex: 0, dayOfWeek: 2, periodIndex: 1, raw: '' },   // contatore dell’AI: duplicato
+    { rowIndex: 0, dayOfWeek: 2, periodIndex: 1, raw: '' },   // contatore dell'AI: duplicato
     { rowIndex: 0, dayOfWeek: 2, periodIndex: 2, raw: '3D' },
     { rowIndex: 0, dayOfWeek: 2, periodIndex: 3, raw: '3D' },
     { rowIndex: 0, dayOfWeek: 2, periodIndex: 4, raw: '3E' },
   ];
-  // Dichiarazione letta correttamente -> la griglia è da 5 colonne, le posizioni si riparano.
+  // Con la geometria dichiarata il giorno è riconosciuto denso MA incoerente: le
+  // posizioni NON vengono riassegnate per ordine di emissione, si segnala e basta.
   for (const declared of [5, '5', ' 5 ']) {
     const outcome = parseTimetableAiResponse('personal-support-timetable', {
       rows: ['Manganiello F.'], periodsPerDay: declared, cells: compacted,
     });
     assert.equal(outcome.periodsPerDay, 5, `periodsPerDay=${JSON.stringify(declared)}`);
-    assert.equal(outcome.positionIssues, 1, `${JSON.stringify(declared)}: riparato per posizione, ma lintelligenza del giorno va verificata (avviso esplicito)`);
-    assert.deepEqual(
-      outcome.cells.filter(c => c.raw).map(c => c.periodIndex),
-      [1, 3, 4, 5],
-      `${JSON.stringify(declared)}: martedì [3D, vuoto, 3D, 3D, 3E] -> 1, 3, 4, 5`
-    );
+    assert.equal(outcome.positionIssues, 1, `${JSON.stringify(declared)}: un avviso, nessuna riparazione silenziosa`);
+    assert.deepEqual(outcome.cells.map(c => c.periodIndex), [1, 1, 2, 3, 4], `${JSON.stringify(declared)}: i periodIndex del modello restano intatti`);
   }
-  // Senza dichiarazione la stessa numerazione compattata non è riparabile:
-  // nessun riordino inventato, solo l’indicazione che le ore vanno verificate.
+  // Senza dichiarazione il comportamento è lo stesso: nessun riordino inventato.
   const undeclared = parseTimetableAiResponse('personal-support-timetable', { rows: ['X'], cells: compacted });
-  assert.equal(undeclared.positionIssues, 1, 'duplicato non risolvibile senza geometria: avviso');
+  assert.equal(undeclared.positionIssues, 1, 'duplicato: avviso');
   assert.deepEqual(undeclared.cells.map(c => c.periodIndex), [1, 1, 2, 3, 4], 'nessuna ora spostata a forza');
 });
 

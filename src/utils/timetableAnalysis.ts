@@ -187,7 +187,7 @@ export interface PersonalGridAnchor {
   cells: TimetableRawCell[];
   /** Colonne per giorno usate per l'ancoraggio (0: griglia non determinabile). */
   periodsPerDay: number;
-  /** (riga, giorno) da verificare a mano: numerazione incoerente o fallback per posizione. */
+  /** (riga, giorno) da verificare a mano: geometria incoerente, posizioni NON riparate. */
   positionIssues: number;
 }
 
@@ -207,10 +207,10 @@ export interface PersonalGridAnchor {
  *      reclamata una e una sola volta) COMANDANO I NUMERI: il payload dice già
  *      quale colonna è vuota, e sostituirli con l'ordine dell'array sposterebbe
  *      l'intero giorno (caso reale: il vuoto della 1ª emesso in coda -> 3E in 1ª);
- *   2. solo se i numeri NON sono una permutazione (duplicati, buchi, contatore
- *      delle sole celle piene) si ripiega sull'ordine di emissione, e NON in
- *      silenzio: `positionIssues++`, perché in quel caso l'unica informazione
- *      disponibile è la posizione nell'array;
+ *   2. se i numeri NON sono una permutazione (duplicati, buchi, contatore delle
+ *      sole celle piene) le celle restano COI LORO NUMERI e il giorno è contato in
+ *      `positionIssues`: nessuna posizione viene mai ricostruita dall'ordine
+ *      dell'array, perché sarebbe un'invenzione e nasconderebbe il difetto.
  * - gruppo incompleto (l'AI ha omesso le colonne vuote): i numeri assoluti sono
  *   gli unici usati e NON sono mai ricompattati o rinumerati; si conta in
  *   `positionIssues` sia la numerazione incoerente (duplicati, colonna oltre
@@ -248,15 +248,20 @@ export function anchorPersonalCellsToGrid(cells: TimetableRawCell[], declaredPer
       // LORO colonna, qualunque sia l'ordine con cui l'AI le ha elencate.
       const numbers = group.map(cell => cell.periodIndex);
       const declaresEveryColumn = new Set(numbers).size === width && numbers.every(n => n >= 1 && n <= width);
-      if (declaresEveryColumn) {
-        for (const cell of group) anchored.push({ ...cell });
-        continue;
+      if (!declaresEveryColumn) {
+        // Numeri incoerenti con la griglia (duplicati, buchi, contatore delle sole
+        // celle piene): le celle restano sui LORO periodIndex e il giorno viene
+        // contato in `positionIssues`. Prima si rinumerava per ordine di emissione
+        // (`index + 1`), e un giorno ruotato dal modello diventava un orario
+        // apparentemente valido (caso reale: martedì [3E,3D,3D,3D,3E] numerati
+        // [1,2,3,4,4] -> «3E in 1ª ora»). Mostrare l'incoerenza vale più che
+        // inventare una posizione: l'anchoring NON tocca mai i periodIndex.
+        positionIssues++;
+      } else {
+        // Geometria coerente: i numeri del modello SONO la griglia e l'ordine di
+        // emissione è irrilevante (payload conforme -> celle esattamente invariate).
       }
-      // Numeri incoerenti con la griglia (duplicati, buchi, contatore delle sole
-      // celle piene): resta l'ordine di lettura. Fallback ammesso ma MAI
-      // silenzioso: l'UI deve far verificare le ore del giorno.
-      positionIssues++;
-      group.forEach((cell, index) => anchored.push({ ...cell, periodIndex: index + 1 }));
+      for (const cell of group) anchored.push({ ...cell });
       continue;
     }
     // Incompleta: l'unico indizio disponibile è la numerazione del modello.
