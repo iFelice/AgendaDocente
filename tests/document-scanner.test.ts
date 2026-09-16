@@ -92,6 +92,88 @@ test('token table: classi valide riconosciute, D/P/Co/sos mai trattati come clas
   assert.deepEqual(extractClassesFromCell('D P Co'), []);
 });
 
+test('classi spezzate dallo spazio: "3 E" vale "3E" (OCR/AI da fotografia)', () => {
+  for (const [cell, expected] of [
+    ['3E', ['3E']], ['3 E', ['3E']], ['3e', ['3E']], ['3 e', ['3E']],
+    ['3^E', ['3E']], ['3^ E', ['3E']], ['3ªE', ['3E']], ['3ª E', ['3E']],
+    ['2 D', ['2D']], ['1 A', ['1A']],
+  ] as const) {
+    assert.deepEqual(extractClassesFromCell(cell), [...expected], `extractClassesFromCell(${JSON.stringify(cell)})`);
+  }
+  // Forma canonica: mai minuscole, mai spazi residui.
+  assert.deepEqual(extractClassesFromCell('3 e'), ['3E']);
+});
+
+test('nessuna normalizzazione cieca: celle vuote, codici, più classi e testo restano come prima', () => {
+  assert.deepEqual(extractClassesFromCell(''), [], 'cella vuota');
+  assert.deepEqual(extractClassesFromCell('   '), [], 'solo spazi');
+  assert.deepEqual(extractClassesFromCell('sos'), [], 'sos non è una classe');
+  assert.deepEqual(extractClassesFromCell('D'), [], 'D è un codice interno');
+  assert.deepEqual(extractClassesFromCell('P'), [], 'P è un codice interno');
+  assert.deepEqual(extractClassesFromCell('Co'), [], 'Co è un codice interno');
+  assert.deepEqual(extractClassesFromCell('3D / sos'), ['3D'], 'il codice accanto alla classe è ignorato');
+  assert.deepEqual(extractClassesFromCell('3D 3E'), ['3D', '3E'], 'due classi nella stessa cella');
+  assert.deepEqual(extractClassesFromCell('3 D 3 E'), ['3D', '3E'], 'due classi spezzate dallo spazio');
+  assert.deepEqual(extractClassesFromCell('3E/3D'), ['3E', '3D'], 'separatore di elencazione');
+  // Nessuna classe inventata quando il pattern non è chiaro.
+  assert.deepEqual(extractClassesFromCell('3 Matematica'), [], 'cifra + parola: nessuna classe');
+  assert.deepEqual(extractClassesFromCell('MATEMATICA'), []);
+  assert.deepEqual(extractClassesFromCell('3D4'), []);
+  assert.deepEqual(extractClassesFromCell('6 A'), [], 'grado fuori dal pattern 1-5');
+});
+
+test('"III E" non diventa mai una classe inventata (niente 2I)', () => {
+  assert.deepEqual(extractClassesFromCell('III E'), [], 'nessuna classe estratta');
+  assert.equal(extractClassesFromCell('III E').includes('2I'), false, '2I non deve esistere');
+  assert.equal(extractClassesFromCell('III').includes('2I'), false, 'il numero romano da solo non è una classe');
+
+  // Nel flusso reale la cella finisce tra quelle non interpretate: nessun candidato.
+  const extraction = personalCellsToCandidates(
+    [{ rowIndex: 0, dayOfWeek: 5, periodIndex: 1, raw: 'III E' } as TimetableRawCell],
+    [0],
+  );
+  assert.deepEqual(extraction.candidates, [], 'nessuna ora inventata da "III E"');
+  assert.equal(extraction.skipped.length, 1, 'la cella è dichiarata non interpretata');
+  assert.equal(extraction.candidates.some(c => c.classLabel === '2I'), false);
+});
+
+test('sequenza personale con venerdì spezzato dallo spazio: coordinate intatte e classi canoniche', () => {
+  const PERIODS = 5;
+  // Ground truth della riga, con il venerdì scritto come lo restituirebbe un OCR: "3 E".
+  const cells = [
+    '', '3D', '3D', '3E', '3E',
+    '3D', '', '3D', '3D', '3E',
+    '', '3E', '3E', '3D', '3E',
+    '', '3E', '3D', '3E', '',
+    '3 E', '3 D', '3 E', '', '',
+  ];
+  assert.equal(cells.length, expectedPersonalCellCount(PERIODS), '25 posizioni (5 ore x 5 giorni)');
+
+  const outcome = parseTimetableAiResponse('personal-support-timetable', { rowLabel: 'Manganiello F.', cells }, 'Manganiello', PERIODS);
+  const extraction = personalCellsToCandidates(outcome.cells!, [0]);
+  const reconstruction = crossrefTimetables(extraction.candidates, []);
+  const slots = reconstructedToTimetableSlots(reconstruction as any, { profile, timeSlotConfig: undefined });
+
+  const friday = slots.filter(s => s.dayOfWeek === 5).sort((a, b) => a.periodNumber - b.periodNumber);
+  assert.deepEqual(friday.map(s => `${s.periodNumber}ª ${s.className}`), ['1ª 3E', '2ª 3D', '3ª 3E'], 'Ven1=3E, Ven2=3D, Ven3=3E');
+  assert.equal(friday.some(s => s.periodNumber === 4 || s.periodNumber === 5), false, 'Ven4 e Ven5 restano vuote');
+  assert.equal(extraction.skipped.length, 0, 'nessuna cella del venerdì persa come "non interpretata"');
+
+  // Nessuna coordinata spostata, duplicata o rinumerata in tutta la sequenza.
+  assert.equal(slots.length, cells.filter(c => c.trim()).length, 'uno slot per cella occupata');
+  for (let index = 0; index < cells.length; index++) {
+    const day = Math.floor(index / PERIODS) + 1;
+    const period = (index % PERIODS) + 1;
+    const hit = slots.find(s => s.dayOfWeek === day && s.periodNumber === period);
+    if (cells[index].trim()) {
+      assert.ok(hit, `index ${index}: ora presente`);
+      assert.equal(hit!.className, cells[index].replace(/\s+/g, ''), `index ${index}: classe canonica`);
+    } else {
+      assert.equal(hit, undefined, `index ${index}: nessuna ora inventata`);
+    }
+  }
+});
+
 test('DAY_LABELS copre lunedì-sabato (struttura tabella italiana)', () => {
   assert.equal(DAY_LABELS[1], 'Lunedì');
   assert.equal(DAY_LABELS[5], 'Venerdì');

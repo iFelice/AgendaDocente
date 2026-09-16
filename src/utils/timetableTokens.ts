@@ -78,17 +78,56 @@ export function classifyTimetableToken(raw: unknown): TimetableToken {
 }
 
 /**
+ * Numero romano scritto da solo: senza la lettera di sezione NON è una classe e
+ * non va normalizzato (è proprio qui che "III" verrebbe letto come "II"+"I" = 2I).
+ * Meglio scartarlo che inventare una classe.
+ */
+const BARE_ROMAN_GRADE = /^(?:I|II|III|IV|V)$/;
+
+/**
+ * Ricompone una sigla di classe spezzata da uno spazio: "3 E" -> "3E".
+ *
+ * Su OCR/AI da fotografia cifra e lettera arrivano spesso separate, e una cella
+ * spezzata sul whitespace PRIMA di essere normalizzata perdeva l'ora intera.
+ * La ricomposizione vale solo per una cifra araba di classe (1-5) seguita da UNA
+ * lettera: nessuno spazio viene rimosso alla cieca e nessuna coppia viene inventata
+ * quando il pattern non è chiaro ("3 Matematica" resta senza classe).
+ */
+function joinSpacedClassTokens(parts: string[]): string[] {
+  const result: string[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    const current = parts[i];
+    const next = parts[i + 1];
+    if (next !== undefined && /^[1-5][\^°ª]?$/.test(current) && /^[A-Za-z]$/.test(next)) {
+      result.push(`${current}${next.toUpperCase()}`);
+      i++; // la lettera appartiene alla cifra: non è un token a sé
+      continue;
+    }
+    result.push(current);
+  }
+  return result;
+}
+
+/**
  * Estrae TUTTE le classi valide contenute in una cella o in un'intestazione
- * (es. "3D 3E" -> ["3D","3E"], "3D / sos" -> ["3D"]). I token non validi
- * (D, P, Co, sos…) sono ignorati, mai trasformati.
+ * (es. "3D 3E" -> ["3D","3E"], "3D / sos" -> ["3D"], "3 E" -> ["3E"]). I token non
+ * validi (D, P, Co, sos…) sono ignorati, mai trasformati.
+ *
+ * Lo spazio non è un separatore cieco: separano solo i caratteri di elencazione
+ * (/ ; , + |), così una cella può contenere più informazioni senza che una sigla
+ * spezzata venga persa.
  */
 export function extractClassesFromCell(raw: unknown): string[] {
   const text = String(raw ?? "");
   if (!text) return [];
   const found: string[] = [];
-  for (const part of text.split(/[\s/;,+|]+/)) {
-    const label = normalizeClassLabel(part);
-    if (label && !found.includes(label)) found.push(label);
+  for (const segment of text.split(/[/;,+|]+/)) {
+    const parts = joinSpacedClassTokens(segment.trim().split(/\s+/).filter(Boolean));
+    for (const part of parts) {
+      if (BARE_ROMAN_GRADE.test(part)) continue;
+      const label = normalizeClassLabel(part);
+      if (label && !found.includes(label)) found.push(label);
+    }
   }
   return found;
 }
