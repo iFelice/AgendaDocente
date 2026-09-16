@@ -28,6 +28,7 @@ import {
   isSupportTeacherProfile,
   periodTimesForIndex,
   reconstructedToTimetableSlots,
+  slotsInReplacementScope,
 } from '../src/utils/reconstructTimetable';
 import { matchStudentName, parsePersonName, foldName, studentMatchLabel } from '../src/utils/studentMatcher';
 import { normalizeTeacherProfile } from '../src/utils/multiSchool';
@@ -679,6 +680,70 @@ test('replace: insieme misto (sostegno + materia) sostituisce entrambe le nature
   const incoming = [supportSlot('new-1', 2, 1), supportSlot('new-2', 3, 1, { subject: 'Matematica' })];
   const merged = applyReconstruction(existingSlots, incoming, 'replace-scope', { profile });
   assert.deepEqual(merged.slots.map(s => s.id), ['ex-altro-istituto', 'new-1', 'new-2']);
+});
+
+// ---------------------------------------------------------------------------
+// 11-ter. RILEVAMENTO DEL VECCHIO ORARIO PERTINENTE (quando va fatta la domanda)
+// ---------------------------------------------------------------------------
+
+/** Istituto principale del profilo: è la sede degli slot legacy senza `schoolId`. */
+const primarySchoolId = () => normalizeTeacherProfile(profile).schools?.find(s => s.isPrimary)?.id;
+
+test('rilevamento: l ambito della domanda coincide con ciò che "sostituisci" può davvero toccare', () => {
+  const primary = primarySchoolId();
+  const existingSlots = [
+    supportSlot('ex-sostegno', 2, 1),
+    supportSlot('ex-solo-vecchia', 4, 1),
+    supportSlot('ex-materia', 3, 1, { subject: 'Matematica' }),
+    supportSlot('ex-altro-istituto', 5, 1, { schoolId: 'school-b' }),
+  ];
+  const incoming = [supportSlot('new-1', 2, 1, { schoolId: primary })];
+
+  const scope = slotsInReplacementScope(existingSlots, incoming, { profile });
+  assert.deepEqual(scope.map(s => s.id), ['ex-sostegno', 'ex-solo-vecchia'], 'solo sostegno dello stesso istituto');
+
+  // Invariante: la domanda annuncia esattamente gli slot che la sostituzione rimuove.
+  const merged = applyReconstruction(existingSlots, incoming, 'replace-scope', { profile });
+  const notPreserved = existingSlots.filter(s => !merged.slots.some(m => m.id === s.id)).map(s => s.id);
+  assert.deepEqual(notPreserved, scope.map(s => s.id), 'nessuna divergenza tra domanda e scrittura');
+});
+
+test('rilevamento: solo materia, altro istituto o archivio vuoto -> ambito vuoto, nessuna domanda', () => {
+  const primary = primarySchoolId();
+  const incoming = [supportSlot('new-1', 2, 1, { schoolId: primary })];
+
+  assert.deepEqual(slotsInReplacementScope([supportSlot('ex-materia', 3, 1, { subject: 'Matematica' })], incoming, { profile }), [], 'le ore di materia non sono dell orario di sostegno');
+  assert.deepEqual(slotsInReplacementScope([supportSlot('ex-altro', 3, 1, { schoolId: 'school-b' })], incoming, { profile }), [], 'le ore di un altro istituto restano fuori ambito');
+  assert.deepEqual(slotsInReplacementScope([], incoming, { profile }), [], 'archivio vuoto: niente da sostituire');
+});
+
+test('rilevamento: senza slot in arrivo nessun ambito (niente da salvare -> niente da sostituire)', () => {
+  assert.deepEqual(slotsInReplacementScope([supportSlot('ex-1', 2, 1)], [], { profile }), []);
+});
+
+test('rilevamento: gli slot legacy senza schoolId valgono l istituto principale; senza profilo restano fuori', () => {
+  const primary = primarySchoolId();
+  const legacy = [supportSlot('ex-legacy', 4, 1)]; // archivi storici: nessuna schoolId
+  const incoming = [supportSlot('new-1', 2, 1, { schoolId: primary })];
+
+  assert.deepEqual(slotsInReplacementScope(legacy, incoming, { profile }).map(s => s.id), ['ex-legacy'], 'con il profilo l ora legacy è pertinente');
+  assert.deepEqual(slotsInReplacementScope(legacy, incoming), [], 'senza profilo niente cancellazioni a sorpresa');
+});
+
+test('rilevamento: entrambi gli archivi possono avere ore pertinenti, e la scrittura ne aggiorna uno solo', () => {
+  const primary = primarySchoolId();
+  const incoming = [supportSlot('new-1', 2, 1, { schoolId: primary })];
+  const provvisorio = [supportSlot('prov-1', 2, 1)];
+  const definitivo = [supportSlot('def-1', 4, 1)];
+
+  assert.deepEqual(slotsInReplacementScope(provvisorio, incoming, { profile }).map(s => s.id), ['prov-1']);
+  assert.deepEqual(slotsInReplacementScope(definitivo, incoming, { profile }).map(s => s.id), ['def-1']);
+
+  // Scrivere nel definitivo non può cancellare l ora del provvisorio: sono due input separati.
+  const aggiornato = applyReconstruction(definitivo, incoming, 'replace-scope', { profile });
+  assert.deepEqual(aggiornato.slots.map(s => s.id), ['new-1'], 'il definitivo è aggiornato');
+  assert.equal(aggiornato.removedCount, 1, 'la vecchia ora del definitivo non sopravvive');
+  assert.equal(slotsInReplacementScope(provvisorio, aggiornato.slots, { profile }).length, 1, 'il provvisorio resta un caso a parte');
 });
 
 test('merge "solo mancanti": nessuna sovrascrittura e nessuna coordinata duplicata', () => {

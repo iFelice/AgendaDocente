@@ -21,6 +21,7 @@ import {
   periodTimesForIndex,
   previewReconstruction,
   reconstructedToTimetableSlots,
+  slotsInReplacementScope,
   type TimetableMergeMode,
 } from "../utils/reconstructTimetable";
 import { AnalysisProgressBar } from "./AnalysisProgressBar";
@@ -191,8 +192,23 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
   const [studentCandidates, setStudentCandidates] = useState<StudentCommitmentCandidate[] | null>(null);
   const [reconSlots, setReconSlots] = useState<ReconEditSlot[] | null>(null);
   const [reconSchoolId, setReconSchoolId] = useState<string | undefined>(undefined);
-  const [reconTarget, setReconTarget] = useState<TimetableType>("provvisorio");
+  /**
+   * Archivio di destinazione. `null` = non ancora scelto: succede solo quando
+   * esistono vecchie ore pertinenti in ENTRAMBI gli archivi, e in quel caso la
+   * scelta spetta all'utente (nessuna cancellazione cross-archive automatica).
+   */
+  const [reconTarget, setReconTarget] = useState<TimetableType | null>("provvisorio");
+  /**
+   * Modalità predefinita/automatica: è quella effettivamente usata quando la
+   * scelta esplicita non è richiesta (nessun vecchio orario pertinente, oppure
+   * Fase B che arricchisce l'orario appena salvato).
+   */
   const [mergeMode, setMergeMode] = useState<TimetableMergeMode>("missing-only");
+  /**
+   * Scelta ESPLICITA «sostituisci / mantieni e aggiungi» della Fase A: `null`
+   * finché l'utente non la fa. Non viene mai pre-selezionata dal codice.
+   */
+  const [mergeChoice, setMergeChoice] = useState<TimetableMergeMode | null>(null);
   const [reconWarning, setReconWarning] = useState<string | null>(null);
   /**
    * FASE A salvata (orario personale/sostegno realmente scritto): da qui in poi
@@ -250,7 +266,56 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
   const natureLabel = support ? "sostegno" : "materia";
   const schools = useMemo(() => normalizeTeacherProfile(profile).schools ?? [], [profile]);
   const multiSchool = schools.length > 1;
-  const existingTarget = reconTarget === "provvisorio" ? provisionalTimetable : definitiveTimetable;
+  /** Archivio su cui si sta per scrivere: vuoto finché l'utente non lo sceglie. */
+  const existingTarget = reconTarget === "provvisorio"
+    ? provisionalTimetable
+    : reconTarget === "definitivo"
+      ? definitiveTimetable
+      : [];
+
+  /**
+   * Gli slot che verrebbero REALMENTE salvati: stessa selezione e stesso filtro
+   * (nessuna classe -> nessuno slot) di `handleSaveReconstruction`. È l'input
+   * unico sia dell'anteprima sia del rilevamento del vecchio orario, così la
+   * domanda e la scrittura non possono divergere.
+   */
+  const saveableSlots = useMemo<TimetableSlot[]>(() => {
+    const selected = (reconSlots ?? []).filter(s => s.selected !== false);
+    const toSave = selected.filter(s => (s.correctedClass ?? s.classLabel ?? "").trim());
+    return reconstructedToTimetableSlots(toSave, { profile, timeSlotConfig, schoolId: reconSchoolId });
+  }, [reconSlots, profile, timeSlotConfig, reconSchoolId]);
+
+  /**
+   * Vecchie ore PERTINENTI nei due archivi, con la STESSA regola della
+   * sostituzione reale (`slotsInReplacementScope`: stesso istituto — gli slot
+   * legacy senza `schoolId` valgono l'istituto principale del profilo — e stessa
+   * natura). Materie normali, ore di altri istituti e dati fuori ambito non
+   * entrano qui, quindi non fanno comparire nessuna domanda.
+   */
+  const pertinentExisting = useMemo(() => ({
+    provvisorio: slotsInReplacementScope(provisionalTimetable, saveableSlots, { profile }),
+    definitivo: slotsInReplacementScope(definitiveTimetable, saveableSlots, { profile }),
+  }), [provisionalTimetable, definitiveTimetable, saveableSlots, profile]);
+
+  /** CASO D: ore pertinenti in entrambi gli archivi -> la scelta dell'archivio è dell'utente. */
+  const archiveChoiceRequired = pertinentExisting.provvisorio.length > 0 && pertinentExisting.definitivo.length > 0;
+
+  /** Ore pertinenti nell'archivio scelto (o in entrambi, se ancora da scegliere). */
+  const pertinentCount = reconTarget === "provvisorio"
+    ? pertinentExisting.provvisorio.length
+    : reconTarget === "definitivo"
+      ? pertinentExisting.definitivo.length
+      : pertinentExisting.provvisorio.length + pertinentExisting.definitivo.length;
+
+  /**
+   * La scelta «sostituisci / mantieni e aggiungi» è OBBLIGATORIA e senza default
+   * solo in Fase A, quando esistono vecchie ore pertinenti. La Fase B
+   * (`phaseASaved`) continua a usare la modalità preimpostata: serve ad
+   * arricchire con le compresenze l'orario appena salvato nello stesso archivio.
+   */
+  const mergeChoiceRequired = pertinentCount > 0 && !phaseASaved;
+  /** Modalità realmente applicata: `null` = scelta ancora dovuta, salvataggio bloccato. */
+  const effectiveMergeMode: TimetableMergeMode | null = mergeChoiceRequired ? mergeChoice : mergeMode;
 
   /**
    * Anteprima della fusione per la schermata di conferma: gli STESSI conteggi che
@@ -258,12 +323,9 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
    * aggiunto, sostituito o rimosso prima di salvare. Nessuna scrittura.
    */
   const mergePreview = useMemo(() => {
-    const selected = (reconSlots ?? []).filter(s => s.selected !== false);
-    const toSave = selected.filter(s => (s.correctedClass ?? s.classLabel ?? "").trim());
-    if (toSave.length === 0) return null;
-    const incoming = reconstructedToTimetableSlots(toSave, { profile, timeSlotConfig, schoolId: reconSchoolId });
-    return previewReconstruction(existingTarget, incoming, mergeMode, { profile });
-  }, [reconSlots, existingTarget, mergeMode, reconSchoolId, profile, timeSlotConfig]);
+    if (saveableSlots.length === 0) return null;
+    return previewReconstruction(existingTarget, saveableSlots, effectiveMergeMode ?? "missing-only", { profile });
+  }, [saveableSlots, existingTarget, effectiveMergeMode, profile]);
 
   // Chiusura: nessuna animazione (e nessun timer) lascia il modale spento.
   useEffect(() => {
@@ -294,6 +356,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     setReconSchoolId(undefined);
     setReconTarget("provvisorio");
     setMergeMode("missing-only");
+    setMergeChoice(null);
     setReconWarning(null);
     setPhaseASaved(null);
     setSavedDirty(false);
@@ -560,13 +623,46 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
       correctedSubject: slot.coTeachingSubjects.length === 1 ? slot.coTeachingSubjects[0] : "",
     }));
     setReconSlots(reconstruction);
-    setReconSchoolId(multiSchool ? schools.find(s => s.isPrimary)?.id : undefined);
+    const nextSchoolId = multiSchool ? schools.find(s => s.isPrimary)?.id : undefined;
+    setReconSchoolId(nextSchoolId);
+    // Archivio di destinazione: lo decide la posizione del vecchio orario
+    // pertinente, non un default fisso. Gli slot in arrivo sono calcolati con la
+    // stessa regola del salvataggio (nessuna classe -> nessuno slot) e la
+    // pertinenza con `slotsInReplacementScope`, cioè la stessa della sostituzione.
+    const incoming = reconstructedToTimetableSlots(
+      reconstruction.filter(s => s.selected !== false && (s.correctedClass ?? s.classLabel ?? "").trim()),
+      { profile, timeSlotConfig, schoolId: nextSchoolId },
+    );
+    const oldInProvisional = slotsInReplacementScope(provisionalTimetable, incoming, { profile }).length;
+    const oldInDefinitive = slotsInReplacementScope(definitiveTimetable, incoming, { profile }).length;
     // Dopo il salvataggio della Fase A l'arricchimento (compresenze) deve sostituire
     // gli slot appena salvati: in "missing-only" li troverebbe già occupati e non
     // li toccherebbe. Prima di qualsiasi salvataggio vale la regola storica: mai
     // sovrascrivere automaticamente.
-    setReconTarget(phaseASaved ? phaseASaved.target : "provvisorio");
-    setMergeMode(phaseASaved ? "replace-scope" : "missing-only");
+    if (phaseASaved) {
+      // FASE B: stesso archivio della Fase A e sostituzione preimpostata (comportamento
+      // necessario all'aggiornamento delle ore appena salvate: nessuna scelta da rifare).
+      setReconTarget(phaseASaved.target);
+      setMergeMode("replace-scope");
+    } else if (oldInDefinitive > 0 && oldInProvisional === 0) {
+      // CASO B: il vecchio orario pertinente è solo nel definitivo -> si aggiorna lì,
+      // invece di scrivere il nuovo nel provvisorio e lasciare intatto il vecchio.
+      setReconTarget("definitivo");
+      setMergeMode("missing-only");
+    } else if (oldInDefinitive > 0 && oldInProvisional > 0) {
+      // CASO D: ore pertinenti in entrambi gli archivi. Nessuna cancellazione
+      // cross-archive automatica: l'archivio lo sceglie l'utente.
+      setReconTarget(null);
+      setMergeMode("missing-only");
+    } else {
+      // CASO A (vecchio orario solo nel provvisorio) e CASO C (nessun vecchio
+      // orario pertinente): archivio di default, nessuna domanda da rispondere.
+      setReconTarget("provvisorio");
+      setMergeMode("missing-only");
+    }
+    // La scelta esplicita riparte da zero ad ogni ingresso nella revisione: non
+    // viene mai ereditata né pre-selezionata.
+    setMergeChoice(null);
     setReconWarning(null);
     setStep("reconstruct");
   };
@@ -584,6 +680,17 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
       setReconWarning("Seleziona almeno uno slot da salvare.");
       return;
     }
+    // Scelte obbligatorie: senza archivio o senza decisione sostituisci/mantieni
+    // non si scrive nulla (il pulsante è già disabilitato: stessa regola, difesa
+    // anche qui). Nessuna modalità viene dedotta in silenzio.
+    if (reconTarget === null) {
+      setReconWarning("Scegli quale archivio aggiornare: provvisorio o definitivo.");
+      return;
+    }
+    if (effectiveMergeMode === null) {
+      setReconWarning("Scegli se sostituire l'orario esistente o aggiungere le nuove ore.");
+      return;
+    }
     // Gli slot senza classe non vengono mai salvati (classe mai inventata):
     // si salvano gli altri e l'utente avverte quali sono stati saltati.
     const withoutClass = selected.filter(s => !(s.correctedClass ?? s.classLabel ?? "").trim());
@@ -592,15 +699,12 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
       setReconWarning("Nessuno slot selezionato ha una classe: completala oppure annulla.");
       return;
     }
-    const slots = reconstructedToTimetableSlots(toSave, {
-      profile,
-      timeSlotConfig,
-      schoolId: reconSchoolId,
-    });
+    // Gli stessi slot dell'anteprima e del rilevamento del vecchio orario.
+    const slots = saveableSlots;
     // Nessun salvataggio prima di qui: la conferma dell'utente è l'unico momento in
     // cui gli slot (e solo quelli confermati) vengono scritti nell'archivio.
-    const preview = previewReconstruction(existingTarget, slots, mergeMode, { profile });
-    if (!await save.run(() => onSaveReconstructedTimetable(slots, reconTarget, mergeMode))) return;
+    const preview = previewReconstruction(existingTarget, slots, effectiveMergeMode, { profile });
+    if (!await save.run(() => onSaveReconstructedTimetable(slots, reconTarget, effectiveMergeMode))) return;
     // Conferma VISIBILE e modale aperto: l'orario è già in archivio, quindi da qui
     // in poi chiudere o tornare indietro non perde nulla (era il guasto su iPhone).
     setPhaseASaved({
@@ -1377,35 +1481,61 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
               <label className="flex items-center gap-2 text-xs font-medium text-stone-700">
                 <span className="shrink-0">Salva in:</span>
                 <select
-                  value={reconTarget}
+                  id="recon-target"
+                  aria-label="Archivio di destinazione"
+                  value={reconTarget ?? ""}
                   onChange={e => {
-                    setReconTarget(e.target.value as TimetableType);
-                    setMergeMode("missing-only");
+                    const next = e.target.value as TimetableType | "";
+                    setReconTarget(next === "" ? null : next);
+                    // Cambiando archivio la decisione va rifatta su quello nuovo.
+                    setMergeChoice(null);
                     if (phaseASaved) setSavedDirty(true);
                   }}
                   className="flex-1 min-w-0 border border-stone-300 rounded-lg p-2 bg-white"
                 >
+                  {reconTarget === null && <option value="">Scegli l'archivio…</option>}
                   <option value="provvisorio">Orario provvisorio</option>
                   <option value="definitivo">Orario definitivo</option>
                 </select>
               </label>
 
-              {existingTarget.length > 0 && (
+              {archiveChoiceRequired && (
+                <p id="recon-archive-choice" className="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1.5">
+                  Vecchie ore di {natureLabel} presenti in <strong>entrambi</strong> gli archivi
+                  ({pertinentExisting.provvisorio.length} nel provvisorio, {pertinentExisting.definitivo.length} nel definitivo):
+                  scegli quale aggiornare. L&apos;altro archivio non viene toccato.
+                </p>
+              )}
+
+              {pertinentCount > 0 && (
                 <fieldset className="p-3 rounded-xl border border-stone-200 space-y-2">
                   <legend className="text-xs font-semibold text-stone-700 px-1">
-                    Esiste già un orario in questo archivio ({existingTarget.length} ore)
+                    Esiste già un orario di {natureLabel} salvato.
                   </legend>
+                  <p className="text-[11px] text-stone-500">
+                    Archivio: {reconTarget === "definitivo" ? "Definitivo" : reconTarget === "provvisorio" ? "Provvisorio" : "da scegliere"}
+                    {" · "}{pertinentCount} {pertinentCount === 1 ? "ora pertinente" : "ore pertinenti"}
+                  </p>
                   <label className="flex items-start gap-2 text-xs text-stone-700 cursor-pointer">
-                    <input type="radio" name="scan-merge-mode" checked={mergeMode === "missing-only"} onChange={() => { setMergeMode("missing-only"); if (phaseASaved) setSavedDirty(true); }} className="mt-0.5 accent-emerald-700" />
-                    <span><strong>Aggiungi solo gli slot mancanti</strong> (le ore esistenti non vengono toccate)</span>
-                  </label>
-                  <label className="flex items-start gap-2 text-xs text-stone-700 cursor-pointer">
-                    <input type="radio" name="scan-merge-mode" checked={mergeMode === "replace-scope"} onChange={() => { setMergeMode("replace-scope"); if (phaseASaved) setSavedDirty(true); }} className="mt-0.5 accent-emerald-700" />
+                    <input type="radio" name="scan-merge-mode" checked={effectiveMergeMode === "replace-scope"} onChange={() => { setMergeChoice("replace-scope"); setMergeMode("replace-scope"); if (phaseASaved) setSavedDirty(true); }} className="mt-0.5 accent-emerald-700" />
                     <span>
-                      <strong>Sostituisci l'orario di {natureLabel} di questo istituto</strong> (le ore confermate sostituiscono le vecchie dello stesso tipo)
+                      <strong>Sostituisci orario esistente</strong>
+                      <span className="block text-[11px] text-stone-500">Il nuovo orario sostituirà quello salvato in questo archivio.</span>
                     </span>
                   </label>
-                  {mergeMode === "replace-scope" && mergePreview && (
+                  <label className="flex items-start gap-2 text-xs text-stone-700 cursor-pointer">
+                    <input type="radio" name="scan-merge-mode" checked={effectiveMergeMode === "missing-only"} onChange={() => { setMergeChoice("missing-only"); setMergeMode("missing-only"); if (phaseASaved) setSavedDirty(true); }} className="mt-0.5 accent-emerald-700" />
+                    <span>
+                      <strong>Mantieni e aggiungi</strong>
+                      <span className="block text-[11px] text-stone-500">Le nuove ore verranno aggiunte senza eliminare quelle esistenti.</span>
+                    </span>
+                  </label>
+                  {effectiveMergeMode === null && (
+                    <p id="recon-merge-choice-required" className="text-[11px] font-semibold text-stone-700">
+                      Scegli una delle due opzioni per poter salvare.
+                    </p>
+                  )}
+                  {effectiveMergeMode === "replace-scope" && mergePreview && (
                     <p id="recon-replace-preview" className="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1.5">
                       Sostituzione reale: {mergePreview.replacedCount + mergePreview.removedCount} ore esistenti di {natureLabel} verranno sostituite
                       ({mergePreview.replacedCount} aggiornate
@@ -1415,7 +1545,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                     </p>
                   )}
                   <p className="text-[11px] text-stone-500">
-                    {mergeMode === "replace-scope"
+                    {effectiveMergeMode === "replace-scope"
                       ? "Vengono sostituite solo le ore dello stesso istituto e della stessa natura; ore di materia, di altri istituti o di altri archivi non vengono mai toccate."
                       : "L'intero orario non viene mai cancellato da qui."}
                   </p>
@@ -1550,7 +1680,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                     type="button"
                     id="recon-confirm-save"
                     onClick={() => void handleSaveReconstruction()}
-                    disabled={save.pending}
+                    disabled={save.pending || reconTarget === null || effectiveMergeMode === null}
                     className="min-h-[44px] px-4 sm:px-5 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white text-xs font-bold shadow-xs flex items-center gap-1.5"
                   >
                     <Check className="w-4 h-4" />
