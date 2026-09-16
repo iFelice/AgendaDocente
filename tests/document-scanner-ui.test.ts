@@ -1248,3 +1248,63 @@ test('revisione personale: la nota sulle ore da verificare compare solo se il do
     await act(async () => { clean.unmount(); });
   }
 });
+
+// ---------------------------------------------------------------------------
+// 25. CONTRATTO "celle solo della riga candidata": scelta umana, e riga senza celle
+// ---------------------------------------------------------------------------
+
+const REAL_TEAM_GRID = [
+  [undefined, '3D', '3D', '3E', '3E'],
+  ['3D', undefined, '3D', '3D', '3E'],
+  [undefined, '3E', '3E', '3D', '3E'],
+  [undefined, '3E', '3D', '3E', undefined],
+  ['3E', '3D', '3E', undefined, undefined],
+];
+
+test('revisione personale: solo la riga candidata ha ore, e nessuna riga viene auto-confermata', async () => {
+  // Risposta conforme al nuovo contratto: 25 etichette, griglia densa 5x5 della SOLA
+  // riga del profilo (índice 7). Le altre righe non hanno celle per contratto.
+  const rows = Array.from({ length: 25 }, (_, i) => (i === 7 ? 'Manganiello F.' : `Collega ${i + 1}`));
+  const cells = REAL_TEAM_GRID.flatMap((periods, d) =>
+    periods.map((raw, p) => ({ rowIndex: 7, dayOfWeek: d + 1, periodIndex: p + 1, raw: raw ?? '' })));
+  fetchResponse = { status: 200, json: { success: true, source: 'test-model', rows, periodsPerDay: 5, cells, positionIssues: 0 } };
+  const renderer = await renderModal();
+  try {
+    await goToSource(renderer, 'personal');
+    await pickFile(renderer, makeFile('orario.jpg', 'image/jpeg', 30_000));
+    await analyzeWithConsent(renderer);
+
+    assert.match(flatText(renderer.root), /Riga trovata per/, 'il matching locale lavora sulle etichette complete');
+    assert.equal(
+      renderer.root.findAll((el: any) => el.props?.id === 'scan-personal-continue').length,
+      0,
+      'nessuna auto-conferma: la riga compatibile NON è già scelta dal sistema',
+    );
+    const radios = renderer.root.findAll((el: any) => el.props?.name === 'scan-personal-row');
+    assert.equal(radios.length, 25, 'tutte le etichette restano scegliibili, nessuna nascosta');
+
+    // Conferma manuale della riga candidata -> le sue 18 ore (i 7 vuoti non diventano ore).
+    await act(async () => { radios.find((r: any) => r.props.value === '7')!.props.onChange(); });
+    assert.match(flatText(renderer.root), /Riga confermata/);
+    const hours = (flatText(renderer.root).match(/\u00aa ora/g) ?? []).length;
+    assert.equal(hours, 18, 'solo le celle con un valore diventano ore');
+
+    // Riga scelta senza celle: esito controllato, nessun salvataggio, nessuna ora inventata.
+    const change = renderer.root.findAll((el: any) => el.props?.children === 'Cambia');
+    assert.equal(change.length, 1, 'il pulsante per ricominciare la scelta c\u00e8');
+    await act(async () => { change[0].props.onClick(); });
+    const afterChange = renderer.root.findAll((el: any) => el.props?.name === 'scan-personal-row');
+    await act(async () => { afterChange.find((r: any) => r.props.value === '0')!.props.onChange(); });
+    assert.match(flatText(renderer.root), /Nessuna cella interpretabile nella riga: nessuna ora è stata inventata/);
+    // "Aggiungi orario curricolare" resta raggiungibile (non crea ore): ciò che deve
+    // essere bloccato è il salvataggio, e infatti la CTA sotto è disabilitata.
+    const disabled = renderer.root.findAll(
+      (el: any) => el.props?.id === 'scan-personal-continue' && el.props?.disabled === true,
+    );
+    assert.equal(disabled.length, 1, 'la CTA di salvataggio è disabilitata, non nascosta');
+    assert.equal(fetchCalls.length, 1, 'una sola chiamata, quella dell\'analisi: nessun salvataggio e nessuna estrazione automatica');
+    assert.match(flatText(renderer.root), /Riga confermata/, 'si resta nella revisione, nessuna schermata vuota');
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});

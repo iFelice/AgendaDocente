@@ -288,12 +288,48 @@ export function anchorPersonalCellsToGrid(cells: TimetableRawCell[], declaredPer
   };
 }
 
+/**
+ * Filtro difensivo del contratto "celle SOLO delle righe candidate".
+ *
+ * Il prompt chiede a Gemini le etichette di TUTTE le righe (costano ~14 char
+ * l'una) e la griglia densa solo delle righe compatibili col cognome: sono le
+ * righe altre a valere ~95% dell'output (625 celle su una pagina da 25 docenti).
+ * Se il modello ne ha comunque incluse altre, qui vengono scartate PRIMA di
+ * ancorare e PRIMA di rispondere, così nessun chiamante può dimenticarlo.
+ *
+ * Regola conservativa (mai peggiorare un caso che oggi funziona):
+ * - `matches.length >= 1` -> restano solo le celle delle righe localmente
+ *   candidate: il modello non può far entrare in archivio la riga di un collega;
+ * - `matches.length === 0` -> le celle ricevute RESTANO: il matcher locale
+ *   confronta il cognome come parola intera e un'etichetta letta male
+ *   ("Manganiello F.") non combacia, mentre il modello potrebbe aver azzeccato
+ *   la riga. La scelta resta umana (`confirmedRow` parte null) e nessuna ora è
+ *   creata automaticamente: qui non si scarta, e non si aggiunge fuzzy matching.
+ * Senza cognome target (chiamanti senza profilo, test, payload legacy) il
+ * comportamento è esattamente quello storico: nessuna selezione per riga.
+ */
+export function restrictPersonalCellsToTargetRows(
+  cells: TimetableRawCell[],
+  rowLabels: string[],
+  targetTeacherSurname?: string,
+): { cells: TimetableRawCell[]; dropped: number } {
+  const target = String(targetTeacherSurname ?? "").trim();
+  if (!target || cells.length === 0) return { cells, dropped: 0 };
+  const matches = findTeacherRows(rowLabels, target);
+  if (matches.length === 0) return { cells, dropped: 0 };
+  const allowed = new Set(matches.map(m => m.rowIndex));
+  const kept = cells.filter(cell => allowed.has(cell.rowIndex));
+  return { cells: kept, dropped: cells.length - kept.length };
+}
+
 /** Valida la risposta grezza per l'orario personale/sostegno: { rows, cells }. */
-export function validatePersonalTimetablePayload(raw: unknown): {
+export function validatePersonalTimetablePayload(raw: unknown, targetTeacherSurname?: string): {
   rows: string[];
   cells: TimetableRawCell[];
   periodsPerDay: number;
   positionIssues: number;
+  /** Celle di righe non candidate scartate dal contratto (0: nessun filtro applicato). */
+  droppedForeignCells: number;
 } {
   if (!record(raw)) invalidShape("Risposta analisi non valida.");
   // Righe: stesso limite dell'orario curricolare (una pagina reale di istituto può
@@ -308,14 +344,19 @@ export function validatePersonalTimetablePayload(raw: unknown): {
   // (che ammette solo 1..MAX_GRID_PERIODS) invece di far fallire l'analisi.
   const declared = normalizePeriodsPerDay(raw.periodsPerDay);
   const cells = raw.cells.map((c, i) => validatePersonalRawCell(c, i));
+  const rows = raw.rows.map((r, i) => normalizeRowLabel(r, i));
+  // Prima si seleziona la riga (contratto "celle solo delle candidate"), POI si
+  // àncora: l'ancoraggio deve vedere solo la geometria che verrà mostrata.
+  const scoped = restrictPersonalCellsToTargetRows(cells, rows, targetTeacherSurname);
   // Le posizioni vengono ancorate alla griglia QUI: è l'unico punto in cui il
   // documento viene interpretato, così nessun chiamante può dimenticarlo.
-  const anchored = anchorPersonalCellsToGrid(cells, declared > 0 ? declared : undefined);
+  const anchored = anchorPersonalCellsToGrid(scoped.cells, declared > 0 ? declared : undefined);
   return {
-    rows: raw.rows.map((r, i) => normalizeRowLabel(r, i)),
+    rows,
     cells: anchored.cells,
     periodsPerDay: anchored.periodsPerDay,
     positionIssues: anchored.positionIssues,
+    droppedForeignCells: scoped.dropped,
   };
 }
 

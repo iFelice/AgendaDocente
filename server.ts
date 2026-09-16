@@ -2,11 +2,13 @@ import { circularAnalysisGuards, analysisErrorHandler } from "./server/circularA
 import { createAnalysisErrorHandler, createAnalysisGuards } from "./server/analysisGuards";
 import {
   CURRICULAR_TIMETABLE_PROMPT,
-  PERSONAL_TIMETABLE_PROMPT,
   STUDENT_DOCUMENT_PROMPT,
+  buildPersonalTimetablePrompt,
+  personalTargetSurname,
   STUDENT_DOCUMENT_TIMEOUT_MS,
   TIMETABLE_ANALYSIS_TIMEOUT_MS,
   describeAnalysisFailure,
+  describePersonalRowFilter,
   parseStudentDocumentAiResponse,
   parseTimetableAiResponse,
   type TimetableAnalysisOutcome,
@@ -523,13 +525,17 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
   const abort = () => controller.abort();
   res.once("close", abort);
   try {
-    const { documentType, imageBase64, mimeType } = req.body;
+    const { documentType, imageBase64, mimeType, profile } = req.body;
     const ai = getGeminiClient();
     if (!ai) {
       return res.status(503).json({ success: false, error: "Il servizio di analisi non è disponibile. Riprova più tardi." });
     }
+    // Solo il cognome serve al modello per individuare la riga: nessun altro campo
+    // del profilo (email, scuola, classi, alunni, account Google, ruoli) finisce
+    // nel prompt, e il cognome non finisce nei log.
+    const targetSurname = documentType === "personal-support-timetable" ? personalTargetSurname(profile) : "";
     const run = await runGeminiJson({
-      systemInstruction: documentType === "personal-support-timetable" ? PERSONAL_TIMETABLE_PROMPT : CURRICULAR_TIMETABLE_PROMPT,
+      systemInstruction: documentType === "personal-support-timetable" ? buildPersonalTimetablePrompt(targetSurname) : CURRICULAR_TIMETABLE_PROMPT,
       contents: [
         { inlineData: { data: imageBase64, mimeType } },
         { text: "Analizza la tabella della foto/PDF allegata rispettando le regole del prompt." },
@@ -553,11 +559,14 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
     // nel catch generico dell'endpoint — che era il sintomo su iPhone.
     let outcome: TimetableAnalysisOutcome;
     try {
-      outcome = parseTimetableAiResponse(documentType, decoded.value);
+      outcome = parseTimetableAiResponse(documentType, decoded.value, targetSurname);
     } catch (error: unknown) {
       console.warn(describeAnalysisFailure(error, decoded.value, documentType));
       return res.status(422).json({ success: false, error: "Analisi non riuscita. Riprova." });
     }
+    // Il modello ha incluso celle di righe non candidate: scartate server-side.
+    // Solo conteggi nei log (mai etichette, cognomi o contenuti).
+    if ((outcome.droppedForeignCells ?? 0) > 0) console.log(describePersonalRowFilter(outcome));
     return res.json({
       success: true,
       source: run.source,

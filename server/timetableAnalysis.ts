@@ -5,7 +5,9 @@ import {
   validateTeacherProfile,
 } from './analysisGuards';
 import {
+  findTeacherRows,
   normalizePeriodsPerDay,
+  teacherSurnames,
   validateCurricularTimetablePayload,
   validatePersonalTimetablePayload,
   validateStudentCommitmentsPayload,
@@ -71,17 +73,49 @@ REGOLE OBBLIGATORIE:
 9. Se il documento non è una tabella di orario o non è leggibile, restituisci le liste vuote. Non inventare nulla.
 10. Restituisci SOLO l'oggetto JSON richiesto, senza commenti.`;
 
-export const PERSONAL_TIMETABLE_PROMPT = `Estrai la struttura della tabella dell'ORARIO PERSONALE del docente dalla foto/PDF allegata.
+/**
+ * Il cognome necessario al matching, e NULLA altro del profilo.
+ *
+ * `foldName` (usato da `teacherSurnames`) toglie accenti, maiuscole e punteggiatura:
+ * il valore che esce è un token `[a-z ]` curto, quindi interpolabile nel prompt senza
+ * rischio di iniezione. Serve anche al filtro server-side (`findTeacherRows`), così
+ * prompt e validazione usano ESATTAMENTE lo stesso cognome.
+ */
+export function personalTargetSurname(profile: unknown): string {
+  const fullName = record(profile) ? (profile as { fullName?: unknown }).fullName : undefined;
+  const surname = teacherSurnames(fullName)[0] ?? "";
+  return surname.replace(/[^a-z ]/g, " ").replace(/\s+/g, " ").trim().slice(0, 60);
+}
+
+/**
+ * Prompt dell'orario PERSONALE: è dinamico perché contiene il solo cognome target.
+ *
+ * perché: il contratto "griglia densa di TUTTE le righe" valeva ~9 500 token di output
+ * su una pagina da 25 docenti (625 celle) e la decodifica non stava nel budget
+ * dell'endpoint (log reali: 504 `deadline` a 25,8 s). Del documento, all'app serve
+ * solo la riga del docente: le etichette di tutte le righe restano obbligatorie
+ * (costano ~14 char l'una) perché alimentano il matching locale e la scelta umana.
+ * `TABLE_RULES` è condivisa col curricolare e NON viene toccata.
+ */
+export function buildPersonalTimetablePrompt(teacherSurname: string): string {
+  const target = teacherSurname.trim();
+  return `Estrai la struttura della tabella dell'ORARIO PERSONALE del docente dalla foto/PDF allegata.
 La tabella ha una colonna docenti (una riga per docente, con eventuali colonne MATERIA e CLASSI) e una griglia giorno (LUNEDÌ..VENERDÌ) x periodo (1ª ora, 2ª ora, ...).
 ${TABLE_RULES}
 REGOLE AGGIUNTIVE OBBLIGATORIE PER L'ORARIO PERSONALE (la posizione delle ore è critica):
-P1. Riporta UNA cella per OGNI colonna della griglia, in ordine da sinistra: anche le colonne vuote, con \"raw\": \"\". Una colonna vuota NON va saltata e NON va usata per rinumerare le ore successive.
-P2. Quindi, per ogni riga e per ogni giorno, il numero di celle restituite deve essere ESATTAMENTE uguale al numero di colonne di quell'intestazione (periodsPerDay), incluse le vuote.
-P3. periodIndex = numero della colonna partendo da 1 (vuote comprese). Mai la progressione delle sole celle non vuote: se i valori sono nelle colonne 1, 3, 4 e 5, i periodIndex sono 1, 3, 4, 5 e le celle con raw \"\" occupano la colonna 2.
-P4. periodsPerDay = quante colonne-periodo ha la griglia per ogni giorno (conteggiando l'intestazione); usa 0 solo se l'intestazione non è leggibile.
+P1. "rows" deve contenere TUTTE le etichette della colonna docenti, nell'ordine del documento: una stringa per riga, ANCHE per le righe di cui non estrai nessuna cella.
+P2. ${target ? `Il docente da estrarre ha cognome "${target}". Cercalo come PAROLA INTERA nelle etichette: mai una sottostringa ("Bianchi" NON combacia con "Bianchini").` : "Nessun cognome target disponibile: considera l'unica riga della griglia, se una sola riga è visibile."}
+P3. In "cells" riporta la griglia densa SOLO delle righe compatibili col cognome, massimo 3 righe: le altre righe esistono solo come etichette in "rows" e per esse NON devi restituire celle.
+P4. Per ogni riga candidata e per ogni giorno, restituisci ESATTAMENTE periodsPerDay celle: una per colonna, in ordine da sinistra, incluse le colonne vuote con \"raw\": \"".
+P5. Una colonna vuota va emessa NELLA SUA POSIZIONE reale: se la 1ª ora è vuota la cella con periodIndex 1 e raw \"\" DEVE esserci. Ometterla, spostarla in fondo al giorno o rinumerare le ore successive è VIETATO.
+P6. periodIndex = numero ASSOLUTO della colonna partendo da 1 (vuoti contati), mai il progressivo delle sole celle non vuote.
+P7. Se nessuna riga è compatibile con sufficiente sicurezza, o se le righe compatibili sono più di 3 (cognome ambiguo), restituisci \"cells\": []: MAI scegliere un'altra riga perché è la più probabile.
+P8. Se la griglia ha UNA SOLA riga (foglio personale ritagliato, o colonna docenti non leggibile), riporta le celle dense di quell'unica riga: la conferma della riga resta comunque umana.
+P9. periodsPerDay = quante colonne-periodo ha la griglia per ogni giorno, contate sull'intestazione (NON sul numero di celle con valore); usa 0 solo se l'intestazione non è leggibile.
 Formato richiesto:
-{ "rows": [etichette della colonna docenti, nell'ordine, es. "Manganiello"], "periodsPerDay": 5, "cells": [{ "rowIndex": 0, "dayOfWeek": 2, "periodIndex": 1, "raw": "3D" }, { "rowIndex": 0, "dayOfWeek": 2, "periodIndex": 2, "raw": "" }] }
-In "cells" riporta l'intera griglia (vuoti inclusi) di TUTTE le righe.`;
+{ "rows": ["Bianchi M.", "Manganiello F.", "...tutte le etichette..."], "periodsPerDay": 5, "cells": [{ "rowIndex": 1, "dayOfWeek": 1, "periodIndex": 1, "raw": "" }, { "rowIndex": 1, "dayOfWeek": 1, "periodIndex": 2, "raw": "3D" }] }
+Riepilogo: "rows" = tutte le etichette; "cells" = al massimo 3 righe x 5 giorni x periodsPerDay celle, vuoti inclusi al loro posto.`;
+}
 
 export const CURRICULAR_TIMETABLE_PROMPT = `Estrai la struttura della tabella dell'ORARIO CURRICOLARE/ISTITUTO dalla foto/PDF allegata.
 Ogni riga rappresenta un docente curricolare: colonna DOCENTI, colonna CLASSI (sigle di riferimento), colonna MATERIA/DISCIPLINA, poi la griglia giorno (LUNEDÌ..VENERDÌ) x periodo con le sigle delle classi in cui il docente è in orario.
@@ -96,17 +130,17 @@ In "rows" riporta ogni docente con materia e classi di riferimento (stringhe vuo
 export const personalTimetableSchema = {
   type: Type.OBJECT,
   properties: {
-    rows: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Etichette della colonna docenti, in ordine' },
+    rows: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'TUTTE le etichette della colonna docenti, in ordine (anche le righe senza celle)' },
     periodsPerDay: { type: Type.INTEGER, description: 'Colonne-periodo della griglia per ogni giorno, contate dall intestazione (1..24); 0 se non leggibile' },
     cells: {
       type: Type.ARRAY,
       items: {
         type: Type.OBJECT,
         properties: {
-          rowIndex: { type: Type.INTEGER, description: 'Riga 0-based' },
+          rowIndex: { type: Type.INTEGER, description: 'Riga 0-based della riga candidata' },
           dayOfWeek: { type: Type.INTEGER, description: '1=lunedì..5=venerdì (6=sabato se presente)' },
-          periodIndex: { type: Type.INTEGER, description: 'Numero di periodo assoluto della colonna 1..N; conta anche le colonne vuote precedenti, non rinumerare le sole celle non vuote' },
-          raw: { type: Type.STRING, description: 'Testo esatto della cella' },
+          periodIndex: { type: Type.INTEGER, description: 'Numero di periodo assoluto della colonna 1..periodsPerDay; conta anche le colonne vuote precedenti, non rinumerare le sole celle non vuote, mai spostare i vuoti in coda' },
+          raw: { type: Type.STRING, description: 'Testo esatto della cella; stringa vuota per una colonna vuota (obbligatorio: la geometria della griglia non deve perdersi)' },
         },
         required: ['rowIndex', 'dayOfWeek', 'periodIndex', 'raw'],
       },
@@ -200,14 +234,22 @@ export interface TimetableAnalysisOutcome {
   periodsPerDay?: number;
   /** (riga, giorno) del personale con posizioni non ancorabili: da verificare. */
   positionIssues?: number;
+  /** Celle di righe non candidate scartate dal filtro server-side (contratto personale). */
+  droppedForeignCells?: number;
 }
 
 /** Valida la risposta AI dell'orario a seconda del tipo documento. */
-export function parseTimetableAiResponse(documentType: TimetableDocumentType, raw: unknown): TimetableAnalysisOutcome {
+export function parseTimetableAiResponse(
+  documentType: TimetableDocumentType,
+  raw: unknown,
+  targetTeacherSurname = '',
+): TimetableAnalysisOutcome {
   if (documentType === 'personal-support-timetable') {
-    // Valida e àncora le celle alle colonne della griglia (vedi anchorPersonalCellsToGrid).
-    const { rows, cells, periodsPerDay, positionIssues } = validatePersonalTimetablePayload(raw);
-    return { rows, cells, periodsPerDay, positionIssues };
+    // Valida, seleziona la riga candidata e àncora le celle alle colonne della
+    // griglia (vedi anchorPersonalCellsToGrid): il cognome arriva dallo STESSO
+    // valore usato nel prompt, quindi prompt e validazione non possono divergere.
+    const { rows, cells, periodsPerDay, positionIssues, droppedForeignCells } = validatePersonalTimetablePayload(raw, targetTeacherSurname);
+    return { rows, cells, periodsPerDay, positionIssues, droppedForeignCells };
   }
   const { rows, cells } = validateCurricularTimetablePayload(raw);
   return { curricularRows: rows.map(({ rowIndex, rowLabel, subject, classes }) => ({ rowIndex, rowLabel, subject, classes })), cells };
@@ -231,6 +273,18 @@ export function describeAnalysisFailure(error: unknown, value: unknown, document
   const periods = normalizePeriodsPerDay(grid.periodsPerDay);
   const doc = documentType === 'personal-support-timetable' ? 'personale' : 'curricolare';
   return `[AI Orari] fase=validazione documento=${doc} esito=fallito motivo=${reason} tipo=${type} righe=${rows} celle=${cells} periodsPerDay=${periods > 0 ? periods : 'assente'}`;
+}
+
+/**
+ * Righe di log per il filtro del contratto personale: SOLO conteggi. Il cognome
+ * target, le etichette delle righe e i `raw` non vengono mai scritti nei log.
+ */
+export function describePersonalRowFilter(outcome: TimetableAnalysisOutcome): string {
+  const rows = outcome.rows?.length ?? 0;
+  const kept = outcome.cells?.length ?? 0;
+  const dropped = outcome.droppedForeignCells ?? 0;
+  const days = new Set((outcome.cells ?? []).map(c => `${c.rowIndex}|${c.dayOfWeek}`)).size;
+  return `[AI Orari] fase=contratto-personale celleTenute=${kept} celleScartate=${dropped} righe=${rows} giorniConCelle=${days}`;
 }
 
 /** Valida la risposta AI del registro/appunti. */
