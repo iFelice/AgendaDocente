@@ -5,10 +5,12 @@
  *    senza matching aggressivo);
  *  - conversione celle -> candidati (mai inventare celle mancanti).
  *
- * ORARIO PERSONALE: il modello restituisce una SEQUENZA lineare di celle
- * (`{ rowLabel, cells: string[] }`) — nessun giorno, nessun periodo, nessun
- * indice di riga. Le coordinate sono derivate dal codice dall'indice
- * dell'array (vedi `validatePersonalSequencePayload`).
+ * ORARIO PERSONALE: il modello restituisce la riga del docente divisa nei suoi
+ * CINQUE blocchi giornalieri (`{ rowLabel, days: [{ cells: string[] }, …] }`) —
+ * nessun giorno, nessun periodo, nessun indice di riga dichiarati. Le
+ * coordinate sono derivate dal codice dalla POSIZIONE: indice del blocco
+ * (lunedì → venerdì) e indice della cella dentro il blocco (vedi
+ * `validatePersonalSequencePayload`).
  *
  * Il matching delle classi usa SOLO le regole esplicite di timetableTokens:
  * D/P/Co e gli altri codici interni non diventano mai classi.
@@ -162,9 +164,9 @@ function normalizeRowLabel(value: unknown, index: number): string {
  * Una posizione della sequenza personale: il testo ESATTO della cella.
  *
  * `null` vale come cella vuota (`""`): nel documento sono lo stesso fatto e
- * nessuna geometria dipende da questo campo (dipende dall'indice). Un valore
- * non stringa — `undefined` incluso — resta un errore: la posizione non è
- * descritta e non viene inventata.
+ * nessuna geometria dipende da questo campo (dipende dalla posizione della
+ * cella dentro il suo blocco giornaliero). Un valore non stringa — `undefined`
+ * incluso — resta un errore: la posizione non è descritta e non viene inventata.
  */
 function normalizeSequenceCell(value: unknown, index: number): string {
   if (value === null) return "";
@@ -178,30 +180,47 @@ export interface PersonalSequence {
    * non contiene e non produce coordinate.
    */
   rowLabel: string;
-  /** Una cella per posizione fisica, da sinistra a destra, vuoti inclusi. */
+  /**
+   * Celle della riga del docente, appiattite dai blocchi giornalieri nell'ordine
+   * dei giorni: una per posizione fisica, vuoti inclusi. È lo stesso
+   * `TimetableRawCell[]` di sempre (riga sintetica 0), quindi tutto ciò che sta
+   * a valle del validatore è invariato.
+   */
   cells: TimetableRawCell[];
 }
 
 /**
- * Valida la risposta grezza dell'orario personale: `{ rowLabel, cells: string[] }`.
+ * Valida la risposta grezza dell'orario personale:
+ * `{ rowLabel, days: [{ cells: string[] }, … x PERSONAL_SCHOOL_DAYS] }`.
  *
- * Il modello NON dichiara più giorno, periodo, indice di riga né ore per
- * giorno: restituisce soltanto la sequenza ordinata delle celle della riga del
- * docente, da sinistra a destra, con le celle vuote al loro posto.
+ * Il modello NON dichiara giorno, periodo, indice di riga né ore per giorno:
+ * restituisce la riga del docente divisa nei suoi blocchi fisici giornalieri,
+ * ognuno con le celle di quel giorno nell'ordine delle colonne, vuoti al loro
+ * posto. È la geometria che mancava al formato piatto `cells[]`: lì una lettura
+ * spostata di una colonna (il venerdì iniziato da una cella vuota) produceva
+ * comunque il totale atteso e superava un controllo fatto solo sul totale.
  *
  * Gate duri (nessuna compensazione, nessuna rinumerazione, nessun anchoring):
- *  1. `cells` è un array di stringhe;
- *  2. `cells.length === expectedPersonalCellCount(periodsPerDay)` — altrimenti
- *     `TimetableShapeError`, cioè 422 e analisi da rifare: una sequenza più
- *     corta o più lunga non è "riparabile" senza inventare o buttare via ore;
+ *  1. `days` è un array di ESATTAMENTE `PERSONAL_SCHOOL_DAYS` blocchi;
+ *  2. ogni blocco è un oggetto con `cells` array lungo ESATTAMENTE
+ *     `periodsPerDay`, di stringhe (`null` vale cella vuota, non stringa no);
  *  3. `rowLabel` deve combaciare col cognome del profilo tramite il matcher
  *     già esistente (`findTeacherRows`, cognome come parola intera): se non è
  *     compatibile l'analisi è rifiutata e NESSUN'altra riga viene scelta.
  *
- * Solo DOPO questi gate l'indice dell'array diventa coordinata:
- * `dayOfWeek = floor(index / periodsPerDay) + 1`, `periodIndex = index %
- * periodsPerDay + 1`, su una riga sintetica `rowIndex = 0`. È l'unica sorgente
- * di coordinate del percorso personale: il modello non può influenzarla.
+ * Controllare il totale NON basta più: cinque blocchi da 5, 5, 4, 5 e 6 celle
+ * sommano le stesse posizioni ma sono rifiutati, perché il giorno corto ha
+ * perso un'ora e quello lungo ne contiene una di un altro giorno.
+ *
+ * Il formato piatto precedente (`{ rowLabel, cells }`) NON è accettato, nemmeno
+ * come fallback: senza blocchi non si sa dove finisce un giorno, quindi quel
+ * payload è ambiguo per costruzione e si preferisce chiedere una nuova
+ * scansione piuttosto che salvare una geometria dubbia.
+ *
+ * Solo DOPO questi gate la POSIZIONE diventa coordinata: `dayOfWeek = indice del
+ * blocco + 1`, `periodIndex = indice della cella nel blocco + 1`, su una riga
+ * sintetica `rowIndex = 0`. È l'unica sorgente di coordinate del percorso
+ * personale: il modello non può influenzarla.
  *
  * `periodsPerDay` arriva dalla REQUEST (dichiarato dall'utente), mai dal
  * payload del modello.
@@ -222,19 +241,29 @@ export function validatePersonalSequencePayload(
     invalidShape("Riga del documento non compatibile col docente.");
   }
 
-  if (!Array.isArray(raw.cells)) invalidShape("Celle del documento non valide.");
-  const values = Array.from(raw.cells).map((value, index) => normalizeSequenceCell(value, index));
-  if (values.length !== expectedPersonalCellCount(periods)) {
-    invalidShape("Lunghezza della sequenza orario non valida.");
-  }
+  // Nessun fallback al formato piatto: un payload che porta ancora `cells` alla
+  // radice non viene reinterpretato né convertito, viene rifiutato.
+  if (raw.cells !== undefined) invalidShape("Formato della risposta non supportato: attesi i blocchi giornalieri.");
+  if (!Array.isArray(raw.days)) invalidShape("Giorni del documento non validi.");
+  if (raw.days.length !== PERSONAL_SCHOOL_DAYS) invalidShape("Numero di giorni dell'orario non valido.");
 
   // Derivazione deterministica: unica origine di giorno e periodo.
-  const cells: TimetableRawCell[] = values.map((value, index) => ({
-    rowIndex: 0,
-    dayOfWeek: Math.floor(index / periods) + 1,
-    periodIndex: (index % periods) + 1,
-    raw: value,
-  }));
+  const cells: TimetableRawCell[] = [];
+  raw.days.forEach((day, dayIndex) => {
+    if (!record(day)) invalidShape(`Giorno non valido (#${dayIndex}).`);
+    if (!Array.isArray(day.cells)) invalidShape(`Celle del giorno non valide (#${dayIndex}).`);
+    // Lunghezza del SINGOLO blocco: il totale delle celle non è una prova
+    // sufficiente (5+5+4+5+6 fa lo stesso totale di 5+5+5+5+5).
+    if (day.cells.length !== periods) invalidShape(`Lunghezza del giorno non valida (#${dayIndex}).`);
+    day.cells.forEach((value, cellIndex) => {
+      cells.push({
+        rowIndex: 0,
+        dayOfWeek: dayIndex + 1,
+        periodIndex: cellIndex + 1,
+        raw: normalizeSequenceCell(value, dayIndex * periods + cellIndex),
+      });
+    });
+  });
   return { rowLabel, cells };
 }
 

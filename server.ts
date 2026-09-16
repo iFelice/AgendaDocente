@@ -17,7 +17,6 @@ import {
   validateStudentDocumentPayload,
   validateTimetableAnalysisPayload,
 } from "./server/timetableAnalysis";
-import { expectedPersonalCellCount } from "./src/utils/timetableAnalysis";
 import express from "express";
 import { parseCircularText, normalizeExtractedItems } from "./src/utils/circularParser";
 import http from "http";
@@ -535,12 +534,13 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
     // nel prompt, e il cognome non finisce nei log.
     const isPersonal = documentType === "personal-support-timetable";
     const targetSurname = isPersonal ? personalTargetSurname(profile) : "";
-    // Geometria dell'orario personale: ore per giorno dichiarate dall'UTENTE
-    // (già validate nella request) x giorni scolastici. Il modello non la
-    // dichiara e non può influenzarla.
-    const expectedCellCount = isPersonal ? expectedPersonalCellCount(periodsPerDay) : 0;
+    // Geometria dell'orario personale: le ore per giorno dichiarate dall'UTENTE
+    // (già validate nella request) sono interpolate nel prompt, che dice così al
+    // modello quante colonne fisiche ha ogni blocco giornaliero. Il modello non
+    // dichiara la geometria e non può influenzarla: il server verifica poi che
+    // ogni blocco abbia esattamente quella lunghezza.
     const run = await runGeminiJson({
-      systemInstruction: isPersonal ? buildPersonalTimetablePrompt(targetSurname, expectedCellCount) : CURRICULAR_TIMETABLE_PROMPT,
+      systemInstruction: isPersonal ? buildPersonalTimetablePrompt(targetSurname, periodsPerDay) : CURRICULAR_TIMETABLE_PROMPT,
       contents: [
         { inlineData: { data: imageBase64, mimeType } },
         { text: "Analizza la tabella della foto/PDF allegata rispettando le regole del prompt." },
@@ -562,8 +562,9 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
     // Forma del payload: un rifiuto del validatore è un fallimento ATTESO e
     // gestito (messaggio utente invariato, diagnostica privacy-safe), non un crash
     // nel catch generico dell'endpoint — che era il sintomo su iPhone.
-    // Nell'orario personale sono rifiuti anche la sequenza di lunghezza diversa
-    // dall'attesa e una riga non compatibile col cognome del profilo.
+    // Nell'orario personale sono rifiuti anche un numero di blocchi giornalieri
+    // diverso da cinque, un blocco con un numero di celle diverso dalle ore per
+    // giorno e una riga non compatibile col cognome del profilo.
     let outcome: TimetableAnalysisOutcome;
     try {
       outcome = parseTimetableAiResponse(documentType, decoded.value, targetSurname, periodsPerDay);

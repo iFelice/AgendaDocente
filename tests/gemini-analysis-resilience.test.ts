@@ -503,8 +503,9 @@ test('i budget sono coerenti: endpoint < client, e il runner ha spazio per la ca
 // ---------------------------------------------------------------------------
 
 test('diagnostica validazione: esito controllato e log privacy-safe (solo tipi e conteggi)', () => {
-  // Cella non stringa nella sequenza: forma errata -> errore di forma con messaggio fisso.
-  const shapePayload = { rowLabel: 'Rossi Matteo', cells: [{ raw: '3D' }] };
+  // Cella non stringa in un blocco giornaliero: forma errata -> errore di forma
+  // con messaggio fisso.
+  const shapePayload = { rowLabel: 'Rossi Matteo', days: [{ cells: [{ raw: '3D' }] }, { cells: [''] }, { cells: [''] }, { cells: [''] }, { cells: [''] }] };
   let shapeError: unknown = null;
   try {
     parseTimetableAiResponse('personal-support-timetable', shapePayload, 'rossi', 1);
@@ -515,19 +516,19 @@ test('diagnostica validazione: esito controllato e log privacy-safe (solo tipi e
   const shapeLog = describeAnalysisFailure(shapeError, shapePayload, 'personal-support-timetable');
   assert.match(shapeLog, /\[AI Orari\] fase=validazione documento=personale esito=fallito motivo=Cella orario non valida/);
   assert.match(shapeLog, /tipo=TimetableShapeError/);
-  assert.match(shapeLog, /celle=1/, 'conteggi utili a capire il payload senza leggerlo');
+  assert.match(shapeLog, /celle=-1/, 'il contratto per giorni non ha un array cells alla radice: nessun conteggio inventato');
   assert.ok(!shapeLog.includes('Rossi'), 'nessun nome di docente nel log');
   assert.ok(!shapeLog.includes('Matteo'), 'nessuna etichetta di riga nel log');
   assert.ok(!shapeLog.includes('3D'), 'nessuna classe nel log');
 
-  // Sequenza più corta dell'attesa: stesso rifiuto controllato (422), nessun log di contenuto.
-  const shortPayload = { rowLabel: 'Rossi Matteo', cells: ['3D', ''] };
+  // Un blocco giornaliero in meno: stesso rifiuto controllato (422), nessun log di contenuto.
+  const shortPayload = { rowLabel: 'Rossi Matteo', days: [{ cells: ['3D'] }, { cells: [''] }, { cells: [''] }, { cells: [''] }] };
   assert.throws(
     () => parseTimetableAiResponse('personal-support-timetable', shortPayload, 'rossi', 1),
-    /Lunghezza della sequenza orario non valida/,
+    /Numero di giorni dell'orario non valido/,
   );
   assert.match(
-    describeAnalysisFailure(new Error('Lunghezza della sequenza orario non valida.'), shortPayload, 'personal-support-timetable'),
+    describeAnalysisFailure(new Error("Numero di giorni dell'orario non valido."), shortPayload, 'personal-support-timetable'),
     /motivo=errore interno di validazione tipo=Error/,
     'un errore non tipizzato non rivela mai il proprio messaggio',
   );
@@ -538,7 +539,7 @@ test('diagnostica validazione: esito controllato e log privacy-safe (solo tipi e
     get rowLabel(): never {
       throw new TypeError('Cannot read properties of undefined (reading \u201cRossi Matteo 3D\u201d)');
     },
-    cells: [],
+    days: [],
   };
   let internalError: unknown = null;
   try {
@@ -547,7 +548,7 @@ test('diagnostica validazione: esito controllato e log privacy-safe (solo tipi e
   } catch (error) {
     internalError = error;
   }
-  const internalLog = describeAnalysisFailure(internalError, { rowLabel: 3, cells: 'no' }, 'personal-support-timetable');
+  const internalLog = describeAnalysisFailure(internalError, { rowLabel: 3, days: 'no' }, 'personal-support-timetable');
   assert.match(internalLog, /motivo=errore interno di validazione tipo=TypeError/);
   assert.match(internalLog, /celle=-1/, 'conteggi difensivi su payload non interpretabile');
   assert.ok(!/Rossi|Matteo|3D|trim/.test(internalLog), 'nessun frammento di documento o di messaggio interno nel log');
