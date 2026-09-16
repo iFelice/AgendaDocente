@@ -133,11 +133,37 @@ export const PERIODS_PER_DAY_QUESTION_ERROR =
 /** Id del contenitore scrollabile del modale (fallback del ref, vedi `useEffect` di scroll). */
 export const SCAN_MODAL_BODY_ID = "scan-modal-body";
 
+/**
+ * Id della SEZIONE OPERATIVA con la scelta «Mantieni e aggiungi / Sovrascrivi
+ * orario esistente»: è la destinazione dello scroll quando la review dell'orario
+ * personale è pronta (fallback del ref, vedi `useEffect` di scroll).
+ */
+export const SCAN_MERGE_CHOICE_ID = "scan-merge-choice";
+
 /** Nodo su cui è possibile chiedere uno scroll (DOM reale o equivalente). */
 export type ScrollableNode = {
   scrollTo?: (options: { top?: number; behavior?: string }) => void;
   scrollTop?: number;
 };
+
+/** Nodo a cui si può chiedere di essere portato in vista (DOM reale o equivalente). */
+export type ScrollIntoViewNode = {
+  scrollIntoView?: (options?: { behavior?: string; block?: string }) => void;
+};
+
+/**
+ * Porta in vista una sezione del modale: `scrollIntoView` muove il PRIMO
+ * contenitore scrollabile — il corpo del modale — e `block: "start"` allinea
+ * l'inizio della sezione al suo bordo superiore (`scroll-mt-*` sulla sezione
+ * tiene il margine sotto l'header sticky). Non è uno scroll generico in cima al
+ * modale e non tocca mai `window`.
+ * @returns true se uno scroll è stato davvero richiesto.
+ */
+export function scrollSectionIntoView(node: ScrollIntoViewNode | null | undefined): boolean {
+  if (!node || typeof node.scrollIntoView !== "function") return false;
+  node.scrollIntoView({ behavior: "smooth", block: "start" });
+  return true;
+}
 
 /**
  * Porta in cima il contenuto scrollabile del modale: dopo un salvataggio riuscito
@@ -279,6 +305,14 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   /** Contenitore scrollabile del corpo del modale: è lui a tornare in cima dopo un salvataggio. */
   const bodyRef = useRef<HTMLDivElement | null>(null);
+  /** Sezione con la scelta Aggiungi/Sovrascrivi: portata in vista quando la review è pronta. */
+  const mergeChoiceRef = useRef<HTMLFieldSetElement | null>(null);
+  /**
+   * Lo scroll alla scelta è già avvenuto per QUESTA comparsa della sezione: un
+   * ref (non uno stato) perché non deve provocare render e perché i rerender
+   * successivi non devono ripetere lo scroll.
+   */
+  const mergeChoiceScrolled = useRef(false);
   const fileRef = useRef<File | null>(null);
   const readingRevision = useRef(0);
   // L'object URL corrente in un ref: il cleanup a unmount deve revocare SEMPRE
@@ -370,6 +404,39 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     scrollModalBodyToTop(node as ScrollableNode | null);
   }, [phaseASaved]);
 
+  /**
+   * Review personale pronta: la sezione con la scelta «Mantieni e aggiungi /
+   * Sovrascrivi orario esistente» viene portata in vista, perché su mobile resta
+   * sotto la piega e l'utente doveva cercarla scorrendo a mano.
+   *
+   * Il trigger è la COMPARSA della sezione, non un render:
+   *  - solo a ricostruzione pronta (`reconSlots`) nella schermata di conferma;
+   *  - solo nel flusso personale (nessun curricolare incrociato: il percorso
+   *    curricolare resta esattamente com'è);
+   *  - solo se esistono vecchie ore pertinenti, cioè se la scelta c'è davvero;
+   *  - mai durante l'analisi e mai dopo il salvataggio, quando vale l'altro
+   *    scroll (in cima, al messaggio di esito).
+   * Il flag nel ref fa sì che lo scroll parta UNA sola volta: né i rerender, né
+   * un cambio di radio/select su una sezione già visibile lo ripetono.
+   */
+  const mergeChoiceVisible =
+    step === "reconstruct" && !!reconSlots && pertinentCount > 0 && !!personal && !curricular && !phaseASaved;
+  useEffect(() => {
+    if (!mergeChoiceVisible) {
+      // La sezione non è più a schermo (indietro, archivio senza ore pertinenti,
+      // salvataggio): una sua nuova comparsa potrà riportarla in vista.
+      mergeChoiceScrolled.current = false;
+      return;
+    }
+    if (isAnalyzing || mergeChoiceScrolled.current) return;
+    mergeChoiceScrolled.current = true;
+    // Il ref è il percorso reale; il lookup per id è il fallback se il ref non è
+    // ancora agganciato (stesso meccanismo dello scroll dopo il salvataggio).
+    const node = mergeChoiceRef.current
+      ?? (typeof document === "undefined" ? null : document.getElementById(SCAN_MERGE_CHOICE_ID));
+    scrollSectionIntoView(node as ScrollIntoViewNode | null);
+  }, [mergeChoiceVisible, isAnalyzing]);
+
   // Chiusura: nessuna animazione (e nessun timer) lascia il modale spento.
   useEffect(() => {
     if (isOpen) return;
@@ -403,6 +470,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     setReconWarning(null);
     setPhaseASaved(null);
     setSavedDirty(false);
+    mergeChoiceScrolled.current = false;
   }, [isOpen]);
 
   // Privacy: a unmount si revoca SEMPRE l'object URL corrente (ref sempre aggiornato).
@@ -1551,7 +1619,11 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
               )}
 
               {pertinentCount > 0 && (
-                <fieldset className="p-3 rounded-xl border border-stone-200 space-y-2">
+                <fieldset
+                  id={SCAN_MERGE_CHOICE_ID}
+                  ref={mergeChoiceRef}
+                  className="p-3 rounded-xl border border-stone-200 space-y-2 scroll-mt-3"
+                >
                   <legend className="text-xs font-semibold text-stone-700 px-1">
                     Esiste già un orario di {natureLabel} salvato.
                   </legend>

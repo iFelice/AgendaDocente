@@ -2,7 +2,7 @@ import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
 import { create, act } from 'react-test-renderer';
-import { DocumentScannerModal, SCAN_MODAL_BODY_ID, scrollModalBodyToTop } from '../src/components/DocumentScannerModal';
+import { DocumentScannerModal, SCAN_MODAL_BODY_ID, SCAN_MERGE_CHOICE_ID, scrollModalBodyToTop, scrollSectionIntoView } from '../src/components/DocumentScannerModal';
 import { OFFLINE_ANALYSIS_MESSAGE, MAX_DOCUMENT_BYTES } from '../src/utils/documentScanner';
 import type { Student, TeacherProfile, TimetableSlot } from '../src/types';
 
@@ -1806,12 +1806,25 @@ function fakeScrollableNode() {
   return { calls, node: { scrollTo: (options: { top?: number; behavior?: string }) => { calls.push(options); } } };
 }
 
-/** Installa un `document` minimale che espone solo il corpo scrollabile del modale. */
-function useFakeDocument(node: unknown) {
+/** Nodo finto su cui registrare le richieste di `scrollIntoView`. */
+function fakeScrollIntoViewNode() {
+  const calls: Array<{ behavior?: string; block?: string }> = [];
+  return { calls, node: { scrollIntoView: (options: { behavior?: string; block?: string }) => { calls.push(options); } } };
+}
+
+/**
+ * Installa un `document` minimale che espone il corpo scrollabile del modale e,
+ * se richiesto, la sezione con la scelta Aggiungi/Sovrascrivi.
+ */
+function useFakeDocument(node: unknown, sectionNode?: unknown) {
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'document');
   Object.defineProperty(globalThis, 'document', {
     configurable: true,
-    value: { getElementById: (id: string) => (id === SCAN_MODAL_BODY_ID ? node : null) },
+    value: {
+      getElementById: (id: string) => (id === SCAN_MODAL_BODY_ID
+        ? node
+        : id === SCAN_MERGE_CHOICE_ID ? (sectionNode ?? null) : null),
+    },
   });
   return () => {
     if (previous) Object.defineProperty(globalThis, 'document', previous);
@@ -1861,6 +1874,117 @@ test('J. salvataggio fallito: nessuno scroll e nessun messaggio di successo', as
     restore();
     await act(async () => { renderer.unmount(); });
   }
+});
+
+test('K. review personale pronta: la scelta Aggiungi/Sovrascrivi è portata in vista una sola volta', async () => {
+  const { calls: bodyCalls, node: bodyNode } = fakeScrollableNode();
+  const { calls: sectionCalls, node: sectionNode } = fakeScrollIntoViewNode();
+  const renderer = await renderModal({
+    provisionalTimetable: CASO_A_PROV,
+    definitiveTimetable: [],
+    onSaveReconstructedTimetable: () => true,
+  });
+  const restore = useFakeDocument(bodyNode, sectionNode);
+  try {
+    // Review personale (senza curricolare): analisi + revisione delle ore.
+    await goToSource(renderer, 'personal');
+    fetchResponse = { status: 200, json: personalResponse as any };
+    await chooseCameraAndPick(renderer, makeFile('orario-personale.jpg', 'image/jpeg', 20_000));
+    await analyzeWithConsent(renderer);
+    assert.ok(byId(renderer, 'scan-personal-sequence'), 'la review delle ore è a schermo');
+    assert.deepEqual(sectionCalls, [], 'nessuno scroll durante l analisi e la review: la scelta non c è ancora');
+    assert.deepEqual(bodyCalls, [], 'nessuno scroll del corpo del modale');
+
+    // La schermata di conferma mostra la scelta: va portata in vista.
+    await act(async () => { byId(renderer, 'scan-personal-continue').props.onClick(); });
+    assert.deepEqual(sectionCalls, [{ behavior: 'smooth', block: 'start' }], 'navigazione richiesta verso la sezione della scelta');
+    assert.deepEqual(bodyCalls, [], 'non è uno scroll generico in cima al modale');
+
+    // Rerender dovuti a una scelta già visibile: nessuno scroll aggiuntivo.
+    await act(async () => { mergeRadiosOf(renderer)[0].props.onChange(); });
+    await act(async () => { mergeRadiosOf(renderer)[1].props.onChange(); });
+    await act(async () => { byId(renderer, 'recon-target').props.onChange({ target: { value: 'provvisorio' } }); });
+    assert.deepEqual(sectionCalls, [{ behavior: 'smooth', block: 'start' }], 'cambiare radio/select non provoca un nuovo scroll');
+  } finally {
+    restore();
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('L. nessuno scroll se la scelta non è disponibile (nessuna vecchia ora pertinente)', async () => {
+  const { calls: bodyCalls, node: bodyNode } = fakeScrollableNode();
+  const { calls: sectionCalls, node: sectionNode } = fakeScrollIntoViewNode();
+  const renderer = await renderModal({ provisionalTimetable: [], definitiveTimetable: [] });
+  const restore = useFakeDocument(bodyNode, sectionNode);
+  try {
+    await flowPersonalToConfirmation(renderer);
+    assert.equal(renderer.root.findAll((el: any) => el.props?.id === SCAN_MERGE_CHOICE_ID).length, 0, 'nessuna sezione di scelta: non esistono vecchie ore');
+    assert.deepEqual(sectionCalls, [], 'nessuna navigazione richiesta');
+    assert.deepEqual(bodyCalls, [], 'nessuno scroll del corpo');
+  } finally {
+    restore();
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('M. dopo il salvataggio riuscito resta lo scroll in cima al messaggio di esito', async () => {
+  const { calls: bodyCalls, node: bodyNode } = fakeScrollableNode();
+  const { calls: sectionCalls, node: sectionNode } = fakeScrollIntoViewNode();
+  const renderer = await renderModal({
+    provisionalTimetable: CASO_A_PROV,
+    definitiveTimetable: [],
+    onSaveReconstructedTimetable: () => true,
+  });
+  const restore = useFakeDocument(bodyNode, sectionNode);
+  try {
+    await flowPersonalToConfirmation(renderer);
+    assert.deepEqual(sectionCalls, [{ behavior: 'smooth', block: 'start' }], 'momento 1: la scelta è portata in vista');
+    assert.deepEqual(bodyCalls, [], 'il corpo non è ancora scrollato');
+
+    await act(async () => { mergeRadiosOf(renderer)[0].props.onChange(); });
+    await act(async () => { byId(renderer, 'recon-confirm-save').props.onClick(); });
+
+    assert.deepEqual(bodyCalls, [{ top: 0, behavior: 'smooth' }], 'momento 2: dopo il successo il modale torna in cima');
+    assert.deepEqual(sectionCalls, [{ behavior: 'smooth', block: 'start' }], 'lo scroll alla scelta non si ripete dopo il salvataggio');
+    assert.match(flatText(byId(renderer, 'scan-timetable-saved')), /Orario salvato/, 'il messaggio di esito è in cima al contenuto');
+  } finally {
+    restore();
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('N. la scelta Aggiungi/Sovrascrivi resta obbligatoria e senza default', async () => {
+  const { calls: sectionCalls, node: sectionNode } = fakeScrollIntoViewNode();
+  const renderer = await renderModal({
+    provisionalTimetable: CASO_A_PROV,
+    definitiveTimetable: [],
+    onSaveReconstructedTimetable: () => true,
+  });
+  const restore = useFakeDocument(fakeScrollableNode().node, sectionNode);
+  try {
+    await flowPersonalToConfirmation(renderer);
+    assert.deepEqual(sectionCalls, [{ behavior: 'smooth', block: 'start' }], 'la sezione è in vista');
+    assert.equal(mergeRadiosOf(renderer).length, 2, 'le due opzioni sono presenti');
+    assert.ok(mergeRadiosOf(renderer).every((radio: any) => radio.props.checked === false), 'nessuna opzione pre-selezionata');
+    assert.ok(byId(renderer, 'recon-merge-choice-required'), 'la scelta è dichiarata obbligatoria');
+    assert.equal(saveDisabled(renderer), true, 'salvataggio bloccato prima della scelta');
+
+    await act(async () => { mergeRadiosOf(renderer)[0].props.onChange(); });
+    assert.equal(saveDisabled(renderer), false, 'salvataggio sbloccato dopo la scelta');
+    assert.deepEqual(sectionCalls, [{ behavior: 'smooth', block: 'start' }], 'nessuno scroll aggiuntivo');
+  } finally {
+    restore();
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('scroll di una sezione: richiesta scrollIntoView, nessun crash senza nodo', () => {
+  const section = fakeScrollIntoViewNode();
+  assert.equal(scrollSectionIntoView(section.node), true);
+  assert.deepEqual(section.calls, [{ behavior: 'smooth', block: 'start' }]);
+  assert.equal(scrollSectionIntoView({}), false, 'nodo senza scrollIntoView: nessuna richiesta');
+  assert.equal(scrollSectionIntoView(null), false);
+  assert.equal(scrollSectionIntoView(undefined), false);
 });
 
 test('scroll del modale: richiesta al contenitore interno, mai a window', () => {

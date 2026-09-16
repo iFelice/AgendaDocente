@@ -36,6 +36,97 @@ import { MultiChipInput } from "./MultiChipInput";
 import { collectKnownTeacherNames, coTeachingSummary, coTeachingSubjectsOf, pruneCoTeachingFields } from "../utils/coTeaching";
 import { DEFAULT_SUBJECTS, mergeSubjectSuggestions, normalizeSubjectName } from "../utils/subjects";
 
+// ---------------------------------------------------------------------------
+// Swipe fra i giorni dell'orario (scorciatoia mobile: i chip restano il controllo
+// principale, accessibile anche da tastiera)
+// ---------------------------------------------------------------------------
+
+/**
+ * Spostamento orizzontale minimo perché il gesto sia considerato uno swipe (px
+ * CSS). Sotto questa soglia restano tocchi, micro-movimenti e scroll: nessun
+ * cambio di giorno.
+ */
+export const DAY_SWIPE_MIN_DISTANCE_PX = 48;
+
+/**
+ * Quanto il gesto deve essere orizzontale: lo spostamento orizzontale deve
+ * essere almeno questo multiplo di quello verticale. Con 1.5 una diagonale a 45°
+ * e un normale scroll verticale non cambiano mai il giorno.
+ */
+export const DAY_SWIPE_HORIZONTAL_RATIO = 1.5;
+
+/**
+ * Controlli da cui uno swipe NON deve mai partire: chip dei giorni, pulsanti di
+ * navigazione, campi dei modali, link. Il gesto resta riservato alle superfici
+ * non interattive dell'area del giorno.
+ */
+export const DAY_SWIPE_INTERACTIVE_SELECTOR = 'button, input, select, textarea, a, label, [role="button"]';
+
+/**
+ * Marcatore SEMANTICO della cella libera della griglia (il "+" che aggiunge
+ * un'ora). È un `<button>`, ma è anche superficie del giorno: il tap apre
+ * «Aggiungi lezione», lo swipe orizzontale cambia giorno. Il riconoscimento usa
+ * questo attributo, non il testo o l'icona del pulsante.
+ */
+export const DAY_SWIPE_CELL_SELECTOR = '[data-slot-cell="empty"]';
+
+/** Direzione di uno swipe fra i giorni: `null` = il gesto non è uno swipe. */
+export type DaySwipeDirection = "next" | "previous" | null;
+
+/**
+ * Decide se lo spostamento di un gesto è uno swipe fra i giorni e in che
+ * direzione: sinistra = giorno successivo, destra = giorno precedente.
+ *
+ * Regole (nessuna ambiguità con lo scroll verticale):
+ *  - almeno `DAY_SWIPE_MIN_DISTANCE_PX` px di spostamento orizzontale;
+ *  - spostamento orizzontale >= `DAY_SWIPE_HORIZONTAL_RATIO` x quello verticale.
+ */
+export function daySwipeDirection(deltaX: number, deltaY: number): DaySwipeDirection {
+  const horizontal = Math.abs(deltaX);
+  const vertical = Math.abs(deltaY);
+  if (horizontal < DAY_SWIPE_MIN_DISTANCE_PX) return null;
+  if (horizontal < vertical * DAY_SWIPE_HORIZONTAL_RATIO) return null;
+  return deltaX < 0 ? "next" : "previous";
+}
+
+/**
+ * Giorno raggiunto da uno swipe, senza MAI uscire dalla settimana mostrata:
+ * nessun wrap-around (da lunedì verso destra si resta a lunedì, dall'ultimo
+ * giorno verso sinistra si resta lì) e nessun salto alla settimana
+ * precedente/successiva. In vista "tutti i giorni" lo swipe non fa nulla: lì la
+ * settimana è già tutta a schermo e lo scroll orizzontale della griglia resta
+ * libero.
+ */
+export function swipeTargetDay(
+  currentDay: number | "all",
+  direction: DaySwipeDirection,
+  availableDays: number[],
+): number | "all" {
+  if (!direction || currentDay === "all") return currentDay;
+  const index = availableDays.indexOf(currentDay);
+  if (index < 0) return currentDay;
+  const target = direction === "next" ? index + 1 : index - 1;
+  if (target < 0 || target >= availableDays.length) return currentDay;
+  return availableDays[target];
+}
+
+/**
+ * True se il gesto parte da un controllo interattivo e NON va interpretato come
+ * swipe. Unica eccezione: il pulsante di una cella libera della griglia
+ * (`DAY_SWIPE_CELL_SELECTOR`), che resta un tap valido per aggiungere un'ora ma
+ * è anche superficie del giorno. Chip, pulsanti di navigazione, campi e link
+ * restano esclusi.
+ */
+export function isInteractiveSwipeTarget(target: unknown): boolean {
+  const element = target as Element | null | undefined;
+  if (!element || typeof element.closest !== "function") return false;
+  const control = element.closest(DAY_SWIPE_INTERACTIVE_SELECTOR);
+  if (!control) return false;
+  // Cella libera: il controllo coincide col marcatore semantico della cella.
+  if (typeof control.closest === "function" && control.closest(DAY_SWIPE_CELL_SELECTOR) === control) return false;
+  return true;
+}
+
 interface TimetableEditorProps {
   profile: TeacherProfile;
   definitiveTimetable: TimetableSlot[];
@@ -185,6 +276,63 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
     setMobileSelectedDay(jsDay as number);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /**
+   * Inizio del gesto di swipe sull'area del giorno. Un solo gesto produce al
+   * massimo UN cambio di giorno: si registra il punto di partenza e si decide
+   * una sola volta, al rilascio (nessun `preventDefault`, quindi lo scroll
+   * verticale della pagina non viene mai bloccato; quando il browser prende il
+   * controllo dello scroll arriva `pointercancel` e il gesto viene scartato).
+   */
+  const daySwipeStartRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
+  /**
+   * Uno swipe riconosciuto non è un tap: il click che alcuni browser fanno
+   * comunque arrivare al rilascio non deve aprire il modale della cella. La
+   * soppressione è esplicita (e non un `preventDefault`), così lo scroll
+   * verticale non viene mai toccato.
+   */
+  const suppressCellClickRef = useRef(false);
+  /** Giorni davvero mostrati: sono loro i bordi dello swipe (sabato incluso se attivo). */
+  const swipeableDays = days.map((d) => d.day);
+
+  /**
+   * Consuma l'eventuale soppressione lasciata da uno swipe: `true` = il click
+   * arriva dopo un gesto orizzontale riconosciuto e va ignorato.
+   */
+  const consumeSwipeClickSuppression = (): boolean => {
+    if (!suppressCellClickRef.current) return false;
+    suppressCellClickRef.current = false;
+    return true;
+  };
+
+  const handleDaySwipeStart = (event: React.PointerEvent<HTMLDivElement>) => {
+    // Ogni gesto riparte pulito: la soppressione vale solo per il gesto appena concluso.
+    suppressCellClickRef.current = false;
+    // Solo tocco/penna: il mouse di tablet e desktop non è una gesture e la
+    // vista larga (che mostra già tutti i giorni) resta identica a prima.
+    if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
+    // Chip, pulsanti, input, link: il gesto non parte mai da un controllo.
+    if (isInteractiveSwipeTarget(event.target)) return;
+    daySwipeStartRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+  };
+
+  const handleDaySwipeEnd = (event: React.PointerEvent<HTMLDivElement>) => {
+    const start = daySwipeStartRef.current;
+    daySwipeStartRef.current = null;
+    if (!start || start.pointerId !== event.pointerId) return;
+    const direction = daySwipeDirection(event.clientX - start.x, event.clientY - start.y);
+    if (!direction) return;
+    // Era uno swipe, non un tap: nessun modale al rilascio.
+    suppressCellClickRef.current = true;
+    // Stesso stato dei chip: il nuovo giorno è selezionato subito, senza
+    // caroselli né animazioni dedicate. Ai bordi il giorno non cambia.
+    const target = swipeTargetDay(mobileSelectedDay, direction, swipeableDays);
+    if (target !== "all" && target !== mobileSelectedDay) setMobileSelectedDay(target);
+  };
+
+  const handleDaySwipeCancel = () => {
+    daySwipeStartRef.current = null;
+  };
 
   // Open Add slot modal prefilled with the selected day and period
   const handleOpenAdd = (day: 1 | 2 | 3 | 4 | 5 | 6, periodNum: number) => {
@@ -821,7 +969,13 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
 
       {/* Timetable Matrix Table (day filter chips above let phones show one readable day
           per screen; the full-week grid keeps its horizontal scroll inside this card) */}
-      <div className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-x-auto max-w-full">
+      <div
+        id="timetable-day-area"
+        onPointerDown={handleDaySwipeStart}
+        onPointerUp={handleDaySwipeEnd}
+        onPointerCancel={handleDaySwipeCancel}
+        className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-x-auto max-w-full"
+      >
         <table className={`w-full text-left border-collapse ${mobileSelectedDay === "all" ? "min-w-[620px]" : "min-w-0"}`}>
           <thead>
             <tr className="bg-stone-50 border-b border-stone-200 text-stone-700 text-xs font-semibold uppercase">
@@ -866,7 +1020,10 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                       >
                         {slot ? (
                           <div
-                            onClick={() => handleEditSlot(slot)}
+                            onClick={() => {
+                              if (consumeSwipeClickSuppression()) return;
+                              handleEditSlot(slot);
+                            }}
                             className={`h-full w-full p-2 rounded-lg border cursor-pointer transition-all flex flex-col justify-between shadow-2xs hover:shadow-xs ${
                               activeTab === "provvisorio"
                                 ? "border-amber-300 bg-amber-50/80 hover:bg-amber-100"
@@ -910,7 +1067,11 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                         ) : (
                           <button
                             type="button"
-                            onClick={() => handleOpenAdd(d.day, p.periodNumber)}
+                            data-slot-cell="empty"
+                            onClick={() => {
+                              if (consumeSwipeClickSuppression()) return;
+                              handleOpenAdd(d.day, p.periodNumber);
+                            }}
                             className="w-full h-full min-h-[44px] rounded-lg border border-dashed border-stone-200 hover:border-emerald-400 hover:bg-emerald-50/40 text-stone-400 hover:text-emerald-700 transition-colors flex items-center justify-center text-xs"
                             title={`Aggiungi lezione ${d.label} ${p.label || `${p.periodNumber}ª ora`}`}
                           >
