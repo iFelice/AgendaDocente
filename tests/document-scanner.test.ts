@@ -671,15 +671,20 @@ test('replace: gli slot legacy senza schoolId sono dell’istituto principale; s
   assert.equal(cautious.slots.length, 2);
 });
 
-test('replace: insieme misto (sostegno + materia) sostituisce entrambe le nature dello stesso istituto', () => {
+test('replace: insieme misto in arrivo NON allarga l ambito (le ore di materia restano)', () => {
   const existingSlots = [
     supportSlot('ex-sostegno', 2, 1),
     supportSlot('ex-materia', 3, 1, { subject: 'Matematica' }),
     supportSlot('ex-altro-istituto', 4, 1, { schoolId: 'school-b' }),
   ];
+  // Il documento produce ore di sostegno E di materia: l'ambito resta quello
+  // dell'orario personale del docente (sostegno), non l'unione delle nature.
   const incoming = [supportSlot('new-1', 2, 1), supportSlot('new-2', 3, 1, { subject: 'Matematica' })];
   const merged = applyReconstruction(existingSlots, incoming, 'replace-scope', { profile });
-  assert.deepEqual(merged.slots.map(s => s.id), ['ex-altro-istituto', 'new-1', 'new-2']);
+  assert.deepEqual(merged.slots.map(s => s.id), ['ex-materia', 'ex-altro-istituto', 'new-1', 'new-2']);
+  assert.equal(merged.replacedCount, 1, 'la vecchia ora di sostegno sulla stessa coordinata è aggiornata');
+  assert.equal(merged.removedCount, 0);
+  assert.equal(merged.untouchedCount, 2, 'ora di materia e altro istituto intatti');
 });
 
 // ---------------------------------------------------------------------------
@@ -744,6 +749,105 @@ test('rilevamento: entrambi gli archivi possono avere ore pertinenti, e la scrit
   assert.deepEqual(aggiornato.slots.map(s => s.id), ['new-1'], 'il definitivo è aggiornato');
   assert.equal(aggiornato.removedCount, 1, 'la vecchia ora del definitivo non sopravvive');
   assert.equal(slotsInReplacementScope(provvisorio, aggiornato.slots, { profile }).length, 1, 'il provvisorio resta un caso a parte');
+});
+
+// ---------------------------------------------------------------------------
+// 11-quater. SOVRASCRITTURA INTEGRALE DELL'ORARIO PERSONALE SETTIMANALE
+// ---------------------------------------------------------------------------
+
+/**
+ * Il documento importato è l'INTERA settimana del docente: "sovrascrivi" elimina
+ * tutte le vecchie ore di sostegno di quell'istituto in quell'archivio, non solo
+ * quelle che il nuovo orario ricopre.
+ */
+const WEEK_OLD: TimetableSlot[] = [
+  supportSlot('old-lun2', 1, 2, { className: '3D' }),
+  supportSlot('old-lun3', 1, 3, { className: '3D' }),
+  supportSlot('old-gio5', 4, 5, { className: '3E' }),
+  supportSlot('old-ven4', 5, 4, { className: '3E' }),
+];
+const WEEK_NEW: TimetableSlot[] = [
+  supportSlot('new-lun2', 1, 2, { className: '3D' }),
+  supportSlot('new-lun3', 1, 3, { className: '3D' }),
+  supportSlot('new-mar1', 2, 1, { className: '3D' }),
+];
+
+test('A. sovrascrittura integrale: il risultato è esattamente il nuovo orario settimanale', () => {
+  const merged = applyReconstruction(WEEK_OLD, WEEK_NEW, 'replace-scope', { profile });
+  assert.deepEqual(merged.slots.map(s => s.id), ['new-lun2', 'new-lun3', 'new-mar1']);
+  assert.deepEqual(merged.slots.map(s => `${s.dayOfWeek}/${s.periodNumber}`), ['1/2', '1/3', '2/1'], 'lunedì 2ª, lunedì 3ª, martedì 1ª');
+  assert.equal(merged.replacedCount, 2, 'le due coordinate già occupate sono aggiornate');
+  assert.equal(merged.removedCount, 2, 'giovedì 5ª e venerdì 4ª escono anche se il nuovo orario non le ricopre');
+  assert.equal(merged.slots.some(s => s.id === 'old-gio5' || s.id === 'old-ven4'), false);
+});
+
+test('B. sovrascrittura integrale: le ore non-Sostegno restano, qualunque materia abbia il nuovo orario', () => {
+  const existingSlots = [
+    ...WEEK_OLD,
+    supportSlot('old-math', 2, 2, { subject: 'Matematica', className: '3D' }),
+    supportSlot('old-ita', 3, 4, { subject: 'Italiano', className: '1A' }),
+  ];
+  // Anche se il documento porta materie di compresenza, l'ambito resta il sostegno.
+  const incoming = [supportSlot('new-1', 1, 2), supportSlot('new-2', 2, 1, { subject: 'Matematica' })];
+  const merged = applyReconstruction(existingSlots, incoming, 'replace-scope', { profile });
+  assert.ok(merged.slots.some(s => s.id === 'old-math'), 'l ora di matematica sopravvive');
+  assert.ok(merged.slots.some(s => s.id === 'old-ita'), 'l ora di italiano sopravvive');
+  assert.equal(merged.slots.filter(s => s.id.startsWith('old-')).length, 2, 'restano solo le due ore di materia');
+});
+
+test('C. sovrascrittura integrale: le ore sicuramente di un altro istituto restano', () => {
+  const existingSlots = [
+    ...WEEK_OLD,
+    supportSlot('old-altro-sostegno', 4, 5, { schoolId: 'school-b' }),
+    supportSlot('old-altro-materia', 5, 1, { schoolId: 'school-b', subject: 'Fisica' }),
+  ];
+  const merged = applyReconstruction(existingSlots, WEEK_NEW, 'replace-scope', { profile });
+  assert.ok(merged.slots.some(s => s.id === 'old-altro-sostegno'), 'sostegno dell altro istituto intatto');
+  assert.ok(merged.slots.some(s => s.id === 'old-altro-materia'), 'materia dell altro istituto intatta');
+  assert.equal(merged.slots.find(s => s.id === 'old-altro-sostegno')?.schoolId, 'school-b');
+});
+
+test('D. sovrascrittura integrale: gli slot legacy senza schoolId dell istituto principale vengono eliminati', () => {
+  const primary = normalizeTeacherProfile(profile).schools?.find(s => s.isPrimary)?.id;
+  const legacy = [supportSlot('old-legacy-gio', 4, 5), supportSlot('old-legacy-ven', 5, 4)]; // nessuna schoolId
+  assert.equal(legacy.every(s => s.schoolId === undefined), true, 'fixture legacy: nessun schoolId');
+  const incoming = [supportSlot('new-1', 1, 2, { schoolId: primary })];
+  const merged = applyReconstruction(legacy, incoming, 'replace-scope', { profile });
+  assert.deepEqual(merged.slots.map(s => s.id), ['new-1'], 'le ore legacy pertinenti escono');
+  assert.equal(merged.removedCount, 2);
+  // Senza profilo, invece, nessun dato incerto viene cancellato.
+  const cautious = applyReconstruction(legacy, incoming, 'replace-scope');
+  assert.equal(cautious.removedCount, 0);
+});
+
+test('E. "mantieni e aggiungi" resta invariato: nessuna cancellazione, nessuna duplicazione', () => {
+  const merged = applyReconstruction(WEEK_OLD, WEEK_NEW, 'missing-only', { profile });
+  assert.equal(merged.removedCount, 0);
+  assert.equal(merged.replacedCount, 0);
+  assert.equal(merged.addedCount, 1, 'solo martedì 1ª mancava');
+  assert.deepEqual(merged.slots.map(s => s.id), ['old-lun2', 'old-lun3', 'old-gio5', 'old-ven4', 'new-mar1']);
+  const keys = merged.slots.map(s => `${s.schoolId ?? ''}|${s.dayOfWeek}|${s.periodNumber}`);
+  assert.equal(new Set(keys).size, keys.length, 'nessuna occupazione duplicata');
+});
+
+test('sovrascrittura integrale: l ambito non dipende dalle materie lette nel documento', () => {
+  // Guasto reale: con le nature ricavate dagli slot in arrivo, un documento le cui
+  // celle erano state lette come materie lasciava intatto il vecchio sostegno.
+  const incomingDiMateria = [
+    supportSlot('new-1', 1, 2, { subject: 'Matematica' }),
+    supportSlot('new-2', 2, 1, { subject: 'Italiano' }),
+  ];
+  const merged = applyReconstruction(WEEK_OLD, incomingDiMateria, 'replace-scope', { profile });
+  assert.equal(merged.slots.some(s => s.id.startsWith('old-')), false, 'il vecchio sostegno esce comunque');
+  assert.equal(merged.removedCount + merged.replacedCount, WEEK_OLD.length);
+});
+
+test('sovrascrittura integrale: provvisorio e definitivo sono ambiti separati', () => {
+  const provvisorio = applyReconstruction(WEEK_OLD, WEEK_NEW, 'replace-scope', { profile });
+  assert.deepEqual(provvisorio.slots.map(s => s.id), ['new-lun2', 'new-lun3', 'new-mar1']);
+  // Il definitivo non è un input della scrittura sul provvisorio: resta com'era.
+  const definitivo = applyReconstruction(WEEK_OLD, [], 'missing-only', { profile });
+  assert.deepEqual(definitivo.slots.map(s => s.id), WEEK_OLD.map(s => s.id));
 });
 
 test('merge "solo mancanti": nessuna sovrascrittura e nessuna coordinata duplicata', () => {

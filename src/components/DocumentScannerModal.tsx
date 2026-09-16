@@ -130,6 +130,32 @@ export const PERIODS_PER_DAY_QUESTION = "Quante ore ci sono in ogni giornata sco
 export const PERIODS_PER_DAY_QUESTION_ERROR =
   `Indica quante ore ci sono in ogni giornata scolastica (numero intero da 1 a ${MAX_GRID_PERIODS}).`;
 
+/** Id del contenitore scrollabile del modale (fallback del ref, vedi `useEffect` di scroll). */
+export const SCAN_MODAL_BODY_ID = "scan-modal-body";
+
+/** Nodo su cui è possibile chiedere uno scroll (DOM reale o equivalente). */
+export type ScrollableNode = {
+  scrollTo?: (options: { top?: number; behavior?: string }) => void;
+  scrollTop?: number;
+};
+
+/**
+ * Porta in cima il contenuto scrollabile del modale: dopo un salvataggio riuscito
+ * il messaggio di esito deve essere la prima cosa che l'utente vede (su mobile la
+ * schermata restava in fondo e non si capiva se il salvataggio fosse andato a buon
+ * fine). Lo scroll è del contenitore INTERNO del modale, mai di `window`.
+ * @returns true se uno scroll è stato davvero richiesto.
+ */
+export function scrollModalBodyToTop(node: ScrollableNode | null | undefined): boolean {
+  if (!node) return false;
+  if (typeof node.scrollTo === "function") {
+    node.scrollTo({ top: 0, behavior: "smooth" });
+    return true;
+  }
+  node.scrollTop = 0;
+  return true;
+}
+
 export interface DocumentScannerModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -251,6 +277,8 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
 
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  /** Contenitore scrollabile del corpo del modale: è lui a tornare in cima dopo un salvataggio. */
+  const bodyRef = useRef<HTMLDivElement | null>(null);
   const fileRef = useRef<File | null>(null);
   const readingRevision = useRef(0);
   // L'object URL corrente in un ref: il cleanup a unmount deve revocare SEMPRE
@@ -287,10 +315,11 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
 
   /**
    * Vecchie ore PERTINENTI nei due archivi, con la STESSA regola della
-   * sostituzione reale (`slotsInReplacementScope`: stesso istituto — gli slot
-   * legacy senza `schoolId` valgono l'istituto principale del profilo — e stessa
-   * natura). Materie normali, ore di altri istituti e dati fuori ambito non
-   * entrano qui, quindi non fanno comparire nessuna domanda.
+   * sovrascrittura reale (`slotsInReplacementScope`: stesso istituto — gli slot
+   * legacy senza `schoolId` valgono l'istituto principale del profilo — e natura
+   * dell'orario personale, non dei singoli slot in arrivo). Materie normali, ore di
+   * altri istituti e dati fuori ambito non entrano qui, quindi non fanno comparire
+   * nessuna domanda.
    */
   const pertinentExisting = useMemo(() => ({
     provvisorio: slotsInReplacementScope(provisionalTimetable, saveableSlots, { profile }),
@@ -326,6 +355,20 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     if (saveableSlots.length === 0) return null;
     return previewReconstruction(existingTarget, saveableSlots, effectiveMergeMode ?? "missing-only", { profile });
   }, [saveableSlots, existingTarget, effectiveMergeMode, profile]);
+
+  /**
+   * Dopo un salvataggio RIUSCITO il contenuto del modale torna in cima: il messaggio
+   * di esito è la prima cosa visibile. `phaseASaved` viene impostato SOLO dopo che
+   * `save.run(...)` ha restituito true, quindi nessun salvataggio fallito (e nessuna
+   * fase di analisi o di revisione) può provocare questo scroll. Il ref è il
+   * percorso reale; il lookup per id è il fallback se il ref non è ancora agganciato.
+   */
+  useEffect(() => {
+    if (!phaseASaved) return;
+    const node = bodyRef.current
+      ?? (typeof document === "undefined" ? null : document.getElementById(SCAN_MODAL_BODY_ID));
+    scrollModalBodyToTop(node as ScrollableNode | null);
+  }, [phaseASaved]);
 
   // Chiusura: nessuna animazione (e nessun timer) lascia il modale spento.
   useEffect(() => {
@@ -841,7 +884,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-4 momentum-scroll">
+        <div id={SCAN_MODAL_BODY_ID} ref={bodyRef} className="flex-1 overflow-y-auto p-4 momentum-scroll">
           {analysisError && step !== "working" && (
             <div className="mb-3 p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2" role="alert">
               <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
@@ -1519,8 +1562,8 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                   <label className="flex items-start gap-2 text-xs text-stone-700 cursor-pointer">
                     <input type="radio" name="scan-merge-mode" checked={effectiveMergeMode === "replace-scope"} onChange={() => { setMergeChoice("replace-scope"); setMergeMode("replace-scope"); if (phaseASaved) setSavedDirty(true); }} className="mt-0.5 accent-emerald-700" />
                     <span>
-                      <strong>Sostituisci orario esistente</strong>
-                      <span className="block text-[11px] text-stone-500">Il nuovo orario sostituirà quello salvato in questo archivio.</span>
+                      <strong>Sovrascrivi orario esistente</strong>
+                      <span className="block text-[11px] text-stone-500">Tutte le vecchie ore di {natureLabel} di questo istituto vengono sostituite da quelle scansionate.</span>
                     </span>
                   </label>
                   <label className="flex items-start gap-2 text-xs text-stone-700 cursor-pointer">
@@ -1546,7 +1589,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                   )}
                   <p className="text-[11px] text-stone-500">
                     {effectiveMergeMode === "replace-scope"
-                      ? "Vengono sostituite solo le ore dello stesso istituto e della stessa natura; ore di materia, di altri istituti o di altri archivi non vengono mai toccate."
+                      ? "La sovrascrittura elimina tutte le vecchie ore di sostegno di questo istituto in questo archivio, anche quelle in giorni o classi assenti nel nuovo orario. Ore di materia, di altri istituti e l'altro archivio non vengono toccati."
                       : "L'intero orario non viene mai cancellato da qui."}
                   </p>
                 </fieldset>

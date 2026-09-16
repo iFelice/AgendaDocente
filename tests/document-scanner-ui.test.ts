@@ -2,7 +2,7 @@ import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
 import { create, act } from 'react-test-renderer';
-import { DocumentScannerModal } from '../src/components/DocumentScannerModal';
+import { DocumentScannerModal, SCAN_MODAL_BODY_ID, scrollModalBodyToTop } from '../src/components/DocumentScannerModal';
 import { OFFLINE_ANALYSIS_MESSAGE, MAX_DOCUMENT_BYTES } from '../src/utils/documentScanner';
 import type { Student, TeacherProfile, TimetableSlot } from '../src/types';
 
@@ -548,8 +548,8 @@ test('orari esistente: scelta esplicita obbligatoria, nessuna pre-selezione, nie
 
   assert.match(text, /Esiste già un orario di sostegno salvato\./);
   assert.match(text, /Archivio: Provvisorio/, 'l archivio con le vecchie ore è dichiarato');
-  assert.match(text, /Sostituisci orario esistente/);
-  assert.match(text, /Il nuovo orario sostituirà quello salvato in questo archivio\./);
+  assert.match(text, /Sovrascrivi orario esistente/);
+  assert.match(text, /Tutte le vecchie ore di sostegno di questo istituto vengono sostituite da quelle scansionate\./);
   assert.match(text, /Mantieni e aggiungi/);
   assert.match(text, /Le nuove ore verranno aggiunte senza eliminare quelle esistenti\./);
   assert.match(text, /non viene mai cancellato/i, 'nessuna opzione di azzeramento');
@@ -1012,7 +1012,7 @@ test('Fase A sostituisce davvero: anteprima delle vecchie ore rimosse e conteggi
   assert.match(preview, /1 aggiornate/, 'coordinata presente nel nuovo orario');
   assert.match(preview, /1 rimosse perché non presenti nel nuovo orario/, 'ex-thu non sopravvive');
   assert.match(preview, /1 ore non pertinenti restano intatte|1 ore non pertinenti/, 'ex-math (materia) esclusa dall’ambito');
-  assert.match(flatText(renderer.root), /ore di materia, di altri istituti o di altri archivi non vengono mai toccate/);
+  assert.match(flatText(renderer.root), /Ore di materia, di altri istituti e l'altro archivio non vengono toccati/);
 
   await chooseMergeModeIfAsked(renderer);
 
@@ -1436,7 +1436,7 @@ test('CASO A: vecchie ore solo nel provvisorio -> archivio provvisorio, scelta o
     assert.equal(renderer.root.findAll((el: any) => el.props?.id === 'recon-archive-choice').length, 0, 'nessun avviso: l archivio non è ambiguo');
     assert.match(text, /Esiste già un orario di sostegno salvato\./);
     assert.match(text, /Archivio: Provvisorio · 1 ora pertinente/);
-    assert.match(text, /Sostituisci orario esistente/);
+    assert.match(text, /Sovrascrivi orario esistente/);
     assert.match(text, /Mantieni e aggiungi/);
     assert.deepEqual(mergeRadiosOf(renderer).map((el: any) => el.props.checked), [false, false], 'nessuna pre-selezione');
     assert.match(text, /Scegli una delle due opzioni per poter salvare\./);
@@ -1659,4 +1659,219 @@ test('CASO D + scelta del definitivo: si aggiorna solo quello, e cambiando archi
   } finally {
     await act(async () => { renderer.unmount(); });
   }
+});
+
+// ---------------------------------------------------------------------------
+// 24. SOVRASCRITTURA INTEGRALE + SCROLL DOPO IL SALVATAGGIO
+// ---------------------------------------------------------------------------
+
+/** Vecchia settimana di sostegno dell'istituto corrente (slot legacy: nessuna schoolId). */
+const OLD_WEEK_SUPPORT: TimetableSlot[] = [
+  { id: 'old-lun2', dayOfWeek: 1, periodNumber: 2, startTime: '09:10', endTime: '10:05', subject: 'Sostegno', className: '3D' },
+  { id: 'old-lun3', dayOfWeek: 1, periodNumber: 3, startTime: '10:05', endTime: '11:00', subject: 'Sostegno', className: '3D' },
+  { id: 'old-gio5', dayOfWeek: 4, periodNumber: 5, startTime: '12:05', endTime: '13:00', subject: 'Sostegno', className: '3E' },
+  { id: 'old-ven4', dayOfWeek: 5, periodNumber: 4, startTime: '11:00', endTime: '12:05', subject: 'Sostegno', className: '3E' },
+];
+/** Dati che la sovrascrittura NON deve toccare. */
+const OLD_MATH: TimetableSlot = { id: 'old-math', dayOfWeek: 2, periodNumber: 2, startTime: '09:10', endTime: '10:05', subject: 'Matematica', className: '3D' };
+const OLD_OTHER_SCHOOL: TimetableSlot = { id: 'old-altro', dayOfWeek: 3, periodNumber: 1, startTime: '08:15', endTime: '09:10', subject: 'Sostegno', className: '1A', schoolId: 'school-b' };
+
+/** Nuovo orario settimanale letto dal documento: lunedì 2ª, lunedì 3ª, martedì 1ª (3D). */
+const NEW_WEEK_RESPONSE = personalTimetableResponse({ 1: '3D', 2: '3D', 6: '3D' });
+
+/** Flusso solo personale (senza curricolare) fino alla schermata di conferma. */
+async function flowPersonalToConfirmation(renderer: any, response: unknown = personalResponse) {
+  await goToSource(renderer, 'personal');
+  fetchResponse = { status: 200, json: response as any };
+  await chooseCameraAndPick(renderer, makeFile('orario-personale.jpg', 'image/jpeg', 20_000));
+  await analyzeWithConsent(renderer);
+  await act(async () => { byId(renderer, 'scan-personal-continue').props.onClick(); });
+  return renderer;
+}
+
+/**
+ * Archivi in memoria + la STESSA scrittura di `App.handleSaveReconstructedTimetable`
+ * (`applyReconstruction` sull'archivio scelto): nessuna persistenza parallela.
+ */
+async function appArchives(provvisorio: TimetableSlot[], definitivo: TimetableSlot[]) {
+  const { applyReconstruction } = await import('../src/utils/reconstructTimetable');
+  const saved: SavedTimetable[] = [];
+  const handler = (slots: TimetableSlot[], target: string, mode: string) => {
+    saved.push({ slots, target, mode });
+    const archive = target === 'provvisorio' ? provvisorio : definitivo;
+    const merged = applyReconstruction(archive, slots, mode as any, { profile });
+    archive.length = 0;
+    archive.push(...merged.slots);
+    return true;
+  };
+  return { saved, handler };
+}
+
+/** Ore di sostegno dell'istituto corrente presenti in un archivio. */
+const supportHoursOf = (archive: TimetableSlot[]) =>
+  archive.filter(s => /sostegno/i.test(s.subject) && s.schoolId !== 'school-b')
+    .map(s => `${s.dayOfWeek}/${s.periodNumber} ${s.className}`)
+    .sort();
+
+test('F. sovrascrittura dal modale: il provvisorio resta con esattamente le nuove ore di sostegno', async () => {
+  const provvisorio = [...OLD_WEEK_SUPPORT, OLD_MATH, OLD_OTHER_SCHOOL];
+  const definitivo: TimetableSlot[] = [];
+  const { saved, handler } = await appArchives(provvisorio, definitivo);
+  const renderer = await renderModal({
+    provisionalTimetable: provvisorio,
+    definitiveTimetable: definitivo,
+    onSaveReconstructedTimetable: handler,
+  });
+  try {
+    await flowPersonalToConfirmation(renderer, NEW_WEEK_RESPONSE);
+    assert.equal(archiveValue(renderer), 'provvisorio');
+    const radios = mergeRadiosOf(renderer);
+    assert.deepEqual(radios.map((el: any) => el.props.checked), [false, false], 'nessuna pre-selezione');
+    await act(async () => { radios[0].props.onChange(); }); // "Sovrascrivi orario esistente"
+
+    const preview = flatText(byId(renderer, 'recon-replace-preview'));
+    assert.match(preview, /4 ore esistenti di sostegno verranno sostituite/, 'tutta la vecchia settimana è nell ambito');
+    assert.match(preview, /2 rimosse perché non presenti nel nuovo orario/, 'giovedì 5ª e venerdì 4ª');
+
+    await act(async () => { byId(renderer, 'recon-confirm-save').props.onClick(); });
+    assert.equal(saved[0].target, 'provvisorio');
+    assert.equal(saved[0].mode, 'replace-scope');
+    assert.deepEqual(supportHoursOf(provvisorio), ['1/2 3D', '1/3 3D', '2/1 3D'], 'risultato esatto: lunedì 2ª, lunedì 3ª, martedì 1ª');
+    assert.equal(provvisorio.some(s => s.id === 'old-gio5' || s.id === 'old-ven4'), false, 'le vecchie ore fuori dal nuovo orario sono eliminate');
+    assert.ok(provvisorio.some(s => s.id === 'old-math'), 'l ora di materia resta');
+    assert.ok(provvisorio.some(s => s.id === 'old-altro'), 'l ora dell altro istituto resta');
+    assert.equal(definitivo.length, 0, 'l altro archivio non viene scritto');
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('G. definitivo: la sovrascrittura aggiorna il definitivo e lascia intatto il provvisorio', async () => {
+  const provvisorio: TimetableSlot[] = [{ ...OLD_MATH, id: 'prov-math' }];
+  const definitivo = [...OLD_WEEK_SUPPORT];
+  const { saved, handler } = await appArchives(provvisorio, definitivo);
+  const renderer = await renderModal({
+    provisionalTimetable: provvisorio,
+    definitiveTimetable: definitivo,
+    onSaveReconstructedTimetable: handler,
+  });
+  try {
+    await flowPersonalToConfirmation(renderer, NEW_WEEK_RESPONSE);
+    assert.equal(archiveValue(renderer), 'definitivo', 'il vecchio orario pertinente sta nel definitivo');
+    assert.match(flatText(renderer.root), /Archivio: Definitivo · 4 ore pertinenti/);
+    await act(async () => { mergeRadiosOf(renderer)[0].props.onChange(); });
+    await act(async () => { byId(renderer, 'recon-confirm-save').props.onClick(); });
+
+    assert.equal(saved[0].target, 'definitivo');
+    assert.equal(saved[0].mode, 'replace-scope');
+    assert.deepEqual(supportHoursOf(definitivo), ['1/2 3D', '1/3 3D', '2/1 3D'], 'la vecchia settimana del definitivo è sostituita');
+    assert.deepEqual(provvisorio.map(s => s.id), ['prov-math'], 'il provvisorio non viene toccato');
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('H. entrambi gli archivi: viene modificato soltanto quello scelto dall utente', async () => {
+  const provvisorio = [...OLD_WEEK_SUPPORT];
+  const definitivo: TimetableSlot[] = [
+    { id: 'def-lun2', dayOfWeek: 1, periodNumber: 2, startTime: '09:10', endTime: '10:05', subject: 'Sostegno', className: '3D' },
+    { id: 'def-gio5', dayOfWeek: 4, periodNumber: 5, startTime: '12:05', endTime: '13:00', subject: 'Sostegno', className: '3E' },
+  ];
+  const { saved, handler } = await appArchives(provvisorio, definitivo);
+  const renderer = await renderModal({
+    provisionalTimetable: provvisorio,
+    definitiveTimetable: definitivo,
+    onSaveReconstructedTimetable: handler,
+  });
+  try {
+    await flowPersonalToConfirmation(renderer, NEW_WEEK_RESPONSE);
+    assert.equal(archiveValue(renderer), '', 'nessun archivio deciso al posto dell utente');
+
+    await act(async () => { byId(renderer, 'recon-target').props.onChange({ target: { value: 'definitivo' } }); });
+    await act(async () => { mergeRadiosOf(renderer)[0].props.onChange(); });
+    await act(async () => { byId(renderer, 'recon-confirm-save').props.onClick(); });
+
+    assert.equal(saved.length, 1, 'una sola scrittura');
+    assert.equal(saved[0].target, 'definitivo');
+    assert.deepEqual(supportHoursOf(definitivo), ['1/2 3D', '1/3 3D', '2/1 3D'], 'il definitivo è sovrascritto');
+    assert.deepEqual(supportHoursOf(provvisorio), ['1/2 3D', '1/3 3D', '4/5 3E', '5/4 3E'], 'il provvisorio resta esattamente com era');
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+/** Nodo scrollabile finto: registra le richieste di scroll. */
+function fakeScrollableNode() {
+  const calls: Array<{ top?: number; behavior?: string }> = [];
+  return { calls, node: { scrollTo: (options: { top?: number; behavior?: string }) => { calls.push(options); } } };
+}
+
+/** Installa un `document` minimale che espone solo il corpo scrollabile del modale. */
+function useFakeDocument(node: unknown) {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  Object.defineProperty(globalThis, 'document', {
+    configurable: true,
+    value: { getElementById: (id: string) => (id === SCAN_MODAL_BODY_ID ? node : null) },
+  });
+  return () => {
+    if (previous) Object.defineProperty(globalThis, 'document', previous);
+    else delete (globalThis as any).document;
+  };
+}
+
+test('I. salvataggio riuscito: il contenuto del modale torna in cima e l esito è visibile', async () => {
+  const { calls, node } = fakeScrollableNode();
+  const renderer = await renderModal({
+    provisionalTimetable: CASO_A_PROV,
+    definitiveTimetable: [],
+    onSaveReconstructedTimetable: () => true,
+  });
+  const restore = useFakeDocument(node);
+  try {
+    await flowToReconstruction(renderer);
+    assert.deepEqual(calls, [], 'nessuno scroll durante analisi e revisione');
+    await act(async () => { mergeRadiosOf(renderer)[0].props.onChange(); });
+    assert.deepEqual(calls, [], 'nessuno scroll prima del salvataggio');
+    await act(async () => { byId(renderer, 'recon-confirm-save').props.onClick(); });
+
+    assert.deepEqual(calls, [{ top: 0, behavior: 'smooth' }], 'scroll in cima richiesto una sola volta, dopo il successo');
+    assert.match(flatText(byId(renderer, 'scan-timetable-saved')), /Orario salvato/, 'il messaggio di esito è in cima al contenuto');
+  } finally {
+    restore();
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('J. salvataggio fallito: nessuno scroll e nessun messaggio di successo', async () => {
+  const { calls, node } = fakeScrollableNode();
+  const renderer = await renderModal({
+    provisionalTimetable: CASO_A_PROV,
+    definitiveTimetable: [],
+    onSaveReconstructedTimetable: () => false, // l archivio rifiuta la scrittura
+  });
+  const restore = useFakeDocument(node);
+  try {
+    await flowToReconstruction(renderer);
+    await act(async () => { mergeRadiosOf(renderer)[0].props.onChange(); });
+    await act(async () => { byId(renderer, 'recon-confirm-save').props.onClick(); });
+
+    assert.deepEqual(calls, [], 'nessuno scroll se il salvataggio non è riuscito');
+    assert.equal(renderer.root.findAll((el: any) => el.props?.id === 'scan-timetable-saved').length, 0, 'nessun esito di successo');
+  } finally {
+    restore();
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('scroll del modale: richiesta al contenitore interno, mai a window', () => {
+  const withScrollTo = fakeScrollableNode();
+  assert.equal(scrollModalBodyToTop(withScrollTo.node), true);
+  assert.deepEqual(withScrollTo.calls, [{ top: 0, behavior: 'smooth' }]);
+
+  const legacyNode: { scrollTop: number } = { scrollTop: 480 };
+  assert.equal(scrollModalBodyToTop(legacyNode), true, 'fallback per i nodi senza scrollTo');
+  assert.equal(legacyNode.scrollTop, 0);
+
+  assert.equal(scrollModalBodyToTop(null), false, 'nessun nodo: nessuna richiesta');
+  assert.equal(scrollModalBodyToTop(undefined), false);
 });

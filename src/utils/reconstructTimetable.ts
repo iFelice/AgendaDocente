@@ -158,10 +158,28 @@ export interface ReconstructionScopeOptions {
 }
 
 /**
- * Gli slot esistenti che una sostituzione in ambito ("replace-scope") può rimuovere:
- * stesso istituto E stessa natura degli slot in arrivo. Con un insieme misto
- * (sostegno + materie) vengono considerate entrambe le nature, perché l'intero
- * documento le copre. Slot di altri istituti o di altra natura NON sono mai inclusi.
+ * Natura dell'orario personale settimanale del docente: sostegno per un docente di
+ * sostegno, materia altrimenti. È la STESSA regola con cui
+ * `reconstructedToTimetableSlots` assegna la materia agli slot importati, quindi
+ * ambito della cancellazione e slot scritti non possono divergere.
+ */
+export function personalTimetableNature(profile?: TeacherProfile): TimetableSlotNature {
+  return profile && isSupportTeacherProfile(profile) ? "support" : "subject";
+}
+
+/**
+ * Gli slot esistenti che una sovrascrittura ("replace-scope") elimina: stesso
+ * istituto E stessa natura dell'ORARIO PERSONALE importato.
+ *
+ * L'ambito NON dipende dagli slot in arrivo — non dalle loro coordinate, non dalle
+ * loro classi, non dalle loro materie, non dall'intersezione vecchio/nuovo: il
+ * documento importato rappresenta l'intera settimana del docente, quindi TUTTE le
+ * vecchie ore di quell'ambito spariscono. Restano fuori ambito (e quindi intatte)
+ * le ore di altra natura e quelle sicuramente di un altro istituto; gli slot legacy
+ * senza `schoolId` valgono l'istituto principale del profilo.
+ *
+ * Senza profilo la natura resta prudenzialmente quella degli slot in arrivo: non si
+ * cancellano dati di un docente di cui non conosciamo l'orario personale.
  */
 export function slotsInReplacementScope(
   existing: TimetableSlot[],
@@ -170,7 +188,9 @@ export function slotsInReplacementScope(
 ): TimetableSlot[] {
   if (incoming.length === 0) return [];
   const schools = new Set(incoming.map(s => slotSchoolKey(s, options.profile)));
-  const natures = new Set(incoming.map(s => slotNature(s)));
+  const natures: Set<TimetableSlotNature> = options.profile
+    ? new Set([personalTimetableNature(options.profile)])
+    : new Set(incoming.map(s => slotNature(s)));
   return existing.filter(s => schools.has(slotSchoolKey(s, options.profile)) && natures.has(slotNature(s)));
 }
 
@@ -239,8 +259,9 @@ export function previewReconstruction(
  * Unisce la proposta (confermata) con l'orario esistente.
  * NIENTE sovrascrittura automatica in "missing-only": uno slot esistente viene
  * toccato solo se coincide per istituto+giorno+periodo. In "replace-scope" la
- * sostituzione è reale ma resta confinata all'ambito della ricostruzione
- * (istituto + natura): vedi `slotsInReplacementScope`.
+ * sovrascrittura è INTEGRALE dentro l'ambito dell'orario personale (istituto +
+ * natura): tutte le vecchie ore di quell'ambito escono, anche quelle in coordinate
+ * o classi assenti nel nuovo orario. Vedi `slotsInReplacementScope`.
  */
 export function applyReconstruction(
   existing: TimetableSlot[],
