@@ -10,6 +10,8 @@
 import type { TeacherProfile } from "../types";
 import { OFFLINE_ANALYSIS_MESSAGE, isOnline } from "../utils/documentScanner";
 import type { CurricularScopeCoordinate } from "../utils/timetableAnalysis";
+import type { TimetableGridGeometry } from "../utils/timetableCrops";
+import { normalizeTimetableGeometry } from "../utils/timetableCrops";
 
 export type ScanTimetableDocumentType = "personal-support-timetable" | "curricular-timetable";
 
@@ -47,6 +49,18 @@ export interface ScanTimetableResult {
    * sequenza, non dal modello.
    */
   cells?: Array<{ rowIndex: number; dayOfWeek: number; periodIndex: number; raw: string }>;
+}
+
+/**
+ * Richiesta di GEOMETRIA della griglia (diagnostica del crop curricolare).
+ *
+ * Nessun profilo: alla geometria non serve sapere chi è il docente.
+ * `periodsPerDay` è dichiarato dall'utente, mai dedotto dall'immagine.
+ */
+export interface ScanTimetableGeometryRequest {
+  imageBase64: string;
+  mimeType: string;
+  periodsPerDay: number;
 }
 
 export interface ScanStudentDocumentRequest {
@@ -152,6 +166,21 @@ export async function analyzeTimetableDocument(req: ScanTimetableRequest): Promi
   if (typeof data.rowLabel === "string") result.rowLabel = data.rowLabel;
   if (Array.isArray(data.curricularRows)) result.curricularRows = data.curricularRows as ScanTimetableResult["curricularRows"];
   return result;
+}
+
+/**
+ * Misura la geometria della tabella orario.
+ *
+ * La risposta viene RIVALIDATA nel client con le stesse regole del server
+ * (`normalizeTimetableGeometry`): un numero fuori intervallo non diventa mai un
+ * crop, e nessuna coordinata viene inventata in caso di rifiuto.
+ *
+ * Nessun dato restituito viene persistito: la geometria vive nello stato del
+ * modale e viene scartata alla chiusura.
+ */
+export async function analyzeTimetableGeometry(req: ScanTimetableGeometryRequest): Promise<TimetableGridGeometry> {
+  const data = await postScan("/api/analyze-timetable-geometry", req);
+  return normalizeTimetableGeometry(data.geometry, req.periodsPerDay);
 }
 
 /** Analizza una foto/appunti di registro per estrarre impegni alunni. */

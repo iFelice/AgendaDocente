@@ -1392,20 +1392,87 @@ test('orario personale: cambiare il numero azzera la conferma (il valore conferm
   }
 });
 
-test('orario curricolare: la domanda sulle ore NON viene richiesta', async () => {
+test('orario curricolare: le ore per giorno sono chieste e confermate come nel personale', async () => {
   fetchResponse = { status: 200, json: curricularResponse as any };
   const renderer = await renderModal();
   try {
     await goToSource(renderer, 'curricular');
     await pickFile(renderer, makeFile('istituto.jpg', 'image/jpeg', 30_000));
     await act(async () => { byId(renderer, 'scan-analyze-cta').props.onClick(); });
-    assert.equal(renderer.root.findAll((el: any) => el.props?.id === 'scan-periods-per-day').length, 0, 'nessun input ore per il curricolare');
-    assert.equal(renderer.root.findAll((el: any) => el.props?.id === 'scan-periods-per-day-confirm').length, 0, 'nessuna conferma ore per il curricolare');
+
+    // La domanda c'è anche qui: il numero di colonne orarie della griglia non è
+    // deducibile in modo affidabile dalla foto di un orario provvisorio.
+    assert.equal(byId(renderer, 'scan-periods-per-day').props.value, String(PERSONAL_PERIODS_PER_DAY), 'prefill dalla configurazione');
+    assert.match(flatText(renderer.root), /Quante ore ci sono in ogni giornata scolastica\?/);
+    assert.match(flatText(renderer.root), /colonne orarie/, 'il testo della conferma parla di colonne, non di celle personali');
+
+    // Solo consenso NON basta: senza conferma l'analisi non parte.
     await act(async () => { byId(renderer, 'scan-cloud-consent').props.onChange({ target: { checked: true } }); });
-    assert.equal(byId(renderer, 'scan-consent-confirm').props.disabled, false, 'il curricolare parte col solo consenso');
+    assert.equal(byId(renderer, 'scan-consent-confirm').props.disabled, true, 'numero valido ma non confermato: invio bloccato');
+    assert.equal(fetchCalls.length, 0, 'nessuna analisi partita senza conferma');
+
+    await confirmPeriodsPerDay(renderer);
+    assert.equal(byId(renderer, 'scan-consent-confirm').props.disabled, false, 'consenso + ore confermate: si può inviare');
+    await confirmAndSettleAnalysis(renderer);
+    assert.equal(fetchCalls.length, 1, 'una sola chiamata');
+    assert.equal(fetchCalls[0].url, '/api/analyze-timetable');
+    // Il contratto dell'analisi curricolare delle materie non cambia: le ore per
+    // giorno confermate servono alla geometria del crop, non a questa chiamata.
+    assert.equal('periodsPerDay' in fetchCalls[0].body, false, 'la request curricolare delle materie è invariata');
   } finally {
     await act(async () => { renderer.unmount(); });
   }
+});
+
+test('preview crop diagnostica: solo nel flusso curricolare, solo dopo la conferma, mai persistita', async () => {
+  fetchResponse = { status: 200, json: curricularResponse as any };
+  const renderer = await renderModal();
+  try {
+    // Nel personale la diagnostica non esiste.
+    await goToSource(renderer, 'personal');
+    await pickFile(renderer, makeFile('orario.jpg', 'image/jpeg', 30_000));
+    await act(async () => { byId(renderer, 'scan-analyze-cta').props.onClick(); });
+    assert.equal(renderer.root.findAll((el: any) => el.props?.id === 'crop-diagnostic-run').length, 0, 'nessuna diagnostica nel personale');
+
+    // Nel curricolare c'è, ma è spenta finché le ore non sono confermate.
+    await act(async () => { renderer.unmount(); });
+    const curricular = await renderModal();
+    try {
+      await goToSource(curricular, 'curricular');
+      await pickFile(curricular, makeFile('istituto.jpg', 'image/jpeg', 30_000));
+      await act(async () => { byId(curricular, 'scan-analyze-cta').props.onClick(); });
+      const run = byId(curricular, 'crop-diagnostic-run');
+      assert.equal(run.props.disabled, true, 'senza ore confermate la diagnostica non parte');
+      await confirmPeriodsPerDay(curricular);
+      assert.equal(byId(curricular, 'crop-diagnostic-run').props.disabled, false, 'ore confermate: diagnostica disponibile');
+      assert.equal(fetchCalls.length, 0, 'la diagnostica non è partita da sola');
+      // Nessuna preview prima di averla chiesta esplicitamente.
+      assert.equal(curricular.root.findAll((el: any) => el.props?.id === 'crop-diagnostic-preview').length, 0);
+    } finally {
+      await act(async () => { curricular.unmount(); });
+    }
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('preview crop diagnostica: nessuna persistenza né log del contenuto', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const panel = readFileSync(join(process.cwd(), 'src', 'components', 'CropDiagnosticPanel.tsx'), 'utf8');
+  const cropper = readFileSync(join(process.cwd(), 'src', 'utils', 'imageCropper.ts'), 'utf8');
+  // I commenti descrivono i divieti: si verifica il CODICE, non la prosa.
+  const withoutComments = (source: string) => source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  for (const [name, source] of [['CropDiagnosticPanel.tsx', panel], ['imageCropper.ts', cropper]] as const) {
+    const code = withoutComments(source);
+    assert.ok(!/localStorage|indexedDB|dexie|services\/storage/i.test(code), `${name}: nessun accesso a storage`);
+    assert.ok(!/console\.(log|warn|error)/.test(code), `${name}: nessun log`);
+    assert.ok(!/toDataURL/.test(code), `${name}: il crop non diventa una stringa persistente`);
+    assert.ok(!/fetch\(/.test(code) || /analyzeTimetableGeometry/.test(code), `${name}: nessuna chiamata fuori dalla geometria`);
+  }
+  // L'object URL del crop è sempre revocato.
+  assert.match(panel, /revokePreviewUrl/, 'il pannello revoca gli object URL');
+  assert.match(panel, /Non viene scritta su disco|resta in memoria/, 'il pannello dichiara di essere effimero');
 });
 
 test('orario personale con 5 ore: contratto 5x5=25 posizioni, vuoti nella loro posizione', async () => {

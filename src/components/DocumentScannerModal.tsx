@@ -1,5 +1,6 @@
 import { useAnalysisProgress } from "../hooks/useAnalysisProgress";
 import { usePersistenceAction } from "../hooks/usePersistenceAction";
+import { CropDiagnosticPanel } from "./CropDiagnosticPanel";
 import {
   analyzeStudentDocument,
   analyzeTimetableDocument,
@@ -327,6 +328,13 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     return value >= 1 && value <= MAX_GRID_PERIODS ? value : 0;
   }, [periodsPerDayInput]);
   const periodsPerDayValid = periodsPerDay > 0;
+  /**
+   * La domanda sulle ore per giorno riguarda sia l'orario personale (fissa la
+   * lunghezza attesa della sequenza) sia quello curricolare (fissa il numero di
+   * colonne orarie da cui derivare la geometria del crop). In entrambi i casi il
+   * numero è dichiarato dall'utente e MAI dedotto dall'immagine.
+   */
+  const requiresPeriodsPerDay = captureFor === "personal" || captureFor === "curricular";
   /** Celle attese nella sequenza: ore per giorno x giorni scolastici (lun-ven). */
   const expectedCellCount = expectedPersonalCellCount(periodsPerDay);
 
@@ -588,6 +596,9 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
       return;
     }
     setConsentGiven(false);
+    // Ogni ingresso nel passo di consenso riparte da zero: come il consenso, la
+    // conferma delle ore non è mai ereditata da un'analisi precedente.
+    setPeriodsPerDayConfirmed(false);
     setAnalysisError(null);
     setStep("consent");
   };
@@ -610,7 +621,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     // attesa da verificare, e senza conferma esplicita quel numero è solo una
     // proposta. In entrambi i casi l'analisi non parte (il pulsante è già
     // disabilitato: questa è la stessa regola, difesa anche qui).
-    if (captureFor === "personal" && (!periodsPerDayValid || !periodsPerDayConfirmed)) {
+    if (requiresPeriodsPerDay && (!periodsPerDayValid || !periodsPerDayConfirmed)) {
       setAnalysisError(periodsPerDayValid ? PERIODS_PER_DAY_CONFIRM_ERROR : PERIODS_PER_DAY_QUESTION_ERROR);
       return;
     }
@@ -1164,7 +1175,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                   dall'utente PRIMA dell'analisi. Da questo numero dipendono la
                   lunghezza attesa della sequenza e il giorno/periodo di ogni
                   cella: senza un valore valido l'analisi non parte. */}
-              {captureFor === "personal" && (
+              {requiresPeriodsPerDay && (
                 <div className="p-3 rounded-xl border border-stone-200 bg-white space-y-2">
                   <label htmlFor="scan-periods-per-day" className="block text-xs font-semibold text-stone-900">
                     {PERIODS_PER_DAY_QUESTION}
@@ -1207,11 +1218,24 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                     />
                     <span className="text-xs text-stone-700">
                       {periodsPerDayValid
-                        ? `Confermo: il mio orario ha ${periodsPerDay} ${periodsPerDay === 1 ? "ora" : "ore"} ogni giorno (${expectedCellCount} posizioni, lunedì-venerdì).`
+                        ? captureFor === "curricular"
+                          ? `Confermo: la griglia ha ${periodsPerDay} ${periodsPerDay === 1 ? "ora" : "ore"} ogni giorno (${expectedCellCount} colonne orarie, lunedì-venerdì).`
+                          : `Confermo: il mio orario ha ${periodsPerDay} ${periodsPerDay === 1 ? "ora" : "ore"} ogni giorno (${expectedCellCount} posizioni, lunedì-venerdì).`
                         : "Inserisci prima il numero di ore per poter confermare."}
                     </span>
                   </label>
                 </div>
+              )}
+
+              {/* DIAGNOSTICA TEMPORANEA: verifica visiva del crop curricolare.
+                  Per rimuoverla: eliminare questo blocco e CropDiagnosticPanel.tsx. */}
+              {captureFor === "curricular" && (
+                <CropDiagnosticPanel
+                  imageBase64={fileBase64 ?? ""}
+                  mimeType={file?.type ?? ""}
+                  imageUrl={previewUrl}
+                  periodsPerDay={periodsPerDayConfirmed && periodsPerDayValid ? periodsPerDay : 0}
+                />
               )}
 
               <label className="flex items-start gap-3 p-3 rounded-xl border border-stone-200 bg-white cursor-pointer">
@@ -1247,7 +1271,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                     !consentGiven || isOffline || isAnalyzing
                     // Orario personale: senza un numero di ore valido E confermato
                     // non esiste una lunghezza attesa certa, quindi non si parte.
-                    || (captureFor === "personal" && (!periodsPerDayValid || !periodsPerDayConfirmed))
+                    || (requiresPeriodsPerDay && (!periodsPerDayValid || !periodsPerDayConfirmed))
                   }
                   className="min-h-[44px] px-5 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white text-sm font-bold shadow-xs flex items-center gap-2"
                 >

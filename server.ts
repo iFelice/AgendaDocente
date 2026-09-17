@@ -2,6 +2,16 @@ import { circularAnalysisGuards, analysisErrorHandler } from "./server/circularA
 import { createAnalysisErrorHandler, createAnalysisGuards } from "./server/analysisGuards";
 import { groqConfigured, groqFallbackDecision, runGroqJson } from "./server/groqAnalysis";
 import {
+  buildTimetableGeometryPrompt,
+  describeGeometryFailure,
+  geometryRejectionMessage,
+  parseTimetableGeometryResponse,
+  timetableGeometrySchema,
+  TIMETABLE_GEOMETRY_USER_TEXT,
+  validateTimetableGeometryPayload,
+} from "./server/timetableGeometry";
+import { totalPeriodColumns } from "./src/utils/timetableCrops";
+import {
   STUDENT_DOCUMENT_PROMPT,
   buildCurricularTimetablePrompt,
   buildPersonalTimetablePrompt,
@@ -548,7 +558,12 @@ async function runGroqTimetableFallback(input: {
   responseSchema: unknown;
   signal: AbortSignal;
   elapsedMs: number;
+  /** Testo utente della chiamata (default: quello dell'analisi orario). */
+  userText?: string;
+  /** Etichetta dei log (default: "AI Orari"). */
+  label?: string;
 }): Promise<{ ok: true; text: string; source: string } | { ok: false }> {
+  const label = input.label ?? "AI Orari";
   const remainingBudgetMs = TIMETABLE_ANALYSIS_TIMEOUT_MS - input.elapsedMs;
   const decision = groqFallbackDecision({
     geminiOk: input.run.ok,
@@ -559,18 +574,18 @@ async function runGroqTimetableFallback(input: {
   });
   if (!decision.proceed) {
     // "gemini-ok" non è un evento: con Gemini a buon fine il fallback non parte.
-    if (decision.reason !== "gemini-ok") console.log(`[AI Orari] fallback=groq saltato motivo=${decision.reason}`);
+    if (decision.reason !== "gemini-ok") console.log(`[${label}] fallback=groq saltato motivo=${decision.reason}`);
     return { ok: false };
   }
-  console.log(`[AI Orari] fallback=groq motivo=${input.run.category} mime=${input.mimeType} budgetMs=${remainingBudgetMs}`);
+  console.log(`[${label}] fallback=groq motivo=${input.run.category} mime=${input.mimeType} budgetMs=${remainingBudgetMs}`);
   const result = await runGroqJson({
     systemInstruction: input.systemInstruction,
-    userText: TIMETABLE_USER_TEXT,
+    userText: input.userText ?? TIMETABLE_USER_TEXT,
     imageBase64: input.imageBase64,
     mimeType: input.mimeType,
     responseSchema: input.responseSchema,
     signal: input.signal,
-    label: "AI Orari",
+    label,
     budgetMs: remainingBudgetMs,
   });
   return result.ok ? { ok: true, text: result.text, source: result.source } : { ok: false };
@@ -686,6 +701,101 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
   }
 });
 app.use("/api/analyze-timetable", scanAnalysisErrorHandler);
+
+// ---------------------------------------------------------------------------
+// Scansiona documento: GEOMETRIA della griglia (diagnostica crop curricolare)
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /api/analyze-timetable-geometry
+ * { imageBase64, mimeType, periodsPerDay } -> { success, source, geometry }
+ *
+ * Misura DOVE stanno tabella, colonna MATERIA e griglia giorno x ora, per poter
+ * ritagliare fisicamente MATERIA + la singola colonna oraria di interesse.
+ *
+ * Non legge il contenuto: lo schema accetta solo numeri, quindi non possono
+ * uscire classi, materie, docenti o testo di celle. Nessun `profile` richiesto:
+ * alla geometria non serve sapere chi è il docente.
+ *
+ * `periodsPerDay` è dichiarato dall'UTENTE (mai dedotto dall'immagine) e fissa
+ * il numero di colonne orarie: le colonne sono derivate dal codice, non chieste
+ * al modello una per una.
+ *
+ * Una geometria che non supera la validazione è un 422 esplicito: nessuna
+ * coordinata di ripiego.
+ */
+app.post("/api/analyze-timetable-geometry", ...createAnalysisGuards(validateTimetableGeometryPayload), async (req, res) => {
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(), TIMETABLE_ANALYSIS_TIMEOUT_MS);
+  const abort = () => controller.abort();
+  res.once("close", abort);
+  try {
+    const { imageBase64, mimeType, periodsPerDay } = req.body;
+    const ai = getGeminiClient();
+    if (!ai) {
+      return res.status(503).json({ success: false, error: "Il servizio di analisi non è disponibile. Riprova più tardi." });
+    }
+    const systemInstruction = buildTimetableGeometryPrompt(periodsPerDay);
+    const analysisStartedAt = Date.now();
+    const run = await runGeminiJson({
+      systemInstruction,
+      contents: [
+        { inlineData: { data: imageBase64, mimeType } },
+        { text: TIMETABLE_GEOMETRY_USER_TEXT },
+      ],
+      responseSchema: timetableGeometrySchema,
+      signal: controller.signal,
+      label: "AI Geometria",
+      // Stesso budget dell'analisi orario: nessuna nuova costante di timeout.
+      budgetMs: TIMETABLE_ANALYSIS_TIMEOUT_MS,
+      thinkingLevel: "low",
+    });
+    console.log(`[AI Geometria] provider=gemini esito=${run.ok ? "ok" : "fallito"} categoria=${run.category} tentativi=${run.attempts.length}`);
+    let text = run.text;
+    let source = run.source;
+    if (!run.ok) {
+      // Stesso fallback dell'analisi orario: stesse condizioni, stesso budget.
+      const fallback = await runGroqTimetableFallback({
+        run,
+        systemInstruction,
+        imageBase64,
+        mimeType,
+        responseSchema: timetableGeometrySchema,
+        signal: controller.signal,
+        elapsedMs: Date.now() - analysisStartedAt,
+        userText: TIMETABLE_GEOMETRY_USER_TEXT,
+        label: "AI Geometria",
+      });
+      if (!fallback.ok) {
+        return res.status(503).json({ success: false, error: "Il documento non è stato elaborato. Riprova più tardi." });
+      }
+      text = fallback.text;
+      source = fallback.source;
+    }
+    const decoded = parseGeminiJson(text, "AI Geometria");
+    if (!decoded.ok) {
+      return res.status(503).json({ success: false, error: "Il documento non è stato elaborato. Riprova più tardi." });
+    }
+    let geometry: ReturnType<typeof parseTimetableGeometryResponse>;
+    try {
+      geometry = parseTimetableGeometryResponse(decoded.value, periodsPerDay);
+    } catch (error: unknown) {
+      // Diagnostica privacy-safe: solo il codice dell'errore, mai i numeri né
+      // alcun contenuto del documento.
+      console.warn(describeGeometryFailure(error));
+      return res.status(422).json({ success: false, error: geometryRejectionMessage(error) });
+    }
+    console.log(`[AI Geometria] fase=geometria esito=ok orePerGiorno=${periodsPerDay} colonne=${totalPeriodColumns(periodsPerDay)}`);
+    return res.json({ success: true, source, geometry });
+  } catch (error: unknown) {
+    console.warn(`[AI Geometria] fase=endpoint esito=fallito tipo=${error instanceof Error ? error.name : "UnknownError"} geometria non riuscita.`);
+    return res.status(500).json({ success: false, error: "Analisi non riuscita. Riprova." });
+  } finally {
+    clearTimeout(deadline);
+    res.off("close", abort);
+  }
+});
+app.use("/api/analyze-timetable-geometry", scanAnalysisErrorHandler);
 
 // ---------------------------------------------------------------------------
 // Scansiona documento: registro / appunti (impegni alunni)
