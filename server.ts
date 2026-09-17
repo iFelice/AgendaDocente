@@ -10,6 +10,16 @@ import {
   TIMETABLE_GEOMETRY_USER_TEXT,
   validateTimetableGeometryPayload,
 } from "./server/timetableGeometry";
+import {
+  buildTimetableStripPrompt,
+  buildTimetableStripUserText,
+  describeStripFailure,
+  parseTimetableStripResponse,
+  stripRejectionMessage,
+  stripSuccessLog,
+  timetableStripSchema,
+  validateTimetableStripPayload,
+} from "./server/timetableStrip";
 import { totalPeriodColumns } from "./src/utils/timetableCrops";
 import {
   STUDENT_DOCUMENT_PROMPT,
@@ -796,6 +806,105 @@ app.post("/api/analyze-timetable-geometry", ...createAnalysisGuards(validateTime
   }
 });
 app.use("/api/analyze-timetable-geometry", scanAnalysisErrorHandler);
+
+/**
+ * POST /api/analyze-timetable-strip
+ * { imageBase64, mimeType, classLabel } -> { success, source, outcome, subjects }
+ *
+ * PROVA DIAGNOSTICA su UNA sola coordinata: legge la strip composta
+ * `[MATERIA] | [COLONNA ORARIA]` già ritagliata dal client e cerca SOLO la
+ * classe richiesta.
+ *
+ * Il provider riceve ESCLUSIVAMENTE quell'immagine: la richiesta accetta un solo
+ * campo immagine e non c'è alcun canale per inviare anche la fotografia
+ * originale. Giorno e periodo non viaggiano nel payload: sono già risolti dal
+ * ritaglio, quindi il modello non può rispondere su un'altra colonna.
+ *
+ * Budget: UNA sola chiamata di analisi (più l'eventuale fallback), con gli
+ * stessi modelli, timeout e retry dell'analisi orario. Nessun loop sulle
+ * coordinate.
+ *
+ * L'esito NON viene salvato: non tocca orario, crossref, Firestore o backup.
+ */
+app.post("/api/analyze-timetable-strip", ...createAnalysisGuards(validateTimetableStripPayload), async (req, res) => {
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(), TIMETABLE_ANALYSIS_TIMEOUT_MS);
+  const abort = () => controller.abort();
+  res.once("close", abort);
+  try {
+    const { imageBase64, mimeType, classLabel } = req.body;
+    const ai = getGeminiClient();
+    if (!ai) {
+      return res.status(503).json({ success: false, error: "Il servizio di analisi non è disponibile. Riprova più tardi." });
+    }
+    const systemInstruction = buildTimetableStripPrompt(classLabel);
+    const userText = buildTimetableStripUserText(classLabel);
+    const analysisStartedAt = Date.now();
+    const run = await runGeminiJson({
+      systemInstruction,
+      contents: [
+        { inlineData: { data: imageBase64, mimeType } },
+        { text: userText },
+      ],
+      responseSchema: timetableStripSchema,
+      signal: controller.signal,
+      label: "AI Strip",
+      // Stesso budget dell'analisi orario: nessuna nuova costante di timeout.
+      budgetMs: TIMETABLE_ANALYSIS_TIMEOUT_MS,
+      thinkingLevel: "low",
+    });
+    console.log(`[AI Strip] provider=gemini esito=${run.ok ? "ok" : "fallito"} categoria=${run.category} tentativi=${run.attempts.length}`);
+    let text = run.text;
+    let source = run.source;
+    let provider = "gemini";
+    if (!run.ok) {
+      // Stesso fallback dell'analisi orario: stesse condizioni, stesso budget.
+      const fallback = await runGroqTimetableFallback({
+        run,
+        systemInstruction,
+        imageBase64,
+        mimeType,
+        responseSchema: timetableStripSchema,
+        signal: controller.signal,
+        elapsedMs: Date.now() - analysisStartedAt,
+        userText,
+        label: "AI Strip",
+      });
+      if (!fallback.ok) {
+        return res.status(503).json({ success: false, error: "Il documento non è stato elaborato. Riprova più tardi." });
+      }
+      text = fallback.text;
+      source = fallback.source;
+      provider = "groq";
+    }
+    const decoded = parseGeminiJson(text, "AI Strip");
+    if (!decoded.ok) {
+      return res.status(503).json({ success: false, error: "Il documento non è stato elaborato. Riprova più tardi." });
+    }
+    let classification: ReturnType<typeof parseTimetableStripResponse>;
+    try {
+      classification = parseTimetableStripResponse(decoded.value, classLabel);
+    } catch (error: unknown) {
+      // Diagnostica privacy-safe: codice e tipo, mai la classe né le materie.
+      console.warn(describeStripFailure(error));
+      return res.status(422).json({ success: false, error: stripRejectionMessage() });
+    }
+    console.log(stripSuccessLog({ provider, source, durationMs: Date.now() - analysisStartedAt, classification }));
+    return res.json({
+      success: true,
+      source,
+      outcome: classification.outcome,
+      subjects: classification.subjects,
+    });
+  } catch (error: unknown) {
+    console.warn(`[AI Strip] fase=endpoint esito=fallito tipo=${error instanceof Error ? error.name : "UnknownError"} analisi strip non riuscita.`);
+    return res.status(500).json({ success: false, error: "Analisi non riuscita. Riprova." });
+  } finally {
+    clearTimeout(deadline);
+    res.off("close", abort);
+  }
+});
+app.use("/api/analyze-timetable-strip", scanAnalysisErrorHandler);
 
 // ---------------------------------------------------------------------------
 // Scansiona documento: registro / appunti (impegni alunni)

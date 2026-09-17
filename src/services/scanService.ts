@@ -11,6 +11,7 @@ import type { TeacherProfile } from "../types";
 import { OFFLINE_ANALYSIS_MESSAGE, isOnline } from "../utils/documentScanner";
 import type { CurricularScopeCoordinate } from "../utils/timetableAnalysis";
 import type { TimetableGridGeometry } from "../utils/timetableCrops";
+import type { StripMatchOutcome } from "../utils/timetableStrip";
 import { normalizeTimetableGeometry } from "../utils/timetableCrops";
 
 export type ScanTimetableDocumentType = "personal-support-timetable" | "curricular-timetable";
@@ -61,6 +62,27 @@ export interface ScanTimetableGeometryRequest {
   imageBase64: string;
   mimeType: string;
   periodsPerDay: number;
+}
+
+/**
+ * Richiesta di STRIP curricolare (diagnostica su UNA coordinata).
+ *
+ * `imageBase64` è la strip COMPOSTA `[MATERIA] | [COLONNA]`, non la fotografia
+ * originale: il provider non riceve mai entrambe. Nessun profilo e nessuna
+ * coordinata: giorno e periodo sono già risolti dal ritaglio.
+ */
+export interface ScanTimetableStripRequest {
+  imageBase64: string;
+  mimeType: string;
+  classLabel: string;
+}
+
+/** Esito della strip: nessuna materia, una sola, o più di una (ambigua). */
+export interface ScanTimetableStripResult {
+  success: boolean;
+  source?: string;
+  outcome: StripMatchOutcome;
+  subjects: string[];
 }
 
 export interface ScanStudentDocumentRequest {
@@ -181,6 +203,29 @@ export async function analyzeTimetableDocument(req: ScanTimetableRequest): Promi
 export async function analyzeTimetableGeometry(req: ScanTimetableGeometryRequest): Promise<TimetableGridGeometry> {
   const data = await postScan("/api/analyze-timetable-geometry", req);
   return normalizeTimetableGeometry(data.geometry, req.periodsPerDay);
+}
+
+/**
+ * Legge UNA strip curricolare per la classe richiesta.
+ *
+ * L'esito viene RIVALIDATO nel client con la stessa regola di evidenza del
+ * server (`classifyStripMatches`): un match vale solo se la cella letta contiene
+ * la classe, quindi `outcome` non può essere "unique" senza quella prova.
+ *
+ * Nessuna persistenza: il risultato vive nello stato del pannello diagnostico e
+ * viene scartato quando il pannello scompare.
+ */
+export async function analyzeTimetableStrip(req: ScanTimetableStripRequest): Promise<ScanTimetableStripResult> {
+  const data = await postScan("/api/analyze-timetable-strip", req);
+  const subjects = Array.isArray(data.subjects) ? (data.subjects.filter((s) => typeof s === "string") as string[]) : [];
+  const raw = typeof data.outcome === "string" ? data.outcome : "";
+  const outcome: StripMatchOutcome = raw === "unique" || raw === "ambiguous" || raw === "none" ? raw : "none";
+  return {
+    success: true,
+    source: typeof data.source === "string" ? data.source : undefined,
+    outcome,
+    subjects,
+  };
 }
 
 /** Analizza una foto/appunti di registro per estrarre impegni alunni. */

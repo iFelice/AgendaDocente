@@ -1,7 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { ScanLine } from "lucide-react";
-import { analyzeTimetableGeometry } from "../services/scanService";
-import { composeCropForCoordinate, isCroppableMimeType, loadImage } from "../utils/imageCropper";
+import { analyzeTimetableGeometry, analyzeTimetableStrip } from "../services/scanService";
+import {
+  COMPOSED_CROP_MIME_TYPE,
+  composeCropBase64ForCoordinate,
+  isCroppableMimeType,
+  loadImage,
+} from "../utils/imageCropper";
+import { stripOutcomeMessage } from "../utils/timetableStrip";
 import {
   subjectColumnCropSpec,
   totalPeriodColumns,
@@ -34,6 +40,9 @@ import { revokePreviewUrl } from "../utils/documentScanner";
 /** Coordinata della preview: lunedì, 2ª ora. */
 export const CROP_DIAGNOSTIC_COORDINATE = { dayOfWeek: 1, periodIndex: 2 } as const;
 
+/** Classe cercata nella prova end-to-end della strip (diagnostica temporanea). */
+export const CROP_DIAGNOSTIC_CLASS_LABEL = "3D";
+
 export const CROP_DIAGNOSTIC_UNSUPPORTED =
   "La preview del crop è disponibile solo per le foto (PNG, JPEG, WebP), non per i PDF.";
 
@@ -48,6 +57,7 @@ export interface CropDiagnosticPanelProps {
 }
 
 type Status = "idle" | "running" | "ready" | "error";
+type StripStatus = "idle" | "running" | "done" | "error";
 
 export const CropDiagnosticPanel: React.FC<CropDiagnosticPanelProps> = ({
   imageBase64,
@@ -59,14 +69,30 @@ export const CropDiagnosticPanel: React.FC<CropDiagnosticPanelProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | undefined>(undefined);
   const [summary, setSummary] = useState<string | null>(null);
+  const [stripStatus, setStripStatus] = useState<StripStatus>("idle");
+  const [stripResult, setStripResult] = useState<string | null>(null);
+  const [stripError, setStripError] = useState<string | null>(null);
   const objectUrlRef = useRef<string | undefined>(undefined);
+  /**
+   * Base64 della strip composta: vive SOLO in questo ref, in memoria. Non è
+   * scritto su disco, non va in IndexedDB/Firestore, non entra nei backup e non
+   * viene loggato. Viene azzerato a ogni nuova esecuzione e allo smontaggio.
+   */
+  const stripBase64Ref = useRef<string | null>(null);
 
   /** Nessun object URL sopravvive al componente: revoca allo smontaggio. */
-  useEffect(() => () => revokePreviewUrl(objectUrlRef.current), []);
+  useEffect(
+    () => () => {
+      revokePreviewUrl(objectUrlRef.current);
+      stripBase64Ref.current = null;
+    },
+    [],
+  );
 
   const release = useCallback(() => {
     revokePreviewUrl(objectUrlRef.current);
     objectUrlRef.current = undefined;
+    stripBase64Ref.current = null;
   }, []);
 
   const runnable = periodsPerDay > 0 && !!imageBase64 && !!imageUrl;
@@ -78,6 +104,9 @@ export const CropDiagnosticPanel: React.FC<CropDiagnosticPanelProps> = ({
     setPreviewUrl(undefined);
     setSummary(null);
     setError(null);
+    setStripResult(null);
+    setStripError(null);
+    setStripStatus("idle");
     setStatus("running");
     try {
       const geometry: TimetableGridGeometry = await analyzeTimetableGeometry({
@@ -87,7 +116,9 @@ export const CropDiagnosticPanel: React.FC<CropDiagnosticPanelProps> = ({
       });
       const spec = subjectColumnCropSpec(geometry, CROP_DIAGNOSTIC_COORDINATE.dayOfWeek, CROP_DIAGNOSTIC_COORDINATE.periodIndex);
       const { image, width, height } = await loadImage(imageUrl);
-      const composed = await composeCropForCoordinate(image, spec, width, height);
+      const composed = await composeCropBase64ForCoordinate(image, spec, width, height);
+      // La strip è pronta per l'analisi: il provider riceverà SOLO questa.
+      stripBase64Ref.current = composed.base64;
       const url = URL.createObjectURL(composed.blob);
       objectUrlRef.current = url;
       setPreviewUrl(url);
@@ -109,6 +140,33 @@ export const CropDiagnosticPanel: React.FC<CropDiagnosticPanelProps> = ({
       setStatus("error");
     }
   }, [imageBase64, imageUrl, mimeType, periodsPerDay, release, runnable]);
+
+  /**
+   * Prova end-to-end sulla strip già composta: il provider riceve SOLO
+   * `[MATERIA] | [LUNEDÌ 2ª]` e cerca solo la classe richiesta.
+   *
+   * L'esito è mostrato e basta: non viene salvato nell'orario, non chiama
+   * "Ricostruisci il mio orario", non tocca crossref, Firestore o backup.
+   */
+  const runStrip = useCallback(async () => {
+    const stripBase64 = stripBase64Ref.current;
+    if (!stripBase64) return;
+    setStripResult(null);
+    setStripError(null);
+    setStripStatus("running");
+    try {
+      const result = await analyzeTimetableStrip({
+        imageBase64: stripBase64,
+        mimeType: COMPOSED_CROP_MIME_TYPE,
+        classLabel: CROP_DIAGNOSTIC_CLASS_LABEL,
+      });
+      setStripResult(stripOutcomeMessage(CROP_DIAGNOSTIC_CLASS_LABEL, { outcome: result.outcome, subjects: result.subjects }));
+      setStripStatus("done");
+    } catch (caught: unknown) {
+      setStripError(caught instanceof Error ? caught.message : "Analisi della strip non riuscita.");
+      setStripStatus("error");
+    }
+  }, []);
 
   if (!supported) {
     return (
@@ -155,6 +213,29 @@ export const CropDiagnosticPanel: React.FC<CropDiagnosticPanelProps> = ({
           alt="Anteprima della colonna MATERIA affiancata alla colonna oraria richiesta"
           className="w-full rounded-lg border border-stone-200 bg-white"
         />
+      )}
+      {previewUrl && (
+        <div className="pt-1 space-y-1.5 border-t border-dashed border-stone-300">
+          <button
+            type="button"
+            id="crop-diagnostic-strip-run"
+            onClick={() => void runStrip()}
+            disabled={!stripBase64Ref.current || stripStatus === "running"}
+            className="min-h-[36px] px-3 rounded-lg text-xs font-semibold bg-stone-700 text-white disabled:opacity-50"
+          >
+            {stripStatus === "running" ? "Leggo la colonna…" : `Analizza questa strip per ${CROP_DIAGNOSTIC_CLASS_LABEL}`}
+          </button>
+          {stripResult && (
+            <p id="crop-diagnostic-strip-result" role="status" className="text-[11px] font-semibold text-stone-700">
+              {stripResult}
+            </p>
+          )}
+          {stripError && (
+            <p id="crop-diagnostic-strip-error" role="status" className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2">
+              {stripError}
+            </p>
+          )}
+        </div>
       )}
     </div>
   );

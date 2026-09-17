@@ -99,6 +99,52 @@ export async function composeCropForCoordinate(
   return composeSubjectAndColumn(image, rects);
 }
 
+/** MIME prodotto dal canvas: la strip inviata al provider è sempre un PNG. */
+export const COMPOSED_CROP_MIME_TYPE = "image/png";
+
+/** Strip composta pronta per l'invio: blob in memoria + la sua codifica base64. */
+export interface ComposedCropBase64Result extends ComposedCropResult {
+  /** Codifica base64 del PNG, SENZA prefisso `data:`. */
+  base64: string;
+  mimeType: typeof COMPOSED_CROP_MIME_TYPE;
+}
+
+/** Blob -> base64 puro (senza prefisso `data:`), tutto in memoria. */
+export function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const url = String(reader.result ?? "");
+      const separator = url.indexOf(",");
+      if (!url.startsWith("data:") || separator < 0) {
+        reject(new Error("Codifica dell'immagine ritagliata non riuscita."));
+        return;
+      }
+      resolve(url.slice(separator + 1));
+    };
+    reader.onerror = () => reject(new Error("Lettura dell'immagine ritagliata non riuscita."));
+    reader.readAsDataURL(blob);
+  });
+}
+
+/**
+ * Come `composeCropForCoordinate`, ma restituisce anche il base64 da inviare al
+ * provider: è il valore che viaggia verso `/api/analyze-timetable-strip`.
+ *
+ * Il provider riceve SOLO questa stringa. La fotografia originale non viene né
+ * allegata né rigenerata qui, e il risultato non viene scritto da nessuna parte:
+ * vive nello stato del pannello diagnostico e sparisce con esso.
+ */
+export async function composeCropBase64ForCoordinate(
+  image: CroppableImageSource,
+  spec: SubjectColumnCropSpec,
+  imageWidth: number,
+  imageHeight: number,
+): Promise<ComposedCropBase64Result> {
+  const composed = await composeCropForCoordinate(image, spec, imageWidth, imageHeight);
+  return { ...composed, base64: await blobToBase64(composed.blob), mimeType: COMPOSED_CROP_MIME_TYPE };
+}
+
 /**
  * Carica un'immagine da un object URL (o data URL) già creato in memoria.
  *
