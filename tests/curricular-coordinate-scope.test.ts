@@ -5,9 +5,12 @@ import {
   MAX_CURRICULAR_SUBJECTS_PER_COORDINATE,
   MAX_GRID_PERIODS,
   TimetableShapeError,
+  MAX_CURRICULAR_CELL_TEXT_LENGTH,
   buildPersonalCoordinateScope,
+  curricularCellTextContainsClass,
   curricularCellsToSlots,
   curricularScopeToRequestPayload,
+  curricularSubjectsFromMatches,
   curricularTargetsToRowsAndCells,
   normalizeCurricularCoordinateScope,
   normalizeCurricularScopeCoordinate,
@@ -19,10 +22,13 @@ import {
 import {
   buildCurricularTimetablePrompt,
   buildPersonalTimetablePrompt,
+  curricularTimetableSchema,
   describeAnalysisFailure,
   parseTimetableAiResponse,
+  personalTimetableSchema,
   validateTimetableAnalysisPayload,
 } from '../server/timetableAnalysis';
+import { groqJsonSchemaFrom } from '../server/groqAnalysis';
 import { crossrefTimetables, RECON_NOTES } from '../src/utils/timetableCrossref';
 import { DAY_LABELS } from '../src/utils/timetableTokens';
 
@@ -134,16 +140,16 @@ test('prompt curricolare: vieta di leggere altre ore dello stesso giorno e altri
   assert.ok(prompt.includes('considera SOLO quella colonna fisica'), 'ambito ristretto a una colonna');
   assert.ok(prompt.includes('ignora completamente le altre ore dello stesso giorno e tutti gli altri giorni'), 'divieto esplicito su ore e giorni');
   assert.ok(prompt.includes('scorri SOLO quella colonna'), 'la ricerca resta dentro la colonna');
-  assert.ok(prompt.includes('quelle occorrenze NON producono materie'), 'le occorrenze altrove non valgono');
+  assert.ok(prompt.includes('quelle occorrenze NON producono elementi'), 'le occorrenze altrove non valgono');
   assert.ok(prompt.includes('NON copiarle da altre coordinate'), 'nessun riporto fra coordinate');
 });
 
 test('prompt curricolare: materie multiple SOLO se la classe è in più righe della stessa colonna', () => {
   const prompt = buildCurricularTimetablePrompt(SCOPE);
-  assert.ok(prompt.includes('Più materie sono ammesse SOLO se la classe richiesta compare in PIÙ RIGHE della STESSA colonna fisica'), 'il multiplo è condizionato');
+  assert.ok(prompt.includes('Più elementi sono ammessi SOLO se la classe richiesta compare in PIÙ RIGHE della STESSA colonna fisica'), 'il multiplo è condizionato');
   assert.ok(prompt.includes('compresenza, classi aperte o più docenti su quella classe/ora'), 'i casi legittimi restano nominati');
-  assert.ok(prompt.includes('Se la classe compare una sola volta in quella colonna, "subjects" contiene al massimo una materia'), 'una riga -> al più una materia');
-  assert.ok(prompt.includes('una materia per ogni riga trovata al passo e)'), 'una materia per riga, non una a caso');
+  assert.ok(prompt.includes('Se la classe compare una sola volta in quella colonna, "matches" contiene al massimo un elemento'), 'una riga -> al più un elemento');
+  assert.ok(prompt.includes('UN elemento per ogni cella selezionata al passo d)'), 'un elemento per cella, non una materia a caso');
   // Regressione: l'invito incondizionato del contratto precedente è rimosso. Era
   // ciò che rendeva conveniente raccogliere le materie della classe ovunque.
   for (const gone of [
@@ -155,13 +161,17 @@ test('prompt curricolare: materie multiple SOLO se la classe è in più righe de
   }
 });
 
-test('prompt curricolare: subjects vuoto se la classe non compare nella colonna richiesta', () => {
+test('prompt curricolare: matches vuoto se la classe non compare nella colonna richiesta', () => {
   const prompt = buildCurricularTimetablePrompt(SCOPE);
-  assert.ok(prompt.includes('Se la classe richiesta NON compare in quella colonna fisica, restituisci quella coordinata con "subjects": []'), 'assenza nella colonna -> array vuoto');
+  assert.ok(prompt.includes('Se la classe richiesta NON compare in quella colonna fisica, restituisci quella coordinata con "matches": []'), 'assenza nella colonna -> array vuoto');
   assert.ok(prompt.includes('ANCHE quando la stessa classe compare in altre ore dello stesso giorno o in altri giorni'), 'la classe presente altrove non basta');
   assert.ok(prompt.includes('NON inventare materie'), 'nessuna materia inventata');
   assert.ok(prompt.includes('NESSUNA voce per coordinate non richieste'), 'elenco chiuso');
-  assert.ok(prompt.includes('{ "targets": [ { "dayOfWeek": 2, "periodIndex": 1, "classLabel": "3D", "subjects": ["Matematica"] } ] }'), 'formato dichiarato');
+  assert.ok(prompt.includes('{ "targets": [ { "dayOfWeek": 2, "periodIndex": 1, "classLabel": "3D", "matches": [ { "cellText": "3D", "subject": "Matematica" } ] } ] }'), 'formato dichiarato');
+  // L'evidenza è nominata nel prompt, e il contratto vecchio non compare più.
+  assert.ok(prompt.includes('"cellText" riporta il testo ESATTO contenuto in quella cella della griglia'), 'la cella letta va riportata');
+  assert.ok(prompt.includes('Un elemento la cui cellText non contiene la classe richiesta viene scartato insieme alla sua materia'), 'il modello sa che una materia senza cella non vale');
+  assert.ok(!prompt.includes('"subjects"'), 'nessun residuo del contratto senza evidenza');
 });
 
 test('prompt curricolare: coordinate con stesso giorno+periodo raggruppate in una colonna', () => {
@@ -306,9 +316,10 @@ test('una coordinata può produrre 0, 1 o più materie: none, unique e ambiguous
   ];
   const outcome = parseTimetableAiResponse('curricular-timetable', {
     targets: [
-      { dayOfWeek: 1, periodIndex: 1, classLabel: '1A', subjects: ['Matematica'] },
-      { dayOfWeek: 1, periodIndex: 2, classLabel: '1A', subjects: ['Italiano', 'Storia'] }, // compresenza
-      { dayOfWeek: 1, periodIndex: 3, classLabel: '1A', subjects: [] },                     // non leggibile
+      { dayOfWeek: 1, periodIndex: 1, classLabel: '1A', matches: [{ cellText: '1A', subject: 'Matematica' }] },
+      // compresenza: due righe della stessa colonna contengono la classe
+      { dayOfWeek: 1, periodIndex: 2, classLabel: '1A', matches: [{ cellText: '1A', subject: 'Italiano' }, { cellText: '1A 1B', subject: 'Storia' }] },
+      { dayOfWeek: 1, periodIndex: 3, classLabel: '1A', matches: [] },                      // non leggibile
     ],
   }, '', 0, scope);
 
@@ -341,10 +352,19 @@ test('nessuna materia inventata: fuori elenco, generiche e duplicate non sopravv
   const scope = [{ dayOfWeek: 2, periodIndex: 1, classLabel: '2B' }];
   const targets = validateCurricularTargetsPayload({
     targets: [
-      { dayOfWeek: 2, periodIndex: 1, classLabel: '2B', subjects: ['Matematica', 'matematica', 'Tutte le materie', '  ', 'Scienze'] },
-      { dayOfWeek: 3, periodIndex: 1, classLabel: '2B', subjects: ['Arte'] },  // giorno non richiesto
-      { dayOfWeek: 2, periodIndex: 2, classLabel: '2B', subjects: ['Arte'] },  // ora non richiesta
-      { dayOfWeek: 2, periodIndex: 1, classLabel: '3C', subjects: ['Arte'] },  // classe non richiesta
+      {
+        dayOfWeek: 2, periodIndex: 1, classLabel: '2B',
+        matches: [
+          { cellText: '2B', subject: 'Matematica' },
+          { cellText: '2B', subject: 'matematica' },        // duplicato
+          { cellText: '2B', subject: 'Tutte le materie' },  // generica
+          { cellText: '2B', subject: '  ' },                // vuota
+          { cellText: '2B 3C', subject: 'Scienze' },        // cella con più classi: valida
+        ],
+      },
+      { dayOfWeek: 3, periodIndex: 1, classLabel: '2B', matches: [{ cellText: '2B', subject: 'Arte' }] },  // giorno non richiesto
+      { dayOfWeek: 2, periodIndex: 2, classLabel: '2B', matches: [{ cellText: '2B', subject: 'Arte' }] },  // ora non richiesta
+      { dayOfWeek: 2, periodIndex: 1, classLabel: '3C', matches: [{ cellText: '3C', subject: 'Arte' }] },  // classe non richiesta
     ],
   }, scope);
   assert.equal(targets.length, 1, 'sopravvive solo la coordinata richiesta');
@@ -353,12 +373,17 @@ test('nessuna materia inventata: fuori elenco, generiche e duplicate non sopravv
   // Forma della risposta: rifiuti tipizzati, mai crash.
   for (const bad of [
     { targets: 'no' },
-    { targets: [{ dayOfWeek: 2, periodIndex: 1, classLabel: '2B' }] },                    // subjects assente
-    { targets: [{ dayOfWeek: 2, periodIndex: 1, classLabel: '2B', subjects: 'Matematica' }] },
-    { targets: [{ dayOfWeek: 9, periodIndex: 1, classLabel: '2B', subjects: [] }] },        // giorno impossibile
-    { targets: [{ dayOfWeek: 2, periodIndex: 1, classLabel: 'Co', subjects: [] }] },        // classe impossibile
-    { targets: [{ dayOfWeek: 2, periodIndex: 1, classLabel: '2B', subjects: [5] }] },       // materia non stringa
-    { targets: [{ dayOfWeek: 2, periodIndex: 1, classLabel: '2B', subjects: Array(MAX_CURRICULAR_SUBJECTS_PER_COORDINATE + 1).fill('Arte') }] },
+    { targets: [{ dayOfWeek: 2, periodIndex: 1, classLabel: '2B' }] },                    // matches assente
+    { targets: [{ dayOfWeek: 2, periodIndex: 1, classLabel: '2B', matches: 'Matematica' }] },
+    { targets: [{ dayOfWeek: 9, periodIndex: 1, classLabel: '2B', matches: [] }] },         // giorno impossibile
+    { targets: [{ dayOfWeek: 2, periodIndex: 1, classLabel: 'Co', matches: [] }] },         // classe impossibile
+    { targets: [{ dayOfWeek: 2, periodIndex: 1, classLabel: '2B', matches: [{ cellText: '2B', subject: 5 }] }] },  // materia non stringa
+    { targets: [{ dayOfWeek: 2, periodIndex: 1, classLabel: '2B', matches: [{ subject: 'Arte' }] }] },              // cellText assente
+    { targets: [{ dayOfWeek: 2, periodIndex: 1, classLabel: '2B', matches: ['2B'] }] },                             // match non oggetto
+    // Il contratto vecchio non rientra dalla finestra: materie dichiarate senza
+    // la cella da cui sono state lette sono un payload fuori contratto.
+    { targets: [{ dayOfWeek: 2, periodIndex: 1, classLabel: '2B', subjects: ['Matematica'] }] },
+    { targets: [{ dayOfWeek: 2, periodIndex: 1, classLabel: '2B', matches: Array(MAX_CURRICULAR_SUBJECTS_PER_COORDINATE + 1).fill({ cellText: '2B', subject: 'Arte' }) }] },
     {},
     null,
   ]) {
@@ -443,12 +468,12 @@ test('flusso personale invariato: prompt, validazione e request non conoscono le
 test('privacy: la diagnostica curricolare riporta solo conteggi', async () => {
   const failure = describeAnalysisFailure(
     new TimetableShapeError('Coordinata non valida (#0).'),
-    { targets: [{ dayOfWeek: 2, periodIndex: 1, classLabel: '2B', subjects: ['Matematica'] }] },
+    { targets: [{ dayOfWeek: 2, periodIndex: 1, classLabel: '2B', matches: [{ cellText: '2B', subject: 'Matematica' }] }] },
     'curricular-timetable',
   );
   assert.match(failure, /documento=curricolare/);
   assert.match(failure, /target=1/, 'conteggio dei target');
-  for (const secret of ['2B', 'Matematica', 'dayOfWeek', 'classLabel', 'subjects']) {
+  for (const secret of ['2B', 'Matematica', 'dayOfWeek', 'classLabel', 'subjects', 'matches', 'cellText']) {
     assert.ok(!failure.includes(secret), `il log non contiene ${secret}`);
   }
 
@@ -461,5 +486,212 @@ test('privacy: la diagnostica curricolare riporta solo conteggi', async () => {
   assert.match(line!, /coordinateRestituite=\$\{returned\}/);
   for (const secret of ['classLabel', 'subject', 'rowLabel', 'imageBase64', 'run.text', 'JSON.stringify']) {
     assert.ok(!line!.includes(secret), `la riga di log non contiene ${secret}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 7. EVIDENZA DELLA CELLA: UNA MATERIA DEVE PROVENIRE DALLA CELLA LETTA
+// ---------------------------------------------------------------------------
+
+/**
+ * Caso reale che ha motivato il contratto con evidenza: su una tabella densa il
+ * modello rispondeva con la stessa materia su TUTTE le coordinate richieste
+ * (18 ore, 18 materie, 0 ambigue) perché dichiarare una materia non richiedeva
+ * alcuna prova. Qui la classe richiesta è 2B, lunedì 2ª ora.
+ */
+const EVIDENCE_SCOPE = [{ dayOfWeek: 1, periodIndex: 2, classLabel: '2B' }];
+const evidenceSubjects = (matches: unknown): string[] =>
+  validateCurricularTargetsPayload(
+    { targets: [{ dayOfWeek: 1, periodIndex: 2, classLabel: '2B', matches }] },
+    EVIDENCE_SCOPE,
+  )[0].subjects;
+
+test('evidenza: cellText con la classe richiesta -> materia accettata', () => {
+  assert.deepEqual(evidenceSubjects([{ cellText: '2B', subject: 'Matematica' }]), ['Matematica']);
+  // La normalizzazione è quella delle celle reali: grafie diverse della stessa
+  // classe restano evidenza valida.
+  assert.deepEqual(evidenceSubjects([{ cellText: '2 B', subject: 'Matematica' }]), ['Matematica']);
+  assert.deepEqual(evidenceSubjects([{ cellText: 'classe 2B', subject: 'Matematica' }]), ['Matematica']);
+  assert.ok(curricularCellTextContainsClass('2B', '2B'), 'prova minima: la cella contiene la classe');
+});
+
+test('evidenza: cellText che elenca più classi -> accettata se contiene la richiesta', () => {
+  assert.deepEqual(evidenceSubjects([{ cellText: '2B 3C', subject: 'Matematica' }]), ['Matematica']);
+  assert.deepEqual(evidenceSubjects([{ cellText: '3C / 2B', subject: 'Matematica' }]), ['Matematica']);
+  assert.ok(curricularCellTextContainsClass('2B', '2B 3C'));
+  assert.ok(!curricularCellTextContainsClass('2B', '3C'), 'una cella senza la classe non è evidenza');
+});
+
+test('evidenza: cellText con un\'ALTRA classe -> match scartato', () => {
+  assert.deepEqual(evidenceSubjects([{ cellText: '3C', subject: 'Matematica' }]), []);
+  // Il codice interno non è una classe: nessuna evidenza, nessuna materia.
+  assert.deepEqual(evidenceSubjects([{ cellText: 'D', subject: 'Matematica' }]), []);
+  assert.deepEqual(evidenceSubjects([{ cellText: 'sos', subject: 'Matematica' }]), []);
+  // "2B4" non è la classe 2B (pattern conservativo già esistente).
+  assert.deepEqual(evidenceSubjects([{ cellText: '2B4', subject: 'Matematica' }]), []);
+  // Su più match, sopravvive solo quello provato.
+  assert.deepEqual(
+    evidenceSubjects([{ cellText: '3C', subject: 'Matematica' }, { cellText: '2B', subject: 'Storia' }]),
+    ['Storia'],
+  );
+});
+
+test('evidenza: cellText vuota -> match scartato', () => {
+  assert.deepEqual(evidenceSubjects([{ cellText: '', subject: 'Matematica' }]), []);
+  assert.deepEqual(evidenceSubjects([{ cellText: '   ', subject: 'Matematica' }]), []);
+  assert.ok(!curricularCellTextContainsClass('2B', ''), 'una cella vuota non prova nulla');
+});
+
+test('evidenza: due match validi sulla stessa coordinata -> ambiguità preservata', () => {
+  const targets = validateCurricularTargetsPayload({
+    targets: [{
+      dayOfWeek: 1, periodIndex: 2, classLabel: '2B',
+      matches: [
+        { cellText: '2B', subject: 'Italiano' },
+        { cellText: '2B 3C', subject: 'Storia' },
+      ],
+    }],
+  }, EVIDENCE_SCOPE);
+  assert.deepEqual(targets[0].subjects, ['Italiano', 'Storia'], 'compresenza: due materie provate');
+
+  // Fino al crossref: due materie sulla stessa coordinata restano una scelta manuale.
+  const outcome = parseTimetableAiResponse('curricular-timetable', { targets: targets.map(t => ({ ...t, matches: [] })) }, '', 0, EVIDENCE_SCOPE);
+  const { slots } = curricularCellsToSlots(
+    [
+      { rowIndex: 0, rowLabel: '', subject: 'Italiano', classes: ['2B'] },
+      { rowIndex: 1, rowLabel: '', subject: 'Storia', classes: ['2B'] },
+    ],
+    [
+      { rowIndex: 0, dayOfWeek: 1, periodIndex: 2, raw: '2B' },
+      { rowIndex: 1, dayOfWeek: 1, periodIndex: 2, raw: '2B' },
+    ],
+  );
+  assert.equal(outcome.cells.length, 0, 'senza match validi nessuna cella (sanity)');
+  const { candidates } = personalCellsToCandidates([{ rowIndex: 0, dayOfWeek: 1, periodIndex: 2, raw: '2B' }], [0]);
+  const reconstruction = crossrefTimetables(candidates, slots);
+  assert.equal(reconstruction[0].status, 'ambiguous', 'più materie provate -> ambigua, non una scelta del modello');
+  assert.deepEqual(reconstruction[0].coTeachingSubjects, ['Italiano', 'Storia']);
+});
+
+test('evidenza: nessun match valido -> subjects vuoto, mai una materia di ripiego', () => {
+  assert.deepEqual(evidenceSubjects([]), []);
+  assert.deepEqual(
+    evidenceSubjects([
+      { cellText: '3C', subject: 'Matematica' },
+      { cellText: '', subject: 'Storia' },
+      { cellText: '2B', subject: 'Tutte le materie' }, // cella valida ma materia generica
+    ]),
+    [],
+  );
+  // Derivazione server-side: la stessa regola vale chiamando direttamente la funzione.
+  assert.deepEqual(curricularSubjectsFromMatches('2B', [{ cellText: '3C', subject: 'Matematica' }]), []);
+  assert.deepEqual(curricularSubjectsFromMatches('2B', [{ cellText: '2B', subject: 'Matematica' }, { cellText: '2B', subject: 'matematica' }]), ['Matematica'], 'duplicati tolti');
+  // Il testo della cella resta vincolato: oltre il tetto non è una cella.
+  assert.throws(
+    () => curricularSubjectsFromMatches('2B', [{ cellText: '2B' + 'x'.repeat(MAX_CURRICULAR_CELL_TEXT_LENGTH), subject: 'Matematica' }]),
+    TimetableShapeError,
+    'cellText troppo lunga rifiutata',
+  );
+});
+
+test('evidenza: coordinata fuori dallo scope resta scartata come prima', () => {
+  const targets = validateCurricularTargetsPayload({
+    targets: [
+      { dayOfWeek: 1, periodIndex: 2, classLabel: '2B', matches: [{ cellText: '2B', subject: 'Matematica' }] },
+      { dayOfWeek: 4, periodIndex: 3, classLabel: '2B', matches: [{ cellText: '2B', subject: 'Arte' }] }, // giorno/ora non richiesti
+      { dayOfWeek: 1, periodIndex: 2, classLabel: '3C', matches: [{ cellText: '3C', subject: 'Arte' }] }, // classe non richiesta
+    ],
+  }, EVIDENCE_SCOPE);
+  assert.equal(targets.length, 1, 'solo la coordinata richiesta sopravvive');
+  assert.deepEqual(targets[0], { dayOfWeek: 1, periodIndex: 2, classLabel: '2B', subjects: ['Matematica'] });
+});
+
+test('orario personale invariato: schema e prompt non conoscono matches né cellText', () => {
+  // Schema personale fissato byte per byte: il contratto dell'evidenza è solo
+  // curricolare e non può toccarlo.
+  assert.deepEqual(JSON.parse(JSON.stringify(personalTimetableSchema)), {
+    type: 'OBJECT',
+    properties: {
+      rowLabel: { type: 'STRING', description: 'Etichetta ESATTA della riga del docente letta nel documento (solo testo, nessun numero di riga)' },
+      days: {
+        type: 'ARRAY',
+        items: {
+          type: 'OBJECT',
+          properties: {
+            cells: {
+              type: 'ARRAY',
+              items: { type: 'STRING' },
+              description: 'Una stringa per ogni colonna fisica del giorno, dalla prima ora all\'ultima, cella vuota inclusa come ""',
+            },
+          },
+          required: ['cells'],
+        },
+        description: 'Blocchi giornalieri in ordine fisico: il primo è LUNEDÌ, poi MARTEDÌ, MERCOLEDÌ, GIOVEDÌ e l\'ultimo è VENERDÌ. Un solo blocco per elemento, senza etichette di giorno e senza ore per giorno',
+      },
+    },
+    required: ['rowLabel', 'days'],
+  });
+
+  const prompt = buildPersonalTimetablePrompt('rossi', 5);
+  for (const curricular of ['matches', 'cellText', 'targets', 'classLabel', 'COLONNE FISICHE DA LEGGERE']) {
+    assert.ok(!prompt.includes(curricular), `il prompt personale non conosce ${curricular}`);
+  }
+  // Semantica personale invariata: geometria e guardia d'identità.
+  const days = Array.from({ length: 5 }, () => ({ cells: ['2B', '', '', '', ''] }));
+  const outcome = parseTimetableAiResponse('personal-support-timetable', { rowLabel: 'Rossi M.', days }, 'rossi', 5);
+  assert.equal(outcome.cells.length, 25, '5 blocchi x 5 celle');
+  assert.equal(outcome.cells.filter(c => c.raw === '2B').length, 5);
+  assert.throws(
+    () => parseTimetableAiResponse('personal-support-timetable', { rowLabel: 'Bianchi M.', days }, 'rossi', 5),
+    /non compatibile/,
+  );
+});
+
+test('Gemini e Groq usano lo STESSO schema curricolare, con la prova della cella', async () => {
+  // Un solo oggetto schema nell'endpoint: entrambi i provider ricevono lo stesso
+  // `responseSchema`, quindi non possono divergere sul contratto.
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(new URL('../server.ts', import.meta.url), 'utf8');
+  const shared = 'const responseSchema = isPersonal ? personalTimetableSchema : curricularTimetableSchema;';
+  const fromShared = source.indexOf(shared);
+  assert.ok(fromShared > 0, 'schema curricolare unico per i due provider');
+  const endpoint = source.slice(fromShared);
+  const geminiCall = endpoint.indexOf('await runGeminiJson({');
+  const groqCall = endpoint.indexOf('await runGroqTimetableFallback({');
+  assert.ok(geminiCall > 0 && groqCall > geminiCall, 'ordine delle chiamate nell endpoint');
+  for (const [name, at] of [['gemini', geminiCall], ['groq', groqCall]] as const) {
+    assert.match(endpoint.slice(at, at + 600), /^\s*responseSchema,$/m, `${name} riceve lo schema condiviso`);
+  }
+
+  // Lo Structured Output di Groq è derivato da quello schema: la prova viaggia.
+  const converted = groqJsonSchemaFrom(curricularTimetableSchema) as Record<string, any>;
+  const match = converted.properties.targets.items.properties.matches.items;
+  assert.deepEqual(Object.keys(match.properties).sort(), ['cellText', 'subject']);
+  assert.deepEqual([...converted.properties.targets.items.required].sort(), ['classLabel', 'dayOfWeek', 'matches', 'periodIndex']);
+  assert.equal(converted.additionalProperties, false, 'strict: nessun campo extra');
+});
+
+test('privacy: cellText e subject non finiscono nei log', async () => {
+  // La diagnosi di un rifiuto con payload "parlante" non ne riporta il contenuto.
+  const failure = describeAnalysisFailure(
+    new TimetableShapeError('Testo della cella non valido (#0).'),
+    { targets: [{ dayOfWeek: 1, periodIndex: 2, classLabel: '2B', matches: [{ cellText: '2B', subject: 'Matematica' }] }] },
+    'curricular-timetable',
+  );
+  for (const secret of ['2B', 'Matematica', 'cellText', 'subject', 'matches', 'classLabel']) {
+    assert.ok(!failure.includes(secret), `il log non contiene ${secret}`);
+  }
+  assert.match(failure, /documento=curricolare/, 'resta il contesto, senza dati');
+
+  // Nessuna riga di log dei moduli server interpola il contenuto delle celle.
+  const { readFileSync } = await import('node:fs');
+  for (const file of ['../server.ts', '../server/timetableAnalysis.ts', '../server/groqAnalysis.ts']) {
+    const lines = readFileSync(new URL(file, import.meta.url), 'utf8').split('\n');
+    lines.forEach((line, index) => {
+      if (!/console\.(log|warn|error)/.test(line)) return;
+      for (const secret of ['cellText', 'match.subject', '.subject', 'rowLabel', 'imageBase64']) {
+        assert.ok(!line.includes(secret), `${file}:${index + 1} non logga ${secret}`);
+      }
+    });
   }
 });

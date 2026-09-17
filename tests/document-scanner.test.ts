@@ -621,9 +621,9 @@ test('orario curricolare: validazione runtime della risposta AI sulle coordinate
   ];
   const ok = validateCurricularTargetsPayload({
     targets: [
-      { dayOfWeek: 2, periodIndex: 1, classLabel: '3D', subjects: ['Matematica'] },
-      // Coordinata richiesta ma non leggibile: subjects vuoto, nessuna materia inventata.
-      { dayOfWeek: 3, periodIndex: 2, classLabel: '3E', subjects: [] },
+      { dayOfWeek: 2, periodIndex: 1, classLabel: '3D', matches: [{ cellText: '3D', subject: 'Matematica' }] },
+      // Coordinata richiesta ma non leggibile: matches vuoto, nessuna materia inventata.
+      { dayOfWeek: 3, periodIndex: 2, classLabel: '3E', matches: [] },
     ],
   }, scope);
   assert.deepEqual(ok, [
@@ -632,8 +632,10 @@ test('orario curricolare: validazione runtime della risposta AI sulle coordinate
   ]);
   assert.throws(() => validateCurricularTargetsPayload({ targets: 'no' }, scope), /non valid/i);
   assert.throws(() => validateCurricularTargetsPayload({ targets: [{ dayOfWeek: 2, periodIndex: 1, classLabel: '3D' }] }, scope), /non valid/i);
-  assert.throws(() => validateCurricularTargetsPayload({ targets: [{ dayOfWeek: 9, periodIndex: 1, classLabel: '3D', subjects: [] }] }, scope), /non valid/i);
-  assert.throws(() => validateCurricularTargetsPayload({ targets: [{ dayOfWeek: 2, periodIndex: 1, classLabel: 'Co', subjects: [] }] }, scope), /non valid/i);
+  assert.throws(() => validateCurricularTargetsPayload({ targets: [{ dayOfWeek: 9, periodIndex: 1, classLabel: '3D', matches: [] }] }, scope), /non valid/i);
+  assert.throws(() => validateCurricularTargetsPayload({ targets: [{ dayOfWeek: 2, periodIndex: 1, classLabel: 'Co', matches: [] }] }, scope), /non valid/i);
+  assert.throws(() => validateCurricularTargetsPayload({ targets: [{ dayOfWeek: 2, periodIndex: 1, classLabel: '3D', matches: [{ cellText: '3D' }] }] }, scope), /non valid/i, 'materia senza testo');
+  assert.throws(() => validateCurricularTargetsPayload({ targets: [{ dayOfWeek: 2, periodIndex: 1, classLabel: '3D', subjects: ['Matematica'] }] }, scope), /non valid/i, 'materie dichiarate senza la cella non sono più un contratto valido');
   assert.throws(() => validateCurricularTargetsPayload({ targets: [] }, []), /non valid/i, 'senza coordinate richieste non esiste risposta valida');
 });
 
@@ -1633,9 +1635,9 @@ test('payload malformato: fallimento controllato (TimetableShapeError), non ecce
   // Il curricolare resta sul SUO contratto: risposta per coordinate richieste.
   const curricular = parseTimetableAiResponse('curricular-timetable', {
     targets: [
-      { dayOfWeek: 2, periodIndex: 1, classLabel: '3D', subjects: ['Matematica'] },
-      { dayOfWeek: 3, periodIndex: 1, classLabel: '3E', subjects: ['Italiano', 'Inglese'] },
-      { dayOfWeek: 5, periodIndex: 1, classLabel: '1A', subjects: ['Scienze'] }, // NON richiesta
+      { dayOfWeek: 2, periodIndex: 1, classLabel: '3D', matches: [{ cellText: '3D', subject: 'Matematica' }] },
+      { dayOfWeek: 3, periodIndex: 1, classLabel: '3E', matches: [{ cellText: '3E 3D', subject: 'Italiano' }, { cellText: '3E', subject: 'Inglese' }] },
+      { dayOfWeek: 5, periodIndex: 1, classLabel: '1A', matches: [{ cellText: '1A', subject: 'Scienze' }] }, // NON richiesta
     ],
   }, '', 0, [
     { dayOfWeek: 2, periodIndex: 1, classLabel: '3D' },

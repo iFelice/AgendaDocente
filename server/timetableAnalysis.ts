@@ -239,8 +239,16 @@ Riepilogo: "rowLabel" = etichetta della riga letta; "days" = ${PERSONAL_SCHOOL_D
  * FISICA → classe → riga → materia, e C4 lega il multiplo all'unica evidenza
  * legittima: la classe presente in PIÙ RIGHE di QUELLA colonna. Le compresenze
  * reali continuano ad arrivare tutte al crossref ("ambigue"); una coordinata la
- * cui classe non è in quella colonna torna con "subjects": [] — mai una materia
+ * cui classe non è in quella colonna torna con "matches": [] — mai una materia
  * inventata o presa da un'altra ora.
+ *
+ * Perché ogni materia viaggia con la SUA cella (`matches` e non `subjects`):
+ * descrivere la procedura non rendeva la lettura VERIFICABILE, e su una tabella
+ * densa il modello rispondeva comunque con la stessa materia su tutte le
+ * coordinate. Ora il modello deve riportare il testo della cella in cui ha
+ * trovato la classe, e il server accetta la materia solo se quella cella
+ * contiene davvero la classe richiesta: una materia senza la sua prova viene
+ * scartata invece di finire nell'orario.
  *
  * Le coordinate con lo stesso giorno+periodo sono LA STESSA colonna fisica, e
  * nell'elenco compaiono su una riga sola ("Martedì, 3ª ora → classi: 2B, 3C"):
@@ -282,18 +290,18 @@ b) dentro quel giorno individua la COLONNA FISICA corrispondente al numero d'ora
 c) da qui in avanti considera SOLO quella colonna fisica: ignora completamente le altre ore dello stesso giorno e tutti gli altri giorni;
 d) scorri SOLO quella colonna e seleziona le celle in cui compare la classe richiesta, anche quando la stessa cella elenca più classi (es. "2B 3C");
 e) per ciascuna cella selezionata risali alla SUA riga e riporta la MATERIA/DISCIPLINA associata a quella riga.
-C4. In "subjects" metti una materia per ogni riga trovata al passo e), nell'ordine in cui le leggi. Più materie sono ammesse SOLO se la classe richiesta compare in PIÙ RIGHE della STESSA colonna fisica (compresenza, classi aperte o più docenti su quella classe/ora). Se la classe compare una sola volta in quella colonna, "subjects" contiene al massimo una materia.
-C5. Se la classe richiesta NON compare in quella colonna fisica, restituisci quella coordinata con "subjects": [], ANCHE quando la stessa classe compare in altre ore dello stesso giorno o in altri giorni: quelle occorrenze NON producono materie. Lo stesso vale se la colonna non è leggibile o la materia non è determinabile: NON inventare materie e NON copiarle da altre coordinate.
+C4. In "matches" metti UN elemento per ogni cella selezionata al passo d), nell'ordine in cui le leggi: "cellText" riporta il testo ESATTO contenuto in quella cella della griglia (SOLO quella cella, mai la riga intera e mai il nome del docente) e "subject" la MATERIA/DISCIPLINA della riga a cui la cella appartiene. Più elementi sono ammessi SOLO se la classe richiesta compare in PIÙ RIGHE della STESSA colonna fisica (compresenza, classi aperte o più docenti su quella classe/ora). Se la classe compare una sola volta in quella colonna, "matches" contiene al massimo un elemento. Un elemento la cui cellText non contiene la classe richiesta viene scartato insieme alla sua materia.
+C5. Se la classe richiesta NON compare in quella colonna fisica, restituisci quella coordinata con "matches": [], ANCHE quando la stessa classe compare in altre ore dello stesso giorno o in altri giorni: quelle occorrenze NON producono elementi. Lo stesso vale se la colonna non è leggibile o la materia non è determinabile: NON inventare materie e NON copiarle da altre coordinate.
 C6. Le classi hanno il formato numero 1-5 + lettera (es. 1A, 2B, 3D, 3E): NON trasformare mai codici brevi come D, P, Co o sos in classi.
 C7. In "classLabel" riporta ESATTAMENTE la sigla scritta nella coordinata richiesta, senza variazioni, senza spazi e senza prefissi.
 C8. In "dayOfWeek" e "periodIndex" riporta ESATTAMENTE i numeri della coordinata richiesta: non ricalcolarli e non spostarli.
 C9. Restituisci una e una sola voce per ogni coordinata richiesta (due coordinate che condividono giorno e ora restano DUE voci distinte) e NESSUNA voce per coordinate non richieste.
 C10. Restituisci SOLO l'oggetto JSON richiesto, senza commenti.
 Formato richiesto (nessun altro campo):
-{ "targets": [ { "dayOfWeek": 2, "periodIndex": 1, "classLabel": "3D", "subjects": ["Matematica"] } ] }
+{ "targets": [ { "dayOfWeek": 2, "periodIndex": 1, "classLabel": "3D", "matches": [ { "cellText": "3D", "subject": "Matematica" } ] } ] }
 COLONNE FISICHE DA LEGGERE (${columns.length} colonne per ${scope.length} coordinate):
 ${list}
-Riepilogo: una colonna fisica = un giorno + un numero d'ora assoluto; cerca la classe SOLO dentro quella colonna; "targets" = una voce per ogni coordinata elencata; "subjects" = una materia per ogni riga di quella colonna in cui la classe compare, array vuoto se la classe non compare in quella colonna.`;
+Riepilogo: una colonna fisica = un giorno + un numero d'ora assoluto; cerca la classe SOLO dentro quella colonna; "targets" = una voce per ogni coordinata elencata; "matches" = un elemento per ogni cella di quella colonna in cui la classe compare, con il testo esatto di quella cella e la materia della sua riga; array vuoto se la classe non compare in quella colonna.`;
 }
 
 export const personalTimetableSchema = {
@@ -320,17 +328,26 @@ export const personalTimetableSchema = {
 };
 
 /**
- * Schema dell'orario curricolare: UNA voce per coordinata richiesta.
+ * Schema dell'orario curricolare: UNA voce per coordinata richiesta, con la
+ * PROVA della cella da cui ogni materia è stata letta.
  *
  * Minimo necessario per alimentare il downstream esistente e nulla più: niente
  * `rows[]` di tutti i docenti, niente `rowIndex`, niente trascrizione `raw`
  * della griglia. Il nome del docente curricolare non viene nemmeno chiesto —
- * non serve alla ricostruzione e non deve circolare.
+ * non serve alla ricostruzione e non deve circolare — e `cellText` è vincolato
+ * alla sola cella della griglia, mai alla riga intera.
  *
- * `subjects` è un array proprio perché una coordinata può avere zero, una o più
- * materie (compresenza): il vincolo "una sola materia" trasformerebbe un dato
- * reale in una scelta arbitraria del modello, mentre il crossref esistente sa
- * già gestire l'elenco (una materia -> certa, più materie -> ambigua).
+ * Perché `matches` e non `subjects`: con un semplice elenco di materie il
+ * modello poteva dichiarare una disciplina senza dire da dove l'aveva presa, e
+ * il server non aveva modo di distinguere una lettura corretta da una materia
+ * raccolta altrove nella tabella. Ogni materia ora arriva INSIEME alla cella in
+ * cui il modello ha trovato la classe richiesta, e il server accetta la materia
+ * solo se quella cella contiene davvero la classe (`curricularSubjectsFromMatches`).
+ *
+ * `matches` è un array perché una coordinata può avere zero, una o più celle
+ * (compresenza): il vincolo "una sola materia" trasformerebbe un dato reale in
+ * una scelta arbitraria del modello, mentre il crossref esistente sa già gestire
+ * l'elenco (una materia -> certa, più materie -> ambigua).
  */
 export const curricularTimetableSchema = {
   type: Type.OBJECT,
@@ -344,13 +361,26 @@ export const curricularTimetableSchema = {
           dayOfWeek: { type: Type.INTEGER, description: 'Giorno della coordinata richiesta, riportato identico (1=lunedì..6=sabato)' },
           periodIndex: { type: Type.INTEGER, description: 'Numero d\'ora assoluto della coordinata richiesta, riportato identico' },
           classLabel: { type: Type.STRING, description: 'Sigla della classe della coordinata richiesta, riportata identica (es. "3D")' },
-          subjects: {
+          matches: {
             type: Type.ARRAY,
-            items: { type: Type.STRING },
-            description: 'Materie leggibili in quella classe/giorno/ora, anche più di una in compresenza; array vuoto se nessuna è determinabile (mai inventate)',
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                cellText: {
+                  type: Type.STRING,
+                  description: 'Testo ESATTO contenuto nella cella della griglia in cui compare la classe richiesta: solo quella cella (es. "3D" o "3D 3E"), mai la riga intera e mai il nome del docente',
+                },
+                subject: {
+                  type: Type.STRING,
+                  description: 'Materia/Disciplina della riga a cui appartiene quella cella; senza una cella valida questa materia viene scartata',
+                },
+              },
+              required: ['cellText', 'subject'],
+            },
+            description: 'Una voce per ogni cella della COLONNA FISICA richiesta in cui compare la classe (più voci solo in compresenza); array vuoto se la classe non compare in quella colonna',
           },
         },
-        required: ['dayOfWeek', 'periodIndex', 'classLabel', 'subjects'],
+        required: ['dayOfWeek', 'periodIndex', 'classLabel', 'matches'],
       },
     },
   },

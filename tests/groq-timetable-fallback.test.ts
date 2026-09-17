@@ -61,8 +61,8 @@ const pdfBase64 = Buffer.from('%PDF-1.7\n%%EOF').toString('base64');
 /** Risposta curricolare conforme al contratto targets[] (dati sintetici). */
 const groqCurricularText = JSON.stringify({
   targets: [
-    { dayOfWeek: 1, periodIndex: 1, classLabel: '1A', subjects: ['Matematica'] },
-    { dayOfWeek: 2, periodIndex: 1, classLabel: '2B', subjects: [] },
+    { dayOfWeek: 1, periodIndex: 1, classLabel: '1A', matches: [{ cellText: '1A', subject: 'Matematica' }] },
+    { dayOfWeek: 2, periodIndex: 1, classLabel: '2B', matches: [] },
   ],
 });
 
@@ -182,9 +182,16 @@ test('fallback Groq: lo Structured Output è derivato dagli schemi Gemini, in mo
   const curricular = groqJsonSchemaFrom(curricularTimetableSchema) as Record<string, any>;
   assert.deepEqual(Object.keys(curricular.properties), ['targets'], 'il contratto applicativo targets[] non cambia');
   const target = curricular.properties.targets.items;
-  assert.deepEqual(Object.keys(target.properties).sort(), ['classLabel', 'dayOfWeek', 'periodIndex', 'subjects']);
-  assert.equal(target.properties.subjects.type, 'array');
-  assert.equal(target.properties.subjects.items.type, 'string');
+  assert.deepEqual(Object.keys(target.properties).sort(), ['classLabel', 'dayOfWeek', 'matches', 'periodIndex']);
+  // La prova della cella viaggia anche nello Structured Output di Groq.
+  assert.equal(target.properties.matches.type, 'array');
+  const match = target.properties.matches.items;
+  assert.equal(match.type, 'object');
+  assert.deepEqual(Object.keys(match.properties).sort(), ['cellText', 'subject']);
+  assert.equal(match.properties.cellText.type, 'string');
+  assert.equal(match.properties.subject.type, 'string');
+  assert.deepEqual([...match.required].sort(), ['cellText', 'subject'], 'strict: entrambi i campi della prova sono richiesti');
+  assert.equal(match.additionalProperties, false, 'nessun campo extra nella prova');
   assert.equal(target.properties.dayOfWeek.type, 'integer');
   const personal = groqJsonSchemaFrom(personalTimetableSchema) as Record<string, any>;
   assert.equal(personal.properties.days.items.properties.cells.type, 'array', 'geometria personale preservata');
@@ -392,7 +399,7 @@ test('validatore condiviso: il JSON di Groq passa nello STESSO parseTimetableAiR
   // Più materie sulla stessa coordinata: il crossref le vedrà come ambigue.
   const coTeaching = parseTimetableAiResponse(
     'curricular-timetable',
-    { targets: [{ dayOfWeek: 1, periodIndex: 1, classLabel: '1A', subjects: ['Matematica', 'Scienze'] }] },
+    { targets: [{ dayOfWeek: 1, periodIndex: 1, classLabel: '1A', matches: [{ cellText: '1A', subject: 'Matematica' }, { cellText: '1A 1B', subject: 'Scienze' }] }] },
     '',
     undefined,
     [CURRICULAR_SCOPE[0]],
@@ -401,7 +408,7 @@ test('validatore condiviso: il JSON di Groq passa nello STESSO parseTimetableAiR
   // Una coordinata non richiesta viene scartata anche se Groq la inventa.
   const notRequested = parseTimetableAiResponse(
     'curricular-timetable',
-    { targets: [{ dayOfWeek: 5, periodIndex: 5, classLabel: '2B', subjects: ['Arte'] }] },
+    { targets: [{ dayOfWeek: 5, periodIndex: 5, classLabel: '2B', matches: [{ cellText: '2B', subject: 'Arte' }] }] },
     '',
     undefined,
     CURRICULAR_SCOPE,
@@ -418,11 +425,12 @@ test('validatore condiviso: il JSON di Groq passa nello STESSO parseTimetableAiR
 test('validatore condiviso: JSON o schema non validi da Groq sono rifiutati, non accettati', () => {
   const invalid: unknown[] = [
     { targets: 'non-un-array' },
-    { targets: [{ dayOfWeek: 1, periodIndex: 1, classLabel: '1A' }] }, // subjects mancante
-    { targets: [{ dayOfWeek: 1, periodIndex: 1, classLabel: '1A', subjects: 'Matematica' }] },
-    { targets: [{ dayOfWeek: 99, periodIndex: 1, classLabel: '1A', subjects: [] }] },
+    { targets: [{ dayOfWeek: 1, periodIndex: 1, classLabel: '1A' }] }, // matches mancante
+    { targets: [{ dayOfWeek: 1, periodIndex: 1, classLabel: '1A', matches: 'Matematica' }] },
+    { targets: [{ dayOfWeek: 99, periodIndex: 1, classLabel: '1A', matches: [] }] },
     { rows: [], cells: [] }, // vecchio contratto di trascrizione
-    { targets: [{ dayOfWeek: 1, periodIndex: 1, classLabel: 'Co', subjects: ['Arte'] }] }, // codice interno
+    { targets: [{ dayOfWeek: 1, periodIndex: 1, classLabel: '1A', subjects: ['Matematica'] }] }, // contratto senza evidenza
+    { targets: [{ dayOfWeek: 1, periodIndex: 1, classLabel: 'Co', matches: [{ cellText: 'Co', subject: 'Arte' }] }] }, // codice interno
   ];
   for (const value of invalid) {
     assert.throws(

@@ -295,7 +295,27 @@ export interface CurricularScopeCoordinate {
   classLabel: string;
 }
 
-/** Esito del modello su UNA coordinata richiesta: 0, 1 o più materie candidate. */
+/**
+ * Evidenza di UNA cella letta dal modello su una coordinata richiesta.
+ *
+ * `cellText` è SOLO il contenuto di quella cella della griglia ("3D", "3D 3E"),
+ * mai la riga intera, mai il nome del docente, mai OCR o testo libero: serve a
+ * rendere VERIFICABILE l'associazione coordinata-materia. `subject` è la materia
+ * della riga a cui la cella appartiene, ma da sola NON basta: senza la cella da
+ * cui è stata ricavata non viene accettata.
+ */
+export interface CurricularCellMatch {
+  cellText: string;
+  subject: string;
+}
+
+/**
+ * Esito del modello su UNA coordinata richiesta: 0, 1 o più materie candidate.
+ *
+ * `subjects` NON è ciò che il modello dichiara: è ciò che il server DERIVA dai
+ * match verificati (`curricularSubjectsFromMatches`). Il downstream
+ * (`curricularTargetsToRowsAndCells`, crossref, review) resta invariato.
+ */
 export interface CurricularTarget {
   dayOfWeek: number;
   periodIndex: number;
@@ -314,6 +334,12 @@ export const MAX_CURRICULAR_SCOPE_SIZE = 6 * MAX_GRID_PERIODS * 2;
 export const MAX_CURRICULAR_SCOPE_INPUT = MAX_CURRICULAR_SCOPE_SIZE * 4;
 /** Materie massime riportate su una singola coordinata. */
 export const MAX_CURRICULAR_SUBJECTS_PER_COORDINATE = 6;
+/**
+ * Lunghezza massima del testo di una cella della griglia. Una cella contiene
+ * sigle di classe ("3D", "3D 3E"): oltre questa soglia non è una cella ma
+ * testo libero, e non ha senso trasportarla (né loggarla).
+ */
+export const MAX_CURRICULAR_CELL_TEXT_LENGTH = 120;
 /** Campi ammessi in una coordinata della request (allow-list chiusa). */
 const CURRICULAR_SCOPE_COORDINATE_KEYS = ['dayOfWeek', 'periodIndex', 'classLabel'];
 
@@ -383,17 +409,74 @@ export function curricularScopeToRequestPayload(coordinates: PersonalCoordinate[
 }
 
 /**
+ * La cella letta contiene DAVVERO la classe richiesta?
+ *
+ * Usa la STESSA normalizzazione delle celle reali (`extractClassesFromCell`),
+ * quindi request, celle personali e prova curricolare non possono divergere:
+ * "3D", "3 D", "3D 2B", "3D / 3E" contengono 3D, mentre "3E", "" e "D" no.
+ *
+ * È la prova minima che il modello abbia letto una cella contenente la classe
+ * richiesta, non una dimostrazione geometrica: la posizione giorno+periodo
+ * resta vincolata dal target richiesto e dal prompt.
+ */
+export function curricularCellTextContainsClass(classLabel: string, cellText: unknown): boolean {
+  const wanted = normalizeClassLabel(classLabel);
+  if (!wanted) return false;
+  return extractClassesFromCell(cellText).includes(wanted);
+}
+
+/**
+ * Deriva le materie di UNA coordinata SOLO dai match verificati.
+ *
+ * Un match produce una materia solo se la sua `cellText` contiene la classe
+ * richiesta: il modello non può dichiarare una materia senza mostrare la cella
+ * da cui l'ha letta. I match scartati non lasciano traccia e non vengono mai
+ * "riparati" con una materia presa altrove. Materia vuota, generica o duplicata
+ * viene tolta, come prima. Nessun match valido -> array vuoto.
+ *
+ * La FORMA del payload è comunque vincolante: un `matches` assente, troppo
+ * lungo o con elementi malformati è un rifiuto (mai un'accettazione tacita),
+ * così un contratto vecchio non può rientrare dalla finestra.
+ */
+export function curricularSubjectsFromMatches(classLabel: string, matches: unknown, index = 0): string[] {
+  if (!Array.isArray(matches) || matches.length > MAX_CURRICULAR_SUBJECTS_PER_COORDINATE) {
+    invalidShape(`Celle della coordinata non valide (#${index}).`);
+  }
+  // I match che superano la verifica restano coppia (cella, materia): la materia
+  // non esiste da sola, esiste solo insieme alla cella da cui è stata letta.
+  const accepted: CurricularCellMatch[] = [];
+  for (const match of matches) {
+    if (!record(match)) invalidShape(`Cella della coordinata non valida (#${index}).`);
+    const cellText = str(match.cellText, MAX_CURRICULAR_CELL_TEXT_LENGTH)
+      ? match.cellText
+      : invalidShape(`Testo della cella non valido (#${index}).`);
+    const rawSubject = str(match.subject, 80)
+      ? match.subject
+      : invalidShape(`Materia non valida (#${index}).`);
+    // Evidenza obbligatoria: senza la classe nella cella il match non esiste.
+    if (!curricularCellTextContainsClass(classLabel, cellText)) continue;
+    const subject = rawSubject.trim();
+    if (!subject || isGenericSubject(subject)) continue; // vuota/generica: non è una disciplina
+    if (accepted.some(existing => sameSubject(existing.subject, subject))) continue;
+    accepted.push({ cellText, subject });
+  }
+  return accepted.map(match => match.subject);
+}
+
+/**
  * Valida la risposta del modello sull'orario curricolare: `{ targets: [...] }`.
  *
  * Regole (mai inventare):
  *  - sopravvivono SOLO le coordinate richieste: una voce su un giorno/periodo/
  *    classe fuori elenco viene SCARTATA, mai ricollocata o "corretta";
- *  - `subjects` può essere vuoto (coordinata non leggibile o materia non
- *    determinabile), avere una materia, o averne più di una: in compresenza più
- *    docenti insistono sulla stessa classe/ora, e il crossref esistente deve
- *    poterle vedere tutte per produrre lo stato "ambiguo";
- *  - materie vuote, generiche o duplicate vengono tolte; le altre restano come
- *    scritte (nessuna normalizzazione del testo oltre al trim).
+ *  - le materie NON vengono prese per buone: sono DERIVATE dai soli match la cui
+ *    cella letta contiene la classe richiesta. Una materia dichiarata senza la
+ *    sua cella non esiste, e una cella senza la classe non produce materie;
+ *  - `matches` vuoto (classe assente da quella colonna fisica, colonna
+ *    illeggibile, materia non determinabile) -> nessuna materia;
+ *  - più match validi sulla stessa coordinata producono più materie: in
+ *    compresenza più docenti insistono sulla stessa classe/ora e il crossref
+ *    esistente deve poterle vedere tutte per produrre lo stato "ambiguo".
  */
 export function validateCurricularTargetsPayload(raw: unknown, scope: CurricularScopeCoordinate[]): CurricularTarget[] {
   if (scope.length === 0) invalidShape("Coordinate di analisi non valide.");
@@ -405,24 +488,16 @@ export function validateCurricularTargetsPayload(raw: unknown, scope: Curricular
   const seen = new Set<string>();
   raw.targets.forEach((item, index) => {
     // Stessi vincoli della request (giorno, ora, classe reale) ma senza
-    // allow-list delle chiavi: qui la coordinata viaggia insieme a "subjects".
+    // allow-list delle chiavi: qui la coordinata viaggia insieme a "matches".
     const coordinate = readCoordinateFields(item);
     if (!coordinate) invalidShape(`Coordinata non valida (#${index}).`);
     const key = coordinateKey(coordinate.dayOfWeek, coordinate.periodIndex, coordinate.classLabel);
     if (!requested.has(key)) return; // coordinata non richiesta: scartata (mai inventata)
     if (seen.has(key)) return;       // una sola voce per coordinata
-    if (!Array.isArray(item.subjects) || item.subjects.length > MAX_CURRICULAR_SUBJECTS_PER_COORDINATE) {
-      invalidShape(`Materie della coordinata non valide (#${index}).`);
-    }
+    // Le materie nascono SOLO qui, dai match verificati contro la classe della
+    // coordinata: è il punto in cui l'evidenza del modello diventa dato.
+    const subjects = curricularSubjectsFromMatches(coordinate.classLabel, item.matches, index);
     seen.add(key);
-    const subjects: string[] = [];
-    for (const value of item.subjects) {
-      if (!str(value, 80)) invalidShape(`Materia non valida (#${index}).`);
-      const subject = value.trim();
-      if (!subject || isGenericSubject(subject)) continue; // vuota/generica: non è una disciplina
-      if (subjects.some(existing => sameSubject(existing, subject))) continue;
-      subjects.push(subject);
-    }
     targets.push({ ...coordinate, subjects });
   });
   return targets;
