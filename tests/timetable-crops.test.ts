@@ -152,10 +152,108 @@ test('geometria fuori bounds -> rifiutata, nessun fallback', () => {
   );
   assert.throws(
     () => normalizeTimetableGeometry({ ...GEOMETRY_RAW, table: { x: -0.1, y: 0.1, width: 0.9, height: 0.8 } }, 5),
-    (error: unknown) => error instanceof TimetableGeometryError && error.code === GEOMETRY_ERRORS.bounds,
-    'valori fuori intervallo riconosciuti come tali',
+    (error: unknown) => error instanceof TimetableGeometryError && error.code === GEOMETRY_ERRORS.negative,
+    'valore negativo riconosciuto come tale',
   );
 });
+
+/** Geometria che tocca entrambi gli estremi del dominio: 0 e 1 sono leciti. */
+const FULL_FRAME = {
+  table: { x: 0, y: 0, width: 1, height: 1 },
+  subjectColumn: { x: 0, width: 0.14 },
+  scheduleGrid: { x: 0.16, width: 0.84 },
+};
+
+test('geometria: dominio 0..1 — gli estremi 0 e 1 sono accettati', () => {
+  const geometry = normalizeTimetableGeometry(FULL_FRAME, 5);
+  assert.equal(geometry.table.x, 0, '0 accettato');
+  assert.equal(geometry.table.width, 1, '1 accettato');
+  assert.equal(geometry.scheduleGrid.x + geometry.scheduleGrid.width, 1, 'la fascia arriva a 1');
+  assert.equal(derivePeriodColumns(geometry).length, 25, '25 colonne comunque derivate');
+});
+
+test('geometria: il validator non altera i valori (nessun clamp, nessuna conversione)', () => {
+  const raw = {
+    table: { x: 0.05, y: 0.08, width: 0.93, height: 0.86 },
+    subjectColumn: { x: 0.06, width: 0.12 },
+    scheduleGrid: { x: 0.25, width: 0.65 },
+  };
+  const geometry = normalizeTimetableGeometry(raw, 5);
+  // L'output deve contenere GLI STESSI numeri dell'input, uno per uno.
+  assert.deepEqual(
+    { table: geometry.table, subjectColumn: geometry.subjectColumn, scheduleGrid: geometry.scheduleGrid },
+    raw,
+    'nessun valore normalizzato viene riscritto',
+  );
+});
+
+test('geometria: valore negativo rifiutato con motivo dedicato', () => {
+  assert.throws(
+    () => normalizeTimetableGeometry({ ...FULL_FRAME, scheduleGrid: { x: -0.01, width: 0.84 } }, 5),
+    (error: unknown) =>
+      error instanceof TimetableGeometryError &&
+      error.code === GEOMETRY_ERRORS.negative &&
+      error.field === 'scheduleGrid',
+    '-0.01 rifiutato come geometry-valore-negativo sul campo giusto',
+  );
+});
+
+test('geometria: valore oltre 1 rifiutato con motivo dedicato', () => {
+  assert.throws(
+    () => normalizeTimetableGeometry({ ...FULL_FRAME, subjectColumn: { x: 0.06, width: 1.01 } }, 5),
+    (error: unknown) =>
+      error instanceof TimetableGeometryError &&
+      error.code === GEOMETRY_ERRORS.aboveOne &&
+      error.field === 'subjectColumn',
+    '1.01 rifiutato come geometry-valore-maggiore-di-uno sul campo giusto',
+  );
+});
+
+test('geometria: una percentuale NON viene divisa per 100 (25 resta un rifiuto)', () => {
+  // 84 al posto di 0.84 sarebbe una geometria perfetta se qualcuno dividesse per
+  // 100: deve invece fallire, con il motivo dei valori oltre 1.
+  assert.throws(
+    () => normalizeTimetableGeometry({ ...FULL_FRAME, scheduleGrid: { x: 0.16, width: 84 } }, 5),
+    (error: unknown) =>
+      error instanceof TimetableGeometryError && error.code === GEOMETRY_ERRORS.aboveOne,
+    '84 rifiutato, non convertito in 0.84',
+  );
+  // Stesso ragionamento in pixel: 1200 non diventa 0.4.
+  assert.throws(
+    () => normalizeTimetableGeometry({ ...FULL_FRAME, table: { x: 1200, y: 0, width: 1, height: 1 } }, 5),
+    TimetableGeometryError,
+    'una misura in pixel è rifiutata',
+  );
+});
+
+test('geometria: NaN e Infinity rifiutati, mai interpretati come numeri', () => {
+  const bad = [
+    { ...FULL_FRAME, scheduleGrid: { x: Number.NaN, width: 0.84 } },
+    { ...FULL_FRAME, scheduleGrid: { x: 0.16, width: Number.POSITIVE_INFINITY } },
+    { ...FULL_FRAME, table: { x: 0, y: 0, width: Number.NEGATIVE_INFINITY, height: 1 } },
+    { ...FULL_FRAME, subjectColumn: { x: Number.NaN, width: Number.NaN } },
+  ];
+  for (const payload of bad) {
+    assert.throws(
+      () => normalizeTimetableGeometry(payload, 5),
+      (error: unknown) => error instanceof TimetableGeometryError && error.code === GEOMETRY_ERRORS.shape,
+      `non finito rifiutato come forma non valida: ${JSON.stringify(Object.keys(payload))}`,
+    );
+  }
+});
+
+test('geometria: rettangolo fuori immagine -> span fuori bounds, distinto dal dominio', () => {
+  // Ogni singolo valore è dentro 0..1, ma l'area esce dall'immagine: motivo diverso.
+  assert.throws(
+    () => normalizeTimetableGeometry({ ...FULL_FRAME, table: { x: 0.3, y: 0, width: 0.9, height: 1 } }, 5),
+    (error: unknown) =>
+      error instanceof TimetableGeometryError &&
+      error.code === GEOMETRY_ERRORS.spanOutOfBounds &&
+      error.field === 'table',
+    'area oltre il bordo destro riconosciuta come span fuori bounds',
+  );
+});
+
 
 test('geometria: width/height e campi mancanti o non numerici -> rifiutati', () => {
   const bad = [

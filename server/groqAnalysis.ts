@@ -169,6 +169,8 @@ interface GeminiSchemaNode {
   properties?: unknown;
   required?: unknown;
   items?: unknown;
+  minimum?: unknown;
+  maximum?: unknown;
 }
 
 function isSchemaNode(value: unknown): value is GeminiSchemaNode {
@@ -209,7 +211,21 @@ export function groqJsonSchemaFrom(geminiSchema: unknown): Record<string, unknow
     return withDescription({ type: "array", items: groqJsonSchemaFrom(geminiSchema.items) });
   }
   if (type === "STRING" || type === "INTEGER" || type === "NUMBER" || type === "BOOLEAN") {
-    return withDescription({ type: type.toLowerCase() });
+    const scalar: Record<string, unknown> = { type: type.toLowerCase() };
+    // I vincoli numerici fanno parte del contratto, non sono documentazione:
+    // senza `minimum`/`maximum` lo Structured Output accetta qualunque numero e
+    // una coordinata normalizzata potrebbe arrivare come percentuale (25) o come
+    // pixel. Vengono riportati solo se sono numeri finiti, così uno schema senza
+    // vincoli resta identico a prima.
+    if (type === "NUMBER" || type === "INTEGER") {
+      if (typeof geminiSchema.minimum === "number" && Number.isFinite(geminiSchema.minimum)) {
+        scalar.minimum = geminiSchema.minimum;
+      }
+      if (typeof geminiSchema.maximum === "number" && Number.isFinite(geminiSchema.maximum)) {
+        scalar.maximum = geminiSchema.maximum;
+      }
+    }
+    return withDescription(scalar);
   }
   throw new Error("schema non convertibile");
 }

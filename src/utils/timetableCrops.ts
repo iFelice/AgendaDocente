@@ -96,36 +96,60 @@ export interface SubjectColumnCropSpec {
   sourceHeight: number;
 }
 
-/** Motivo stabile del rifiuto di una geometria: mai testo del documento. */
+/**
+ * Motivo stabile del rifiuto di una geometria: mai testo del documento, mai il
+ * valore numerico rifiutato. È l'unica informazione che finisce nei log.
+ */
 export const GEOMETRY_ERRORS = {
   periodsPerDay: "geometry-periods-per-day",
   shape: "geometry-forma-non-valida",
-  bounds: "geometry-valori-fuori-intervallo",
-  overlap: "geometry-colonna-materia-sovrapposta-alla-griglia",
+  /** Un numero normalizzato minore di 0. */
+  negative: "geometry-valore-negativo",
+  /** Un numero normalizzato maggiore di 1 (es. una percentuale o un pixel). */
+  aboveOne: "geometry-valore-maggiore-di-uno",
+  /** Valori singolarmente leciti ma rettangolo/fascia fuori dal contenitore. */
+  spanOutOfBounds: "geometry-span-fuori-bounds",
+  overlap: "geometry-overlap",
   columns: "geometry-colonne-fuori-dalla-griglia",
   pixels: "geometry-crop-fuori-immagine",
 } as const;
 
 export type GeometryErrorCode = (typeof GEOMETRY_ERRORS)[keyof typeof GEOMETRY_ERRORS];
 
+/** Nomi strutturali ammessi nella diagnostica: sono i campi del NOSTRO schema. */
+export type GeometryField = "table" | "subjectColumn" | "scheduleGrid";
+
 /**
- * Errore di geometria: il messaggio è una stringa fissa nostra (mai contenuto
- * del documento), quindi è sicuro nei log del server.
+ * Errore di geometria.
+ *
+ * `message` è una stringa fissa nostra (mai contenuto del documento) e `code`
+ * dice IL TIPO di violazione; `field` dice DOVE, con il solo nome strutturale
+ * del campo. Il valore numerico rifiutato non è trasportato da nessuna parte:
+ * non nel messaggio, non nel codice, non nel campo.
  */
 export class TimetableGeometryError extends Error {
   readonly code: GeometryErrorCode;
-  constructor(code: GeometryErrorCode, message: string) {
+  readonly field?: GeometryField;
+  constructor(code: GeometryErrorCode, message: string, field?: GeometryField) {
     super(message);
     this.name = "TimetableGeometryError";
     this.code = code;
+    this.field = field;
   }
 }
 
 const isFiniteNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 
-/** Tolleranza per i bordi: 0.999999 del modello non deve diventare un rifiuto. */
-const EPSILON = 1e-6;
+/**
+ * Tolleranza usata SOLO sulle somme che calcoliamo noi (x + width, y + height),
+ * per non trasformare l'aritmetica IEEE-754 in un falso rifiuto.
+ *
+ * NON è una tolleranza sui valori del modello: il dominio 0..1 di ogni singolo
+ * numero è verificato in modo esatto (`value < 0` e `value > 1`), senza epsilon.
+ * Non esiste alcun clamp: un valore fuori dominio è un rifiuto, non una correzione.
+ */
+const SUM_EPSILON = 1e-9;
 
 /** Ore per giorno utilizzabili: intero dentro il tetto di geometria dell'app. */
 export function isValidPeriodsPerDay(value: unknown): value is number {
@@ -152,48 +176,70 @@ export function totalPeriodColumns(periodsPerDay: number): number {
   return PERSONAL_SCHOOL_DAYS * periodsPerDay;
 }
 
-function readNormalizedRect(value: unknown, what: string): NormalizedRect {
-  if (!isRecord(value)) throw new TimetableGeometryError(GEOMETRY_ERRORS.shape, `Geometria non valida: ${what}.`);
+/**
+ * Dominio normalizzato di UN numero: 0 <= value <= 1, verificato in modo ESATTO.
+ *
+ * Il rifiuto distingue la direzione della violazione, perché sono errori diversi
+ * con cause diverse: un valore negativo è una misura sbagliata, un valore > 1 è
+ * quasi sempre una percentuale (25 invece di 0.25) o un pixel. Nessuna delle due
+ * viene convertita o corretta: si rifiuta e basta.
+ */
+function assertNormalizedNumber(value: number, field: GeometryField): void {
+  if (value < 0) {
+    throw new TimetableGeometryError(GEOMETRY_ERRORS.negative, "Geometria non valida: valore normalizzato negativo.", field);
+  }
+  if (value > 1) {
+    throw new TimetableGeometryError(GEOMETRY_ERRORS.aboveOne, "Geometria non valida: valore normalizzato oltre 1.", field);
+  }
+}
+
+const spanError = (field: GeometryField) =>
+  new TimetableGeometryError(GEOMETRY_ERRORS.spanOutOfBounds, "Geometria non valida: area fuori dai limiti.", field);
+
+function readNormalizedRect(value: unknown, field: GeometryField): NormalizedRect {
+  if (!isRecord(value)) throw new TimetableGeometryError(GEOMETRY_ERRORS.shape, "Geometria non valida.", field);
   const { x, y, width, height } = value;
   if (![x, y, width, height].every(isFiniteNumber)) {
-    throw new TimetableGeometryError(GEOMETRY_ERRORS.shape, `Geometria non valida: ${what}.`);
+    // NaN, Infinity, stringhe e campi mancanti: forma non valida, mai un numero.
+    throw new TimetableGeometryError(GEOMETRY_ERRORS.shape, "Geometria non valida.", field);
   }
   return { x: x as number, y: y as number, width: width as number, height: height as number };
 }
 
-function readNormalizedSpan(value: unknown, what: string): NormalizedSpan {
-  if (!isRecord(value)) throw new TimetableGeometryError(GEOMETRY_ERRORS.shape, `Geometria non valida: ${what}.`);
+function readNormalizedSpan(value: unknown, field: GeometryField): NormalizedSpan {
+  if (!isRecord(value)) throw new TimetableGeometryError(GEOMETRY_ERRORS.shape, "Geometria non valida.", field);
   const { x, width } = value;
   if (![x, width].every(isFiniteNumber)) {
-    throw new TimetableGeometryError(GEOMETRY_ERRORS.shape, `Geometria non valida: ${what}.`);
+    throw new TimetableGeometryError(GEOMETRY_ERRORS.shape, "Geometria non valida.", field);
   }
   return { x: x as number, width: width as number };
 }
 
-const outOfBounds = (what: string) =>
-  new TimetableGeometryError(GEOMETRY_ERRORS.bounds, `Geometria fuori dall'immagine: ${what}.`);
-
 /** Verifica che una fascia orizzontale stia dentro i limiti normalizzati 0..1. */
-function assertSpanInImage(span: NormalizedSpan, what: string): void {
-  if (span.x < -EPSILON) throw outOfBounds(what);
-  if (span.width <= 0) throw outOfBounds(what);
-  if (span.x + span.width > 1 + EPSILON) throw outOfBounds(what);
+function assertSpanInImage(span: NormalizedSpan, field: GeometryField): void {
+  assertNormalizedNumber(span.x, field);
+  assertNormalizedNumber(span.width, field);
+  if (span.width <= 0) throw spanError(field);
+  if (span.x + span.width > 1 + SUM_EPSILON) throw spanError(field);
 }
 
 /**
  * Valida e normalizza la geometria restituita dalla chiamata di geometria.
  *
- * Controlli (tutti obbligatori, nessuno aggirabile):
+ * Controlli (tutti obbligatori, nessuno aggirabile, nessun aggiustamento):
  *  - `periodsPerDay` intero da 1 a `MAX_GRID_PERIODS` (dichiarato dall'utente);
- *  - tutti i valori finiti e dentro 0..1;
+ *  - ogni numero finito (NaN/Infinity rifiutati) e dentro 0..1 in modo ESATTO:
+ *    `< 0` e `> 1` sono rifiuti distinti, e un 25 o un 80 NON diventano 0.25/0.80;
  *  - larghezze e altezze strettamente positive;
+ *  - `table` interamente dentro l'immagine;
  *  - `subjectColumn` e `scheduleGrid` interamente dentro `table`;
  *  - `subjectColumn` non sovrapposta alla griglia: se le due fasce si
  *    intersecano, una delle due è sbagliata e nessun crop sarebbe affidabile;
  *  - le `PERSONAL_SCHOOL_DAYS * periodsPerDay` colonne derivate restano dentro
  *    `scheduleGrid` (verifica esplicita sulla prima e sull'ultima).
  *
- * Ogni fallimento è un `TimetableGeometryError`: nessuna coordinata di ripiego.
+ * Ogni fallimento è un `TimetableGeometryError` con codice e campo: nessuna
+ * coordinata di ripiego, nessun clamp, nessuna conversione di unità.
  */
 export function normalizeTimetableGeometry(raw: unknown, periodsPerDay: unknown): TimetableGridGeometry {
   if (!isValidPeriodsPerDay(periodsPerDay)) {
@@ -205,27 +251,32 @@ export function normalizeTimetableGeometry(raw: unknown, periodsPerDay: unknown)
   const subjectColumn = readNormalizedSpan(raw.subjectColumn, "subjectColumn");
   const scheduleGrid = readNormalizedSpan(raw.scheduleGrid, "scheduleGrid");
 
-  // Table: dentro l'immagine e di area positiva.
-  if (table.x < -EPSILON || table.y < -EPSILON) throw outOfBounds("table");
-  if (table.width <= 0 || table.height <= 0) throw outOfBounds("table");
-  if (table.x + table.width > 1 + EPSILON || table.y + table.height > 1 + EPSILON) throw outOfBounds("table");
+  // Table: ogni misura nel dominio, poi l'area dentro l'immagine.
+  assertNormalizedNumber(table.x, "table");
+  assertNormalizedNumber(table.y, "table");
+  assertNormalizedNumber(table.width, "table");
+  assertNormalizedNumber(table.height, "table");
+  if (table.width <= 0 || table.height <= 0) throw spanError("table");
+  if (table.x + table.width > 1 + SUM_EPSILON || table.y + table.height > 1 + SUM_EPSILON) throw spanError("table");
 
-  // Le due fasce devono stare interamente nella tabella.
+  // Le due fasce: dominio esatto, larghezza positiva, dentro l'immagine.
   assertSpanInImage(subjectColumn, "subjectColumn");
   assertSpanInImage(scheduleGrid, "scheduleGrid");
+
+  // Ed entrambe interamente dentro la tabella.
   const tableEnd = table.x + table.width;
-  if (subjectColumn.x < table.x - EPSILON || subjectColumn.x + subjectColumn.width > tableEnd + EPSILON) {
-    throw outOfBounds("subjectColumn fuori da table");
+  if (subjectColumn.x < table.x - SUM_EPSILON || subjectColumn.x + subjectColumn.width > tableEnd + SUM_EPSILON) {
+    throw spanError("subjectColumn");
   }
-  if (scheduleGrid.x < table.x - EPSILON || scheduleGrid.x + scheduleGrid.width > tableEnd + EPSILON) {
-    throw outOfBounds("scheduleGrid fuori da table");
+  if (scheduleGrid.x < table.x - SUM_EPSILON || scheduleGrid.x + scheduleGrid.width > tableEnd + SUM_EPSILON) {
+    throw spanError("scheduleGrid");
   }
 
   // MATERIA e griglia non devono sovrapporsi: la composizione le affianca, e una
   // sovrapposizione significa che una delle due misure è sbagliata.
   const overlap = Math.min(subjectColumn.x + subjectColumn.width, scheduleGrid.x + scheduleGrid.width)
     - Math.max(subjectColumn.x, scheduleGrid.x);
-  if (overlap > EPSILON) {
+  if (overlap > SUM_EPSILON) {
     throw new TimetableGeometryError(
       GEOMETRY_ERRORS.overlap,
       "Colonna MATERIA e griglia si sovrappongono: geometria non utilizzabile.",
@@ -241,7 +292,7 @@ export function normalizeTimetableGeometry(raw: unknown, periodsPerDay: unknown)
   const first = columns[0].span;
   const last = columns[columns.length - 1].span;
   const gridEnd = scheduleGrid.x + scheduleGrid.width;
-  if (first.x < scheduleGrid.x - EPSILON || last.x + last.width > gridEnd + EPSILON) {
+  if (first.x < scheduleGrid.x - SUM_EPSILON || last.x + last.width > gridEnd + SUM_EPSILON) {
     throw new TimetableGeometryError(GEOMETRY_ERRORS.columns, "Colonne derivate fuori dalla griglia.");
   }
   return geometry;

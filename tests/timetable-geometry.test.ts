@@ -101,6 +101,45 @@ test('schema geometry: Gemini e Groq condividono lo stesso contratto', () => {
   assert.match(JSON.stringify(converted), /normalizzate|bordo|0 e 1/i, 'le description sopravvivono alla conversione');
 });
 
+/** Tutti i numeri geometrici di uno schema, con il percorso del campo. */
+function collectNumbers(node: any, path: string, out: Array<{ path: string; minimum: unknown; maximum: unknown }>) {
+  if (!node) return;
+  if (node.type === 'NUMBER' || node.type === 'number') {
+    out.push({ path, minimum: node.minimum, maximum: node.maximum });
+  }
+  for (const key of Object.keys(node.properties || {})) collectNumbers(node.properties[key], `${path}${path ? '.' : ''}${key}`, out);
+}
+
+test('schema geometry: OGNI numero dichiara minimum 0 e maximum 1 (Gemini)', () => {
+  const numbers: Array<{ path: string; minimum: unknown; maximum: unknown }> = [];
+  collectNumbers(timetableGeometrySchema, '', numbers);
+  assert.deepEqual(numbers.map((n) => n.path).sort(), [
+    'scheduleGrid.width', 'scheduleGrid.x', 'subjectColumn.width', 'subjectColumn.x',
+    'table.height', 'table.width', 'table.x', 'table.y',
+  ], 'otto numeri geometrici');
+  for (const number of numbers) {
+    assert.equal(number.minimum, 0, `${number.path}: minimum 0`);
+    assert.equal(number.maximum, 1, `${number.path}: maximum 1`);
+  }
+});
+
+test('schema geometry: la conversione Groq CONSERVA minimum e maximum', () => {
+  const converted = groqJsonSchemaFrom(timetableGeometrySchema) as Record<string, any>;
+  const numbers: Array<{ path: string; minimum: unknown; maximum: unknown }> = [];
+  collectNumbers(converted, '', numbers);
+  assert.equal(numbers.length, 8, 'nessun numero perso dalla conversione');
+  for (const number of numbers) {
+    assert.equal(number.minimum, 0, `${number.path}: minimum 0 dopo la conversione`);
+    assert.equal(number.maximum, 1, `${number.path}: maximum 1 dopo la conversione`);
+  }
+  // Controllo puntuale su un campo, per fissare la forma inviata a Groq.
+  assert.deepEqual(
+    { ...converted.properties.scheduleGrid.properties.x, description: undefined },
+    { type: 'number', minimum: 0, maximum: 1, description: undefined },
+    'scheduleGrid.x arriva a Groq con il vincolo numerico',
+  );
+});
+
 // ---------------------------------------------------------------------------
 // PROMPT
 // ---------------------------------------------------------------------------
@@ -134,6 +173,16 @@ test('prompt geometry: chiede solo misure e dichiara le colonne derivate dal cod
   // Il testo utente non contiene dati del docente.
   assert.ok(TIMETABLE_GEOMETRY_USER_TEXT.length < 160);
   assert.ok(!/profile|fullName|school/i.test(TIMETABLE_GEOMETRY_USER_TEXT));
+  // Il formato frazionario è dichiarato in modo inequivocabile, con esempi e divieti.
+  assert.match(prompt, /FRAZIONE DECIMALE compresa fra 0\.0 e 1\.0/);
+  assert.match(prompt, /25% della larghezza = 0\.25/);
+  assert.match(prompt, /80% = 0\.80/);
+  assert.match(prompt, /NON usare: percentuali \(25, 80\); pixel; coordinate 0\.\.100/);
+  assert.match(prompt, /valori negativi; valori maggiori di 1/);
+  // Chiarimento di formato: il SIGNIFICATO dei tre campi non cambia.
+  for (const meaning of ['"table" = l\'area occupata dall\'INTERA tabella', 'colonna MATERIA/DISCIPLINA', 'griglia giorno x ora']) {
+    assert.ok(prompt.includes(meaning), `il prompt continua a definire: ${meaning}`);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -160,20 +209,55 @@ test('parse geometry: geometria valida accettata, invalida rifiutata', () => {
   assert.throws(() => parseTimetableGeometryResponse(VALID_GEOMETRY, 0), TimetableGeometryError, 'ore per giorno non valide');
 });
 
-test('diagnostica geometry: solo il codice dell errore, nessun numero del payload', () => {
-  let failure: unknown = null;
-  try { parseTimetableGeometryResponse({ ...VALID_GEOMETRY, scheduleGrid: { x: 0.25, width: 5 } }, 5); }
-  catch (error) { failure = error; }
-  const line = describeGeometryFailure(failure);
-  assert.match(line, /fase=geometria esito=fallito/);
-  assert.match(line, /motivo=geometry-valori-fuori-intervallo/);
-  for (const secret of ['0.25', '0.65', 'scheduleGrid', 'subjectColumn', '0.08']) {
-    assert.ok(!line.includes(secret), `il log non contiene ${secret}`);
+/** Cattura l'errore di una geometria invece di lasciarlo propagare. */
+function failureOf(payload: unknown): unknown {
+  try { parseTimetableGeometryResponse(payload, 5); } catch (error) { return error; }
+  return null;
+}
+
+test('diagnostica geometry: i quattro motivi sono distinti e nominano solo il campo', () => {
+  const cases = [
+    { name: 'negativo', payload: { ...VALID_GEOMETRY, scheduleGrid: { x: -0.01, width: 0.65 } }, motivo: 'geometry-valore-negativo', campo: 'scheduleGrid' },
+    { name: 'oltre 1', payload: { ...VALID_GEOMETRY, subjectColumn: { x: 0.08, width: 1.01 } }, motivo: 'geometry-valore-maggiore-di-uno', campo: 'subjectColumn' },
+    { name: 'percentuale', payload: { ...VALID_GEOMETRY, scheduleGrid: { x: 0.25, width: 65 } }, motivo: 'geometry-valore-maggiore-di-uno', campo: 'scheduleGrid' },
+    { name: 'area fuori', payload: { ...VALID_GEOMETRY, table: { x: 0.3, y: 0.1, width: 0.9, height: 0.8 } }, motivo: 'geometry-span-fuori-bounds', campo: 'table' },
+    { name: 'sovrapposizione', payload: { ...VALID_GEOMETRY, subjectColumn: { x: 0.25, width: 0.12 } }, motivo: 'geometry-overlap' },
+  ];
+  const motivi = new Set<string>();
+  for (const testCase of cases) {
+    const failure = failureOf(testCase.payload);
+    assert.ok(failure instanceof TimetableGeometryError, `${testCase.name}: errore di geometria`);
+    const line = describeGeometryFailure(failure);
+    assert.match(line, new RegExp(`motivo=${testCase.motivo}( campo=| tipo=)`), `${testCase.name}: ${line}`);
+    motivi.add(testCase.motivo);
+    if (testCase.campo) assert.match(line, new RegExp(`campo=${testCase.campo} `), `${testCase.name}: campo strutturale`);
+    else assert.ok(!line.includes('campo='), 'la sovrapposizione riguarda due fasce: nessun campo singolo');
+  }
+  assert.equal(motivi.size, 4, 'quattro motivi diversi: negativo, oltre 1, bounds, overlap');
+});
+
+test('diagnostica geometry: nessun valore geometrico finisce nel log', () => {
+  const payloads = [
+    { ...VALID_GEOMETRY, scheduleGrid: { x: -0.01, width: 0.65 } },
+    { ...VALID_GEOMETRY, scheduleGrid: { x: 0.25, width: 65 } },
+    { ...VALID_GEOMETRY, table: { x: 0.3, y: 0.1, width: 0.9, height: 0.8 } },
+    { ...VALID_GEOMETRY, subjectColumn: { x: 0.25, width: 0.12 } },
+    { ...VALID_GEOMETRY, table: { x: 0.05, y: 0.1, width: 0.9, height: 1.01 } },
+  ];
+  for (const payload of payloads) {
+    const line = describeGeometryFailure(failureOf(payload));
+    assert.match(line, /fase=geometria esito=fallito motivo=geometry-/);
+    // Nessuna cifra: il log nomina il tipo di violazione e il campo, mai i numeri.
+    assert.ok(!/\d/.test(line), `nessuna cifra nel log: ${line}`);
+    for (const secret of ['0.05', '0.25', '0.65', '1.01', '-0.01', '65', '0.9', '0.8']) {
+      assert.ok(!line.includes(secret), `il log non contiene ${secret}`);
+    }
   }
   // Un errore inatteso non fa trapelare il suo messaggio.
   assert.match(describeGeometryFailure(new TypeError('payload con 3D e Matematica')), /motivo=errore-interno/);
   assert.ok(!describeGeometryFailure(new TypeError('payload con 3D e Matematica')).includes('Matematica'));
   // Messaggio utente generico, senza dettagli tecnici.
+  const failure = failureOf({ ...VALID_GEOMETRY, scheduleGrid: { x: 0.25, width: 5 } });
   assert.match(geometryRejectionMessage(failure), /foto/i);
   assert.ok(!geometryRejectionMessage(failure).includes('geometry-'), 'nessun codice interno nel messaggio utente');
 });
