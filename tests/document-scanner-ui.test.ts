@@ -253,6 +253,15 @@ async function setPeriodsPerDay(renderer: any, value: string) {
   await act(async () => { input.props.onChange({ target: { value } }); });
 }
 
+/**
+ * Conferma esplicita delle ore: senza questa spunta l'analisi personale non parte,
+ * anche se il campo è già compilato dalla proposta.
+ */
+async function confirmPeriodsPerDay(renderer: any, checked = true) {
+  const box = byId(renderer, 'scan-periods-per-day-confirm');
+  await act(async () => { box.props.onChange({ target: { checked } }); });
+}
+
 const curricularResponse = {
   success: true,
   source: 'test-model',
@@ -295,6 +304,12 @@ async function analyzeWithConsent(renderer: any, periodsPerDay?: string) {
   // Orario personale: le ore per giorno dichiarate (se il test le vuole diverse
   // dal prefill) prima dell'invio.
   if (periodsPerDay !== undefined) await setPeriodsPerDay(renderer, periodsPerDay);
+  // Orario personale: la domanda sulle ore va confermata esplicitamente.
+  const periodsBox = renderer.root.findAll((el: any) => el.props?.id === 'scan-periods-per-day-confirm');
+  if (periodsBox.length > 0) {
+    assert.equal(periodsBox[0].props.checked, false, 'la conferma delle ore non è mai preselezionata');
+    await confirmPeriodsPerDay(renderer);
+  }
   // Consenso richiesto (checkbox NON preselezionata).
   const consent = byId(renderer, 'scan-cloud-consent');
   assert.equal(consent.props.checked, false, 'il consenso non è mai preselezionato');
@@ -1096,6 +1111,9 @@ async function withPendingAnalysis(run: (gate: { respond: (json: unknown, status
 /** Consenso + invio SENZA attendere l'esito: si è ancora nello step «working». */
 async function sendForAnalysis(renderer: any) {
   await act(async () => { byId(renderer, 'scan-analyze-cta').props.onClick(); });
+  // Orario personale: la domanda sulle ore va confermata esplicitamente.
+  const periodsBox = renderer.root.findAll((el: any) => el.props?.id === 'scan-periods-per-day-confirm');
+  if (periodsBox.length > 0) await confirmPeriodsPerDay(renderer);
   await act(async () => { byId(renderer, 'scan-cloud-consent').props.onChange({ target: { checked: true } }); });
   await act(async () => {
     byId(renderer, 'scan-consent-confirm').props.onClick();
@@ -1332,13 +1350,145 @@ test('orario personale: la domanda sulle ore blocca l analisi finché il valore 
     }
     assert.equal(fetchCalls.length, 0, 'nessuna analisi partita senza un valore valido');
 
-    // Valore valido: l invio si sblocca (serve comunque il consenso).
+    // Valore valido MA non confermato: l invio resta bloccato. È il punto che
+    // prima mancava: il campo era già compilato dalla proposta e l analisi
+    // partiva senza che l utente avesse mai risposto alla domanda.
     await setPeriodsPerDay(renderer, '5');
     await act(async () => { byId(renderer, 'scan-cloud-consent').props.onChange({ target: { checked: true } }); });
-    assert.equal(byId(renderer, 'scan-consent-confirm').props.disabled, false, 'consenso + ore valide: si può inviare');
+    assert.equal(byId(renderer, 'scan-consent-confirm').props.disabled, true, 'numero valido ma non confermato: invio bloccato');
+    assert.equal(fetchCalls.length, 0, 'nessuna analisi partita senza conferma');
+
+    // Conferma esplicita: ora si può inviare.
+    await confirmPeriodsPerDay(renderer);
+    assert.equal(byId(renderer, 'scan-consent-confirm').props.disabled, false, 'consenso + ore confermate: si può inviare');
     await confirmAndSettleAnalysis(renderer);
     assert.equal(fetchCalls.length, 1, 'una sola chiamata');
     assert.equal(fetchCalls[0].body.periodsPerDay, 5, 'le ore dichiarate viaggiano nella richiesta');
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('orario personale: cambiare il numero azzera la conferma (il valore confermato è quello visibile)', async () => {
+  fetchResponse = { status: 200, json: personalResponse as any };
+  const renderer = await renderModal();
+  try {
+    await goToSource(renderer, 'personal');
+    await pickFile(renderer, makeFile('orario.jpg', 'image/jpeg', 30_000));
+    await act(async () => { byId(renderer, 'scan-analyze-cta').props.onClick(); });
+    await act(async () => { byId(renderer, 'scan-cloud-consent').props.onChange({ target: { checked: true } }); });
+    await confirmPeriodsPerDay(renderer);
+    assert.equal(byId(renderer, 'scan-consent-confirm').props.disabled, false, 'confermato: si può inviare');
+    // L'utente corregge il numero: la conferma precedente non vale più.
+    await setPeriodsPerDay(renderer, '4');
+    assert.equal(byId(renderer, 'scan-periods-per-day-confirm').props.checked, false, 'conferma azzerata');
+    assert.equal(byId(renderer, 'scan-consent-confirm').props.disabled, true, 'invio bloccato dopo la modifica');
+    assert.equal(fetchCalls.length, 0, 'nessuna analisi partita col valore vecchio');
+    await confirmPeriodsPerDay(renderer);
+    await confirmAndSettleAnalysis(renderer);
+    assert.equal(fetchCalls[0].body.periodsPerDay, 4, 'viene inviato il numero confermato adesso');
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('orario curricolare: la domanda sulle ore NON viene richiesta', async () => {
+  fetchResponse = { status: 200, json: curricularResponse as any };
+  const renderer = await renderModal();
+  try {
+    await goToSource(renderer, 'curricular');
+    await pickFile(renderer, makeFile('istituto.jpg', 'image/jpeg', 30_000));
+    await act(async () => { byId(renderer, 'scan-analyze-cta').props.onClick(); });
+    assert.equal(renderer.root.findAll((el: any) => el.props?.id === 'scan-periods-per-day').length, 0, 'nessun input ore per il curricolare');
+    assert.equal(renderer.root.findAll((el: any) => el.props?.id === 'scan-periods-per-day-confirm').length, 0, 'nessuna conferma ore per il curricolare');
+    await act(async () => { byId(renderer, 'scan-cloud-consent').props.onChange({ target: { checked: true } }); });
+    assert.equal(byId(renderer, 'scan-consent-confirm').props.disabled, false, 'il curricolare parte col solo consenso');
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('orario personale con 5 ore: contratto 5x5=25 posizioni, vuoti nella loro posizione', async () => {
+  fetchResponse = {
+    status: 200,
+    json: {
+      success: true,
+      source: 'test-model',
+      rowLabel: 'Manganiello F.',
+      cells: personalSequenceCells(REAL_SEQUENCE_FLAT, 5),
+    } as any,
+  };
+  const renderer = await renderModal();
+  try {
+    await goToSource(renderer, 'personal');
+    await pickFile(renderer, makeFile('orario.jpg', 'image/jpeg', 30_000));
+    await act(async () => { byId(renderer, 'scan-analyze-cta').props.onClick(); });
+    await setPeriodsPerDay(renderer, '5');
+    assert.match(flatText(renderer.root), /25 posizioni/, '5 ore x 5 giorni = 25 posizioni annunciate prima dell invio');
+    await act(async () => { byId(renderer, 'scan-cloud-consent').props.onChange({ target: { checked: true } }); });
+    await confirmPeriodsPerDay(renderer);
+    await confirmAndSettleAnalysis(renderer);
+    assert.equal(fetchCalls[0].body.periodsPerDay, 5);
+    const text = flatText(renderer.root);
+    assert.match(text, /25 posizioni/, 'la revisione mostra le 25 posizioni');
+    // Lunedì 1ª e 2ª sono libere nella griglia reale: devono restare libere e al
+    // loro posto, non compattate in testa o in coda.
+    assert.match(text, /18/, 'le 18 ore lette sono distinguibili dalle 7 posizioni libere');
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('orario personale: annullare la domanda non avvia alcuna analisi e non salva il numero', async () => {
+  fetchResponse = { status: 200, json: personalResponse as any };
+  const saved: SavedTimetable[] = [];
+  const config = { firstHourStartTime: '08:15', periodsPerDay: 6, standardDurationMinutes: 55, customSlots: [] } as any;
+  const renderer = await renderModal({ timeSlotConfig: config, onSaveReconstructedTimetable: (payload: SavedTimetable) => { saved.push(payload); } });
+  try {
+    await goToSource(renderer, 'personal');
+    await pickFile(renderer, makeFile('orario.jpg', 'image/jpeg', 30_000));
+    await act(async () => { byId(renderer, 'scan-analyze-cta').props.onClick(); });
+    await setPeriodsPerDay(renderer, '5');
+    // L'utente torna indietro invece di confermare.
+    await act(async () => {
+      const back = renderer.root.findAll((el: any) => el.type === 'button' && nodeText(el).trim() === 'Indietro');
+      assert.ok(back.length > 0, 'pulsante Indietro presente');
+      back[0].props.onClick();
+    });
+    assert.equal(fetchCalls.length, 0, 'nessuna analisi partita dopo l annullamento');
+    assert.equal(config.periodsPerDay, 6, 'il numero inserito NON è stato scritto nella configurazione');
+    assert.deepEqual(saved, [], 'nessun salvataggio');
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('orario personale: il numero confermato non viene mai salvato come configurazione', async () => {
+  fetchResponse = {
+    status: 200,
+    json: {
+      success: true,
+      source: 'test-model',
+      rowLabel: 'Manganiello F.',
+      cells: personalSequenceCells(REAL_SEQUENCE_FLAT, 5),
+    } as any,
+  };
+  const saved: SavedTimetable[] = [];
+  const config = { firstHourStartTime: '08:15', periodsPerDay: 6, standardDurationMinutes: 55, customSlots: [] } as any;
+  const renderer = await renderModal({
+    timeSlotConfig: config,
+    onSaveReconstructedTimetable: (slots: TimetableSlot[], target: string, mode: string) => { saved.push({ slots, target, mode }); return true; },
+  });
+  try {
+    await goToSource(renderer, 'personal');
+    await pickFile(renderer, makeFile('orario.jpg', 'image/jpeg', 30_000));
+    await analyzeWithConsent(renderer, '5');
+    await act(async () => { byId(renderer, 'scan-personal-continue').props.onClick(); });
+    await chooseMergeModeIfAsked(renderer);
+    await act(async () => { byId(renderer, 'recon-confirm-save').props.onClick(); });
+    assert.equal(saved.length, 1, 'il salvataggio dell orario è avvenuto');
+    assert.equal(config.periodsPerDay, 6, 'la configurazione delle fasce orarie non è toccata dallo scanner');
+    assert.ok(!JSON.stringify(saved).includes('periodsPerDay'), 'nessun periodsPerDay nel payload salvato');
   } finally {
     await act(async () => { renderer.unmount(); });
   }

@@ -127,6 +127,15 @@ const PERSONAL_ROW_INDEX = 0;
 
 /** Domanda obbligatoria prima dell'analisi dell'orario personale. */
 export const PERIODS_PER_DAY_QUESTION = "Quante ore ci sono in ogni giornata scolastica?";
+/**
+ * Proposta iniziale della domanda. È solo una proposta: l'analisi non parte finché
+ * l'utente non conferma il numero, perché per un orario provvisorio le ore per
+ * giorno non sono deducibili in modo affidabile né dall'immagine né dalla
+ * configurazione delle fasce orarie dell'app.
+ */
+export const PERIODS_PER_DAY_DEFAULT_PROPOSAL = 5;
+export const PERIODS_PER_DAY_CONFIRM_ERROR =
+  "Conferma quante ore ci sono in ogni giornata scolastica prima di avviare l'analisi.";
 /** Messaggio quando il valore non è (ancora) utilizzabile. */
 export const PERIODS_PER_DAY_QUESTION_ERROR =
   `Indica quante ore ci sono in ogni giornata scolastica (numero intero da 1 a ${MAX_GRID_PERIODS}).`;
@@ -250,6 +259,12 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
    * giorno e il periodo di ogni cella. Stringa perché è il valore di un input.
    */
   const [periodsPerDayInput, setPeriodsPerDayInput] = useState<string>("");
+  /**
+   * Conferma esplicita del numero di ore. Non è mai preselezionata e si azzera ad
+   * ogni modifica del numero: la domanda deve essere letta e accettata, non
+   * scavalcata perché il campo era già compilato.
+   */
+  const [periodsPerDayConfirmed, setPeriodsPerDayConfirmed] = useState<boolean>(false);
   const [personal, setPersonal] = useState<PersonalReviewState | null>(null);
   /** Ore curricolari GIÀ limitate alle mie coordinate: `droppedCount` è quanto è stato scartato. */
   const [curricular, setCurricular] = useState<{ rows: CurricularRawRow[]; slots: CurricularTimetableSlot[]; skipped: SkippedCell[]; droppedCount: number } | null>(null);
@@ -289,9 +304,11 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
   const [savedDirty, setSavedDirty] = useState(false);
 
   /**
-   * Prefill della domanda sulle ore: la configurazione delle fasce orarie
-   * dell'utente (`timeSlotConfig.periodsPerDay`), quando è un numero sensato.
-   * Resta modificabile: il valore usato è solo quello confermato dall'utente.
+   * Proposta mostrata nella domanda sulle ore: la configurazione delle fasce
+   * orarie dell'utente (`timeSlotConfig.periodsPerDay`) quando è un numero
+   * sensato, altrimenti `PERIODS_PER_DAY_DEFAULT_PROPOSAL`. Il campo non è mai
+   * vuoto, quindi la domanda si vede; ma resta solo una proposta, e il valore
+   * usato è quello che l'utente conferma esplicitamente.
    */
   const periodsPerDayPrefill =
     typeof timeSlotConfig?.periodsPerDay === "number"
@@ -299,7 +316,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     && timeSlotConfig.periodsPerDay >= 1
     && timeSlotConfig.periodsPerDay <= MAX_GRID_PERIODS
       ? String(timeSlotConfig.periodsPerDay)
-      : "";
+      : String(PERIODS_PER_DAY_DEFAULT_PROPOSAL);
 
   /** Ore per giorno dichiarate: 0 = valore assente o non accettabile. */
   const periodsPerDay = useMemo(() => {
@@ -471,6 +488,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     setIsReading(false);
     setConsentGiven(false);
     setPeriodsPerDayInput(periodsPerDayPrefill);
+    setPeriodsPerDayConfirmed(false);
     setPersonal(null);
     setCurricular(null);
     setStudentCandidates(null);
@@ -589,10 +607,11 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
       return;
     }
     // Orario personale: senza un numero di ore valido non esiste una lunghezza
-    // attesa da verificare, quindi l'analisi non parte (il pulsante è già
+    // attesa da verificare, e senza conferma esplicita quel numero è solo una
+    // proposta. In entrambi i casi l'analisi non parte (il pulsante è già
     // disabilitato: questa è la stessa regola, difesa anche qui).
-    if (captureFor === "personal" && !periodsPerDayValid) {
-      setAnalysisError(PERIODS_PER_DAY_QUESTION_ERROR);
+    if (captureFor === "personal" && (!periodsPerDayValid || !periodsPerDayConfirmed)) {
+      setAnalysisError(periodsPerDayValid ? PERIODS_PER_DAY_CONFIRM_ERROR : PERIODS_PER_DAY_QUESTION_ERROR);
       return;
     }
     // Orario curricolare: senza coordinate non c'è nulla da cercare, quindi
@@ -1158,7 +1177,12 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                     max={MAX_GRID_PERIODS}
                     step={1}
                     value={periodsPerDayInput}
-                    onChange={event => setPeriodsPerDayInput(event.target.value)}
+                    onChange={event => {
+                      // Ogni modifica invalida la conferma: il numero confermato
+                      // è sempre quello che l'utente sta guardando adesso.
+                      setPeriodsPerDayInput(event.target.value);
+                      setPeriodsPerDayConfirmed(false);
+                    }}
                     className="w-24 min-h-[44px] px-3 rounded-lg border border-stone-300 text-sm text-stone-900"
                     aria-describedby="scan-periods-per-day-help"
                   />
@@ -1167,6 +1191,26 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                       ? `La tua riga sarà letta come ${expectedCellCount} posizioni: ${periodsPerDay} ${periodsPerDay === 1 ? "ora" : "ore"} per ${PERSONAL_SCHOOL_DAYS} giorni (lunedì-venerdì), celle libere incluse.`
                       : PERIODS_PER_DAY_QUESTION_ERROR}
                   </p>
+                  {/* Conferma esplicita: senza di questa l'analisi non parte, così
+                      il numero proposto non può essere inviato per distrazione. */}
+                  <label
+                    htmlFor="scan-periods-per-day-confirm"
+                    className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer ${periodsPerDayValid ? "border-stone-200 bg-stone-50" : "border-stone-200 bg-stone-100 opacity-60"}`}
+                  >
+                    <input
+                      type="checkbox"
+                      id="scan-periods-per-day-confirm"
+                      checked={periodsPerDayConfirmed && periodsPerDayValid}
+                      disabled={!periodsPerDayValid}
+                      onChange={event => setPeriodsPerDayConfirmed(event.target.checked)}
+                      className="mt-0.5 w-5 h-5 accent-emerald-700"
+                    />
+                    <span className="text-xs text-stone-700">
+                      {periodsPerDayValid
+                        ? `Confermo: il mio orario ha ${periodsPerDay} ${periodsPerDay === 1 ? "ora" : "ore"} ogni giorno (${expectedCellCount} posizioni, lunedì-venerdì).`
+                        : "Inserisci prima il numero di ore per poter confermare."}
+                    </span>
+                  </label>
                 </div>
               )}
 
@@ -1201,9 +1245,9 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                   onClick={() => void handleStartAnalysis()}
                   disabled={
                     !consentGiven || isOffline || isAnalyzing
-                    // Orario personale: senza un numero di ore valido non esiste
-                    // una lunghezza attesa, quindi l'analisi non può partire.
-                    || (captureFor === "personal" && !periodsPerDayValid)
+                    // Orario personale: senza un numero di ore valido E confermato
+                    // non esiste una lunghezza attesa certa, quindi non si parte.
+                    || (captureFor === "personal" && (!periodsPerDayValid || !periodsPerDayConfirmed))
                   }
                   className="min-h-[44px] px-5 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white text-sm font-bold shadow-xs flex items-center gap-2"
                 >

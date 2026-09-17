@@ -105,14 +105,21 @@ const str = (v: unknown, max: number): v is string => typeof v === "string" && v
  * (mai testo del documento), quindi sono sicuri da mettere nei log del server.
  */
 export class TimetableShapeError extends Error {
-  constructor(message: string) {
+  /**
+   * Motivo stabile e NON testuale del rifiuto: permette all'endpoint di scegliere
+   * il messaggio per l'utente senza fare matching sul testo e senza mai rimandare
+   * al client un frammento del documento.
+   */
+  readonly code?: string;
+  constructor(message: string, code?: string) {
     super(message);
     this.name = "TimetableShapeError";
+    this.code = code;
   }
 }
 
-function invalidShape(message: string): never {
-  throw new TimetableShapeError(message);
+function invalidShape(message: string, code?: string): never {
+  throw new TimetableShapeError(message, code);
 }
 
 export function validateRawCell(v: unknown, index: number): TimetableRawCell {
@@ -238,7 +245,7 @@ export function validatePersonalSequencePayload(
   // Guardia d'identità col matcher esistente (cognome intero, mai sottostringa):
   // senza una riga compatibile non si sceglie un'altra riga, si rifiuta.
   if (findTeacherRows([rowLabel], targetTeacherSurname).length !== 1) {
-    invalidShape("Riga del documento non compatibile col docente.");
+    invalidShape("Riga del documento non compatibile col docente.", TEACHER_ROW_NOT_RECOGNIZED);
   }
 
   // Nessun fallback al formato piatto: un payload che porta ancora `cells` alla
@@ -486,17 +493,56 @@ export function validateStudentCommitmentsPayload(raw: unknown): Array<Omit<Stud
 // Ricerca della riga del docente (conservativa)
 // ---------------------------------------------------------------------------
 
-const HONORIFIC_PATTERN = /^(?:prof(?:essore|essoressa|essor|\.|ssa)?|dott(?:ore|oressa|or|\.|ssa)?|ing\.?|arch\.?|dr\.?|avv\.?)\s+/i;
+/**
+ * Codice del rifiuto "riga del docente non riconosciuta": è l'unico motivo di
+ * rifiuto che l'utente può risolvere da solo (nome nel profilo o foto illeggibile),
+ * quindi è l'unico che riceve un messaggio dedicato invece di quello generico.
+ */
+export const TEACHER_ROW_NOT_RECOGNIZED = "riga-docente-non-riconosciuta";
 
 /**
- * Estrae il cognome dal nome completo del profilo ("Prof. Felice Manganiello"
- * -> "Manganiello"). Onorifici rimossi; maiuscole e accenti ignorati a valle.
+ * Onorifici e titoli, dopo la piega: "Prof.ssa" diventa "prof ssa", quindi la
+ * lista è di TOKEN e non di prefissi. Vanno esclusi dal confronto perché
+ * compaiono sia nel profilo sia nelle etichette delle righe e non identificano
+ * nessuno: una riga che dicesse solo "Prof.ssa" non deve combaciare con nulla.
  */
-export function teacherSurnames(fullName: unknown): string[] {
-  const clean = String(fullName ?? "").trim().replace(HONORIFIC_PATTERN, "").trim();
-  const parts = clean.split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return [];
-  return [foldName(parts[parts.length - 1])].filter(Boolean);
+const HONORIFIC_TOKENS = new Set([
+  "prof", "ssa", "professore", "professoressa", "professor", "profssa",
+  "dott", "dottore", "dottoressa", "dottssa", "ins", "insgn", "insegnante",
+  "docente", "maestro", "maestra", "ing", "arch", "dr", "avv", "sig", "sra", "sre",
+]);
+
+/** Punteggiatura innocua oltre a quella che `foldName` già trasforma in spazio. */
+const EXTRA_NAME_PUNCTUATION = /[,;:/\\|()[\]{}<>+=*_~^\u00b0\u00a7#@\u20ac&%!?`]/g;
+
+/**
+ * Piega un'etichetta o un nome per il confronto: maiuscole/minuscole, accenti,
+ * apostrofi e punteggiatura innocua non contano, gli spazi in eccesso collassano.
+ * È `foldName` più la punteggiatura che nelle tabelle scolastiche separa i nomi
+ * senza essere un trattino o un punto ("ROSSI,M.", "Bianchi L. (sostegno)").
+ */
+export function foldPersonLabel(raw: unknown): string {
+  return foldName(raw).replace(EXTRA_NAME_PUNCTUATION, " ").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Parole del nome del docente che identificano la sua riga.
+ *
+ * Sono TUTTE le parole e non solo l'ultima: `fullName` nel profilo è scritto
+ * dall'utente e l'ordine non è garantito — "Felice Manganiello" (nome cognome) e
+ * "Rossi Matteo" (cognome nome, la forma dei registri e dei seed dell'app) sono
+ * entrambi legittimi. Prendere solo l'ultima parola significava cercare "matteo"
+ * per il profilo "Rossi Matteo": nelle tabelle la riga è "ROSSI M.", quindi la
+ * parola cercata non c'era e l'analisi veniva rifiutata anche quando il modello
+ * aveva letto la riga giusta.
+ *
+ * Restano escluse le iniziali singole (non identificano nessuno) e le parole che
+ * non sono lettere: un `fullName` ostile non può inserire marcatori, perché ogni
+ * token accettato è `/^[a-z]{2,}$/`.
+ */
+export function teacherNameTokens(fullName: unknown): string[] {
+  const words = foldPersonLabel(fullName).split(" ").filter(Boolean);
+  return Array.from(new Set(words.filter((word) => /^[a-z]{2,}$/.test(word) && !HONORIFIC_TOKENS.has(word))));
 }
 
 export interface TeacherRowMatch {
@@ -508,21 +554,26 @@ export interface TeacherRowMatch {
  * Trova le righe della tabella compatibili con il docente del profilo.
  *
  * Regole conservative:
- *  - si confronta SOLO il cognome del profilo, come parola intera
- *    (mai sottostringhe: "Bianchi" non combacia con "Bianchini");
- *  - maiuscole, accenti e punteggiatura non contano;
+ *  - il confronto è a PAROLE INTERE: "Bianchi" non combacia mai con
+ *    "Bianchini", né "Manganiell" con "Manganiello";
+ *  - maiuscole/minuscole, spazi in testa o in coda, accenti, apostrofi e
+ *    punteggiatura innocua non contano (`foldPersonLabel`);
+ *  - onorifici e titoli ("Prof.", "Prof.ssa", "Docente") sono ignorati da
+ *    entrambe le parti: non possono né aiutare né impedire il match;
+ *  - l'etichetta può riportare solo il cognome, "COGNOME N." oppure nome e
+ *    cognome per esteso: basta una parola del nome del profilo;
+ *  - un nome DIVERSO resta escluso: senza parole in comune non c'è match;
  *  - se più righe sono compatibili vengono tutte restituite: la scelta
  *    definitiva spetta sempre all'utente (niente auto-selezione);
- *  - se nessuna riga è compatibile, la lista resta vuota (l'utente può
- *    comunque scegliere manualmente la riga corretta).
+ *  - se nessuna riga è compatibile, la lista resta vuota.
  */
 export function findTeacherRows(rowLabels: string[], profileName: unknown): TeacherRowMatch[] {
-  const surnames = teacherSurnames(profileName);
-  if (!surnames.length) return [];
+  const tokens = teacherNameTokens(profileName);
+  if (!tokens.length) return [];
   const matches: TeacherRowMatch[] = [];
   rowLabels.forEach((label, rowIndex) => {
-    const words = foldName(label).split(" ").filter(Boolean);
-    if (surnames.some(s => words.includes(s))) matches.push({ rowIndex, rowLabel: label });
+    const words = foldPersonLabel(label).split(" ").filter(Boolean);
+    if (tokens.some(token => words.includes(token))) matches.push({ rowIndex, rowLabel: label });
   });
   return matches;
 }

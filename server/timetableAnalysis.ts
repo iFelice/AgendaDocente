@@ -10,7 +10,8 @@ import {
   MAX_GRID_PERIODS,
   normalizeCurricularCoordinateScope,
   PERSONAL_SCHOOL_DAYS,
-  teacherSurnames,
+  teacherNameTokens,
+  TEACHER_ROW_NOT_RECOGNIZED,
   validateCurricularTargetsPayload,
   validatePersonalSequencePayload,
   validateStudentCommitmentsPayload,
@@ -116,19 +117,30 @@ export function validateStudentDocumentPayload(body: unknown): { imageBase64: st
 // ---------------------------------------------------------------------------
 
 /**
- * Il cognome necessario al matching, e NULLA altro del profilo.
+ * Le parole del nome necessarie al matching, e NULLA altro del profilo.
  *
- * `foldName` (usato da `teacherSurnames`) toglie accenti, maiuscole e punteggiatura:
- * il valore che esce è un token `[a-z ]` curto, quindi interpolabile nel prompt senza
- * rischio di iniezione. Serve anche alla guardia d'identità server-side
- * (`findTeacherRows` dentro `validatePersonalSequencePayload`, che verifica il
- * `rowLabel` restituito dal modello), così prompt e validazione usano ESATTAMENTE
- * lo stesso cognome.
+ * `teacherNameTokens` (usato anche da `findTeacherRows`) piega maiuscole, accenti
+ * e punteggiatura: i token che escono sono tutti `/^[a-z]{2,}$/`, quindi
+ * interpolabili nel prompt senza rischio di iniezione. Prompt e validazione usano
+ * ESATTAMENTE la stessa lista: se il modello cerca una parola e il validatore ne
+ * pretende un'altra, l'analisi fallisce su una riga letta correttamente.
+ *
+ * Sono fino a DUE parole e non una sola: `fullName` è scritto dall'utente e
+ * l'ordine nome/cognome non è garantito. Con una sola parola (l'ultima) il profilo
+ * "Rossi Matteo" faceva cercare al modello "matteo", che nella riga "ROSSI M." non
+ * c'è: il modello non trovava la riga, restituiva `rowLabel` vuoto e l'analisi
+ * moriva su "Riga del documento non compatibile col docente". Le due parole del
+ * nome sono il minimo che copra entrambi gli ordini; il tetto a due token
+ * (ciascuno di sole lettere) mantiene chiusa la superficie di iniezione.
+ *
+ * Nessun altro campo del profilo (email, scuola, classi, alunni, account Google,
+ * ruoli) finisce nel prompt, e i nomi non finiscono nei log.
  */
 export function personalTargetSurname(profile: unknown): string {
   const fullName = record(profile) ? (profile as { fullName?: unknown }).fullName : undefined;
-  const surname = teacherSurnames(fullName)[0] ?? "";
-  return surname.replace(/[^a-z ]/g, " ").replace(/\s+/g, " ").trim().slice(0, 60);
+  // Le ULTIME due parole sono il nome della persona: eventuale testo aggiunto
+  // prima resta fuori dal prompt.
+  return teacherNameTokens(fullName).slice(-2).join(" ").replace(/[^a-z ]/g, " ").replace(/\s+/g, " ").trim().slice(0, 60);
 }
 
 /**
@@ -174,7 +186,7 @@ P2. Ciò che nel documento è vuoto resta vuoto (""), ciò che non è leggibile 
 P3. Riporta in ogni cella il testo ESATTO come scritto, senza normalizzazioni né interpretazioni: "3D" resta "3D", "sos" resta "sos", "D" resta "D", "P" resta "P", "Co" resta "Co".
 P4. NON trasformare mai D/P/Co o altri codici brevi in classi: le classi hanno il formato numero 1-5 + lettera (es. 1A, 2B, 3D, 3E).
 P5. Se una cella contiene più valori separati (es. "3D 3E"), riportali integri nella stessa stringa.
-P6. ${target ? `Individua la riga del docente con cognome "${target}". Cercalo come PAROLA INTERA nelle etichette: mai una sottostringa ("Bianchi" NON combacia con "Bianchini").` : "Nessun cognome target disponibile: restituisci \"days\": [] e NON scegliere una riga a caso."}
+P6. ${target ? `Individua la riga del docente a cui appartengono queste parole del nome: "${target}". L'etichetta della riga può scriverle in forme diverse (solo il cognome, "COGNOME N.", "Prof.ssa COGNOME NOME", maiuscole o minuscole): cerca ogni parola come PAROLA INTERA, mai una sottostringa ("Bianchi" NON combacia con "Bianchini").` : "Nessun cognome target disponibile: restituisci \"days\": [] e NON scegliere una riga a caso."}
 P7. In "rowLabel" riporta l'etichetta ESATTA della riga che hai letto (solo il testo dell'etichetta: nessun numero di riga).
 P8. Leggi SOLO quella riga: nessuna cella di altre righe.
 P9. Leggi prima l'INTESTAZIONE della griglia, cioè le colonne dei giorni LUNEDÌ, MARTEDÌ, MERCOLEDÌ, GIOVEDÌ, VENERDÌ: da lì riconosci ${PERSONAL_SCHOOL_DAYS} BLOCCHI FISICI giornalieri, da sinistra verso destra.
@@ -436,6 +448,22 @@ export function parseTimetableAiResponse(
   const targets = validateCurricularTargetsPayload(raw, coordinateScope);
   const { rows, cells } = curricularTargetsToRowsAndCells(targets);
   return { curricularRows: rows, cells };
+}
+
+/**
+ * Messaggio per l'utente quando il payload del modello viene rifiutato.
+ *
+ * Di default resta generico: il motivo del rifiuto è diagnostica server-side.
+ * Fa eccezione la riga del docente non riconosciuta, che l'utente può risolvere
+ * da solo (nome nel profilo, foto della colonna docenti illeggibile) e che con
+ * un "Analisi non riuscita" generico lo lasciava senza indicazioni. Nessun
+ * frammento del documento o del modello arriva al client: solo il motivo.
+ */
+export function timetableRejectionMessage(error: unknown): string {
+  if (error instanceof TimetableShapeError && error.code === TEACHER_ROW_NOT_RECOGNIZED) {
+    return "Non ho riconosciuto la riga del tuo orario nel documento: il nome letto non corrisponde a quello del tuo profilo. Controlla nome e cognome in Profilo, oppure riprova con una foto più leggibile della colonna dei docenti.";
+  }
+  return "Analisi non riuscita. Riprova.";
 }
 
 /**

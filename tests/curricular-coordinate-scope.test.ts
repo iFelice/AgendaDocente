@@ -410,7 +410,7 @@ test('filtro client-side resta attivo: una risposta fuori ambito viene comunque 
 
 test('flusso personale invariato: prompt, validazione e request non conoscono le coordinate', () => {
   const prompt = buildPersonalTimetablePrompt('rossi', 5);
-  assert.ok(prompt.includes('cognome "rossi"'), 'il personale continua a ricevere il cognome');
+  assert.ok(prompt.includes('del nome: "rossi"'), 'il personale continua a ricevere le parole del nome del docente');
   assert.ok(prompt.includes('ESATTAMENTE 5 celle'), 'geometria personale invariata');
   assert.ok(!prompt.includes('COLONNE FISICHE DA LEGGERE'), 'il personale non riceve alcuno elenco di colonne');
   assert.ok(!prompt.includes('COORDINATE RICHIESTE'), 'il personale non riceve alcuno scope');

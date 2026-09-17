@@ -9,6 +9,7 @@ import {
   STUDENT_DOCUMENT_TIMEOUT_MS,
   TIMETABLE_ANALYSIS_TIMEOUT_MS,
   describeAnalysisFailure,
+  timetableRejectionMessage,
   parseStudentDocumentAiResponse,
   parseTimetableAiResponse,
   type TimetableAnalysisOutcome,
@@ -654,7 +655,10 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
       outcome = parseTimetableAiResponse(documentType, decoded.value, targetSurname, periodsPerDay, coordinateScope);
     } catch (error: unknown) {
       console.warn(describeAnalysisFailure(error, decoded.value, documentType));
-      return res.status(422).json({ success: false, error: "Analisi non riuscita. Riprova." });
+      // Messaggio generico, tranne quando la riga del docente non è stata
+      // riconosciuta: quello l'utente può risolverlo (profilo o foto), gli altri
+      // no. Solo il motivo esce, mai un frammento del documento o del modello.
+      return res.status(422).json({ success: false, error: timetableRejectionMessage(error) });
     }
     if (!isPersonal) {
       // Diagnostica privacy-safe: SOLO conteggi. Mai classi, coordinate, materie,

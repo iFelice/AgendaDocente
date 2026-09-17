@@ -409,8 +409,8 @@ test('validatore condiviso: il JSON di Groq passa nello STESSO parseTimetableAiR
   assert.equal(notRequested.cells.length, 0, 'nessuna materia per coordinate fuori elenco');
   // Personale: la geometria a blocchi è verificata esattamente come per Gemini.
   assert.throws(
-    () => parseTimetableAiResponse('personal-support-timetable', { rowLabel: 'Docente', days: [{ cells: ['', ''] }] }, 'docente', 5, undefined),
-    /non valid|blocc|celle|forma/i,
+    () => parseTimetableAiResponse('personal-support-timetable', { rowLabel: 'Rossi M.', days: [{ cells: ['', ''] }] }, 'rossi matteo', 5, undefined),
+    /non valid|giorni|blocc|celle|forma/i,
     'un payload personale con 1 blocco invece di 5 è rifiutato anche se arriva da Groq',
   );
 });
@@ -739,7 +739,7 @@ test('endpoint: orario personale con Groq -> la geometria a blocchi è verificat
   process.env.GROQ_API_KEY = TEST_GROQ_KEY;
   // Un solo blocco invece di cinque: il validatore personale deve rifiutarlo
   // anche quando arriva dal provider di fallback.
-  const wrongGeometry = JSON.stringify({ rowLabel: 'Docente', days: [{ cells: ['', '', '', '', ''] }] });
+  const wrongGeometry = JSON.stringify({ rowLabel: 'Rossi M.', days: [{ cells: ['', '', '', '', ''] }] });
   stubProviders({
     gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
     groq: () => ({ status: 200, body: { choices: [{ message: { content: wrongGeometry }, finish_reason: 'stop' }] } }),
@@ -751,7 +751,9 @@ test('endpoint: orario personale con Groq -> la geometria a blocchi è verificat
       mimeType: 'image/png',
       documentType: 'personal-support-timetable',
       periodsPerDay: 5,
-      profile,
+      // Profilo nominato e riga compatibile: ciò che deve fallire è la GEOMETRIA
+      // (un blocco invece di cinque), non la guardia d'identità.
+      profile: { ...profile, fullName: 'Rossi Matteo' },
     });
     assert.equal(res.status, 422, 'validatePersonalSequencePayload si applica anche a Groq');
     assert.deepEqual(intercepted.filter((h) => h === 'groq'), ['groq'], 'il fallback vale per entrambi i tipi di orario');
