@@ -10,9 +10,6 @@
 import type { TeacherProfile } from "../types";
 import { OFFLINE_ANALYSIS_MESSAGE, isOnline } from "../utils/documentScanner";
 import type { CurricularScopeCoordinate } from "../utils/timetableAnalysis";
-import type { TimetableGridGeometry } from "../utils/timetableCrops";
-import type { StripMatchOutcome } from "../utils/timetableStrip";
-import { normalizeTimetableGeometry } from "../utils/timetableCrops";
 
 export type ScanTimetableDocumentType = "personal-support-timetable" | "curricular-timetable";
 
@@ -50,39 +47,6 @@ export interface ScanTimetableResult {
    * sequenza, non dal modello.
    */
   cells?: Array<{ rowIndex: number; dayOfWeek: number; periodIndex: number; raw: string }>;
-}
-
-/**
- * Richiesta di GEOMETRIA della griglia (diagnostica del crop curricolare).
- *
- * Nessun profilo: alla geometria non serve sapere chi è il docente.
- * `periodsPerDay` è dichiarato dall'utente, mai dedotto dall'immagine.
- */
-export interface ScanTimetableGeometryRequest {
-  imageBase64: string;
-  mimeType: string;
-  periodsPerDay: number;
-}
-
-/**
- * Richiesta di STRIP curricolare (diagnostica su UNA coordinata).
- *
- * `imageBase64` è la strip COMPOSTA `[MATERIA] | [COLONNA]`, non la fotografia
- * originale: il provider non riceve mai entrambe. Nessun profilo e nessuna
- * coordinata: giorno e periodo sono già risolti dal ritaglio.
- */
-export interface ScanTimetableStripRequest {
-  imageBase64: string;
-  mimeType: string;
-  classLabel: string;
-}
-
-/** Esito della strip: nessuna materia, una sola, o più di una (ambigua). */
-export interface ScanTimetableStripResult {
-  success: boolean;
-  source?: string;
-  outcome: StripMatchOutcome;
-  subjects: string[];
 }
 
 export interface ScanStudentDocumentRequest {
@@ -188,44 +152,6 @@ export async function analyzeTimetableDocument(req: ScanTimetableRequest): Promi
   if (typeof data.rowLabel === "string") result.rowLabel = data.rowLabel;
   if (Array.isArray(data.curricularRows)) result.curricularRows = data.curricularRows as ScanTimetableResult["curricularRows"];
   return result;
-}
-
-/**
- * Misura la geometria della tabella orario.
- *
- * La risposta viene RIVALIDATA nel client con le stesse regole del server
- * (`normalizeTimetableGeometry`): un numero fuori intervallo non diventa mai un
- * crop, e nessuna coordinata viene inventata in caso di rifiuto.
- *
- * Nessun dato restituito viene persistito: la geometria vive nello stato del
- * modale e viene scartata alla chiusura.
- */
-export async function analyzeTimetableGeometry(req: ScanTimetableGeometryRequest): Promise<TimetableGridGeometry> {
-  const data = await postScan("/api/analyze-timetable-geometry", req);
-  return normalizeTimetableGeometry(data.geometry, req.periodsPerDay);
-}
-
-/**
- * Legge UNA strip curricolare per la classe richiesta.
- *
- * L'esito viene RIVALIDATO nel client con la stessa regola di evidenza del
- * server (`classifyStripMatches`): un match vale solo se la cella letta contiene
- * la classe, quindi `outcome` non può essere "unique" senza quella prova.
- *
- * Nessuna persistenza: il risultato vive nello stato del pannello diagnostico e
- * viene scartato quando il pannello scompare.
- */
-export async function analyzeTimetableStrip(req: ScanTimetableStripRequest): Promise<ScanTimetableStripResult> {
-  const data = await postScan("/api/analyze-timetable-strip", req);
-  const subjects = Array.isArray(data.subjects) ? (data.subjects.filter((s) => typeof s === "string") as string[]) : [];
-  const raw = typeof data.outcome === "string" ? data.outcome : "";
-  const outcome: StripMatchOutcome = raw === "unique" || raw === "ambiguous" || raw === "none" ? raw : "none";
-  return {
-    success: true,
-    source: typeof data.source === "string" ? data.source : undefined,
-    outcome,
-    subjects,
-  };
 }
 
 /** Analizza una foto/appunti di registro per estrarre impegni alunni. */

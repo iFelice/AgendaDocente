@@ -1330,23 +1330,42 @@ test('diagnostica crop: il pannello non è più renderizzato né importato dal m
 });
 
 
-test('preview crop diagnostica: nessuna persistenza né log del contenuto', async () => {
-  const { readFileSync } = await import('node:fs');
+test('codice sperimentale geometry/crop/strip: rimosso, nessun riferimento runtime residuo', async () => {
+  const { existsSync, readFileSync, readdirSync } = await import('node:fs');
   const { join } = await import('node:path');
-  const panel = readFileSync(join(process.cwd(), 'src', 'components', 'CropDiagnosticPanel.tsx'), 'utf8');
-  const cropper = readFileSync(join(process.cwd(), 'src', 'utils', 'imageCropper.ts'), 'utf8');
-  // I commenti descrivono i divieti: si verifica il CODICE, non la prosa.
-  const withoutComments = (source: string) => source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
-  for (const [name, source] of [['CropDiagnosticPanel.tsx', panel], ['imageCropper.ts', cropper]] as const) {
-    const code = withoutComments(source);
-    assert.ok(!/localStorage|indexedDB|dexie|services\/storage/i.test(code), `${name}: nessun accesso a storage`);
-    assert.ok(!/console\.(log|warn|error)/.test(code), `${name}: nessun log`);
-    assert.ok(!/toDataURL/.test(code), `${name}: il crop non diventa una stringa persistente`);
-    assert.ok(!/fetch\(/.test(code) || /analyzeTimetableGeometry/.test(code), `${name}: nessuna chiamata fuori dalla geometria`);
+  // I moduli sperimentali non esistono più nel repository.
+  for (const gone of [
+    'src/components/CropDiagnosticPanel.tsx',
+    'src/utils/imageCropper.ts',
+    'src/utils/timetableCrops.ts',
+    'src/utils/timetableStrip.ts',
+    'server/timetableGeometry.ts',
+    'server/timetableStrip.ts',
+  ]) {
+    assert.equal(existsSync(join(process.cwd(), gone)), false, `eliminato: ${gone}`);
   }
-  // L'object URL del crop è sempre revocato.
-  assert.match(panel, /revokePreviewUrl/, 'il pannello revoca gli object URL');
-  assert.match(panel, /Non viene scritta su disco|resta in memoria/, 'il pannello dichiara di essere effimero');
+  // Nessuna sorgente di produzione cita più gli endpoint o le funzioni sperimentali.
+  const sources: string[] = ['server.ts'];
+  for (const dir of ['server', 'src']) {
+    const walk = (path: string) => {
+      for (const entry of readdirSync(path, { withFileTypes: true })) {
+        const full = join(path, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (/\.(ts|tsx)$/.test(entry.name)) sources.push(full);
+      }
+    };
+    walk(join(process.cwd(), dir));
+  }
+  const forbidden = /analyze-timetable-geometry|analyze-timetable-strip|CropDiagnosticPanel|analyzeTimetableGeometry|analyzeTimetableStrip|composeSubjectAndColumn|composeCropBase64ForCoordinate|timetableGeometry|timetableStrip|timetableCrops|imageCropper/;
+  for (const file of sources) {
+    const code = readFileSync(file, 'utf8');
+    assert.ok(!forbidden.test(code), `${file}: nessun riferimento al codice sperimentale`);
+  }
+  // Il fallback Groq dell'analisi ATTIVA dell'orario personale resta al suo posto.
+  const server = readFileSync(join(process.cwd(), 'server.ts'), 'utf8');
+  assert.match(server, /await runGroqTimetableFallback\(\{/, 'fallback Groq ancora collegato');
+  assert.equal((server.match(/await runGroqTimetableFallback\(\{/g) ?? []).length, 1, 'un solo endpoint lo usa: /api/analyze-timetable');
+  assert.ok(existsSync(join(process.cwd(), 'server', 'groqAnalysis.ts')), 'server/groqAnalysis.ts conservato');
 });
 
 test('orario personale con 5 ore: contratto 5x5=25 posizioni, vuoti nella loro posizione', async () => {
