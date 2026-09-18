@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, BookOpen, ChevronRight, Pencil, Plus, Trash2, X } from "lucide-react";
 import { localDateISO } from "../utils/dates";
 import { compareStudentNames, isStudentActive } from "../utils/studentMatcher";
@@ -8,6 +8,8 @@ interface RegisterViewProps {
   profile: TeacherProfile;
   students: Student[];
   assessments: StudentAssessment[];
+  initialStudentId?: string | null;
+  onBackToOrigin?: () => void;
   onSaveAssessment: (assessment: StudentAssessment) => void | false | Promise<void | false>;
   onDeleteAssessment: (id: string) => void | false | Promise<void | false>;
 }
@@ -121,12 +123,19 @@ function AssessmentForm({
   );
 }
 
-export const RegisterView: React.FC<RegisterViewProps> = ({ profile, students, assessments, onSaveAssessment, onDeleteAssessment }) => {
+export const RegisterView: React.FC<RegisterViewProps> = ({ profile, students, assessments, initialStudentId, onBackToOrigin, onSaveAssessment, onDeleteAssessment }) => {
   const activeStudents = useMemo(() => getActiveRegisterStudents(students), [students]);
+  const initialStudent = initialStudentId ? activeStudents.find(student => student.id === initialStudentId) ?? null : null;
   const classOptions = useMemo(() => getRegisterClasses(profile, students), [profile, students]);
-  const [selectedClass, setSelectedClass] = useState("");
-  const [selectedStudentId, setSelectedStudentId] = useState<string | null>(null);
+  const [selectedClass, setSelectedClass] = useState(initialStudent?.className.trim().toUpperCase() ?? "");
+  const [selectedStudentId, setSelectedStudentId] = useState<string | null>(initialStudent?.id ?? null);
   const [editing, setEditing] = useState<StudentAssessment | null | undefined>(undefined);
+  useEffect(() => {
+    if (initialStudentId === undefined) return;
+    const direct = activeStudents.find(student => student.id === initialStudentId) ?? null;
+    setSelectedStudentId(direct?.id ?? null);
+    setSelectedClass(direct?.className.trim().toUpperCase() ?? "");
+  }, [initialStudentId, activeStudents]);
   const visibleStudents = activeStudents.filter(student => !selectedClass || student.className.trim().toUpperCase() === selectedClass);
   const selectedStudent = activeStudents.find(student => student.id === selectedStudentId) ?? null;
   const studentAssessments = selectedStudent ? sortStudentAssessments(assessments.filter(item => item.studentId === selectedStudent.id)) : [];
@@ -143,7 +152,7 @@ export const RegisterView: React.FC<RegisterViewProps> = ({ profile, students, a
     return result;
   };
 
-  if (selectedStudent) return <main aria-label="Scheda studente Registro" className="mx-auto max-w-3xl pb-28"><button type="button" onClick={() => setSelectedStudentId(null)} className="mb-4 flex min-h-[44px] items-center gap-2 rounded-xl px-2 font-semibold text-emerald-800 hover:bg-emerald-50"><ArrowLeft className="h-5 w-5" />Indietro</button><section className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm sm:p-6"><div className="flex items-start justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-wide text-emerald-700">Scheda studente</p><h1 className="mt-1 text-2xl font-bold">{selectedStudent.fullName}</h1><p className="mt-1 text-sm text-stone-500">Classe {selectedStudent.className}</p></div><BookOpen className="h-7 w-7 text-emerald-700" /></div><div className="mt-8 flex items-center justify-between gap-3"><h2 className="text-lg font-bold">Valutazioni</h2><button type="button" onClick={() => setEditing(null)} className="flex min-h-[44px] items-center gap-2 rounded-xl bg-emerald-700 px-4 font-semibold text-white shadow-sm hover:bg-emerald-800"><Plus className="h-5 w-5" />Valutazione</button></div>{studentAssessments.length === 0 ? <div className="mt-5 rounded-xl bg-stone-50 p-5 text-sm text-stone-600">Nessuna valutazione registrata.<div className="mt-3 font-semibold text-emerald-800">Aggiungi la prima valutazione con il pulsante qui sopra.</div></div> : <ul className="mt-4 divide-y divide-stone-100">{studentAssessments.map(item => <li key={item.id}><button type="button" onClick={() => setEditing(item)} className="flex min-h-[64px] w-full items-center justify-between gap-3 py-3 text-left hover:bg-stone-50"><span><span className="block text-sm font-semibold">{item.date}{item.subject ? ` · ${item.subject}` : ""}</span><span className="block text-xs text-stone-500">{TYPE_LABELS[item.assessmentType]}{item.note ? ` · ${item.note}` : ""}</span></span><span className="flex items-center gap-2 font-bold text-emerald-800">{item.valueKind === "numeric" ? item.numericValue : item.judgementValue}<Pencil className="h-4 w-4 text-stone-400" /></span></button></li>)}</ul>}</section>{editing !== undefined && <AssessmentForm student={selectedStudent} initial={editing} onClose={() => setEditing(undefined)} onSave={save} onDelete={remove} />}</main>;
+  if (selectedStudent) return <main aria-label="Scheda studente Registro" className="mx-auto max-w-3xl pb-28"><button type="button" onClick={() => onBackToOrigin ? onBackToOrigin() : setSelectedStudentId(null)} className="mb-4 flex min-h-[44px] items-center gap-2 rounded-xl px-2 font-semibold text-emerald-800 hover:bg-emerald-50"><ArrowLeft className="h-5 w-5" />Indietro</button><section className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm sm:p-6"><div className="flex items-start justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-wide text-emerald-700">Scheda studente</p><h1 className="mt-1 text-2xl font-bold">{selectedStudent.fullName}</h1><p className="mt-1 text-sm text-stone-500">Classe {selectedStudent.className}</p></div><BookOpen className="h-7 w-7 text-emerald-700" /></div><div className="mt-8 flex items-center justify-between gap-3"><h2 className="text-lg font-bold">Valutazioni</h2><button type="button" onClick={() => setEditing(null)} className="flex min-h-[44px] items-center gap-2 rounded-xl bg-emerald-700 px-4 font-semibold text-white shadow-sm hover:bg-emerald-800"><Plus className="h-5 w-5" />Valutazione</button></div>{studentAssessments.length === 0 ? <div className="mt-5 rounded-xl bg-stone-50 p-5 text-sm text-stone-600">Nessuna valutazione registrata.<div className="mt-3 font-semibold text-emerald-800">Aggiungi la prima valutazione con il pulsante qui sopra.</div></div> : <ul className="mt-4 divide-y divide-stone-100">{studentAssessments.map(item => <li key={item.id}><button type="button" onClick={() => setEditing(item)} className="flex min-h-[64px] w-full items-center justify-between gap-3 py-3 text-left hover:bg-stone-50"><span><span className="block text-sm font-semibold">{item.date}{item.subject ? ` · ${item.subject}` : ""}</span><span className="block text-xs text-stone-500">{TYPE_LABELS[item.assessmentType]}{item.note ? ` · ${item.note}` : ""}</span></span><span className="flex items-center gap-2 font-bold text-emerald-800">{item.valueKind === "numeric" ? item.numericValue : item.judgementValue}<Pencil className="h-4 w-4 text-stone-400" /></span></button></li>)}</ul>}</section>{editing !== undefined && <AssessmentForm student={selectedStudent} initial={editing} onClose={() => setEditing(undefined)} onSave={save} onDelete={remove} />}</main>;
 
   return <main aria-label="Registro" className="mx-auto max-w-3xl pb-28"><div className="mb-5"><p className="text-xs font-bold uppercase tracking-wide text-emerald-700">Registro</p><h1 className="mt-1 text-2xl font-bold">Valutazioni</h1><p className="mt-1 text-sm text-stone-500">Scegli una classe per visualizzare gli studenti.</p></div><label className="block text-sm font-semibold">Classe<select aria-label="Seleziona classe" value={selectedClass} onChange={e => setSelectedClass(e.target.value)} className={inputClass}><option value="">Tutte le classi</option>{classOptions.map(name => <option key={name} value={name}>{name}</option>)}</select></label>{visibleStudents.length === 0 ? <div className="mt-6 rounded-2xl border border-dashed border-stone-300 bg-white p-6 text-center text-stone-600">{activeStudents.length === 0 ? "Nessuno studente attivo disponibile." : "Nessuno studente nella classe selezionata."}</div> : <ul className="mt-5 overflow-hidden rounded-2xl border border-stone-200 bg-white shadow-sm">{visibleStudents.map(student => { const count = assessments.filter(item => item.studentId === student.id).length; return <li key={student.id}><button type="button" onClick={() => setSelectedStudentId(student.id)} className="flex min-h-[64px] w-full items-center justify-between gap-3 px-4 py-3 text-left hover:bg-emerald-50"><span><span className="block font-semibold">{student.fullName}</span><span className="block text-xs text-stone-500">{student.className} · {count} valutazioni</span></span><ChevronRight className="h-5 w-5 shrink-0 text-stone-400" /></button></li>; })}</ul>}</main>;
 };

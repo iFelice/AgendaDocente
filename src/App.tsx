@@ -87,6 +87,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
   const isDefinitiveCompiled = activeTimetableInfo.isDefinitiveCompiled;
 
   const [currentView, setCurrentView] = useState<ViewMode>("oggi");
+  const [registerStudentId, setRegisterStudentId] = useState<string | null>(null);
   const [isCircularModalOpen, setIsCircularModalOpen] = useState(false);
   const [isScannerOpen, setIsScannerOpen] = useState(false);
   // File pre-scansionato dal flusso unificato, da alimentare alla pipeline circolare esistente.
@@ -552,6 +553,15 @@ export default function App({ initialData }: { initialData: LocalData }) {
     showToast("Valutazione eliminata.");
   });
 
+  const handleViewChange = (view: ViewMode) => {
+    setCurrentView(view);
+    if (view !== "registro") setRegisterStudentId(null);
+  };
+  const handleOpenRegister = (studentId: string) => {
+    setRegisterStudentId(studentId);
+    setCurrentView("registro");
+  };
+
   // Stats for badges
   const todayIso = localDateISO();
   const todayEventsCount = events.filter((e) => e.date === todayIso && !e.completed).length;
@@ -566,7 +576,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
       {/* Top Navigation */}
       <Navbar
         currentView={currentView}
-        onViewChange={setCurrentView}
+        onViewChange={handleViewChange}
         profile={profile}
         onOpenCircularModal={() => setIsCircularModalOpen(true)}
         onOpenScanner={() => setIsScannerOpen(true)}
@@ -667,6 +677,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
             onDeleteMultipleStudents={handleDeleteMultipleStudents}
             onReassignStudentsClass={handleReassignStudentsClass}
             onClearAllStudents={handleClearAllStudents}
+            onOpenRegister={handleOpenRegister}
           />
         )}
 
@@ -675,6 +686,8 @@ export default function App({ initialData }: { initialData: LocalData }) {
             profile={profile}
             students={students}
             assessments={assessments}
+            initialStudentId={registerStudentId}
+            onBackToOrigin={registerStudentId ? () => { setRegisterStudentId(null); setCurrentView("classi"); } : undefined}
             onSaveAssessment={handleSaveAssessment}
             onDeleteAssessment={handleDeleteAssessment}
           />
@@ -718,7 +731,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
           where the header navigation stays in charge. */}
       <MobileNav
         currentView={currentView}
-        onViewChange={setCurrentView}
+        onViewChange={handleViewChange}
         onOpenNewEvent={() => handleOpenNewEvent()}
         onOpenScanner={() => setIsScannerOpen(true)}
         onOpenProfileModal={() => {

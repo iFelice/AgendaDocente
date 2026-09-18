@@ -51,6 +51,7 @@ interface ClassesViewProps {
   onDeleteMultipleStudents?: (studentIds: string[]) => void | false | Promise<void | false>;
   onReassignStudentsClass?: (studentIds: string[], targetClass: string) => void;
   onClearAllStudents?: () => void;
+  onOpenRegister?: (studentId: string) => void;
 }
 
 const CATEGORY_CONFIG: Record<
@@ -111,6 +112,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
   onDeleteMultipleStudents,
   onReassignStudentsClass,
   onClearAllStudents,
+  onOpenRegister,
 }) => {
   const save = usePersistenceAction();
   const editBaseline = useRef<Student | undefined>(undefined);
@@ -836,6 +838,15 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
                   </button>
 
                   <div className="flex items-center space-x-1.5">
+                    {onOpenRegister && isStudentActive(student) && (
+                      <button
+                        type="button"
+                        onClick={() => onOpenRegister(student.id)}
+                        className="min-h-[44px] rounded-lg border border-emerald-200 bg-emerald-50 px-3 text-xs font-semibold text-emerald-800 hover:bg-emerald-100"
+                      >
+                        Apri Registro
+                      </button>
+                    )}
                     {student.isSupportStudent && (
                       <button
                         onClick={() => handleScheduleGlo(student)}
@@ -886,6 +897,15 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
               </div>
 
               <div className="flex items-center space-x-2">
+                {onOpenRegister && isStudentActive(activeDetailStudent) && (
+                  <button
+                    type="button"
+                    onClick={() => onOpenRegister(activeDetailStudent.id)}
+                    className="min-h-[44px] rounded-lg bg-emerald-600 px-3 text-xs font-bold text-white hover:bg-emerald-700"
+                  >
+                    Apri Registro
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={handlePrintStudentSheet}
