@@ -13,6 +13,7 @@ import {
   Sparkles,
   User,
   Users,
+  BookOpen,
   X,
 } from "lucide-react";
 import type { ViewMode } from "../types";
@@ -49,6 +50,7 @@ export const MOBILE_NAV_ITEMS: { id: ViewMode | "altro"; label: string; icon: Ic
 export const MOBILE_MORE_VIEWS: { id: ViewMode; label: string; icon: IconType }[] = [
   { id: "orario", label: "Orario Lezioni", icon: Grid },
   { id: "classi", label: "Classi & Alunni", icon: Users },
+  { id: "registro", label: "Registro", icon: BookOpen },
   { id: "circolari", label: "Archivio Circolari", icon: FileSearch },
 ];
 

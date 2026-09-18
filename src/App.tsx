@@ -10,6 +10,7 @@ import {
   CircularDocument,
   ExtractedItem,
   Student,
+  StudentAssessment,
   StudentNote,
   TeacherProfile,
   TimeSlotConfig,
@@ -29,6 +30,7 @@ import { DeadlinesView } from "./components/DeadlinesView";
 const TimetableEditor = lazy(() => import("./components/TimetableEditor").then(module => ({default: module.TimetableEditor})));
 const CircularsArchiveView = lazy(() => import("./components/CircularsArchiveView").then(module => ({default: module.CircularsArchiveView})));
 const ClassesView = lazy(() => import("./components/ClassesView").then(module => ({default: module.ClassesView})));
+const RegisterView = lazy(() => import("./components/RegisterView").then(module => ({default: module.RegisterView})));
 const CircularAnalyzerModal = lazy(() => import("./components/CircularAnalyzerModal").then(module => ({default: module.CircularAnalyzerModal})));
 const DocumentScannerModal = lazy(() => import("./components/DocumentScannerModal").then(module => ({default: module.DocumentScannerModal})));
 import { EventModal } from "./components/EventModal";
@@ -71,6 +73,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
   const [events, setEvents] = useState<CalendarEvent[]>(() => initialData.events);
   const [circulars, setCirculars] = useState<CircularDocument[]>(() => initialData.circulars);
   const [students, setStudents] = useState<Student[]>(() => initialData.students);
+  const [assessments, setAssessments] = useState<StudentAssessment[]>(() => initialData.assessments);
 
   // Active Timetable logic: defaults to provisional if definitive is uncompiled
   const activeType = timetableMode !== 'provvisorio' && definitiveTimetable.length > 0 ? 'definitivo' : 'provvisorio';
@@ -133,6 +136,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
     setEvents(previous => retainEqual(previous, data.events));
     setCirculars(previous => retainEqual(previous, data.circulars));
     setStudents(previous => retainEqual(previous, data.students));
+    setAssessments(previous => retainEqual(previous, data.assessments));
     if (lastOnboarding.current !== data.onboardingCompleted) setIsOnboardingOpen(!data.onboardingCompleted);
     lastOnboarding.current = data.onboardingCompleted;
   }
@@ -539,6 +543,15 @@ export default function App({ initialData }: { initialData: LocalData }) {
     showToast(`${addedCount} impegni dal registro aggiunti all'agenda.`);
   });
 
+  const handleSaveAssessment = withPersistenceFeedback(async (assessment: StudentAssessment) => {
+    await storage.saveAssessment(assessment);
+    showToast("Valutazione salvata.");
+  });
+  const handleDeleteAssessment = withPersistenceFeedback(async (assessmentId: string) => {
+    await storage.deleteAssessment(assessmentId);
+    showToast("Valutazione eliminata.");
+  });
+
   // Stats for badges
   const todayIso = localDateISO();
   const todayEventsCount = events.filter((e) => e.date === todayIso && !e.completed).length;
@@ -654,6 +667,16 @@ export default function App({ initialData }: { initialData: LocalData }) {
             onDeleteMultipleStudents={handleDeleteMultipleStudents}
             onReassignStudentsClass={handleReassignStudentsClass}
             onClearAllStudents={handleClearAllStudents}
+          />
+        )}
+
+        {currentView === "registro" && (
+          <RegisterView
+            profile={profile}
+            students={students}
+            assessments={assessments}
+            onSaveAssessment={handleSaveAssessment}
+            onDeleteAssessment={handleDeleteAssessment}
           />
         )}
 

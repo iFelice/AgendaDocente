@@ -13,6 +13,7 @@ import {
   CalendarDays,
   HeartHandshake,
   Users,
+  BookOpen,
 } from "lucide-react";
 import { TeacherProfile, ViewMode } from "../types";
 import { PWAInstallButton } from "./PWAInstallButton";
@@ -58,6 +59,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     { id: "mese", label: "Mese", icon: Calendar },
     { id: "scadenze", label: "Scadenze & PEI", icon: CheckSquare },
     { id: "classi", label: "Classi & Alunni", icon: Users },
+    { id: "registro", label: "Registro", icon: BookOpen },
     { id: "orario", label: "Orario Lezioni", icon: Grid },
     { id: "circolari", label: "Archivio Circolari", icon: FileSearch },
   ];

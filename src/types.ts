@@ -281,4 +281,5 @@ export type ViewMode =
   | "scadenze"
   | "orario"
   | "classi"
+  | "registro"
   | "circolari";

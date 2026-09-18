@@ -314,7 +314,7 @@ test('"Altro" opens an accessible sheet with the secondary destinations', async 
   for (const label of ['Orario Lezioni', 'Classi & Alunni', 'Archivio Circolari', 'Analizza Circolare', 'Profilo / Impostazioni', 'Accedi con Google', 'Guida rapida', 'Installa App']) {
     assert.ok(sheetText.includes(label), `"${label}" must be reachable from Altro`);
   }
-  assert.deepEqual(MOBILE_MORE_VIEWS.map((item) => item.id), ['orario', 'classi', 'circolari']);
+  assert.deepEqual(MOBILE_MORE_VIEWS.map((item) => item.id), ['orario', 'classi', 'registro', 'circolari']);
 
   // Choosing a destination closes the sheet and navigates.
   await act(async () => { byId(renderer, 'mobile-more-orario').props.onClick(); });
@@ -402,6 +402,7 @@ test('desktop navigation is unchanged: every section stays in the header tabs', 
     ['nav-tab-mese', 'Mese'],
     ['nav-tab-scadenze', 'Scadenze & PEI'],
     ['nav-tab-classi', 'Classi & Alunni'],
+    ['nav-tab-registro', 'Registro'],
     ['nav-tab-orario', 'Orario Lezioni'],
     ['nav-tab-circolari', 'Archivio Circolari'],
   ];
