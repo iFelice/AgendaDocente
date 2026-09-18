@@ -9,6 +9,9 @@ const required = (v: unknown) => text(v) && (v as string).trim().length > 0;
 const optional = (v: unknown, fn: (v: unknown) => boolean) => v === undefined || fn(v);
 const bool = (v: unknown) => typeof v === 'boolean';
 const number = (v: unknown) => typeof v === 'number' && Number.isFinite(v);
+const nonEmptyText = (v: unknown) => text(v) && v.trim().length > 0;
+const timestamp = (v: unknown) => nonEmptyText(v) && !Number.isNaN(Date.parse(v as string));
+const boundedText = (max: number) => (v: unknown) => text(v) && v.length <= max;
 const categories = ['lezione','consiglio_classe','collegio_docenti','dipartimento','dipartimento_sostegno','glo','pei','riunione','ricevimento_genitori','formazione','scadenza','promemoria','personale'];
 function list(value: unknown, validate: (v: Record<string, any>) => boolean): boolean {
   return Array.isArray(value) && value.every(v => record(v) && required(v.id) && validate(v)) && new Set(value.map(v => v.id)).size === value.length;
@@ -58,6 +61,11 @@ export function validateBackup(data: unknown): asserts data is Record<string, an
   if (!list(data.students, s => text(s.fullName) && text(s.className) && Array.isArray(s.notes)
     && s.notes.every(n => record(n) && required(n.id) && isValidDate(n.date) && text(n.category) && text(n.title) && text(n.content) && text(n.createdAt))
     && ['birthDate','peiType','diagnosticSummary','specialists','gloDate','updatedAt'].every(k => optional(s[k],text))
+    && optional(s.schoolId, nonEmptyText)
+    && optional(s.schoolYear, nonEmptyText)
+    && optional(s.status, status => status === 'active' || status === 'archived')
+    && optional(s.archivedAt, timestamp)
+    && optional(s.archivedReason, boundedText(500))
     && ['isSupportStudent','hasBesDsa','pdpApproved'].every(k => optional(s[k],bool)) && optional(s.supportHoursPerWeek,number)
     && optional(s.contactParents,v => record(v) && ['parentNames','phone','email','notes'].every(k => optional(v[k],text))))) throw new Error('Alunni nel backup non validi.');
   if (data.version === 2) {
