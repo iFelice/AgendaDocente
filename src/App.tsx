@@ -1,6 +1,7 @@
 import { deleteEventLocallyFirst } from "./services/eventWorkflows";
 import { observeLocalData, retainEqual } from "./services/observeLocalData";
 import { persistenceErrorMessage } from "./services/persistenceErrors";
+import { isStudentActive } from "./utils/studentMatcher";
 import { database, type LocalData } from "./services/db";
 import { localDateISO } from "./utils/dates";
 import React, { useState, useEffect, useRef, lazy, Suspense } from "react";
@@ -406,9 +407,13 @@ export default function App({ initialData }: { initialData: LocalData }) {
   });
 
   const handleDeleteStudent = withPersistenceFeedback(async (studentId: string) => {
-    await storage.deleteStudent(studentId);
+    await storage.archiveStudent(studentId);
+    showToast("Alunno archiviato. I dati e le note sono stati conservati.");
+  });
 
-    showToast("Alunno rimosso dall'elenco.");
+  const handleRestoreStudent = withPersistenceFeedback(async (studentId: string) => {
+    await storage.restoreStudent(studentId);
+    showToast("Alunno ripristinato nell'elenco attivo.");
   });
 
   const handleAddStudentNote = withPersistenceFeedback(async (studentId: string, note: StudentNote) => {
@@ -425,10 +430,17 @@ export default function App({ initialData }: { initialData: LocalData }) {
 
   const handleDeleteMultipleStudents = withPersistenceFeedback(async (studentIds: string[]) => {
     await database.atomic(async () => {
-      const list = (await storage.getStudents()).filter((s) => !studentIds.includes(s.id));
-    await storage.saveStudents(list);
+      const list = await storage.getStudents();
+      const archivedAt = new Date().toISOString();
+      for (const student of list) {
+        if (studentIds.includes(student.id)) {
+          student.status = "archived";
+          student.archivedAt = archivedAt;
+        }
+      }
+      await storage.saveStudents(list);
     });
-    showToast(`${studentIds.length} alunni rimossi.`);
+    showToast(`${studentIds.length} alunni archiviati. I dati sono stati conservati.`);
   });
 
   const handleReassignStudentsClass = withPersistenceFeedback(async (studentIds: string[], targetClass: string) => {
@@ -445,8 +457,14 @@ export default function App({ initialData }: { initialData: LocalData }) {
   });
 
   const handleClearAllStudents = withPersistenceFeedback(async () => {
-    await storage.saveStudents([]);
-    showToast("Elenco alunni azzerato.");
+    const list = await storage.getStudents();
+    const archivedAt = new Date().toISOString();
+    for (const student of list) {
+      student.status = "archived";
+      student.archivedAt = archivedAt;
+    }
+    await storage.saveStudents(list);
+    showToast("Alunni archiviati. I dati sono stati conservati.");
   });
 
   const handleScheduleStudentEvent = (prefill: Partial<CalendarEvent>) => {
@@ -629,6 +647,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
             students={students}
             onSaveStudent={handleSaveStudent}
             onDeleteStudent={handleDeleteStudent}
+            onRestoreStudent={handleRestoreStudent}
             onAddNote={handleAddStudentNote}
             onDeleteNote={handleDeleteStudentNote}
             onScheduleEvent={handleScheduleStudentEvent}
@@ -700,7 +719,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
         isOpen={isScannerOpen}
         onClose={() => setIsScannerOpen(false)}
         profile={profile}
-        students={students}
+        students={students.filter(isStudentActive)}
         timeSlotConfig={timeSlotConfig}
         provisionalTimetable={provisionalTimetable}
         definitiveTimetable={definitiveTimetable}

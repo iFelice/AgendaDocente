@@ -1,4 +1,4 @@
-import { assertUnchanged } from "./persistenceErrors";
+import { assertUnchanged, DuplicateStudentError } from "./persistenceErrors";
 import { linkLegacyCircularEvents } from "../utils/circularLinks";
 import { localDateISO } from "../utils/dates";
 import { CalendarEvent, CircularDocument, ExtractedItem, SchoolLevel, Student, StudentNote, TeacherProfile, TimeSlotConfig, TimetableMode, TimetableSlot, TimetableType, } from "../types";
@@ -7,6 +7,7 @@ import { validateBackup } from "./backup";
 import { database, type LocalData, type LegacyStorage } from "./db";
 import { extractedItemError } from "../utils/circularParser";
 import { normalizeSchoolLinkedData } from "../utils/multiSchool";
+import { normalizeStudentNameForComparison } from "../utils/studentMatcher";
 export function getSchoolLevelLabel(level?: SchoolLevel): string {
   switch (level) {
     case "infanzia":
@@ -1087,6 +1088,13 @@ export const storage = {
         const withoutNotes = (value?: Student) => value && {...value, notes:[], updatedAt:undefined};
         assertUnchanged(withoutNotes(list[idx]), withoutNotes(expected));
       }
+      const duplicate = list.find((existing) =>
+        existing.id !== student.id &&
+        existing.className.trim().toLocaleLowerCase() === student.className.trim().toLocaleLowerCase() &&
+        (existing.schoolId ?? undefined) === (student.schoolId ?? undefined) &&
+        normalizeStudentNameForComparison(existing.fullName) === normalizeStudentNameForComparison(student.fullName)
+      );
+      if (duplicate) throw new DuplicateStudentError(duplicate.fullName, duplicate.className);
       const updatedStudent = {
         ...student,
         notes: idx >= 0 ? list[idx].notes : student.notes,
@@ -1101,6 +1109,28 @@ export const storage = {
       await this.saveStudents(list);
     });
   },
+  async archiveStudent(id: string): Promise<void> {
+    return database.atomic(async () => {
+      const list = await this.getStudents();
+      const student = list.find((s) => s.id === id);
+      if (!student) return;
+      student.status = "archived";
+      student.archivedAt = new Date().toISOString();
+      await this.saveStudents(list);
+    });
+  },
+  async restoreStudent(id: string): Promise<void> {
+    return database.atomic(async () => {
+      const list = await this.getStudents();
+      const student = list.find((s) => s.id === id);
+      if (!student) return;
+      student.status = "active";
+      delete student.archivedAt;
+      delete student.archivedReason;
+      await this.saveStudents(list);
+    });
+  },
+  /** Permanent deletion remains an internal/maintenance operation, not normal UI behaviour. */
   async deleteStudent(id: string): Promise<void> {
     return database.atomic(async () => {
       const list = (await this.getStudents()).filter((s) => s.id !== id);

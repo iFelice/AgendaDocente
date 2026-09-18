@@ -90,6 +90,27 @@ function levenshtein(a: string, b: string): number {
 export interface MatchableStudent {
   id: string;
   fullName: string;
+  status?: "active" | "archived";
+}
+
+/** Legacy students without status are active; archived students are hidden from normal matching. */
+export function isStudentActive(student: Pick<MatchableStudent, "status">): boolean {
+  return student.status !== "archived";
+}
+
+/** Stable comparison key: preserve the stored name, normalize only for comparison. */
+export function normalizeStudentNameForComparison(raw: unknown): string {
+  return foldName(raw).replace(/\s+/g, " ").trim();
+}
+
+/** Deterministic local ordering without guessing which token is the surname. */
+const studentNameCollator = new Intl.Collator("it", { sensitivity: "base", numeric: true });
+export function compareStudentNames(a: Pick<MatchableStudent, "id" | "fullName">, b: Pick<MatchableStudent, "id" | "fullName">): number {
+  const byName = studentNameCollator.compare(
+    normalizeStudentNameForComparison(a.fullName),
+    normalizeStudentNameForComparison(b.fullName),
+  );
+  return byName || studentNameCollator.compare(a.id, b.id);
 }
 
 interface NameInterpretation {
@@ -141,6 +162,7 @@ export function matchStudentName(raw: string, students: MatchableStudent[]): Stu
 
   const scored: StudentMatchCandidate[] = [];
   for (const student of students) {
+    if (!isStudentActive(student)) continue;
     const studentParts = foldName(student.fullName).split(" ").filter(Boolean);
     if (!studentParts.length) continue;
 
