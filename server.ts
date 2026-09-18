@@ -18,6 +18,8 @@ import {
   stripRejectionMessage,
   stripSuccessLog,
   timetableStripSchema,
+  TIMETABLE_STRIP_DEADLINE_MS,
+  TIMETABLE_STRIP_GROQ_FALLBACK_TIMEOUT_MS,
   validateTimetableStripPayload,
 } from "./server/timetableStrip";
 import { totalPeriodColumns } from "./src/utils/timetableCrops";
@@ -572,9 +574,19 @@ async function runGroqTimetableFallback(input: {
   userText?: string;
   /** Etichetta dei log (default: "AI Orari"). */
   label?: string;
+  /**
+   * Budget DEDICATO del fallback, indipendente da quanto ha consumato Gemini.
+   *
+   * Se assente (tutti gli endpoint tranne la strip) il comportamento è quello di
+   * sempre: il residuo del deadline dell'endpoint. La strip lo imposta perché
+   * Gemini può legittimamente esaurire tutto il proprio budget e il fallback non
+   * deve ereditare quel conto alla rovescia.
+   */
+  fallbackBudgetMs?: number;
 }): Promise<{ ok: true; text: string; source: string } | { ok: false }> {
   const label = input.label ?? "AI Orari";
-  const remainingBudgetMs = TIMETABLE_ANALYSIS_TIMEOUT_MS - input.elapsedMs;
+  const dedicatedBudget = input.fallbackBudgetMs !== undefined;
+  const remainingBudgetMs = dedicatedBudget ? input.fallbackBudgetMs : TIMETABLE_ANALYSIS_TIMEOUT_MS - input.elapsedMs;
   const decision = groqFallbackDecision({
     geminiOk: input.run.ok,
     geminiTransient: input.run.category !== "ok" && isTransientGeminiCategory(input.run.category),
@@ -587,7 +599,7 @@ async function runGroqTimetableFallback(input: {
     if (decision.reason !== "gemini-ok") console.log(`[${label}] fallback=groq saltato motivo=${decision.reason}`);
     return { ok: false };
   }
-  console.log(`[${label}] fallback=groq motivo=${input.run.category} mime=${input.mimeType} budgetMs=${remainingBudgetMs}`);
+  console.log(`[${label}] fallback=groq motivo=${input.run.category} mime=${input.mimeType} budgetMs=${remainingBudgetMs} budget=${dedicatedBudget ? "dedicato" : "residuo"}`);
   const result = await runGroqJson({
     systemInstruction: input.systemInstruction,
     userText: input.userText ?? TIMETABLE_USER_TEXT,
@@ -828,7 +840,10 @@ app.use("/api/analyze-timetable-geometry", scanAnalysisErrorHandler);
  */
 app.post("/api/analyze-timetable-strip", ...createAnalysisGuards(validateTimetableStripPayload), async (req, res) => {
   const controller = new AbortController();
-  const deadline = setTimeout(() => controller.abort(), TIMETABLE_ANALYSIS_TIMEOUT_MS);
+  // Deadline dell'endpoint = budget Gemini + budget Groq. Gemini resta limitato
+  // dal proprio `budgetMs` qui sotto: questo allunga solo la finestra in cui la
+  // risposta può arrivare, non il tempo concesso a Gemini.
+  const deadline = setTimeout(() => controller.abort(), TIMETABLE_STRIP_DEADLINE_MS);
   const abort = () => controller.abort();
   res.once("close", abort);
   try {
@@ -849,7 +864,7 @@ app.post("/api/analyze-timetable-strip", ...createAnalysisGuards(validateTimetab
       responseSchema: timetableStripSchema,
       signal: controller.signal,
       label: "AI Strip",
-      // Stesso budget dell'analisi orario: nessuna nuova costante di timeout.
+      // Budget di Gemini INVARIATO: il fix separa i budget, non concede più tempo.
       budgetMs: TIMETABLE_ANALYSIS_TIMEOUT_MS,
       thinkingLevel: "low",
     });
@@ -869,6 +884,8 @@ app.post("/api/analyze-timetable-strip", ...createAnalysisGuards(validateTimetab
         elapsedMs: Date.now() - analysisStartedAt,
         userText,
         label: "AI Strip",
+        // Budget PROPRIO: Groq parte anche se Gemini ha consumato tutto il suo.
+        fallbackBudgetMs: TIMETABLE_STRIP_GROQ_FALLBACK_TIMEOUT_MS,
       });
       if (!fallback.ok) {
         return res.status(503).json({ success: false, error: "Il documento non è stato elaborato. Riprova più tardi." });

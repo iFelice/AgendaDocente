@@ -4,7 +4,15 @@ import { join } from 'node:path';
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { app } from '../server';
-import { groqJsonSchemaFrom, GROQ_VISION_MODEL_DEFAULT } from '../server/groqAnalysis';
+import {
+  GROQ_MIN_ATTEMPT_MS,
+  GROQ_VISION_MODEL_DEFAULT,
+  groqAttemptTimeoutMs,
+  groqFallbackDecision,
+  groqJsonSchemaFrom,
+} from '../server/groqAnalysis';
+import { TIMETABLE_ANALYSIS_TIMEOUT_MS } from '../server/timetableAnalysis';
+import { SCAN_REQUEST_TIMEOUT_MS } from '../src/services/scanService';
 import {
   STRIP_REQUEST_KEYS,
   buildTimetableStripPrompt,
@@ -14,6 +22,8 @@ import {
   stripRejectionMessage,
   stripSuccessLog,
   timetableStripSchema,
+  TIMETABLE_STRIP_DEADLINE_MS,
+  TIMETABLE_STRIP_GROQ_FALLBACK_TIMEOUT_MS,
   validateTimetableStripPayload,
 } from '../server/timetableStrip';
 import {
@@ -472,4 +482,255 @@ test('strip: risposta fuori contratto -> 422, nessun esito inventato', async () 
   } finally {
     restore();
   }
+});
+
+// ---------------------------------------------------------------------------
+// BUDGET DEDICATO DEL FALLBACK GROQ DELLA STRIP
+// ---------------------------------------------------------------------------
+
+/** Risposta di geometria valida (sintetica), per il test di non regressione. */
+const GEOMETRY_TEXT = JSON.stringify({
+  table: { x: 0.05, y: 0.1, width: 0.9, height: 0.8 },
+  subjectColumn: { x: 0.08, width: 0.12 },
+  scheduleGrid: { x: 0.25, width: 0.65 },
+});
+
+/**
+ * Orologio virtuale: avanza SOLO quando lo decide il test.
+ *
+ * Serve a riprodurre in pochi millisecondi ciò che su Render richiede 42 secondi
+ * reali: Gemini che consuma TUTTO il proprio budget prima di fallire. Senza di
+ * esso il caso di regressione sarebbe impossibile da scrivere in modo
+ * deterministico (o costerebbe 45 s di attesa per ogni esecuzione).
+ */
+function virtualClock() {
+  const realNow = Date.now;
+  let virtual = realNow();
+  Date.now = () => virtual;
+  return {
+    advance: (ms: number) => { virtual += ms; },
+    elapsed: () => virtual,
+    startedAt: virtual,
+    restore: () => { Date.now = realNow; },
+  };
+}
+
+/** Quanto consuma ogni tentativo Gemini simulato (504 = deadline). */
+const GEMINI_ATTEMPT_COST_MS = 21_000;
+
+test('budget strip: il residuo di Gemini non basta, il budget dedicato sì', () => {
+  // Numeri reali osservati su Render: durataMs=42095, categoria=deadline.
+  const observedElapsedMs = 42_095;
+  const residual = TIMETABLE_ANALYSIS_TIMEOUT_MS - observedElapsedMs;
+  assert.equal(groqAttemptTimeoutMs(residual), 0, 'con il budget residuo il fallback non può partire');
+  assert.equal(
+    groqFallbackDecision({ geminiOk: false, geminiTransient: true, groqConfigured: true, mimeType: 'image/png', remainingBudgetMs: residual }).reason,
+    'budget-esaurito',
+    'è esattamente il motivo visto nei log di Render',
+  );
+  // Con il budget dedicato la stessa situazione cambia esito.
+  const attempt = groqAttemptTimeoutMs(TIMETABLE_STRIP_GROQ_FALLBACK_TIMEOUT_MS);
+  assert.ok(attempt >= GROQ_MIN_ATTEMPT_MS, `tentativo Groq utile: ${attempt} ms`);
+  assert.equal(
+    groqFallbackDecision({ geminiOk: false, geminiTransient: true, groqConfigured: true, mimeType: 'image/png', remainingBudgetMs: TIMETABLE_STRIP_GROQ_FALLBACK_TIMEOUT_MS }).proceed,
+    true,
+  );
+  // Gemini non riceve più tempo: il suo budget è la costante di sempre.
+  assert.equal(TIMETABLE_ANALYSIS_TIMEOUT_MS, 45_000, 'il budget di Gemini è invariato');
+  assert.equal(TIMETABLE_STRIP_DEADLINE_MS, 45_000 + TIMETABLE_STRIP_GROQ_FALLBACK_TIMEOUT_MS);
+  assert.ok(
+    TIMETABLE_STRIP_GROQ_FALLBACK_TIMEOUT_MS >= 20_000 && TIMETABLE_STRIP_GROQ_FALLBACK_TIMEOUT_MS <= 25_000,
+    'budget del fallback nella fascia richiesta (20-25 s)',
+  );
+});
+
+test('REGRESSIONE: Gemini esaurisce TUTTO il budget -> Groq parte comunque e il validator è invariato', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  const clock = virtualClock();
+  stubProviders({
+    // 504 = categoria "deadline", la stessa dei log di Render. Ogni tentativo
+    // consuma 21 s di orologio virtuale: due tentativi = 42 s, cioè praticamente
+    // tutto TIMETABLE_ANALYSIS_TIMEOUT_MS.
+    gemini: () => {
+      clock.advance(GEMINI_ATTEMPT_COST_MS);
+      return { status: 504, body: { error: { code: 504, message: 'Deadline exceeded' } } };
+    },
+    groq: () => ({ status: 200, body: { choices: [{ message: { content: STRIP_TEXT }, finish_reason: 'stop' }] } }),
+  });
+  const restoreLogs = captureLogs();
+  try {
+    const res = await postStrip({ imageBase64: pngBase64, mimeType: 'image/png', classLabel: TARGET_CLASS });
+    const elapsedMs = clock.elapsed() - clock.startedAt;
+    // La premessa del caso: Gemini ha davvero consumato tutto il suo budget.
+    assert.ok(elapsedMs >= 42_000, `budget Gemini consumato: ${elapsedMs} ms`);
+    assert.equal(groqAttemptTimeoutMs(TIMETABLE_ANALYSIS_TIMEOUT_MS - elapsedMs), 0, 'il residuo non avrebbe permesso alcun tentativo');
+
+    // PRIMA DEL FIX qui arrivava un 503 con "fallback=groq saltato
+    // motivo=budget-esaurito": la strip non raggiungeva mai Groq.
+    assert.equal(res.status, 200, 'la strip risponde nonostante il budget Gemini esaurito');
+    const data = await res.json();
+    assert.equal(data.success, true);
+    assert.equal(data.source, GROQ_VISION_MODEL_DEFAULT, 'la risposta arriva dal fallback');
+    assert.equal(data.outcome, 'unique', 'stesso validator strip: esito invariato');
+    assert.deepEqual(data.subjects, ['Matematica']);
+
+    assert.equal(intercepted.filter((h) => h === 'groq').length, 1, 'una sola chiamata Groq');
+    const logs = logLines.join('\n');
+    assert.match(logs, /provider=gemini esito=fallito categoria=deadline/, 'Gemini ha fallito per deadline');
+    assert.match(logs, /fallback=groq motivo=deadline mime=image\/png budgetMs=25000 budget=dedicato/, 'budget dedicato, non residuo');
+    assert.match(logs, /esitoStrip=unique numeroMatch=1 scartati=0/);
+    for (const secret of ['3D', 'Matematica', 'cellText', 'subject', pngBase64]) {
+      assert.ok(!logs.includes(secret), `il log non contiene ${secret}`);
+    }
+  } finally {
+    restoreLogs();
+    clock.restore();
+  }
+});
+
+test('strip: Gemini 503 rapido -> Groq chiamato con lo stesso prompt, schema e immagine', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  stubProviders({
+    gemini: () => ({ status: 503, body: { error: { code: 503, message: 'Model is currently experiencing high demand' } } }),
+    groq: () => ({ status: 200, body: { choices: [{ message: { content: STRIP_TEXT }, finish_reason: 'stop' }] } }),
+  });
+  const restore = captureLogs();
+  try {
+    const res = await postStrip({ imageBase64: pngBase64, mimeType: 'image/png', classLabel: TARGET_CLASS });
+    assert.equal(res.status, 200);
+    assert.equal(intercepted.filter((h) => h === 'groq').length, 1, 'una sola chiamata Groq per richiesta');
+    const body = JSON.parse(providerBodies[providerBodies.length - 1]);
+    // Prompt IDENTICO a quello della strip, senza alcuna aggiunta.
+    assert.equal(body.messages[0].content, buildTimetableStripPrompt(TARGET_CLASS));
+    const parts = body.messages[1].content;
+    assert.equal(parts.filter((p: any) => p.type === 'text')[0].text, buildTimetableStripUserText(TARGET_CLASS));
+    const images = parts.filter((p: any) => p.type === 'image_url');
+    assert.equal(images.length, 1, 'una sola immagine');
+    assert.equal(images[0].image_url.url, `data:image/png;base64,${pngBase64}`, 'la strip, non la foto originale');
+    // Schema IDENTICO a quello derivato dallo schema strip.
+    assert.deepEqual(body.response_format.json_schema.schema, groqJsonSchemaFrom(timetableStripSchema));
+    assert.equal(body.response_format.json_schema.strict, true);
+    assert.equal(body.temperature, 0);
+    assert.match(logLines.join('\n'), /budget=dedicato/, 'anche sul percorso rapido il budget è dedicato');
+  } finally {
+    restore();
+  }
+});
+
+test('strip: errore Gemini NON transitorio -> Groq non viene chiamato', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  stubProviders({ gemini: () => ({ status: 404, body: { error: { code: 404, message: 'models/xyz is not found' } } }) });
+  const restore = captureLogs();
+  try {
+    const res = await postStrip({ imageBase64: pngBase64, mimeType: 'image/png', classLabel: TARGET_CLASS });
+    assert.equal(res.status, 503, 'risposta controllata');
+    const data = await res.json();
+    assert.equal(data.success, false);
+    assert.deepEqual(intercepted.filter((h) => h === 'groq'), [], 'nessuna chiamata Groq su errore deterministico');
+    assert.match(logLines.join('\n'), /fallback=groq saltato motivo=errore-non-transitorio/);
+  } finally {
+    restore();
+  }
+});
+
+test('strip: GROQ_API_KEY assente -> nessun crash, risposta controllata', async () => {
+  delete process.env.GROQ_API_KEY;
+  stubProviders({ gemini: () => ({ status: 503, body: { error: { code: 503, message: 'Model is currently experiencing high demand' } } }) });
+  const restore = captureLogs();
+  try {
+    const res = await postStrip({ imageBase64: pngBase64, mimeType: 'image/png', classLabel: TARGET_CLASS });
+    assert.equal(res.status, 503);
+    const data = await res.json();
+    assert.equal(data.success, false);
+    assert.equal(data.outcome, undefined, 'nessun esito inventato');
+    assert.deepEqual(intercepted.filter((h) => h === 'groq'), [], 'nessuna chiamata Groq senza chiave');
+    assert.match(logLines.join('\n'), /fallback=groq saltato motivo=non-configurato/);
+  } finally {
+    restore();
+  }
+});
+
+test('strip: fallback Groq in timeout -> 503 controllato, un solo tentativo, nessun retry', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  stubProviders({
+    gemini: () => ({ status: 503, body: { error: { code: 503, message: 'Model is currently experiencing high demand' } } }),
+    // Un fetch che abortisce è esattamente ciò che produce il timeout del tentativo.
+    groq: () => { throw Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }); },
+  });
+  const restore = captureLogs();
+  try {
+    const res = await postStrip({ imageBase64: pngBase64, mimeType: 'image/png', classLabel: TARGET_CLASS });
+    assert.equal(res.status, 503, 'risposta controllata, nessun crash');
+    const data = await res.json();
+    assert.equal(data.success, false);
+    assert.equal(data.outcome, undefined);
+    assert.equal(intercepted.filter((h) => h === 'groq').length, 1, 'un solo tentativo Groq: nessun retry del provider');
+    const logs = logLines.join('\n');
+    assert.match(logs, /provider=groq .*esito=fallito categoria=deadline/, 'il timeout del fallback è classificato');
+    assert.equal((logs.match(/provider=groq/g) ?? []).length, 1, 'una sola riga di esito Groq');
+    assert.ok(!logs.includes(pngBase64) && !logs.includes('Matematica'));
+  } finally {
+    restore();
+  }
+});
+
+test('non regressione: geometry continua a usare il budget RESIDUO, non quello dedicato', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  stubProviders({
+    gemini: () => ({ status: 503, body: { error: { code: 503, message: 'Model is currently experiencing high demand' } } }),
+    groq: () => ({ status: 200, body: { choices: [{ message: { content: GEOMETRY_TEXT }, finish_reason: 'stop' }] } }),
+  });
+  const restore = captureLogs();
+  try {
+    const res = await realFetch(`${baseUrl}/api/analyze-timetable-geometry`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ imageBase64: pngBase64, mimeType: 'image/png', periodsPerDay: 5 }),
+    });
+    assert.equal(res.status, 200);
+    const logs = logLines.join('\n');
+    assert.match(logs, /\[AI Geometria\] fallback=groq motivo=sovraccarico mime=image\/png budgetMs=\d+ budget=residuo/, 'geometry: budget residuo, come prima');
+    assert.doesNotMatch(logs, /\[AI Geometria\].*budget=dedicato/, 'geometry non ha ricevuto il budget della strip');
+  } finally {
+    restore();
+  }
+});
+
+test('budget: solo la strip passa un budget dedicato agli altri endpoint', async () => {
+  const source = withoutComments(readFileSync(join(process.cwd(), 'server.ts'), 'utf8'));
+  // Tre call site di fallback oltre alla strip: nessuno passa fallbackBudgetMs.
+  const callSites = source.split('await runGroqTimetableFallback({').slice(1);
+  assert.equal(callSites.length, 3, 'timetable, geometry e strip');
+  const withDedicated = callSites.filter((chunk) => chunk.slice(0, 700).includes('fallbackBudgetMs'));
+  assert.equal(withDedicated.length, 1, 'un solo endpoint usa il budget dedicato');
+  assert.ok(withDedicated[0].slice(0, 700).includes('label: "AI Strip"'), 'ed è la strip');
+  // Il deadline dedicato esiste solo nell'endpoint strip (una sola occorrenza nel
+  // codice, oltre all'import).
+  const usages = source.match(/setTimeout\(\(\) => controller\.abort\(\), TIMETABLE_STRIP_DEADLINE_MS\)/g) ?? [];
+  assert.equal(usages.length, 1, 'un solo endpoint con il deadline dedicato');
+  assert.equal(
+    (source.match(/setTimeout\(\(\) => controller\.abort\(\), TIMETABLE_ANALYSIS_TIMEOUT_MS\)/g) ?? []).length,
+    2,
+    'orario e geometria hanno il deadline di sempre',
+  );
+  assert.match(source, /setTimeout\(\(\) => controller\.abort\(\), CIRCULAR_ANALYSIS_TIMEOUT_MS\)/, 'circular invariato');
+  assert.match(source, /setTimeout\(\(\) => controller\.abort\(\), STUDENT_DOCUMENT_TIMEOUT_MS\)/, 'student invariato');
+  // Il budget di Gemini nella strip è ancora la costante condivisa.
+  const stripEndpoint = source.slice(source.indexOf('/api/analyze-timetable-strip'));
+  assert.match(stripEndpoint, /budgetMs: TIMETABLE_ANALYSIS_TIMEOUT_MS,/, 'Gemini non riceve più tempo');
+  assert.ok(!/TIMETABLE_ANALYSIS_TIMEOUT_MS\s*=/.test(source), 'la costante globale non è ridefinita');
+});
+
+test('client: il timeout della strip copre Gemini + Groq senza toccare gli altri endpoint', async () => {
+  // Peggio caso server: tutto il budget Gemini più tutto il budget Groq.
+  assert.ok(
+    SCAN_REQUEST_TIMEOUT_MS > TIMETABLE_STRIP_DEADLINE_MS,
+    `il client attende ${SCAN_REQUEST_TIMEOUT_MS} ms, il server al più ${TIMETABLE_STRIP_DEADLINE_MS} ms`,
+  );
+  assert.ok(SCAN_REQUEST_TIMEOUT_MS - TIMETABLE_STRIP_DEADLINE_MS >= 10_000, 'almeno 10 s di margine');
+  // Non è stato introdotto un timeout client specifico: non serviva.
+  const service = withoutComments(readFileSync(join(process.cwd(), 'src', 'services', 'scanService.ts'), 'utf8'));
+  assert.ok(!/STRIP.*TIMEOUT_MS|TIMEOUT_MS.*STRIP/i.test(service), 'nessuna costante di timeout specifica della strip');
+  // Una sola CHIAMATA del helper, con la costante condivisa: nessun override.
+  assert.equal((service.match(/createScanTimeout\(SCAN_REQUEST_TIMEOUT_MS\)/g) ?? []).length, 1, 'un solo punto di timeout client, condiviso');
 });

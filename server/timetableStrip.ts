@@ -1,5 +1,6 @@
 import { Type } from '@google/genai';
 import { AnalysisInputError, validateImageFields } from './analysisGuards';
+import { TIMETABLE_ANALYSIS_TIMEOUT_MS } from './timetableAnalysis';
 import { normalizeClassLabel } from '../src/utils/timetableTokens';
 import {
   classifyStripMatches,
@@ -24,6 +25,31 @@ import {
  * (`validateCurricularTargetsPayload` / schema `matches` su `/api/analyze-timetable`),
  * il crossref, né alcun salvataggio: l'esito serve alla UI diagnostica.
  */
+
+/**
+ * Budget DEDICATO del fallback Groq della STRIP.
+ *
+ * perché esiste: su Render la strip non è mai arrivata a Groq. Gemini consumava
+ * quasi tutto `TIMETABLE_ANALYSIS_TIMEOUT_MS` (`durataMs=42095`, categoria
+ * `deadline`) e il fallback ereditava il budget residuo dello stesso endpoint:
+ * `groqAttemptTimeoutMs(45000 - 42095)` = 905 ms, sotto `GROQ_MIN_ATTEMPT_MS`,
+ * quindi `[AI Strip] fallback=groq saltato motivo=budget-esaurito`. La strip era
+ * formalmente collegata al fallback ma di fatto irraggiungibile.
+ *
+ * Questo valore NON toglie né aggiunge tempo a Gemini: il budget di Gemini resta
+ * `TIMETABLE_ANALYSIS_TIMEOUT_MS`. Separa i due budget, e basta. Groq riceve
+ * `groqAttemptTimeoutMs(25000)` = 23 s effettivi per UNA singola strip.
+ */
+export const TIMETABLE_STRIP_GROQ_FALLBACK_TIMEOUT_MS = 25_000;
+
+/**
+ * Deadline complessivo dell'endpoint strip: budget Gemini PIÙ budget Groq.
+ *
+ * È il tempo massimo che il client può attendere. Serve solo a non abortire la
+ * risposta mentre Groq sta ancora lavorando: Gemini continua a essere limitato
+ * dal proprio budget, quindi un Gemini veloce risponde esattamente come prima.
+ */
+export const TIMETABLE_STRIP_DEADLINE_MS = TIMETABLE_ANALYSIS_TIMEOUT_MS + TIMETABLE_STRIP_GROQ_FALLBACK_TIMEOUT_MS;
 
 const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const invalid = () => { throw new AnalysisInputError(400, 'Richiesta di analisi non valida.'); };
