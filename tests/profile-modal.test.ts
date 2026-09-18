@@ -84,7 +84,7 @@ function memoryStore(overrides: Partial<SyncableSnapshot> = {}): SyncStore & { s
 function makeFakeCloud(clock: { now: string }, failReads = false) {
   const cloud = {
     state: {} as Record<string, RemoteStateDoc>,
-    items: { events: new Map<string, RemoteItem>(), circulars: new Map<string, RemoteItem>() } as Record<ItemsCollection, Map<string, RemoteItem>>,
+    items: { events: new Map<string, RemoteItem>(), circulars: new Map<string, RemoteItem>(), assessments: new Map<string, RemoteItem>() } as Record<ItemsCollection, Map<string, RemoteItem>>,
     conflicts: [] as { kind: string; loser: unknown }[],
     reads: 0, writes: 0,
     writeInFlight: 0, maxWriteInFlight: 0,

@@ -94,4 +94,4 @@ export function createFirestoreGateway(app: FirebaseApp | null, getUid: () => st
 }
 
 /** Path layout used by the gateway and by firestore.rules (kept in sync by tests). */
-export const CLOUD_PATH_PATTERN = /^users\/[A-Za-z0-9_-]+\/(state\/[a-zA-Z]+|events\/[^/]+|circulars\/[^/]+|conflicts\/[^/]+)$/;
+export const CLOUD_PATH_PATTERN = /^users\/[A-Za-z0-9_-]+\/(state\/[a-zA-Z]+|events\/[^/]+|circulars\/[^/]+|assessments\/[^/]+|conflicts\/[^/]+)$/;

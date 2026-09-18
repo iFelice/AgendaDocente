@@ -54,7 +54,7 @@ const newSlot = (id: string, dayOfWeek: 1 | 2 | 3 | 4 | 5 | 6, periodNumber: num
 function makeFakeCloud(clock: { now: string }) {
   const cloud = {
     state: {} as Record<string, RemoteStateDoc>,
-    items: { events: new Map<string, RemoteItem>(), circulars: new Map<string, RemoteItem>() } as Record<ItemsCollection, Map<string, RemoteItem>>,
+    items: { events: new Map<string, RemoteItem>(), circulars: new Map<string, RemoteItem>(), assessments: new Map<string, RemoteItem>() } as Record<ItemsCollection, Map<string, RemoteItem>>,
     conflicts: [] as { kind: string; loser: unknown }[],
     writes: 0,
   };

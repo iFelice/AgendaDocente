@@ -1,4 +1,4 @@
-import type { CalendarEvent, CircularDocument, TeacherProfile, TimetableSlot, TimeSlotConfig } from "../../types";
+import type { CalendarEvent, CircularDocument, StudentAssessment, TeacherProfile, TimetableSlot, TimeSlotConfig } from "../../types";
 import type {
   ItemsCollection,
   RemoteItem,
@@ -10,6 +10,7 @@ import type {
 } from "./types";
 import { ITEMS_COLLECTIONS, STATE_DOC_NAMES } from "./types";
 import { isPlaceholderFullName } from "../../utils/names";
+import { isValidStudentAssessment } from "../backup";
 
 /** Deterministic key-order-insensitive serialization + FNV-1a hash: content identity only. */
 export function canonicalStringify(value: unknown): string {
@@ -62,6 +63,7 @@ export interface SyncPlan {
   /** Partial local replacements produced by remote-newer rows or mirrored deletions. */
   localEvents?: CalendarEvent[];
   localCirculars?: CircularDocument[];
+  localAssessments?: StudentAssessment[];
   localApplyState: Partial<Record<StateDocName, unknown>>;
   remoteWrites: Record<ItemsCollection, Record<string, unknown>>;
   remoteDeletes: Record<ItemsCollection, string[]>;
@@ -83,7 +85,7 @@ export function itemsDigest(rows: { id: string }[]): string {
 const emptyState = (uid: string): SyncStateV1 => ({
   uid,
   state: {},
-  items: { events: { docs: {} }, circulars: { docs: {} } },
+  items: { events: { docs: {} }, circulars: { docs: {} }, assessments: { docs: {} } },
 });
 
 const isNonEmptyArray = (v: unknown): boolean => Array.isArray(v) && v.length > 0;
@@ -93,6 +95,7 @@ export function isPristineLocal(snapshot: SyncableSnapshot): boolean {
   return (
     snapshot.events.length === 0 &&
     snapshot.circulars.length === 0 &&
+    (snapshot.assessments ?? []).length === 0 &&
     snapshot.students.length === 0 &&
     snapshot.definitiveTimetable.length === 0 &&
     snapshot.provisionalTimetable.length === 0 &&
@@ -121,6 +124,7 @@ export function snapshotFromRemote(remote: RemoteSnapshot): Partial<Record<State
   }
   if (remote.items.events.length) out.events = remote.items.events.map(i => i.payload);
   if (remote.items.circulars.length) out.circulars = remote.items.circulars.map(i => i.payload);
+  if (remote.items.assessments?.length) out.assessments = remote.items.assessments.map(i => i.payload);
   return out;
 }
 
@@ -145,8 +149,8 @@ export function planSync(ctx: PlanContext): SyncPlan {
   const plan: SyncPlan = {
     fullRestore: null,
     localApplyState: {},
-    remoteWrites: { events: {}, circulars: {} },
-    remoteDeletes: { events: [], circulars: [] },
+    remoteWrites: { events: {}, circulars: {}, assessments: {} },
+    remoteDeletes: { events: [], circulars: [], assessments: [] },
     stateWrites: {},
     needsResolution: [],
     archivedOnOverwrite: [],
@@ -154,6 +158,19 @@ export function planSync(ctx: PlanContext): SyncPlan {
     nextState,
     changedSomething: false,
   };
+
+  // Item-level assessment payloads are untrusted input. Invalid remote rows are never
+  // included in a full restore; they are archived and deleted by the normal cloud side.
+  const validAssessments: RemoteItem[] = [];
+  for (const item of remote.items.assessments ?? []) {
+    if (isValidStudentAssessment(item.payload)) validAssessments.push(item);
+    else {
+      plan.archivedOnOverwrite.push({ kind: `invalid-item:assessments:${item.id}`, loser: item.payload });
+      plan.remoteDeletes.assessments.push(item.id);
+      plan.changedSomething = true;
+    }
+  }
+  remote.items.assessments = validAssessments;
 
   const remoteKnown = remoteHasData(remote);
   if (!syncState && !resolution && isPristineLocal(snapshot) && remoteKnown) {
@@ -249,52 +266,71 @@ export function planSync(ctx: PlanContext): SyncPlan {
   // --- legacy / malformed remote state documents (classified by remoteSchema.ts) ---
   repairLegacyStateDocs(plan, ctx, nextState, snapshot);
 
-  // --- item collections (events / circulars): id-level three-way merge (union + LWW + mirrored deletions) ---
+  // --- item collections: id-level three-way merge (union + conflict archive + assessment tombstones) ---
   for (const coll of ITEMS_COLLECTIONS) {
-    const track = nextState.items[coll];
-    const localRows = new Map<string, { row: CalendarEvent | CircularDocument; hash: string }>(
-      (coll === "events" ? snapshot.events : snapshot.circulars).map(row => [row.id, { row, hash: contentHash(row) }] as [string, { row: CalendarEvent | CircularDocument; hash: string }])
+    const track = (nextState.items[coll] ??= { docs: {} });
+    const rows = coll === "events" ? snapshot.events : coll === "circulars" ? snapshot.circulars : snapshot.assessments ?? [];
+    const localRows = new Map<string, { row: CalendarEvent | CircularDocument | StudentAssessment; hash: string }>(
+      rows.map(row => [row.id, { row, hash: contentHash(row) }] as [string, { row: CalendarEvent | CircularDocument | StudentAssessment; hash: string }])
     );
-    const remoteRows = new Map<string, RemoteItem>(remote.items[coll].map(item => [item.id, item] as [string, RemoteItem]));
+    const rawRemoteRows = remote.items[coll] ?? [];
+    const remoteRows = new Map<string, RemoteItem>();
+    for (const item of rawRemoteRows) {
+      if (coll === "assessments" && !isValidStudentAssessment(item.payload)) {
+        plan.archivedOnOverwrite.push({ kind: `invalid-item:${coll}:${item.id}`, loser: item.payload });
+        plan.remoteDeletes[coll].push(item.id);
+        plan.changedSomething = true;
+        continue;
+      }
+      remoteRows.set(item.id, item);
+    }
 
     const ensureLocalList = () => {
       if (coll === "events") plan.localEvents ??= [...snapshot.events];
-      else plan.localCirculars ??= [...snapshot.circulars];
+      else if (coll === "circulars") plan.localCirculars ??= [...snapshot.circulars];
+      else plan.localAssessments ??= [...(snapshot.assessments ?? [])];
     };
+    const localList = () => coll === "events" ? plan.localEvents ?? snapshot.events : coll === "circulars" ? plan.localCirculars ?? snapshot.circulars : plan.localAssessments ?? (snapshot.assessments ?? []);
     const recordSync = (id: string, hash: string, updatedAt: string) => {
       track.docs[id] = { hash, updatedAt };
+      if (track.deleted) delete track.deleted[id];
+    };
+    const remove = (id: string) => {
+      ensureLocalList();
+      if (coll === "events") plan.localEvents = plan.localEvents!.filter(row => row.id !== id);
+      else if (coll === "circulars") plan.localCirculars = plan.localCirculars!.filter(row => row.id !== id);
+      else plan.localAssessments = plan.localAssessments!.filter(row => row.id !== id);
+    };
+    const apply = (payload: unknown) => {
+      ensureLocalList();
+      const incoming = payload as CalendarEvent | CircularDocument | StudentAssessment;
+      const list = localList() as Array<CalendarEvent | CircularDocument | StudentAssessment>;
+      const index = list.findIndex(row => row.id === incoming.id);
+      if (index >= 0) list[index] = incoming;
+      else list.push(incoming);
     };
 
     for (const [id, local] of localRows) {
+      if (track.deleted?.[id]) delete track.deleted[id]; // the user recreated the same id
       const remoteItem = remoteRows.get(id);
       const synced = track.docs[id];
       const localChanged = !synced || synced.hash !== local.hash;
-
       if (!remoteItem) {
         if (synced && !localChanged) {
-          // Row was deleted on the other side while we left it untouched: mirror the deletion locally.
-          ensureLocalList();
-          removeLocalRow(plan, coll, id);
+          remove(id);
           delete track.docs[id];
           plan.changedSomething = true;
           continue;
         }
-        // New here (or edited here after a remote deletion): push.
         plan.remoteWrites[coll][id] = local.row;
         recordSync(id, local.hash, nowIso);
         plan.changedSomething = true;
         continue;
       }
-
       const remoteChanged = !synced || remoteItem.updatedAt !== synced.updatedAt;
-      if (!localChanged && !remoteChanged) {
-        // Already in agreement.
-        continue;
-      }
+      if (!localChanged && !remoteChanged) continue;
       if (forcePush) {
-        if (synced && remoteItem.updatedAt !== synced.updatedAt) {
-          plan.archivedOnOverwrite.push({ kind: `item:${coll}:${id}`, loser: remoteItem.payload });
-        }
+        if (synced && remoteChanged) plan.archivedOnOverwrite.push({ kind: `item:${coll}:${id}`, loser: remoteItem.payload });
         plan.remoteWrites[coll][id] = local.row;
         recordSync(id, local.hash, nowIso);
         plan.changedSomething = true;
@@ -307,18 +343,14 @@ export function planSync(ctx: PlanContext): SyncPlan {
         continue;
       }
       if (!localChanged && remoteChanged) {
-        ensureLocalList();
-        applyRemoteRow(plan, coll, remoteItem.payload as CalendarEvent & CircularDocument);
+        apply(remoteItem.payload);
         recordSync(id, contentHash(remoteItem.payload), remoteItem.updatedAt);
         plan.changedSomething = true;
         continue;
       }
-      // Both sides edited the same row. Without shared history (never synced) the active device wins
-      // and the remote copy is archived; otherwise the newer wall-clock wins, loser archived.
       const remoteIsNewer = Boolean(synced) && Boolean(track.changedAt) && remoteItem.updatedAt > (track.changedAt as string);
       if (remoteIsNewer) {
-        ensureLocalList();
-        applyRemoteRow(plan, coll, remoteItem.payload as CalendarEvent & CircularDocument);
+        apply(remoteItem.payload);
         recordSync(id, contentHash(remoteItem.payload), remoteItem.updatedAt);
       } else {
         plan.archivedOnOverwrite.push({ kind: `item:${coll}:${id}`, loser: remoteItem.payload });
@@ -331,16 +363,31 @@ export function planSync(ctx: PlanContext): SyncPlan {
     for (const [id, remoteItem] of remoteRows) {
       if (localRows.has(id)) continue;
       const synced = track.docs[id];
+      const tombstone = coll === "assessments" ? track.deleted?.[id] : undefined;
+      if (tombstone) {
+        // A local assessment deletion wins over a stale or concurrently surviving remote copy.
+        if (remoteItem.updatedAt !== tombstone.updatedAt) plan.archivedOnOverwrite.push({ kind: `item:${coll}:${id}`, loser: remoteItem.payload });
+        plan.remoteDeletes[coll].push(id);
+        delete track.docs[id];
+        plan.changedSomething = true;
+        continue;
+      }
       if (!synced) {
-        // Created on another device: bring it down.
         ensureLocalList();
-        applyRemoteRow(plan, coll, remoteItem.payload as CalendarEvent & CircularDocument);
+        apply(remoteItem.payload);
         recordSync(id, contentHash(remoteItem.payload), remoteItem.updatedAt);
         plan.changedSomething = true;
         continue;
       }
-      // Known on both sides, gone from local: assume a local deletion. Propagate it only when
-      // the other side has not touched the row since the last sync; otherwise it resurrects here.
+      // A missing local item is a deletion. Assessments retain a tombstone so they cannot resurrect.
+      if (coll === "assessments") {
+        (track.deleted ??= {})[id] = { deletedAt: nowIso, updatedAt: synced.updatedAt };
+        if (remoteItem.updatedAt !== synced.updatedAt) plan.archivedOnOverwrite.push({ kind: `item:${coll}:${id}`, loser: remoteItem.payload });
+        plan.remoteDeletes[coll].push(id);
+        delete track.docs[id];
+        plan.changedSomething = true;
+        continue;
+      }
       if (remoteItem.updatedAt === synced.updatedAt) {
         plan.remoteDeletes[coll].push(id);
         delete track.docs[id];
@@ -354,19 +401,12 @@ export function planSync(ctx: PlanContext): SyncPlan {
         continue;
       }
       ensureLocalList();
-      applyRemoteRow(plan, coll, remoteItem.payload as CalendarEvent & CircularDocument);
+      apply(remoteItem.payload);
       recordSync(id, contentHash(remoteItem.payload), remoteItem.updatedAt);
       plan.changedSomething = true;
     }
 
-    // Forget sync records for rows that no longer exist anywhere (deleted on both sides).
-    for (const id of Object.keys(track.docs)) {
-      if (!localRows.has(id) && !remoteRows.has(id)) delete track.docs[id];
-    }
-    // After this cycle commits, local content for this collection equals the merged list:
-    // keep the digest in sync so the engine's local-change detector does not false-positive
-    // on rows we just pulled (prevents push/pull ping-pong loops).
-    track.lastSyncedHash = itemsDigest(coll === "events" ? (plan.localEvents ?? snapshot.events) : (plan.localCirculars ?? snapshot.circulars));
+    track.lastSyncedHash = itemsDigest(localList());
     track.lastDetectedHash = undefined;
     if (Object.keys(plan.remoteWrites[coll]).length === 0) delete track.changedAt;
   }
@@ -481,7 +521,7 @@ function syncAllTracks(nextState: SyncStateV1, snapshot: SyncableSnapshot, remot
   }
   for (const coll of ITEMS_COLLECTIONS) {
     const docs: Record<string, { hash: string; updatedAt: string }> = {};
-    for (const item of remote.items[coll]) docs[item.id] = { hash: contentHash(item.payload), updatedAt: item.updatedAt };
+    for (const item of (remote.items[coll] ?? [])) docs[item.id] = { hash: contentHash(item.payload), updatedAt: item.updatedAt };
     nextState.items[coll] = { docs };
   }
   nextState.lastCompletedAt = nowIso;

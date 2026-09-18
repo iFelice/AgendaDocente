@@ -44,15 +44,14 @@ export function createStoreAdapter(): SyncStore {
         }
         if (changes.localEvents) await write("events", changes.localEvents);
         if (changes.localCirculars) await write("circulars", changes.localCirculars);
+        if (changes.localAssessments) await write("assessments", changes.localAssessments);
       });
     },
   };
 }
 
 async function applySnapshot(snapshot: SyncableSnapshot): Promise<void> {
-  // Assessments are deliberately local-only until a future sync step; a cloud full restore must not erase them.
-  const assessments = await database.read("assessments");
-  await database.restore({ ...snapshot, assessments });
+  await database.restore({ ...snapshot, assessments: snapshot.assessments ?? [] });
 }
 
 /**

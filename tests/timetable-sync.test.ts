@@ -100,6 +100,7 @@ function makeFakeCloud(clock: { now: string }): FakeCloud {
     items: {
       events: new Map<string, RemoteItem>(),
       circulars: new Map<string, RemoteItem>(),
+      assessments: new Map<string, RemoteItem>(),
     } as Record<ItemsCollection, Map<string, RemoteItem>>,
     conflicts: [] as { kind: string; loser: unknown }[],
     writes: 0,

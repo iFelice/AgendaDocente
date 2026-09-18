@@ -1,5 +1,6 @@
 import { isValidTime } from "../../utils/dates";
 import { TEACHER_ROLE_KINDS } from "../../types";
+import { isValidStudentAssessment } from "../backup";
 import type { RemoteStateDoc, StateDocName } from "./types";
 
 /**
@@ -50,6 +51,9 @@ const optional = (v: unknown, fn: (v: unknown) => boolean): boolean => v === und
 const isIsoTimestamp = (v: unknown): boolean =>
   typeof v === "string" && v.length >= 10 && !Number.isNaN(Date.parse(v));
 const boundedText = (max: number) => (v: unknown): boolean => text(v) && (v as string).length <= max;
+
+/** Shared runtime validator for item-level assessment documents. */
+export { isValidStudentAssessment };
 
 // ---------------------------------------------------------------------------
 // Semantic payload validators (per state document type)
