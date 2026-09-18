@@ -2,7 +2,7 @@ import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
 import { create, act } from 'react-test-renderer';
-import { DocumentScannerModal, SCAN_MODAL_BODY_ID, SCAN_MERGE_CHOICE_ID, scrollModalBodyToTop, scrollSectionIntoView } from '../src/components/DocumentScannerModal';
+import { CURRICULAR_SCOPE_EMPTY_MESSAGE, DocumentScannerModal, SCAN_MODAL_BODY_ID, SCAN_MERGE_CHOICE_ID, scrollModalBodyToTop, scrollSectionIntoView } from '../src/components/DocumentScannerModal';
 import { OFFLINE_ANALYSIS_MESSAGE, MAX_DOCUMENT_BYTES } from '../src/utils/documentScanner';
 import type { Student, TeacherProfile, TimetableSlot } from '../src/types';
 
@@ -253,6 +253,15 @@ async function setPeriodsPerDay(renderer: any, value: string) {
   await act(async () => { input.props.onChange({ target: { value } }); });
 }
 
+/**
+ * Conferma esplicita delle ore: senza questa spunta l'analisi personale non parte,
+ * anche se il campo è già compilato dalla proposta.
+ */
+async function confirmPeriodsPerDay(renderer: any, checked = true) {
+  const box = byId(renderer, 'scan-periods-per-day-confirm');
+  await act(async () => { box.props.onChange({ target: { checked } }); });
+}
+
 const curricularResponse = {
   success: true,
   source: 'test-model',
@@ -295,6 +304,12 @@ async function analyzeWithConsent(renderer: any, periodsPerDay?: string) {
   // Orario personale: le ore per giorno dichiarate (se il test le vuole diverse
   // dal prefill) prima dell'invio.
   if (periodsPerDay !== undefined) await setPeriodsPerDay(renderer, periodsPerDay);
+  // Orario personale: la domanda sulle ore va confermata esplicitamente.
+  const periodsBox = renderer.root.findAll((el: any) => el.props?.id === 'scan-periods-per-day-confirm');
+  if (periodsBox.length > 0) {
+    assert.equal(periodsBox[0].props.checked, false, 'la conferma delle ore non è mai preselezionata');
+    await confirmPeriodsPerDay(renderer);
+  }
   // Consenso richiesto (checkbox NON preselezionata).
   const consent = byId(renderer, 'scan-cloud-consent');
   assert.equal(consent.props.checked, false, 'il consenso non è mai preselezionato');
@@ -313,8 +328,12 @@ async function confirmAndSettleAnalysis(renderer: any) {
 }
 
 /**
- * Flusso completo "Ricostruisci il mio orario":
- * personale (consenso -> riga) + curricolare (consenso) -> incrocio -> "Orario ricostruito".
+ * Flusso UNICO dello scanner: foto del PROPRIO orario -> consenso -> riga letta ->
+ * revisione dell'orario.
+ *
+ * La ricostruzione automatica delle compresenze tramite l'orario curricolare
+ * d'istituto è sospesa, quindi non esiste più un secondo documento da acquisire:
+ * la revisione si raggiunge direttamente dalla riga personale.
  */
 async function flowToReconstruction(renderer: any) {
   fetchCalls.length = 0; // contatore per-flusso (il test può eseguire più flussi)
@@ -327,13 +346,9 @@ async function flowToReconstruction(renderer: any) {
   // Nessuna conferma della riga: il server l'ha già verificata col cognome del profilo.
   assert.ok(flatText(renderer.root).includes('Manganiello F.'), 'riga letta mostrata in revisione');
   assert.equal(renderer.root.findAll((el: any) => el.props?.name === 'scan-personal-row').length, 0, 'nessuna scelta della riga');
-  // Aggiungi l'orario curricolare (incrocio multi-documento).
-  await act(async () => { byId(renderer, 'scan-personal-add-curricular').props.onClick(); });
-  fetchResponse = { status: 200, json: curricularResponse as any };
-  await chooseCameraAndPick(renderer, makeFile('orario-curricolare.jpg', 'image/jpeg', 25_000));
-  await analyzeWithConsent(renderer);
-  // "Ricostruisci il mio orario" -> schermata di conferma.
-  await act(async () => { byId(renderer, 'scan-curricular-reconstruct').props.onClick(); });
+  // Dalla riga personale alla revisione: nessuna CTA di orario curricolare in mezzo.
+  assert.equal(renderer.root.findAll((el: any) => el.props?.id === 'scan-personal-add-curricular').length, 0, 'nessuna CTA curricolare');
+  await act(async () => { byId(renderer, 'scan-personal-continue').props.onClick(); });
   return renderer;
 }
 
@@ -344,9 +359,15 @@ async function flowToReconstruction(renderer: any) {
 test('scansione: tipo documento + sorgente (fotocamera preferita con fallback file picker)', async () => {
   const renderer = await renderModal();
   const text = flatText(renderer.root);
-  for (const label of ['Circolare', 'Orario personale / sostegno', 'Orario curricolare / istituto', 'Registro / appunti', 'Ricostruisci il mio orario']) {
+  for (const label of ['Circolare', 'Orario personale / sostegno', 'Registro / appunti']) {
     assert.ok(text.includes(label), `tipo "${label}" presente`);
   }
+  // La ricostruzione automatica delle compresenze è sospesa: nessuna sorgente,
+  // nessuna sezione e nessun testo che la prometta.
+  for (const hidden of ['Orario curricolare / istituto', 'Ricostruisci il mio orario', 'compresenze ricostruite', 'Incrocia i tuoi documenti']) {
+    assert.ok(!text.includes(hidden), `non più offerto: "${hidden}"`);
+  }
+  assert.equal(renderer.root.findAll((el: any) => el.props?.id === 'scan-reconstruct-entry').length, 0, 'nessuna CTA di incrocio documenti');
   await goToSource(renderer, 'personal');
 
   const cameraInput = renderer.root.findByProps({ 'aria-label': 'Scatta foto del documento' });
@@ -483,19 +504,24 @@ test('orari ricostruiti: carte con giorno/ora/classe/materia/confidenza e semafo
   assert.ok(text.includes('confidenza'), 'livello di confidenza mostrato');
   assert.ok(text.includes('Materia principale: Sostegno'), 'materia principale dichiarata');
 
-  // Classe e materia in compresenza sono campi modificali con i valori ricostruiti.
+  // Classe: precompilata dove la riga personale la determina, vuota per la cella sos.
   const classInputs = renderer.root.findAll((el: any) => el.props?.placeholder === 'es. 3D');
   assert.deepEqual(classInputs.map((el: any) => el.props.value).sort(), ['', '3D', '3E'], 'classe precompilata dove determinata, vuota per la cella sos');
-  const subjectInputs = renderer.root.findAll((el: any) => el.props?.placeholder === 'es. Matematica');
-  assert.deepEqual(subjectInputs.map((el: any) => el.props.value), ['Matematica', 'Matematica'], 'materia in compresenza dall\'incrocio');
-  const noneInputs = renderer.root.findAll((el: any) => el.props?.placeholder === 'Materia non identificata');
-  assert.equal(noneInputs.length, 1, 'slot senza materia: campo vuoto + etichetta "Materia non identificata"');
-  assert.ok(text.includes('Classe non identificata nella cella'), 'slot sos etichettato, mai forzato');
 
-  // Semaforo: verde per le uniche corrispondenze, rosso per lo slot senza classe.
+  // Materia di compresenza: NON più ricostruita automaticamente. Il campo resta
+  // vuoto e modificabile a mano: nessuna materia viene inventata.
+  const subjectInputs = renderer.root.findAll((el: any) => el.props?.placeholder === 'es. Matematica');
+  assert.deepEqual(subjectInputs, [], 'nessuno slot ha una materia di compresenza proposta');
+  const noneInputs = renderer.root.findAll((el: any) => el.props?.placeholder === 'Materia non identificata');
+  assert.equal(noneInputs.length, 3, 'ogni slot dichiara la materia mancante invece di dedurla');
+  assert.deepEqual(noneInputs.map((el: any) => el.props.value), ['', '', ''], 'campo materia vuoto e pronto per l\'inserimento manuale');
+  assert.ok(text.includes('Classe non identificata nella cella'), 'slot sos etichettato, mai forzato');
+  assert.ok(text.includes('nessuna materia viene inventata'), 'la regola è dichiarata all\'utente');
+
+  // Semaforo: senza materia la certezza non può essere verde.
   const dots = renderer.root.findAll((el: any) => el.props?.['aria-hidden'] === true && String(el.props.className ?? '').includes('rounded-full'));
-  assert.ok(dots.filter((d: any) => String(d.props.className).includes('bg-emerald-500')).length === 2, 'due slot verdi');
-  assert.ok(dots.some((d: any) => String(d.props.className).includes('bg-rose-400')), 'slot rosso per il mancato riconoscimento');
+  assert.equal(dots.filter((d: any) => String(d.props.className).includes('bg-emerald-500')).length, 0, 'nessuno slot "certo" senza materia');
+  assert.ok(dots.some((d: any) => String(d.props.className).includes('bg-rose-400')), 'materia non identificata segnalata');
 });
 
 test('conferma: NESSUN salvataggio prima della conferma; deselezionati non salvati; correzione manuale rispettata', async () => {
@@ -516,8 +542,10 @@ test('conferma: NESSUN salvataggio prima della conferma; deselezionati non salva
   const sosCheckbox = slots[2].findAll((el: any) => el.props?.type === 'checkbox')[0];
   await act(async () => { sosCheckbox.props.onChange(); });
 
-  // Correggi manualmente la materia del primo slot (classe 3D: Martedì 1ª ora).
-  const subjectInputs = renderer.root.findAll((el: any) => el.props?.placeholder === 'es. Matematica');
+  // Inserisci manualmente la materia del primo slot (classe 3D: Martedì 1ª ora):
+  // il campo parte vuoto, la compresenza si aggiunge a mano.
+  const subjectInputs = renderer.root.findAll((el: any) => el.props?.placeholder === 'Materia non identificata');
+  assert.equal(subjectInputs.length, 3, 'nessuna materia precompilata: tutti i campi partono vuoti');
   await act(async () => { subjectInputs[0].props.onChange({ target: { value: 'Scienze' } }); });
 
   await chooseMergeModeIfAsked(renderer);
@@ -531,10 +559,14 @@ test('conferma: NESSUN salvataggio prima della conferma; deselezionati non salva
   const corrected = saved[0].slots.find(s => s.dayOfWeek === 2 && s.periodNumber === 1);
   assert.ok(corrected, 'slot Martedì 1ª ora presente');
   assert.equal(corrected?.className, '3D');
-  assert.deepEqual(corrected?.coTeachingSubjects, ['Scienze'], 'la correzione manuale vince sulla proposta');
+  assert.deepEqual(corrected?.coTeachingSubjects, ['Scienze'], 'la materia inserita a mano viene salvata');
   assert.equal(corrected?.subject, 'Sostegno');
+  // Lo slot NON toccato a mano resta senza materia di compresenza: nessuna
+  // materia viene inventata al posto dell'utente.
   const untouched = saved[0].slots.find(s => s.dayOfWeek === 3 && s.periodNumber === 1);
-  assert.deepEqual(untouched?.coTeachingSubjects, ['Matematica'], 'gli slot non corretti conservano la proposta');
+  assert.ok(untouched, 'slot Mercoledì 1ª ora presente');
+  assert.equal(untouched?.className, '3E');
+  assert.deepEqual(untouched?.coTeachingSubjects ?? [], [], 'nessuna materia di compresenza inventata');
 });
 
 test('orari esistente: scelta esplicita obbligatoria, nessuna pre-selezione, niente azzeramento', async () => {
@@ -751,114 +783,71 @@ function noisyCurricularPayload() {
   return { success: true, source: 'test-model', curricularRows, cells };
 }
 
-async function flowToCurricularReview(renderer: any, payload: unknown) {
-  fetchCalls.length = 0;
-  await goToSource(renderer, 'personal');
-  fetchResponse = { status: 200, json: personalResponse as any };
-  await chooseCameraAndPick(renderer, makeFile('orario-personale.jpg', 'image/jpeg', 20_000));
-  await analyzeWithConsent(renderer);
-  // Nessuna scelta della riga: l'ha letta il modello e il server l'ha verificata
-  // contro il cognome del profilo. La revisione delle ore resta obbligatoria.
-  assert.ok(flatText(renderer.root).includes('Manganiello F.'), 'riga letta mostrata in revisione');
-  await act(async () => { byId(renderer, 'scan-personal-add-curricular').props.onClick(); });
-  fetchResponse = { status: 200, json: payload as any };
-  await chooseCameraAndPick(renderer, makeFile('orario-istituto.jpg', 'image/jpeg', 300_000));
-  await analyzeWithConsent(renderer);
-  return renderer;
-}
+// ---------------------------------------------------------------------------
+// 11-bis. RICOSTRUZIONE AUTOMATICA DELLE COMPRESENZE: SOSPESA
+// ---------------------------------------------------------------------------
 
-test('Fase B: la revisione curricolare mostra le MIE ore, non l’orario d’istituto', async () => {
-  const renderer = await renderModal({ provisionalTimetable: [], definitiveTimetable: [] });
-  await flowToCurricularReview(renderer, noisyCurricularPayload());
-
-  const counts = flatText(byId(renderer, 'scan-curricular-counts'));
-  assert.match(counts, /2 ore del tuo orario/, 'contesto: le mie coordinate, non “32 docenti, 430 ore”');
-  assert.match(counts, /1 materia trovata/);
-  assert.match(counts, /1 ambigua/, 'mercoledì ha due materie: scelta manuale');
-  assert.match(counts, /0 non identificate/);
-  assert.ok(!/docenti/.test(counts), 'il numero di docenti non è più l’intestazione');
-
-  const text = flatText(renderer.root);
-  assert.match(text, /Le tue 2 classi/, 'quante classi vengono cercate');
-  assert.match(text, /3D, 3E/, 'quali classi vengono cercate nella tabella');
-  assert.match(text, /330 ore di altre classi sono state escluse/, `${text.slice(0, 200)}`);
-  assert.match(text, /non vengono n\u00e9 mostrate, n\u00e9 incrociate, n\u00e9 salvate/);
-  assert.ok(!text.includes('Scienze') && !/Materia \d/.test(text), 'le materie delle altre classi non sono in lista');
-  assert.ok(!text.includes('1A') && !text.includes('5B'), 'le classi non mie non compaiono');
-  await act(async () => { renderer.unmount(); });
-});
-
-test('Fase B: l’incrocio e il salvataggio usano solo le mie coordinate (nessuna ora d’istituto salvata)', async () => {
+test('compresenze automatiche: nessun percorso UX le avvia e nessun endpoint sperimentale parte', async () => {
   const saved: SavedTimetable[] = [];
   const renderer = await renderModal({
     provisionalTimetable: [],
     definitiveTimetable: [],
     onSaveReconstructedTimetable: (slots, target, mode) => { saved.push({ slots, target, mode }); return true; },
   });
-  await flowToCurricularReview(renderer, noisyCurricularPayload());
-  await act(async () => { byId(renderer, 'scan-curricular-reconstruct').props.onClick(); });
-
-  const cards = renderer.root.findAll((el: any) => String(el.props?.id ?? '').startsWith('recon-slot-'));
-  assert.equal(cards.length, 3, 'un solo slot per ogni ora personale (3D mar, 3E mer, sos gio)');
-  const subjectInputs = renderer.root.findAll((el: any) => el.props?.placeholder === 'es. Matematica');
-  assert.deepEqual(subjectInputs.map((el: any) => el.props.value), ['Matematica', ''],
-    'l’ora ambigua resta vuota: la scelta è manuale, mai automatica');
-  assert.match(flatText(renderer.root), /Italiano/, 'le due candidate della MIA classe sono proposte');
-  assert.match(flatText(renderer.root), /Inglese/);
-  assert.ok(!flatText(renderer.root).includes('Scienze'), 'nessuna materia di altre classi nell’incrocio');
-
-  await chooseMergeModeIfAsked(renderer);
-
-  await act(async () => { byId(renderer, 'recon-confirm-save').props.onClick(); });
-  assert.equal(saved.length, 1, 'salvataggio solo alla conferma');
-  const classNames = saved[0].slots.map(s => s.className).sort();
-  assert.deepEqual([...new Set(classNames)], ['3D', '3E'], 'salvate solo le mie classi');
-  assert.equal(saved[0].slots.length, 2, 'le ore dell’istituto non sono mai diventate slot');
-  assert.ok(saved[0].slots.every(s => s.subject === 'Sostegno'), 'la materia principale resta Sostegno');
-  await act(async () => { renderer.unmount(); });
-});
-
-test('Fase B con solo orario già salvato: l’ambito viene dall’archivio (modale riaperto)', async () => {
-  // Nessuna analisi personale in questa sessione: contano le ore salvate in Fase A.
-  const renderer = await renderModal({ provisionalTimetable: existingTimetable, definitiveTimetable: [] });
-  await goToSource(renderer, 'curricular');
-  fetchResponse = { status: 200, json: noisyCurricularPayload() as any };
-  await chooseCameraAndPick(renderer, makeFile('orario-istituto.jpg', 'image/jpeg', 300_000));
+  fetchCalls.length = 0;
+  await goToSource(renderer, 'personal');
+  fetchResponse = { status: 200, json: personalResponse as any };
+  await chooseCameraAndPick(renderer, makeFile('orario-personale.jpg', 'image/jpeg', 20_000));
   await analyzeWithConsent(renderer);
+  assert.ok(flatText(renderer.root).includes('Manganiello F.'), 'riga letta mostrata in revisione');
 
-  const counts = flatText(byId(renderer, 'scan-curricular-counts'));
-  assert.match(counts, /1 ora del tuo orario/, 'l’unica ora salvata (martedì 1ª, 3D)');
-  assert.match(counts, /1 materia trovata/);
-  assert.match(flatText(renderer.root), /di altre classi sono state escluse/, 'il resto della tabella d’istituto è fuori ambito');
-  const text = flatText(renderer.root);
-  assert.ok(!text.includes('Inglese') && !text.includes('Italiano'), 'le ore di altre classi non entrano nella revisione');
+  // Nessuna CTA verso l'orario curricolare o l'incrocio multi-documento.
+  for (const id of ['scan-personal-add-curricular', 'scan-add-curricular-after-save', 'scan-reconstruct-entry']) {
+    assert.equal(renderer.root.findAll((el: any) => el.props?.id === id).length, 0, `CTA non più presente: ${id}`);
+  }
+  // Nessuna diagnostica di crop, in nessun punto del flusso.
+  assert.equal(renderer.root.findAll((el: any) => String(el.props?.id ?? '').startsWith('crop-diagnostic')).length, 0, 'nessun pannello diagnostico');
+
+  await act(async () => { byId(renderer, 'scan-personal-continue').props.onClick(); });
+  await chooseMergeModeIfAsked(renderer);
+  await act(async () => { byId(renderer, 'recon-confirm-save').props.onClick(); });
+  assert.equal(saved.length, 1, 'salvataggio avvenuto alla conferma esplicita');
+  for (const id of ['scan-personal-add-curricular', 'scan-add-curricular-after-save']) {
+    assert.equal(renderer.root.findAll((el: any) => el.props?.id === id).length, 0, `nessuna CTA curricolare dopo il salvataggio: ${id}`);
+  }
+
+  // UNA sola chiamata di analisi in tutto il flusso, ed è quella del proprio orario.
+  assert.equal(fetchCalls.length, 1, 'una sola chiamata di analisi');
+  assert.equal(fetchCalls[0].url, '/api/analyze-timetable');
+  assert.equal(fetchCalls[0].body.documentType, 'personal-support-timetable', 'solo il proprio orario');
+  for (const call of fetchCalls) {
+    assert.ok(!/analyze-timetable-geometry|analyze-timetable-strip/.test(call.url), `endpoint sperimentale non chiamato: ${call.url}`);
+    assert.notEqual(call.body?.documentType, 'curricular-timetable', 'nessuna analisi curricolare d istituto');
+  }
   await act(async () => { renderer.unmount(); });
 });
 
-test('Fase B senza alcun orario personale: nessun filtro a vuoto, e nessun incrocio possibile', async () => {
+test('sostegno: giorno, ora e classe si salvano anche senza materia di compresenza', async () => {
   const saved: SavedTimetable[] = [];
   const renderer = await renderModal({
-    provisionalTimetable: [],
-    definitiveTimetable: [],
-    onSaveReconstructedTimetable: (slots, target, mode) => { saved.push({ slots, target, mode }); },
+    onSaveReconstructedTimetable: (slots, target, mode) => { saved.push({ slots, target, mode }); return true; },
   });
-  await goToSource(renderer, 'curricular');
-  fetchResponse = { status: 200, json: noisyCurricularPayload() as any };
-  await chooseCameraAndPick(renderer, makeFile('orario-istituto.jpg', 'image/jpeg', 300_000));
-  await analyzeWithConsent(renderer);
-
-  // Niente coordinate da rispettare: l’estratto NON viene svuotato (nessun dato perso),
-  // ma il riepilogo dice che le mie ore sono zero.
-  assert.match(flatText(byId(renderer, 'scan-curricular-counts')), /0 ore del tuo orario/);
-  assert.ok(!flatText(renderer.root).includes('sono state escluse'), 'nessuna esclusione dichiarata quando non c’è un ambito');
-  assert.match(flatText(renderer.root), /Ricostruisci il mio orario/);
-
-  // Senza riga personale confermata non si può incrociare: si torna alla Fase A.
-  await act(async () => { byId(renderer, 'scan-curricular-reconstruct').props.onClick(); });
-  assert.match(flatText(renderer.root), /Scatta foto/, 'si torna alla cattura dell’orario personale');
-  assert.equal(saved.length, 0, 'nessun salvataggio di ore d’istituto');
+  await flowToReconstruction(renderer);
+  await chooseMergeModeIfAsked(renderer);
+  // Nessuna materia inserita a mano: il salvataggio non la richiede.
+  await act(async () => { byId(renderer, 'recon-confirm-save').props.onClick(); });
+  assert.equal(saved.length, 1, 'salvato senza alcuna materia di compresenza');
+  assert.equal(saved[0].slots.length, 2, 'le due ore con la classe riconosciuta');
+  for (const slot of saved[0].slots) {
+    assert.ok(slot.dayOfWeek >= 1 && slot.dayOfWeek <= 5, 'giorno presente');
+    assert.ok(slot.periodNumber >= 1, 'ora presente');
+    assert.ok(String(slot.className ?? '').length > 0, 'classe presente');
+    assert.deepEqual(slot.coTeachingSubjects ?? [], [], 'nessuna materia di compresenza inventata');
+    assert.equal(slot.subject, 'Sostegno', 'la materia principale resta quella dichiarata');
+  }
   await act(async () => { renderer.unmount(); });
 });
+
 
 // ---------------------------------------------------------------------------
 // 11-ter. FASE A (salvataggio reale) → poi, facoltativa, FASE B (curricolare)
@@ -900,8 +889,10 @@ test('Fase A: azione esplicita «Salva questo orario», conferma visibile e ness
   assert.match(banner, /Orario salvato/, 'conferma di salvataggio riuscito');
   assert.match(banner, /Orario provvisorio/, 'archivio di destinazione dichiarato');
   assert.match(banner, /vista Orario/, 'dove rivedere le ore');
-  assert.match(banner, /Vuoi aggiungere anche l.orario curricolare per ricostruire le compresenze\?/, 'Fase B offerta solo ora, come passo facoltativo');
-  assert.ok(byId(renderer, 'scan-add-curricular-after-save'), 'CTA separata per l’orario curricolare');
+  // La ricostruzione automatica delle compresenze è sospesa: dopo il salvataggio
+  // non viene proposto alcun secondo documento.
+  assert.doesNotMatch(banner, /orario curricolare/i, 'nessuna proposta di orario curricolare');
+  assert.equal(renderer.root.findAll((el: any) => el.props?.id === 'scan-add-curricular-after-save').length, 0, 'nessuna CTA curricolare dopo il salvataggio');
   assert.match(flatText(byId(renderer, 'recon-close')), /Chiudi/, 'dopo il salvataggio non c’è più nulla da annullare');
   assert.match(flatText(byId(renderer, 'recon-confirm-save')), /Salva di nuovo/);
 
@@ -911,86 +902,7 @@ test('Fase A: azione esplicita «Salva questo orario», conferma visibile e ness
   await act(async () => { renderer.unmount(); });
 });
 
-test('Fase B: si raggiunge dopo il salvataggio e tornare indietro non rifà l’analisi', async () => {
-  const saved: SavedTimetable[] = [];
-  const renderer = await renderModal({
-    onSaveReconstructedTimetable: (slots, target, mode) => { saved.push({ slots, target, mode }); },
-  });
-  await goToSource(renderer, 'personal');
-  fetchResponse = { status: 200, json: personalResponse as any };
-  await chooseCameraAndPick(renderer, makeFile('orario-personale.jpg', 'image/jpeg', 20_000));
-  await analyzeWithConsent(renderer);
-  // Nessuna scelta della riga: l'ha letta il modello e il server l'ha verificata
-  // contro il cognome del profilo. La revisione delle ore resta obbligatoria.
-  assert.ok(flatText(renderer.root).includes('Manganiello F.'), 'riga letta mostrata in revisione');
-  await act(async () => { byId(renderer, 'scan-personal-continue').props.onClick(); });
-  await chooseMergeModeIfAsked(renderer);
-  await act(async () => { byId(renderer, 'recon-confirm-save').props.onClick(); });
-  assert.equal(saved.length, 1);
 
-  // CTA Fase B: nuova cattura del curricolare, senza ripetere nulla della Fase A.
-  await act(async () => { byId(renderer, 'scan-add-curricular-after-save').props.onClick(); });
-  assert.match(flatText(renderer.root), /Orario curricolare \/ istituto/, 'sorgente del documento curricolare');
-  fetchResponse = { status: 200, json: curricularResponse as any };
-  await chooseCameraAndPick(renderer, makeFile('orario-curricolare.jpg', 'image/jpeg', 25_000));
-  await analyzeWithConsent(renderer);
-
-  // Il ritorno alla riga personale è possibile e la revisione è ancora in memoria.
-  await act(async () => { byId(renderer, 'scan-curricular-back-personal').props.onClick(); });
-  const text = flatText(renderer.root);
-  assert.match(text, /Riga letta nel documento: Manganiello F\./, 'la riga già letta e verificata non va rifatta');
-  assert.match(text, /Orario personale già salvato/, 'stadio corrente dichiarato all’utente');
-  assert.equal(saved.length, 1, 'nessun doppio salvataggio nel navigare avanti/indietro');
-  await act(async () => { renderer.unmount(); });
-});
-
-test('Fase B dopo il salvataggio: l’incrocio parte in sostituzione e arricchisce le ore già salvate', async () => {
-  const { applyReconstruction } = await import('../src/utils/reconstructTimetable');
-  const saved: SavedTimetable[] = [];
-  const renderer = await renderModal({
-    provisionalTimetable: existingTimetable,
-    onSaveReconstructedTimetable: (slots, target, mode) => { saved.push({ slots, target, mode }); },
-  });
-  await goToSource(renderer, 'personal');
-  fetchResponse = { status: 200, json: personalResponse as any };
-  await chooseCameraAndPick(renderer, makeFile('orario-personale.jpg', 'image/jpeg', 20_000));
-  await analyzeWithConsent(renderer);
-  // Nessuna scelta della riga: l'ha letta il modello e il server l'ha verificata
-  // contro il cognome del profilo. La revisione delle ore resta obbligatoria.
-  assert.ok(flatText(renderer.root).includes('Manganiello F.'), 'riga letta mostrata in revisione');
-  await act(async () => { byId(renderer, 'scan-personal-continue').props.onClick(); });
-  await chooseMergeModeIfAsked(renderer);
-  await act(async () => { byId(renderer, 'recon-confirm-save').props.onClick(); });
-  assert.equal(saved[0].mode, 'missing-only', 'primo salvataggio: niente sovrascrittura automatica');
-
-  await act(async () => { byId(renderer, 'scan-add-curricular-after-save').props.onClick(); });
-  fetchResponse = { status: 200, json: curricularResponse as any };
-  await chooseCameraAndPick(renderer, makeFile('orario-curricolare.jpg', 'image/jpeg', 25_000));
-  await analyzeWithConsent(renderer);
-  await act(async () => { byId(renderer, 'scan-curricular-reconstruct').props.onClick(); });
-
-  // Default dopo un salvataggio: sostituzione dell’ambito. Con «solo mancanti» le
-  // compresenze troverebbero le ore già occupate e non verrebbero mai scritte.
-  const mergeRadios = renderer.root.findAll((el: any) => el.props?.name === 'scan-merge-mode');
-  assert.equal(mergeRadios[0].props.checked, true, 'sezione «Sostituisci» pre-selezionata dopo il salvataggio');
-  assert.equal(mergeRadios[1].props.checked, false);
-
-  await chooseMergeModeIfAsked(renderer);
-
-  await act(async () => { byId(renderer, 'recon-confirm-save').props.onClick(); });
-  assert.equal(saved.length, 2, 'secondo salvataggio: arricchimento compresenze');
-  assert.equal(saved[1].mode, 'replace-scope');
-  assert.equal(saved[1].target, 'provvisorio', 'stesso archivio del primo salvataggio');
-  assert.ok(saved[1].slots.some(s => (s.coTeachingSubjects ?? []).length > 0), 'gli slot arricchiti portano la materia in compresenza');
-
-  // Effetto reale sull’orario salvato in Fase A: nessuna duplicazione delle ore.
-  const phaseA = applyReconstruction(existingTimetable, saved[0].slots, 'missing-only', { profile });
-  const enriched = applyReconstruction(phaseA.slots, saved[1].slots, 'replace-scope', { profile });
-  const keys = enriched.slots.map(slot => `${slot.schoolId ?? ''}|${slot.dayOfWeek}|${slot.periodNumber}`);
-  assert.equal(new Set(keys).size, keys.length, 'nessuna coordinata duplicata dopo l’arricchimento');
-  assert.equal(enriched.removedCount, 0, 'le ore confermate coprono le stesse coordinate');
-  await act(async () => { renderer.unmount(); });
-});
 
 test('Fase A sostituisce davvero: anteprima delle vecchie ore rimosse e conteggio mostrato', async () => {
   const withOldHours: TimetableSlot[] = [
@@ -1091,6 +1003,9 @@ async function withPendingAnalysis(run: (gate: { respond: (json: unknown, status
 /** Consenso + invio SENZA attendere l'esito: si è ancora nello step «working». */
 async function sendForAnalysis(renderer: any) {
   await act(async () => { byId(renderer, 'scan-analyze-cta').props.onClick(); });
+  // Orario personale: la domanda sulle ore va confermata esplicitamente.
+  const periodsBox = renderer.root.findAll((el: any) => el.props?.id === 'scan-periods-per-day-confirm');
+  if (periodsBox.length > 0) await confirmPeriodsPerDay(renderer);
   await act(async () => { byId(renderer, 'scan-cloud-consent').props.onChange({ target: { checked: true } }); });
   await act(async () => {
     byId(renderer, 'scan-consent-confirm').props.onClick();
@@ -1327,13 +1242,213 @@ test('orario personale: la domanda sulle ore blocca l analisi finché il valore 
     }
     assert.equal(fetchCalls.length, 0, 'nessuna analisi partita senza un valore valido');
 
-    // Valore valido: l invio si sblocca (serve comunque il consenso).
+    // Valore valido MA non confermato: l invio resta bloccato. È il punto che
+    // prima mancava: il campo era già compilato dalla proposta e l analisi
+    // partiva senza che l utente avesse mai risposto alla domanda.
     await setPeriodsPerDay(renderer, '5');
     await act(async () => { byId(renderer, 'scan-cloud-consent').props.onChange({ target: { checked: true } }); });
-    assert.equal(byId(renderer, 'scan-consent-confirm').props.disabled, false, 'consenso + ore valide: si può inviare');
+    assert.equal(byId(renderer, 'scan-consent-confirm').props.disabled, true, 'numero valido ma non confermato: invio bloccato');
+    assert.equal(fetchCalls.length, 0, 'nessuna analisi partita senza conferma');
+
+    // Conferma esplicita: ora si può inviare.
+    await confirmPeriodsPerDay(renderer);
+    assert.equal(byId(renderer, 'scan-consent-confirm').props.disabled, false, 'consenso + ore confermate: si può inviare');
     await confirmAndSettleAnalysis(renderer);
     assert.equal(fetchCalls.length, 1, 'una sola chiamata');
     assert.equal(fetchCalls[0].body.periodsPerDay, 5, 'le ore dichiarate viaggiano nella richiesta');
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('orario personale: cambiare il numero azzera la conferma (il valore confermato è quello visibile)', async () => {
+  fetchResponse = { status: 200, json: personalResponse as any };
+  const renderer = await renderModal();
+  try {
+    await goToSource(renderer, 'personal');
+    await pickFile(renderer, makeFile('orario.jpg', 'image/jpeg', 30_000));
+    await act(async () => { byId(renderer, 'scan-analyze-cta').props.onClick(); });
+    await act(async () => { byId(renderer, 'scan-cloud-consent').props.onChange({ target: { checked: true } }); });
+    await confirmPeriodsPerDay(renderer);
+    assert.equal(byId(renderer, 'scan-consent-confirm').props.disabled, false, 'confermato: si può inviare');
+    // L'utente corregge il numero: la conferma precedente non vale più.
+    await setPeriodsPerDay(renderer, '4');
+    assert.equal(byId(renderer, 'scan-periods-per-day-confirm').props.checked, false, 'conferma azzerata');
+    assert.equal(byId(renderer, 'scan-consent-confirm').props.disabled, true, 'invio bloccato dopo la modifica');
+    assert.equal(fetchCalls.length, 0, 'nessuna analisi partita col valore vecchio');
+    await confirmPeriodsPerDay(renderer);
+    await confirmAndSettleAnalysis(renderer);
+    assert.equal(fetchCalls[0].body.periodsPerDay, 4, 'viene inviato il numero confermato adesso');
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('orario personale: le ore per giorno sono chieste e confermate (unico percorso dello scanner)', async () => {
+  const renderer = await renderModal();
+  await goToSource(renderer, 'personal');
+  fetchResponse = { status: 200, json: personalResponse as any };
+  await chooseCameraAndPick(renderer, makeFile('orario-personale.jpg', 'image/jpeg', 20_000));
+  await act(async () => { byId(renderer, 'scan-analyze-cta').props.onClick(); });
+
+  // La domanda è obbligatoria: 1..12 ore, 5 giorni, N x 5 posizioni.
+  assert.match(flatText(renderer.root), /Quante ore ci sono in ogni giornata scolastica\?/);
+  await setPeriodsPerDay(renderer, '5');
+  assert.match(flatText(byId(renderer, 'scan-periods-per-day-help')), /25 posizioni: 5 ore per 5 giorni/);
+  // Conferma esplicita obbligatoria: senza, l'invio resta bloccato.
+  await act(async () => { byId(renderer, 'scan-cloud-consent').props.onChange({ target: { checked: true } }); });
+  assert.equal(byId(renderer, 'scan-consent-confirm').props.disabled, true, 'numero valido ma non confermato: invio bloccato');
+  await confirmPeriodsPerDay(renderer);
+  assert.equal(byId(renderer, 'scan-consent-confirm').props.disabled, false, 'con numero confermato si può partire');
+
+  // Il percorso è uno solo: nessuna sorgente curricolare da raggiungere.
+  assert.equal(renderer.root.findAll((el: any) => el.props?.id === 'scan-reconstruct-entry').length, 0);
+  await act(async () => { renderer.unmount(); });
+});
+
+
+test('diagnostica crop: il pannello non è più renderizzato né importato dal modale', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const modal = readFileSync(join(process.cwd(), 'src', 'components', 'DocumentScannerModal.tsx'), 'utf8');
+  const withoutComments = (source: string) => source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+  const code = withoutComments(modal);
+  assert.ok(!/CropDiagnosticPanel/.test(code), 'il modale non importa più il pannello diagnostico');
+  assert.ok(!/analyzeTimetableGeometry|analyzeTimetableStrip/.test(code), 'il modale non chiama geometry né strip');
+
+  // Verifica comportamentale: in nessuno step compare la diagnostica.
+  const renderer = await renderModal();
+  await goToSource(renderer, 'personal');
+  fetchResponse = { status: 200, json: personalResponse as any };
+  await chooseCameraAndPick(renderer, makeFile('orario-personale.jpg', 'image/jpeg', 20_000));
+  await analyzeWithConsent(renderer);
+  await act(async () => { byId(renderer, 'scan-personal-continue').props.onClick(); });
+  assert.equal(renderer.root.findAll((el: any) => String(el.props?.id ?? '').startsWith('crop-diagnostic')).length, 0, 'nessun crop diagnostico');
+  assert.ok(!flatText(renderer.root).includes('MATERIA + Lunedì'), 'nessuna preview della strip');
+  assert.ok(!/Analizza questa strip/.test(flatText(renderer.root)), 'nessuna CTA di analisi strip');
+  await act(async () => { renderer.unmount(); });
+});
+
+
+test('codice sperimentale geometry/crop/strip: rimosso, nessun riferimento runtime residuo', async () => {
+  const { existsSync, readFileSync, readdirSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  // I moduli sperimentali non esistono più nel repository.
+  for (const gone of [
+    'src/components/CropDiagnosticPanel.tsx',
+    'src/utils/imageCropper.ts',
+    'src/utils/timetableCrops.ts',
+    'src/utils/timetableStrip.ts',
+    'server/timetableGeometry.ts',
+    'server/timetableStrip.ts',
+  ]) {
+    assert.equal(existsSync(join(process.cwd(), gone)), false, `eliminato: ${gone}`);
+  }
+  // Nessuna sorgente di produzione cita più gli endpoint o le funzioni sperimentali.
+  const sources: string[] = ['server.ts'];
+  for (const dir of ['server', 'src']) {
+    const walk = (path: string) => {
+      for (const entry of readdirSync(path, { withFileTypes: true })) {
+        const full = join(path, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (/\.(ts|tsx)$/.test(entry.name)) sources.push(full);
+      }
+    };
+    walk(join(process.cwd(), dir));
+  }
+  const forbidden = /analyze-timetable-geometry|analyze-timetable-strip|CropDiagnosticPanel|analyzeTimetableGeometry|analyzeTimetableStrip|composeSubjectAndColumn|composeCropBase64ForCoordinate|timetableGeometry|timetableStrip|timetableCrops|imageCropper/;
+  for (const file of sources) {
+    const code = readFileSync(file, 'utf8');
+    assert.ok(!forbidden.test(code), `${file}: nessun riferimento al codice sperimentale`);
+  }
+  // Il fallback Groq dell'analisi ATTIVA dell'orario personale resta al suo posto.
+  const server = readFileSync(join(process.cwd(), 'server.ts'), 'utf8');
+  assert.match(server, /await runGroqTimetableFallback\(\{/, 'fallback Groq ancora collegato');
+  assert.equal((server.match(/await runGroqTimetableFallback\(\{/g) ?? []).length, 1, 'un solo endpoint lo usa: /api/analyze-timetable');
+  assert.ok(existsSync(join(process.cwd(), 'server', 'groqAnalysis.ts')), 'server/groqAnalysis.ts conservato');
+});
+
+test('orario personale con 5 ore: contratto 5x5=25 posizioni, vuoti nella loro posizione', async () => {
+  fetchResponse = {
+    status: 200,
+    json: {
+      success: true,
+      source: 'test-model',
+      rowLabel: 'Manganiello F.',
+      cells: personalSequenceCells(REAL_SEQUENCE_FLAT, 5),
+    } as any,
+  };
+  const renderer = await renderModal();
+  try {
+    await goToSource(renderer, 'personal');
+    await pickFile(renderer, makeFile('orario.jpg', 'image/jpeg', 30_000));
+    await act(async () => { byId(renderer, 'scan-analyze-cta').props.onClick(); });
+    await setPeriodsPerDay(renderer, '5');
+    assert.match(flatText(renderer.root), /25 posizioni/, '5 ore x 5 giorni = 25 posizioni annunciate prima dell invio');
+    await act(async () => { byId(renderer, 'scan-cloud-consent').props.onChange({ target: { checked: true } }); });
+    await confirmPeriodsPerDay(renderer);
+    await confirmAndSettleAnalysis(renderer);
+    assert.equal(fetchCalls[0].body.periodsPerDay, 5);
+    const text = flatText(renderer.root);
+    assert.match(text, /25 posizioni/, 'la revisione mostra le 25 posizioni');
+    // Lunedì 1ª e 2ª sono libere nella griglia reale: devono restare libere e al
+    // loro posto, non compattate in testa o in coda.
+    assert.match(text, /18/, 'le 18 ore lette sono distinguibili dalle 7 posizioni libere');
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('orario personale: annullare la domanda non avvia alcuna analisi e non salva il numero', async () => {
+  fetchResponse = { status: 200, json: personalResponse as any };
+  const saved: SavedTimetable[] = [];
+  const config = { firstHourStartTime: '08:15', periodsPerDay: 6, standardDurationMinutes: 55, customSlots: [] } as any;
+  const renderer = await renderModal({ timeSlotConfig: config, onSaveReconstructedTimetable: (payload: SavedTimetable) => { saved.push(payload); } });
+  try {
+    await goToSource(renderer, 'personal');
+    await pickFile(renderer, makeFile('orario.jpg', 'image/jpeg', 30_000));
+    await act(async () => { byId(renderer, 'scan-analyze-cta').props.onClick(); });
+    await setPeriodsPerDay(renderer, '5');
+    // L'utente torna indietro invece di confermare.
+    await act(async () => {
+      const back = renderer.root.findAll((el: any) => el.type === 'button' && nodeText(el).trim() === 'Indietro');
+      assert.ok(back.length > 0, 'pulsante Indietro presente');
+      back[0].props.onClick();
+    });
+    assert.equal(fetchCalls.length, 0, 'nessuna analisi partita dopo l annullamento');
+    assert.equal(config.periodsPerDay, 6, 'il numero inserito NON è stato scritto nella configurazione');
+    assert.deepEqual(saved, [], 'nessun salvataggio');
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('orario personale: il numero confermato non viene mai salvato come configurazione', async () => {
+  fetchResponse = {
+    status: 200,
+    json: {
+      success: true,
+      source: 'test-model',
+      rowLabel: 'Manganiello F.',
+      cells: personalSequenceCells(REAL_SEQUENCE_FLAT, 5),
+    } as any,
+  };
+  const saved: SavedTimetable[] = [];
+  const config = { firstHourStartTime: '08:15', periodsPerDay: 6, standardDurationMinutes: 55, customSlots: [] } as any;
+  const renderer = await renderModal({
+    timeSlotConfig: config,
+    onSaveReconstructedTimetable: (slots: TimetableSlot[], target: string, mode: string) => { saved.push({ slots, target, mode }); return true; },
+  });
+  try {
+    await goToSource(renderer, 'personal');
+    await pickFile(renderer, makeFile('orario.jpg', 'image/jpeg', 30_000));
+    await analyzeWithConsent(renderer, '5');
+    await act(async () => { byId(renderer, 'scan-personal-continue').props.onClick(); });
+    await chooseMergeModeIfAsked(renderer);
+    await act(async () => { byId(renderer, 'recon-confirm-save').props.onClick(); });
+    assert.equal(saved.length, 1, 'il salvataggio dell orario è avvenuto');
+    assert.equal(config.periodsPerDay, 6, 'la configurazione delle fasce orarie non è toccata dallo scanner');
+    assert.ok(!JSON.stringify(saved).includes('periodsPerDay'), 'nessun periodsPerDay nel payload salvato');
   } finally {
     await act(async () => { renderer.unmount(); });
   }

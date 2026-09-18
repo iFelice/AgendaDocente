@@ -18,7 +18,7 @@
 
 import type { TimetableSlot } from "../types";
 import type { TimetableToken } from "./timetableTokens";
-import { classifyTimetableToken, extractClassesFromCell } from "./timetableTokens";
+import { classifyTimetableToken, extractClassesFromCell, normalizeClassLabel } from "./timetableTokens";
 import { foldName } from "./studentMatcher";
 import { isGenericSubject } from "./circularRelevance";
 import { normalizeSubjectName, sameSubject } from "./subjects";
@@ -105,14 +105,21 @@ const str = (v: unknown, max: number): v is string => typeof v === "string" && v
  * (mai testo del documento), quindi sono sicuri da mettere nei log del server.
  */
 export class TimetableShapeError extends Error {
-  constructor(message: string) {
+  /**
+   * Motivo stabile e NON testuale del rifiuto: permette all'endpoint di scegliere
+   * il messaggio per l'utente senza fare matching sul testo e senza mai rimandare
+   * al client un frammento del documento.
+   */
+  readonly code?: string;
+  constructor(message: string, code?: string) {
     super(message);
     this.name = "TimetableShapeError";
+    this.code = code;
   }
 }
 
-function invalidShape(message: string): never {
-  throw new TimetableShapeError(message);
+function invalidShape(message: string, code?: string): never {
+  throw new TimetableShapeError(message, code);
 }
 
 export function validateRawCell(v: unknown, index: number): TimetableRawCell {
@@ -238,7 +245,7 @@ export function validatePersonalSequencePayload(
   // Guardia d'identità col matcher esistente (cognome intero, mai sottostringa):
   // senza una riga compatibile non si sceglie un'altra riga, si rifiuta.
   if (findTeacherRows([rowLabel], targetTeacherSurname).length !== 1) {
-    invalidShape("Riga del documento non compatibile col docente.");
+    invalidShape("Riga del documento non compatibile col docente.", TEACHER_ROW_NOT_RECOGNIZED);
   }
 
   // Nessun fallback al formato piatto: un payload che porta ancora `cells` alla
@@ -267,25 +274,262 @@ export function validatePersonalSequencePayload(
   return { rowLabel, cells };
 }
 
-/** Valida la risposta grezza per l'orario curricolare: { rows, cells }. */
-export function validateCurricularTimetablePayload(raw: unknown): { rows: CurricularRawRow[]; cells: TimetableRawCell[] } {
-  if (!record(raw)) invalidShape("Risposta analisi non valida.");
-  if (!Array.isArray(raw.rows) || raw.rows.length > 100) invalidShape("Righe del documento non valide.");
-  const rows: CurricularRawRow[] = raw.rows.map((r, i) => {
-    // subject e classes sono obbligatori nella risposta AI (valori vuoti ammessi, inventati no).
-    if (!record(r) || !intWithin(r.rowIndex, 0, 100) || !str(r.subject, 80)
-      || !Array.isArray(r.classes) || r.classes.length > 10 || !r.classes.every(c => str(c, 20))) {
-      invalidShape(`Riga docente non valida (#${i}).`);
-    }
-    return {
-      rowIndex: r.rowIndex,
-      rowLabel: r.rowLabel === undefined ? undefined : (str(r.rowLabel, 80) ? r.rowLabel.trim() : invalidShape("Etichetta riga non valida.")),
-      subject: r.subject.trim(),
-      classes: r.classes.map(c => c.trim()),
-    };
+// ---------------------------------------------------------------------------
+// AMBITO DELL'ANALISI CURRICOLARE: le coordinate richieste al modello
+//
+// La tabella d'istituto ha centinaia di celle, ma al docente di sostegno ne
+// servono pochissime: solo quelle in cui È presente (giorno + periodo + classe).
+// Quelle coordinate sono già calcolate dal client (`buildPersonalCoordinateScope`)
+// e da qui viaggiano nella request, così il modello riceve un ELENCO di celle da
+// cercare invece dell'istruzione a trascrivere l'intera griglia.
+// ---------------------------------------------------------------------------
+
+/**
+ * Una coordinata richiesta all'analisi curricolare: giorno + periodo assoluto +
+ * classe. È la FORMA WIRE (nessuna `key` interna) con cui il client dichiara al
+ * server quali celle della tabella d'istituto servono davvero.
+ */
+export interface CurricularScopeCoordinate {
+  dayOfWeek: number;
+  periodIndex: number;
+  classLabel: string;
+}
+
+/**
+ * Evidenza di UNA cella letta dal modello su una coordinata richiesta.
+ *
+ * `cellText` è SOLO il contenuto di quella cella della griglia ("3D", "3D 3E"),
+ * mai la riga intera, mai il nome del docente, mai OCR o testo libero: serve a
+ * rendere VERIFICABILE l'associazione coordinata-materia. `subject` è la materia
+ * della riga a cui la cella appartiene, ma da sola NON basta: senza la cella da
+ * cui è stata ricavata non viene accettata.
+ */
+export interface CurricularCellMatch {
+  cellText: string;
+  subject: string;
+}
+
+/**
+ * Esito del modello su UNA coordinata richiesta: 0, 1 o più materie candidate.
+ *
+ * `subjects` NON è ciò che il modello dichiara: è ciò che il server DERIVA dai
+ * match verificati (`curricularSubjectsFromMatches`). Il downstream
+ * (`curricularTargetsToRowsAndCells`, crossref, review) resta invariato.
+ */
+export interface CurricularTarget {
+  dayOfWeek: number;
+  periodIndex: number;
+  classLabel: string;
+  subjects: string[];
+}
+
+/**
+ * Tetto delle coordinate richiedibili, legato alla geometria massima della
+ * griglia: 6 giorni x `MAX_GRID_PERIODS` ore, con al più due classi per cella
+ * (una cella dell'orario personale può elencare "3D 3E"). Oltre non esiste
+ * richiesta legittima: meglio un 400 che un prompt chilometrico.
+ */
+export const MAX_CURRICULAR_SCOPE_SIZE = 6 * MAX_GRID_PERIODS * 2;
+/** Tetto difensivo sulla lunghezza dell'array PRIMA della de-duplicazione. */
+export const MAX_CURRICULAR_SCOPE_INPUT = MAX_CURRICULAR_SCOPE_SIZE * 4;
+/** Materie massime riportate su una singola coordinata. */
+export const MAX_CURRICULAR_SUBJECTS_PER_COORDINATE = 6;
+/**
+ * Lunghezza massima del testo di una cella della griglia. Una cella contiene
+ * sigle di classe ("3D", "3D 3E"): oltre questa soglia non è una cella ma
+ * testo libero, e non ha senso trasportarla (né loggarla).
+ */
+export const MAX_CURRICULAR_CELL_TEXT_LENGTH = 120;
+/** Campi ammessi in una coordinata della request (allow-list chiusa). */
+const CURRICULAR_SCOPE_COORDINATE_KEYS = ['dayOfWeek', 'periodIndex', 'classLabel'];
+
+/**
+ * Legge i tre campi di una coordinata da un oggetto: `null` se non è
+ * utilizzabile.
+ *
+ * La classe passa dalla STESSA utility usata per leggere le celle
+ * (`normalizeClassLabel`), così request, prompt e risposta non possono divergere:
+ * "3 d", "3°D" e "classe 3D" diventano "3D", mentre D/P/Co, "sos" e il testo
+ * libero restano `null` (una classe non si inventa).
+ *
+ * NON applica l'allow-list delle chiavi, quindi è riutilizzabile anche sulla
+ * risposta del modello, dove la coordinata viaggia insieme a "subjects".
+ */
+function readCoordinateFields(value: unknown): CurricularScopeCoordinate | null {
+  if (!record(value)) return null;
+  // Stesso intervallo di giorno usato per le celle dell'orario (1=lunedì..6=sabato).
+  if (!intWithin(value.dayOfWeek, 1, 6)) return null;
+  if (!intWithin(value.periodIndex, 1, MAX_GRID_PERIODS)) return null;
+  const classLabel = normalizeClassLabel(value.classLabel);
+  if (!classLabel) return null;
+  return { dayOfWeek: value.dayOfWeek, periodIndex: value.periodIndex, classLabel };
+}
+
+/** Normalizza UNA coordinata della request: `null` quando non è utilizzabile. */
+export function normalizeCurricularScopeCoordinate(value: unknown): CurricularScopeCoordinate | null {
+  if (!record(value)) return null;
+  // Allow-list chiusa anche sull'elemento: la `key` interna e qualsiasi altro
+  // campo non fanno parte del contratto e non vengono accettati per tolleranza.
+  if (Object.keys(value).some(k => !CURRICULAR_SCOPE_COORDINATE_KEYS.includes(k))) return null;
+  return readCoordinateFields(value);
+}
+
+/**
+ * Valida e normalizza l'intero `coordinateScope` della request curricolare.
+ *
+ * `null` = scope non utilizzabile (non è un array, è vuoto, supera il tetto, o
+ * contiene anche un solo elemento invalido): il server risponde 400 PRIMA di
+ * chiamare Gemini. Nessun ambito parziale: una richiesta a metà chiederebbe al
+ * modello celle che il client scarterebbe comunque.
+ *
+ * I duplicati (stessa coordinata scritta due volte, o con grafie diverse della
+ * stessa classe) collassano in una sola richiesta.
+ */
+export function normalizeCurricularCoordinateScope(value: unknown): CurricularScopeCoordinate[] | null {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_CURRICULAR_SCOPE_INPUT) return null;
+  const coordinates: CurricularScopeCoordinate[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    const coordinate = normalizeCurricularScopeCoordinate(item);
+    if (!coordinate) return null;
+    const key = coordinateKey(coordinate.dayOfWeek, coordinate.periodIndex, coordinate.classLabel);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    coordinates.push(coordinate);
+  }
+  return coordinates.length > 0 && coordinates.length <= MAX_CURRICULAR_SCOPE_SIZE ? coordinates : null;
+}
+
+/**
+ * Forma wire dello scope: le coordinate personali già costruite dal client,
+ * senza la `key` interna (dettaglio di implementazione, non dato inviato).
+ */
+export function curricularScopeToRequestPayload(coordinates: PersonalCoordinate[]): CurricularScopeCoordinate[] {
+  return coordinates.map(({ dayOfWeek, periodIndex, classLabel }) => ({ dayOfWeek, periodIndex, classLabel }));
+}
+
+/**
+ * La cella letta contiene DAVVERO la classe richiesta?
+ *
+ * Usa la STESSA normalizzazione delle celle reali (`extractClassesFromCell`),
+ * quindi request, celle personali e prova curricolare non possono divergere:
+ * "3D", "3 D", "3D 2B", "3D / 3E" contengono 3D, mentre "3E", "" e "D" no.
+ *
+ * È la prova minima che il modello abbia letto una cella contenente la classe
+ * richiesta, non una dimostrazione geometrica: la posizione giorno+periodo
+ * resta vincolata dal target richiesto e dal prompt.
+ */
+export function curricularCellTextContainsClass(classLabel: string, cellText: unknown): boolean {
+  const wanted = normalizeClassLabel(classLabel);
+  if (!wanted) return false;
+  return extractClassesFromCell(cellText).includes(wanted);
+}
+
+/**
+ * Deriva le materie di UNA coordinata SOLO dai match verificati.
+ *
+ * Un match produce una materia solo se la sua `cellText` contiene la classe
+ * richiesta: il modello non può dichiarare una materia senza mostrare la cella
+ * da cui l'ha letta. I match scartati non lasciano traccia e non vengono mai
+ * "riparati" con una materia presa altrove. Materia vuota, generica o duplicata
+ * viene tolta, come prima. Nessun match valido -> array vuoto.
+ *
+ * La FORMA del payload è comunque vincolante: un `matches` assente, troppo
+ * lungo o con elementi malformati è un rifiuto (mai un'accettazione tacita),
+ * così un contratto vecchio non può rientrare dalla finestra.
+ */
+export function curricularSubjectsFromMatches(classLabel: string, matches: unknown, index = 0): string[] {
+  if (!Array.isArray(matches) || matches.length > MAX_CURRICULAR_SUBJECTS_PER_COORDINATE) {
+    invalidShape(`Celle della coordinata non valide (#${index}).`);
+  }
+  // I match che superano la verifica restano coppia (cella, materia): la materia
+  // non esiste da sola, esiste solo insieme alla cella da cui è stata letta.
+  const accepted: CurricularCellMatch[] = [];
+  for (const match of matches) {
+    if (!record(match)) invalidShape(`Cella della coordinata non valida (#${index}).`);
+    const cellText = str(match.cellText, MAX_CURRICULAR_CELL_TEXT_LENGTH)
+      ? match.cellText
+      : invalidShape(`Testo della cella non valido (#${index}).`);
+    const rawSubject = str(match.subject, 80)
+      ? match.subject
+      : invalidShape(`Materia non valida (#${index}).`);
+    // Evidenza obbligatoria: senza la classe nella cella il match non esiste.
+    if (!curricularCellTextContainsClass(classLabel, cellText)) continue;
+    const subject = rawSubject.trim();
+    if (!subject || isGenericSubject(subject)) continue; // vuota/generica: non è una disciplina
+    if (accepted.some(existing => sameSubject(existing.subject, subject))) continue;
+    accepted.push({ cellText, subject });
+  }
+  return accepted.map(match => match.subject);
+}
+
+/**
+ * Valida la risposta del modello sull'orario curricolare: `{ targets: [...] }`.
+ *
+ * Regole (mai inventare):
+ *  - sopravvivono SOLO le coordinate richieste: una voce su un giorno/periodo/
+ *    classe fuori elenco viene SCARTATA, mai ricollocata o "corretta";
+ *  - le materie NON vengono prese per buone: sono DERIVATE dai soli match la cui
+ *    cella letta contiene la classe richiesta. Una materia dichiarata senza la
+ *    sua cella non esiste, e una cella senza la classe non produce materie;
+ *  - `matches` vuoto (classe assente da quella colonna fisica, colonna
+ *    illeggibile, materia non determinabile) -> nessuna materia;
+ *  - più match validi sulla stessa coordinata producono più materie: in
+ *    compresenza più docenti insistono sulla stessa classe/ora e il crossref
+ *    esistente deve poterle vedere tutte per produrre lo stato "ambiguo".
+ */
+export function validateCurricularTargetsPayload(raw: unknown, scope: CurricularScopeCoordinate[]): CurricularTarget[] {
+  if (scope.length === 0) invalidShape("Coordinate di analisi non valide.");
+  if (!record(raw) || !Array.isArray(raw.targets) || raw.targets.length > MAX_CURRICULAR_SCOPE_SIZE) {
+    invalidShape("Risposta analisi non valida.");
+  }
+  const requested = new Set(scope.map(c => coordinateKey(c.dayOfWeek, c.periodIndex, c.classLabel)));
+  const targets: CurricularTarget[] = [];
+  const seen = new Set<string>();
+  raw.targets.forEach((item, index) => {
+    // Stessi vincoli della request (giorno, ora, classe reale) ma senza
+    // allow-list delle chiavi: qui la coordinata viaggia insieme a "matches".
+    const coordinate = readCoordinateFields(item);
+    if (!coordinate) invalidShape(`Coordinata non valida (#${index}).`);
+    const key = coordinateKey(coordinate.dayOfWeek, coordinate.periodIndex, coordinate.classLabel);
+    if (!requested.has(key)) return; // coordinata non richiesta: scartata (mai inventata)
+    if (seen.has(key)) return;       // una sola voce per coordinata
+    // Le materie nascono SOLO qui, dai match verificati contro la classe della
+    // coordinata: è il punto in cui l'evidenza del modello diventa dato.
+    const subjects = curricularSubjectsFromMatches(coordinate.classLabel, item.matches, index);
+    seen.add(key);
+    targets.push({ ...coordinate, subjects });
   });
-  if (!Array.isArray(raw.cells) || raw.cells.length > 1500) invalidShape("Celle del documento non valide.");
-  return { rows, cells: raw.cells.map((c, i) => validateRawCell(c, i)) };
+  return targets;
+}
+
+/**
+ * Adatta la risposta per coordinate alla struttura `{ rows, cells }` già
+ * consumata da `curricularCellsToSlots`: è il punto PIÙ STRETTO in cui il nuovo
+ * output del modello entra nella pipeline esistente, quindi filtro client-side,
+ * riepilogo di copertura e crossref restano esattamente quelli di prima.
+ *
+ * Una riga sintetica per ogni coppia (coordinata, materia), con `rowIndex`
+ * progressivo e UNIVOCO: `curricularCellsToSlots` indicizza le righe per
+ * `rowIndex`, quindi due materie della stessa coordinata devono stare su due
+ * righe diverse per sopravvivere entrambe (e diventare "ambigue" nel crossref).
+ * `rowLabel` resta vuoto: il nome del docente curricolare non serve e non viene
+ * mai salvato.
+ */
+export function curricularTargetsToRowsAndCells(targets: CurricularTarget[]): { rows: CurricularRawRow[]; cells: TimetableRawCell[] } {
+  const rows: CurricularRawRow[] = [];
+  const cells: TimetableRawCell[] = [];
+  let rowIndex = 0;
+  for (const target of targets) {
+    for (const subject of target.subjects) {
+      rows.push({ rowIndex, rowLabel: "", subject, classes: [target.classLabel] });
+      // La cella sintetizzata ripassa dalla stessa guardia delle celle reali:
+      // giorno, periodo e testo restano dentro il contratto di TimetableRawCell.
+      cells.push(validateRawCell({ rowIndex, dayOfWeek: target.dayOfWeek, periodIndex: target.periodIndex, raw: target.classLabel }, cells.length));
+      rowIndex += 1;
+    }
+  }
+  return { rows, cells };
 }
 
 const COMMITMENT_TYPES: StudentCommitmentType[] = ["oral_test", "written_test", "recovery", "meeting", "assignment", "other"];
@@ -324,17 +568,56 @@ export function validateStudentCommitmentsPayload(raw: unknown): Array<Omit<Stud
 // Ricerca della riga del docente (conservativa)
 // ---------------------------------------------------------------------------
 
-const HONORIFIC_PATTERN = /^(?:prof(?:essore|essoressa|essor|\.|ssa)?|dott(?:ore|oressa|or|\.|ssa)?|ing\.?|arch\.?|dr\.?|avv\.?)\s+/i;
+/**
+ * Codice del rifiuto "riga del docente non riconosciuta": è l'unico motivo di
+ * rifiuto che l'utente può risolvere da solo (nome nel profilo o foto illeggibile),
+ * quindi è l'unico che riceve un messaggio dedicato invece di quello generico.
+ */
+export const TEACHER_ROW_NOT_RECOGNIZED = "riga-docente-non-riconosciuta";
 
 /**
- * Estrae il cognome dal nome completo del profilo ("Prof. Felice Manganiello"
- * -> "Manganiello"). Onorifici rimossi; maiuscole e accenti ignorati a valle.
+ * Onorifici e titoli, dopo la piega: "Prof.ssa" diventa "prof ssa", quindi la
+ * lista è di TOKEN e non di prefissi. Vanno esclusi dal confronto perché
+ * compaiono sia nel profilo sia nelle etichette delle righe e non identificano
+ * nessuno: una riga che dicesse solo "Prof.ssa" non deve combaciare con nulla.
  */
-export function teacherSurnames(fullName: unknown): string[] {
-  const clean = String(fullName ?? "").trim().replace(HONORIFIC_PATTERN, "").trim();
-  const parts = clean.split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return [];
-  return [foldName(parts[parts.length - 1])].filter(Boolean);
+const HONORIFIC_TOKENS = new Set([
+  "prof", "ssa", "professore", "professoressa", "professor", "profssa",
+  "dott", "dottore", "dottoressa", "dottssa", "ins", "insgn", "insegnante",
+  "docente", "maestro", "maestra", "ing", "arch", "dr", "avv", "sig", "sra", "sre",
+]);
+
+/** Punteggiatura innocua oltre a quella che `foldName` già trasforma in spazio. */
+const EXTRA_NAME_PUNCTUATION = /[,;:/\\|()[\]{}<>+=*_~^\u00b0\u00a7#@\u20ac&%!?`]/g;
+
+/**
+ * Piega un'etichetta o un nome per il confronto: maiuscole/minuscole, accenti,
+ * apostrofi e punteggiatura innocua non contano, gli spazi in eccesso collassano.
+ * È `foldName` più la punteggiatura che nelle tabelle scolastiche separa i nomi
+ * senza essere un trattino o un punto ("ROSSI,M.", "Bianchi L. (sostegno)").
+ */
+export function foldPersonLabel(raw: unknown): string {
+  return foldName(raw).replace(EXTRA_NAME_PUNCTUATION, " ").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Parole del nome del docente che identificano la sua riga.
+ *
+ * Sono TUTTE le parole e non solo l'ultima: `fullName` nel profilo è scritto
+ * dall'utente e l'ordine non è garantito — "Felice Manganiello" (nome cognome) e
+ * "Rossi Matteo" (cognome nome, la forma dei registri e dei seed dell'app) sono
+ * entrambi legittimi. Prendere solo l'ultima parola significava cercare "matteo"
+ * per il profilo "Rossi Matteo": nelle tabelle la riga è "ROSSI M.", quindi la
+ * parola cercata non c'era e l'analisi veniva rifiutata anche quando il modello
+ * aveva letto la riga giusta.
+ *
+ * Restano escluse le iniziali singole (non identificano nessuno) e le parole che
+ * non sono lettere: un `fullName` ostile non può inserire marcatori, perché ogni
+ * token accettato è `/^[a-z]{2,}$/`.
+ */
+export function teacherNameTokens(fullName: unknown): string[] {
+  const words = foldPersonLabel(fullName).split(" ").filter(Boolean);
+  return Array.from(new Set(words.filter((word) => /^[a-z]{2,}$/.test(word) && !HONORIFIC_TOKENS.has(word))));
 }
 
 export interface TeacherRowMatch {
@@ -346,21 +629,26 @@ export interface TeacherRowMatch {
  * Trova le righe della tabella compatibili con il docente del profilo.
  *
  * Regole conservative:
- *  - si confronta SOLO il cognome del profilo, come parola intera
- *    (mai sottostringhe: "Bianchi" non combacia con "Bianchini");
- *  - maiuscole, accenti e punteggiatura non contano;
+ *  - il confronto è a PAROLE INTERE: "Bianchi" non combacia mai con
+ *    "Bianchini", né "Manganiell" con "Manganiello";
+ *  - maiuscole/minuscole, spazi in testa o in coda, accenti, apostrofi e
+ *    punteggiatura innocua non contano (`foldPersonLabel`);
+ *  - onorifici e titoli ("Prof.", "Prof.ssa", "Docente") sono ignorati da
+ *    entrambe le parti: non possono né aiutare né impedire il match;
+ *  - l'etichetta può riportare solo il cognome, "COGNOME N." oppure nome e
+ *    cognome per esteso: basta una parola del nome del profilo;
+ *  - un nome DIVERSO resta escluso: senza parole in comune non c'è match;
  *  - se più righe sono compatibili vengono tutte restituite: la scelta
  *    definitiva spetta sempre all'utente (niente auto-selezione);
- *  - se nessuna riga è compatibile, la lista resta vuota (l'utente può
- *    comunque scegliere manualmente la riga corretta).
+ *  - se nessuna riga è compatibile, la lista resta vuota.
  */
 export function findTeacherRows(rowLabels: string[], profileName: unknown): TeacherRowMatch[] {
-  const surnames = teacherSurnames(profileName);
-  if (!surnames.length) return [];
+  const tokens = teacherNameTokens(profileName);
+  if (!tokens.length) return [];
   const matches: TeacherRowMatch[] = [];
   rowLabels.forEach((label, rowIndex) => {
-    const words = foldName(label).split(" ").filter(Boolean);
-    if (surnames.some(s => words.includes(s))) matches.push({ rowIndex, rowLabel: label });
+    const words = foldPersonLabel(label).split(" ").filter(Boolean);
+    if (tokens.some(token => words.includes(token))) matches.push({ rowIndex, rowLabel: label });
   });
   return matches;
 }

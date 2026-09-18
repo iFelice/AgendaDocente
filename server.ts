@@ -1,13 +1,15 @@
 import { circularAnalysisGuards, analysisErrorHandler } from "./server/circularAnalysisGuard";
 import { createAnalysisErrorHandler, createAnalysisGuards } from "./server/analysisGuards";
+import { groqConfigured, groqFallbackDecision, runGroqJson } from "./server/groqAnalysis";
 import {
-  CURRICULAR_TIMETABLE_PROMPT,
   STUDENT_DOCUMENT_PROMPT,
+  buildCurricularTimetablePrompt,
   buildPersonalTimetablePrompt,
   personalTargetSurname,
   STUDENT_DOCUMENT_TIMEOUT_MS,
   TIMETABLE_ANALYSIS_TIMEOUT_MS,
   describeAnalysisFailure,
+  timetableRejectionMessage,
   parseStudentDocumentAiResponse,
   parseTimetableAiResponse,
   type TimetableAnalysisOutcome,
@@ -518,13 +520,74 @@ const scanAnalysisErrorHandler = createAnalysisErrorHandler(false);
 // Scansiona documento: orari (personale/sostegno e curricolare)
 // ---------------------------------------------------------------------------
 
+/** Testo utente inviato al modello: identico per Gemini e per il fallback Groq. */
+const TIMETABLE_USER_TEXT = "Analizza la tabella della foto/PDF allegata rispettando le regole del prompt.";
+
+/**
+ * Fallback Groq Vision per l'analisi degli orari.
+ *
+ * Entra in gioco SOLO dopo che Gemini ha esaurito i tentativi E il fallimento è
+ * transitorio (sovraccarico/quota/deadline/rete): su un errore deterministico —
+ * request o `coordinateScope` non validi, profilo non valido, MIME non
+ * supportato, schema rifiutato — la richiesta è sbagliata e un altro modello
+ * sbaglierebbe allo stesso modo, quindi si risponde subito con l'errore previsto.
+ * Restano fuori anche il PDF (Groq Vision prende immagini, non PDF: quel caso
+ * resta Gemini-only) e l'assenza di `GROQ_API_KEY` (comportamento attuale,
+ * nessun crash).
+ *
+ * Il testo che torna prosegue nel percorso ORDINARIO (`parseGeminiJson` +
+ * `parseTimetableAiResponse`): il provider non ha alcun canale per bypassare
+ * `validatePersonalSequencePayload` / `validateCurricularTargetsPayload`. Con
+ * `ok=false` l'endpoint risponde esattamente come prima del fallback.
+ */
+async function runGroqTimetableFallback(input: {
+  run: GeminiJsonRunResult;
+  systemInstruction: string;
+  imageBase64: string;
+  mimeType: string;
+  responseSchema: unknown;
+  signal: AbortSignal;
+  elapsedMs: number;
+  /** Testo utente della chiamata (default: quello dell'analisi orario). */
+  userText?: string;
+  /** Etichetta dei log (default: "AI Orari"). */
+  label?: string;
+}): Promise<{ ok: true; text: string; source: string } | { ok: false }> {
+  const label = input.label ?? "AI Orari";
+  const remainingBudgetMs = TIMETABLE_ANALYSIS_TIMEOUT_MS - input.elapsedMs;
+  const decision = groqFallbackDecision({
+    geminiOk: input.run.ok,
+    geminiTransient: input.run.category !== "ok" && isTransientGeminiCategory(input.run.category),
+    groqConfigured: groqConfigured(),
+    mimeType: input.mimeType,
+    remainingBudgetMs,
+  });
+  if (!decision.proceed) {
+    // "gemini-ok" non è un evento: con Gemini a buon fine il fallback non parte.
+    if (decision.reason !== "gemini-ok") console.log(`[${label}] fallback=groq saltato motivo=${decision.reason}`);
+    return { ok: false };
+  }
+  console.log(`[${label}] fallback=groq motivo=${input.run.category} mime=${input.mimeType} budgetMs=${remainingBudgetMs}`);
+  const result = await runGroqJson({
+    systemInstruction: input.systemInstruction,
+    userText: input.userText ?? TIMETABLE_USER_TEXT,
+    imageBase64: input.imageBase64,
+    mimeType: input.mimeType,
+    responseSchema: input.responseSchema,
+    signal: input.signal,
+    label,
+    budgetMs: remainingBudgetMs,
+  });
+  return result.ok ? { ok: true, text: result.text, source: result.source } : { ok: false };
+}
+
 app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnalysisPayload), async (req, res) => {
   const controller = new AbortController();
   const deadline = setTimeout(() => controller.abort(), TIMETABLE_ANALYSIS_TIMEOUT_MS);
   const abort = () => controller.abort();
   res.once("close", abort);
   try {
-    const { documentType, imageBase64, mimeType, profile, periodsPerDay } = req.body;
+    const { documentType, imageBase64, mimeType, profile, periodsPerDay, coordinateScope } = req.body;
     const ai = getGeminiClient();
     if (!ai) {
       return res.status(503).json({ success: false, error: "Il servizio di analisi non è disponibile. Riprova più tardi." });
@@ -539,23 +602,50 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
     // modello quante colonne fisiche ha ogni blocco giornaliero. Il modello non
     // dichiara la geometria e non può influenzarla: il server verifica poi che
     // ogni blocco abbia esattamente quella lunghezza.
+    // Orario curricolare: il prompt riceve l'ELENCO delle coordinate richieste
+    // (giorno + periodo + classe, già validate nella request) e chiede solo
+    // quelle, invece della trascrizione dell'intera tabella d'istituto.
+    const systemInstruction = isPersonal
+      ? buildPersonalTimetablePrompt(targetSurname, periodsPerDay)
+      : buildCurricularTimetablePrompt(coordinateScope);
+    const responseSchema = isPersonal ? personalTimetableSchema : curricularTimetableSchema;
+    const analysisStartedAt = Date.now();
     const run = await runGeminiJson({
-      systemInstruction: isPersonal ? buildPersonalTimetablePrompt(targetSurname, periodsPerDay) : CURRICULAR_TIMETABLE_PROMPT,
+      systemInstruction,
       contents: [
         { inlineData: { data: imageBase64, mimeType } },
-        { text: "Analizza la tabella della foto/PDF allegata rispettando le regole del prompt." },
+        { text: TIMETABLE_USER_TEXT },
       ],
-      responseSchema: isPersonal ? personalTimetableSchema : curricularTimetableSchema,
+      responseSchema,
       signal: controller.signal,
       label: "AI Orari",
       budgetMs: TIMETABLE_ANALYSIS_TIMEOUT_MS,
       thinkingLevel: "low",
     });
+    console.log(`[AI Orari] provider=gemini esito=${run.ok ? "ok" : "fallito"} categoria=${run.category} tentativi=${run.attempts.length}`);
+    // Testo e provider vincenti: da qui in poi il percorso è UNO SOLO, quindi il
+    // fallback non può produrre un contratto diverso da quello di Gemini.
+    let text = run.text;
+    let source = run.source;
     if (!run.ok) {
-      return res.status(503).json({ success: false, error: "Il documento non è stato elaborato. Riprova più tardi." });
+      const fallback = await runGroqTimetableFallback({
+        run,
+        systemInstruction,
+        imageBase64,
+        mimeType,
+        responseSchema,
+        signal: controller.signal,
+        elapsedMs: Date.now() - analysisStartedAt,
+      });
+      if (!fallback.ok) {
+        return res.status(503).json({ success: false, error: "Il documento non è stato elaborato. Riprova più tardi." });
+      }
+      text = fallback.text;
+      source = fallback.source;
     }
-    // Runtime validation obbligatoria: il JSON del modello è sempre verificato.
-    const decoded = parseGeminiJson(run.text, "AI Orari");
+    // Runtime validation obbligatoria: il JSON del modello è sempre verificato,
+    // qualunque sia il provider che lo ha prodotto.
+    const decoded = parseGeminiJson(text, "AI Orari");
     if (!decoded.ok) {
       return res.status(503).json({ success: false, error: "Il documento non è stato elaborato. Riprova più tardi." });
     }
@@ -567,14 +657,23 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
     // giorno e una riga non compatibile col cognome del profilo.
     let outcome: TimetableAnalysisOutcome;
     try {
-      outcome = parseTimetableAiResponse(documentType, decoded.value, targetSurname, periodsPerDay);
+      outcome = parseTimetableAiResponse(documentType, decoded.value, targetSurname, periodsPerDay, coordinateScope);
     } catch (error: unknown) {
       console.warn(describeAnalysisFailure(error, decoded.value, documentType));
-      return res.status(422).json({ success: false, error: "Analisi non riuscita. Riprova." });
+      // Messaggio generico, tranne quando la riga del docente non è stata
+      // riconosciuta: quello l'utente può risolverlo (profilo o foto), gli altri
+      // no. Solo il motivo esce, mai un frammento del documento o del modello.
+      return res.status(422).json({ success: false, error: timetableRejectionMessage(error) });
+    }
+    if (!isPersonal) {
+      // Diagnostica privacy-safe: SOLO conteggi. Mai classi, coordinate, materie,
+      // nomi di docenti, OCR o JSON del modello.
+      const returned = new Set(outcome.cells.map((cell) => `${cell.dayOfWeek}|${cell.periodIndex}`)).size;
+      console.log(`[AI Orari] fase=curricolare esito=ok coordinateRichieste=${coordinateScope.length} coordinateRestituite=${returned} celle=${outcome.cells.length}`);
     }
     return res.json({
       success: true,
-      source: run.source,
+      source,
       // Solo per l'orario personale: etichetta della riga letta, già verificata
       // contro il cognome del profilo. Nessuna coordinata: giorno e periodo sono
       // derivati dal codice.
@@ -592,6 +691,10 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
   }
 });
 app.use("/api/analyze-timetable", scanAnalysisErrorHandler);
+
+// ---------------------------------------------------------------------------
+// Scansiona documento: GEOMETRIA della griglia (diagnostica crop curricolare)
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Scansiona documento: registro / appunti (impegni alunni)
