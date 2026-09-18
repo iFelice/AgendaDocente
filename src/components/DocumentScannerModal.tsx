@@ -1,6 +1,5 @@
 import { useAnalysisProgress } from "../hooks/useAnalysisProgress";
 import { usePersistenceAction } from "../hooks/usePersistenceAction";
-import { CropDiagnosticPanel } from "./CropDiagnosticPanel";
 import {
   analyzeStudentDocument,
   analyzeTimetableDocument,
@@ -223,7 +222,6 @@ export interface DocumentScannerModalProps {
 const DOC_TYPE_OPTIONS: Array<{ id: ScanDocType; label: string; description: string; icon: React.ComponentType<{ className?: string }> }> = [
   { id: "circolare", label: "Circolare", description: "Impegni, riunioni, scadenze", icon: ClipboardCheck },
   { id: "personal", label: "Orario personale / sostegno", description: "La tua riga nell'orario", icon: HeartHandshake },
-  { id: "curricular", label: "Orario curricolare / istituto", description: "Materie per classe e ora", icon: Sparkles },
   { id: "registro", label: "Registro / appunti", description: "Interrogazioni, verifiche, colloqui", icon: Users },
 ];
 
@@ -1038,25 +1036,6 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                 </div>
               </section>
 
-              {support && (
-                <section aria-label="Ricostruisci il mio orario">
-                  <h3 className="text-xs font-bold uppercase tracking-wide text-stone-500 mb-2">Ricostruisci il mio orario</h3>
-                  <button
-                    type="button"
-                    id="scan-reconstruct-entry"
-                    onClick={() => handleTypeChoice("ricostruisci")}
-                    className="w-full rounded-xl bg-emerald-700 hover:bg-emerald-800 active:bg-emerald-900 text-white p-4 flex items-center gap-3 text-left shadow-xs"
-                  >
-                    <HeartHandshake className="w-6 h-6 shrink-0" />
-                    <span>
-                      <span className="block text-sm font-bold">Incrocia i tuoi documenti</span>
-                      <span className="block text-[11px] text-emerald-100">
-                        Orario personale + orario curricolare = compresenze ricostruite
-                      </span>
-                    </span>
-                  </button>
-                </section>
-              )}
             </div>
           )}
 
@@ -1227,17 +1206,6 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                 </div>
               )}
 
-              {/* DIAGNOSTICA TEMPORANEA: verifica visiva del crop curricolare.
-                  Per rimuoverla: eliminare questo blocco e CropDiagnosticPanel.tsx. */}
-              {captureFor === "curricular" && (
-                <CropDiagnosticPanel
-                  imageBase64={fileBase64 ?? ""}
-                  mimeType={file?.type ?? ""}
-                  imageUrl={previewUrl}
-                  periodsPerDay={periodsPerDayConfirmed && periodsPerDayValid ? periodsPerDay : 0}
-                />
-              )}
-
               <label className="flex items-start gap-3 p-3 rounded-xl border border-stone-200 bg-white cursor-pointer">
                 <input
                   type="checkbox"
@@ -1384,20 +1352,10 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                 <p className="text-[11px] text-stone-500">
                   {phaseASaved
                     ? "Orario personale già salvato: le ore sono nella vista Orario."
-                    : "Nessun salvataggio ancora effettuato: rivedi le ore e usa «Salva questo orario». L'orario curricolare è facoltativo e può essere aggiunto dopo il salvataggio."}
+                    : "Nessun salvataggio ancora effettuato: rivedi le ore e usa «Salva questo orario»."}
                 </p>
               )}
               <div className="flex items-center justify-end gap-2">
-                {support && (docType === "personal" || docType === "ricostruisci") && (
-                  <button
-                    type="button"
-                    id="scan-personal-add-curricular"
-                    onClick={() => startCapture("curricular")}
-                    className="min-h-[44px] px-4 rounded-xl text-sm font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100"
-                  >
-                    Aggiungi orario curricolare
-                  </button>
-                )}
                 <button
                   type="button"
                   id="scan-personal-continue"
@@ -1635,21 +1593,6 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                     {phaseASaved.removed > 0 && `, ${phaseASaved.removed} vecchie rimosse`}
                     . L'orario è già in archivio: puoi chiudere questa finestra e lo trovi nella vista Orario.
                   </p>
-                  {!curricular && (
-                    <div className="pt-2 border-t border-emerald-200 space-y-2">
-                      <p className="text-[11px]">
-                        Vuoi aggiungere anche l'orario curricolare per ricostruire le compresenze?
-                      </p>
-                      <button
-                        type="button"
-                        id="scan-add-curricular-after-save"
-                        onClick={() => startCapture("curricular")}
-                        className="min-h-[44px] px-3 rounded-lg bg-white border border-emerald-300 text-xs font-bold text-emerald-800 hover:bg-emerald-100"
-                      >
-                        Aggiungi orario curricolare per le compresenze
-                      </button>
-                    </div>
-                  )}
                 </div>
               )}
               <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 text-xs text-stone-600 space-y-2">
