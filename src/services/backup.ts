@@ -1,5 +1,5 @@
 import { isValidDate, isValidTime, eventDateError } from '../utils/dates';
-import { TEACHER_ROLE_KINDS, type StudentAssessment } from '../types';
+import { TEACHER_ROLE_KINDS, type StudentAssessment, type StudentScheduledAssessment } from '../types';
 import { normalizeTeacherProfile } from '../utils/multiSchool';
 
 const record = (v: unknown): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v);
@@ -61,6 +61,22 @@ export function validateStudentAssessment(v: unknown): asserts v is StudentAsses
   if (!isValidStudentAssessment(v)) throw new Error('Valutazione non valida.');
 }
 
+export function isValidStudentScheduledAssessment(v: unknown): v is StudentScheduledAssessment {
+  return record(v) && required(v.id) && required(v.studentId) && required(v.className)
+    && isValidDate(v.date) && assessmentTypes.includes(v.assessmentType)
+    && ['scheduled', 'completed', 'cancelled'].includes(v.status)
+    && timestamp(v.createdAt) && timestamp(v.updatedAt)
+    && optional(v.schoolId, nonEmptyText) && optional(v.schoolYear, nonEmptyText)
+    && optional(v.subject, value => assessmentText(value, 120))
+    && optional(v.topic, value => assessmentText(value, 500))
+    && optional(v.note, value => assessmentText(value, 2000))
+    && v.numericValue === undefined && v.judgementValue === undefined && v.valueKind === undefined;
+}
+
+export function validateStudentScheduledAssessment(v: unknown): asserts v is StudentScheduledAssessment {
+  if (!isValidStudentScheduledAssessment(v)) throw new Error('Prova programmata non valida.');
+}
+
 /** Validate the entire document before touching live storage, including nested arrays used by views. */
 export function validateBackup(data: unknown): asserts data is Record<string, any> {
   if (!record(data) || ![2,3].includes(data.version)) throw new Error('Versione backup non supportata.');
@@ -92,6 +108,10 @@ export function validateBackup(data: unknown): asserts data is Record<string, an
   const assessments = data.assessments ?? [];
   if (!Array.isArray(assessments) || new Set(assessments.map((assessment: any) => assessment?.id)).size !== assessments.length || !assessments.every(isValidStudentAssessment)) {
     throw new Error('Valutazioni nel backup non valide.');
+  }
+  const scheduledAssessments = data.scheduledAssessments ?? [];
+  if (!Array.isArray(scheduledAssessments) || new Set(scheduledAssessments.map((item: any) => item?.id)).size !== scheduledAssessments.length || !scheduledAssessments.every(isValidStudentScheduledAssessment)) {
+    throw new Error('Prove programmate nel backup non valide.');
   }
   if (data.version === 2) {
     if (!timetable(data.timetable)) throw new Error('Orario nel backup non valido.');

@@ -227,6 +227,23 @@ export interface StudentParentContact {
 
 export type StudentAssessmentType = "oral" | "written" | "practical" | "other";
 export type StudentAssessmentValueKind = "numeric" | "judgement";
+export type StudentScheduledAssessmentStatus = "scheduled" | "completed" | "cancelled";
+
+export interface StudentScheduledAssessment {
+  id: string;
+  studentId: string;
+  schoolId?: string;
+  schoolYear?: string;
+  className: string;
+  date: string;
+  subject?: string;
+  assessmentType: StudentAssessmentType;
+  topic?: string;
+  note?: string;
+  status: StudentScheduledAssessmentStatus;
+  createdAt: string;
+  updatedAt: string;
+}
 
 export interface StudentAssessment {
   id: string;
