@@ -1,9 +1,9 @@
 import { assertUnchanged, DuplicateStudentError } from "./persistenceErrors";
 import { linkLegacyCircularEvents } from "../utils/circularLinks";
 import { localDateISO } from "../utils/dates";
-import { CalendarEvent, CircularDocument, ExtractedItem, SchoolLevel, Student, StudentNote, TeacherProfile, TimeSlotConfig, TimetableMode, TimetableSlot, TimetableType, } from "../types";
+import { CalendarEvent, CircularDocument, ExtractedItem, SchoolLevel, Student, StudentAssessment, StudentNote, TeacherProfile, TimeSlotConfig, TimetableMode, TimetableSlot, TimetableType, } from "../types";
 import { getCurrentSchoolYear } from "../utils/schoolYear";
-import { validateBackup } from "./backup";
+import { validateBackup, validateStudentAssessment } from "./backup";
 import { database, type LocalData, type LegacyStorage } from "./db";
 import { extractedItemError } from "../utils/circularParser";
 import { normalizeSchoolLinkedData } from "../utils/multiSchool";
@@ -701,7 +701,7 @@ export const DEFAULT_EVENTS: CalendarEvent[] = [
  * conservative one-time cleanup of rows that older beta versions used to insert.
  */
 export function demoInstallation(): LocalData {
- return {profile:structuredClone(DEFAULT_PROFILE),events:structuredClone(DEFAULT_EVENTS),circulars:[],students:structuredClone(DEFAULT_STUDENTS),
+ return {profile:structuredClone(DEFAULT_PROFILE),events:structuredClone(DEFAULT_EVENTS),circulars:[],students:structuredClone(DEFAULT_STUDENTS),assessments:[],
  definitiveTimetable:[],provisionalTimetable:structuredClone(DEFAULT_PROVISIONAL_TIMETABLE),timetableMode:'auto',onboardingCompleted:false,timeSlotConfig:undefined};
 }
 
@@ -723,7 +723,7 @@ export function defaultTeacherProfile(): TeacherProfile {
 
 /** A new installation starts empty: no demo profile, students, events or lessons. */
 export function emptyInstallation(): LocalData {
- return {profile:defaultTeacherProfile(),events:[],circulars:[],students:[],
+ return {profile:defaultTeacherProfile(),events:[],circulars:[],students:[],assessments:[],
   definitiveTimetable:[],provisionalTimetable:[],timetableMode:'auto',onboardingCompleted:false,timeSlotConfig:undefined};
 }
 
@@ -1159,6 +1159,33 @@ export const storage = {
       await this.saveStudents(list);
     });
   },
+  // STUDENT ASSESSMENTS (local-only until a future sync step)
+  async getAssessments(): Promise<StudentAssessment[]> { return database.read("assessments"); },
+  async getAssessmentsByStudent(studentId: string): Promise<StudentAssessment[]> {
+    return (await this.getAssessments())
+      .filter((assessment) => assessment.studentId === studentId)
+      .sort((a, b) => b.date.localeCompare(a.date) || b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id));
+  },
+  async saveAssessment(assessment: StudentAssessment): Promise<void> {
+    return database.atomic(async () => {
+      const list = await this.getAssessments();
+      const index = list.findIndex((item) => item.id === assessment.id);
+      const existing = index >= 0 ? list[index] : undefined;
+      const saved: StudentAssessment = {
+        ...assessment,
+        createdAt: existing?.createdAt ?? assessment.createdAt,
+        updatedAt: new Date().toISOString(),
+      };
+      validateStudentAssessment(saved);
+      if (index >= 0) list[index] = saved; else list.push(saved);
+      await database.write("assessments", list);
+    });
+  },
+  async deleteAssessment(id: string): Promise<void> {
+    return database.atomic(async () => {
+      await database.write("assessments", (await this.getAssessments()).filter((assessment) => assessment.id !== id));
+    });
+  },
   // BACKUP & RESTORE
   async exportDataBackup(): Promise<string> { return JSON.stringify({ version: 3, exportedAt: new Date().toISOString(), ...await database.readSnapshot() }, null, 2); },
   async importDataBackup(jsonString: string): Promise<boolean> {
@@ -1167,7 +1194,7 @@ export const storage = {
       validateBackup(data);
       await database.atomic(async () => {
         const current = await database.readSnapshot();
-        const restored = normalizeSchoolLinkedData({ profile: data.profile, events: linkLegacyCircularEvents(data.events, data.circulars), circulars: data.circulars, students: data.students,
+        const restored = normalizeSchoolLinkedData({ profile: data.profile, events: linkLegacyCircularEvents(data.events, data.circulars), circulars: data.circulars, students: data.students, assessments: data.assessments ?? [],
           definitiveTimetable: data.version === 3 ? data.definitiveTimetable : data.timetable, provisionalTimetable: data.version === 3 ? data.provisionalTimetable : current.provisionalTimetable,
           timetableMode: data.version === 3 ? data.timetableMode : current.timetableMode, onboardingCompleted: data.version === 3 ? data.onboardingCompleted : current.onboardingCompleted, timeSlotConfig: data.version === 3 ? data.timeSlotConfig : current.timeSlotConfig });
         await database.restore(restored);

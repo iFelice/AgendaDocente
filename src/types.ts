@@ -225,6 +225,26 @@ export interface StudentParentContact {
   notes?: string;
 }
 
+export type StudentAssessmentType = "oral" | "written" | "practical" | "other";
+export type StudentAssessmentValueKind = "numeric" | "judgement";
+
+export interface StudentAssessment {
+  id: string;
+  studentId: string;
+  schoolId?: string;
+  schoolYear?: string;
+  className: string;
+  date: string;
+  subject?: string;
+  assessmentType: StudentAssessmentType;
+  valueKind: StudentAssessmentValueKind;
+  numericValue?: number;
+  judgementValue?: string;
+  note?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Student {
   id: string;
   fullName: string;

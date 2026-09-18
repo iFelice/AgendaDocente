@@ -50,7 +50,9 @@ export function createStoreAdapter(): SyncStore {
 }
 
 async function applySnapshot(snapshot: SyncableSnapshot): Promise<void> {
-  await database.restore(snapshot);
+  // Assessments are deliberately local-only until a future sync step; a cloud full restore must not erase them.
+  const assessments = await database.read("assessments");
+  await database.restore({ ...snapshot, assessments });
 }
 
 /**

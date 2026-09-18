@@ -1,5 +1,5 @@
 import { isValidDate, isValidTime, eventDateError } from '../utils/dates';
-import { TEACHER_ROLE_KINDS } from '../types';
+import { TEACHER_ROLE_KINDS, type StudentAssessment } from '../types';
 import { normalizeTeacherProfile } from '../utils/multiSchool';
 
 const record = (v: unknown): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v);
@@ -40,6 +40,27 @@ function timeSlotConfigValidator(v: unknown): boolean {
     && optional(v.customSlots, slots => Array.isArray(slots) && slots.every(periodSlotValidator));
 }
 
+const assessmentTypes = ['oral', 'written', 'practical', 'other'];
+const valueKinds = ['numeric', 'judgement'];
+const assessmentText = (v: unknown, max: number) => text(v) && v.length <= max;
+
+export function isValidStudentAssessment(v: unknown): v is StudentAssessment {
+  if (!record(v) || !required(v.id) || !required(v.studentId) || !required(v.className)
+    || !isValidDate(v.date) || !assessmentTypes.includes(v.assessmentType)
+    || !valueKinds.includes(v.valueKind) || !timestamp(v.createdAt) || !timestamp(v.updatedAt)
+    || !optional(v.schoolId, nonEmptyText) || !optional(v.schoolYear, nonEmptyText)
+    || !optional(v.subject, value => assessmentText(value, 120))
+    || !optional(v.note, value => assessmentText(value, 2000))) return false;
+  if (v.valueKind === 'numeric') {
+    return number(v.numericValue) && v.judgementValue === undefined;
+  }
+  return required(v.judgementValue) && assessmentText(v.judgementValue, 120) && v.numericValue === undefined;
+}
+
+export function validateStudentAssessment(v: unknown): asserts v is StudentAssessment {
+  if (!isValidStudentAssessment(v)) throw new Error('Valutazione non valida.');
+}
+
 /** Validate the entire document before touching live storage, including nested arrays used by views. */
 export function validateBackup(data: unknown): asserts data is Record<string, any> {
   if (!record(data) || ![2,3].includes(data.version)) throw new Error('Versione backup non supportata.');
@@ -68,6 +89,10 @@ export function validateBackup(data: unknown): asserts data is Record<string, an
     && optional(s.archivedReason, boundedText(500))
     && ['isSupportStudent','hasBesDsa','pdpApproved'].every(k => optional(s[k],bool)) && optional(s.supportHoursPerWeek,number)
     && optional(s.contactParents,v => record(v) && ['parentNames','phone','email','notes'].every(k => optional(v[k],text))))) throw new Error('Alunni nel backup non validi.');
+  const assessments = data.assessments ?? [];
+  if (!Array.isArray(assessments) || new Set(assessments.map((assessment: any) => assessment?.id)).size !== assessments.length || !assessments.every(isValidStudentAssessment)) {
+    throw new Error('Valutazioni nel backup non valide.');
+  }
   if (data.version === 2) {
     if (!timetable(data.timetable)) throw new Error('Orario nel backup non valido.');
   } else if (!timetable(data.definitiveTimetable) || !timetable(data.provisionalTimetable)
