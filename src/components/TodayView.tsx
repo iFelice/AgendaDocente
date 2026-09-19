@@ -1,4 +1,4 @@
-import { addDaysISO, civilDayOfWeek, civilTimetableDay, localDateISO, parseCivilDate } from "../utils/dates";
+import { addDaysISO, civilDayOfWeek, civilTimetableDay, formatCivilDateIt, localDateISO, parseCivilDate } from "../utils/dates";
 import React from "react";
 import {
   BookOpen,
@@ -459,7 +459,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
             )}
           </div>
 
-          <section className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-hidden"><button type="button" aria-expanded={!collapsed.scheduledAssessments} onClick={() => toggleCollapse("scheduledAssessments")} className="flex min-h-[52px] w-full items-center justify-between gap-2 px-3 py-3 text-left"><span className="text-sm font-bold text-stone-900">Prove degli alunni ({dayScheduled.length})</span><span className="text-stone-500">{collapsed.scheduledAssessments ? "›" : "⌄"}</span></button>{!collapsed.scheduledAssessments && <div className="border-t border-stone-100 p-3 space-y-3">{dayScheduled.concat(nextScheduled).length === 0 ? <p className="text-sm text-stone-500">Nessuna prova programmata in questa finestra.</p> : <>{dayScheduled.length > 0 && <h3 className="text-xs font-bold uppercase tracking-wide text-amber-900">Oggi</h3>}{dayScheduled.map(item => <button type="button" key={`today-${item.id}`} onClick={() => onOpenScheduledAssessment?.(item.studentId)} className="block w-full min-h-[72px] rounded-lg border border-amber-300 bg-amber-50 p-3 text-left"><span className="block font-bold text-stone-900">{item.studentName}{item.className ? ` · ${item.className}` : ""} </span><span className="block text-xs text-stone-700">{item.subject || "Materia non indicata"} · {scheduledAssessmentTypeLabel[item.assessmentType]}</span>{item.topic && <span className="mt-1 block text-sm font-semibold text-stone-900">{item.topic}</span>}</button>)}{nextScheduled.length > 0 && <h3 className="pt-1 text-xs font-bold uppercase tracking-wide text-stone-600">Prossime prove</h3>}{nextScheduled.map(item => <button type="button" key={`next-${item.id}`} onClick={() => onOpenScheduledAssessment?.(item.studentId)} className="block w-full min-h-[64px] rounded-lg border border-stone-200 bg-stone-50 p-3 text-left"><span className="block text-xs font-bold text-stone-700">{item.date}</span><span className="block font-semibold text-stone-900">{item.studentName}</span><span className="block text-xs text-stone-700">{item.subject || "Materia non indicata"} · {scheduledAssessmentTypeLabel[item.assessmentType]}</span>{item.topic && <span className="block truncate text-xs font-semibold">{item.topic}</span>}</button>)}</>}</div>}</section>
+          <section className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-hidden"><button type="button" aria-expanded={!collapsed.scheduledAssessments} onClick={() => toggleCollapse("scheduledAssessments")} className="flex min-h-[52px] w-full items-center justify-between gap-2 px-3 py-3 text-left"><span className="text-sm font-bold text-stone-900">Prove degli alunni ({dayScheduled.length})</span><span className="text-stone-500">{collapsed.scheduledAssessments ? "›" : "⌄"}</span></button>{!collapsed.scheduledAssessments && <div className="border-t border-stone-100 p-3 space-y-3">{dayScheduled.concat(nextScheduled).length === 0 ? <p className="text-sm text-stone-500">Nessuna prova programmata in questa finestra.</p> : <>{dayScheduled.length > 0 && <h3 className="text-xs font-bold uppercase tracking-wide text-amber-900">Oggi</h3>}{dayScheduled.map(item => <button type="button" key={`today-${item.id}`} onClick={() => onOpenScheduledAssessment?.(item.studentId)} className="block w-full min-h-[72px] rounded-lg border border-amber-300 bg-amber-50 p-3 text-left"><span className="block font-bold text-stone-900">{item.studentName}{item.className ? ` · ${item.className}` : ""} </span><span className="block text-xs text-stone-700">{item.subject || "Materia non indicata"} · {scheduledAssessmentTypeLabel[item.assessmentType]}</span>{item.topic && <span className="mt-1 block text-sm font-semibold text-stone-900">{item.topic}</span>}</button>)}{nextScheduled.length > 0 && <h3 className="pt-1 text-xs font-bold uppercase tracking-wide text-stone-600">Prossime prove</h3>}{nextScheduled.map(item => <button type="button" key={`next-${item.id}`} onClick={() => onOpenScheduledAssessment?.(item.studentId)} className="block w-full min-h-[64px] rounded-lg border border-stone-200 bg-stone-50 p-3 text-left"><span className="block text-xs font-bold text-stone-700">{formatCivilDateIt(item.date)}</span><span className="block font-semibold text-stone-900">{item.studentName}</span><span className="block text-xs text-stone-700">{item.subject || "Materia non indicata"} · {scheduledAssessmentTypeLabel[item.assessmentType]}</span>{item.topic && <span className="block truncate text-xs font-semibold">{item.topic}</span>}</button>)}</>}</div>}</section>
 
           {/* Section 2: Meetings & Events. With no data the section collapses to a
               single compact row ("Nessun impegno oggi · + Aggiungi") instead of a big
@@ -639,7 +639,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
                       </div>
 
                       <div className="flex items-center justify-between text-[11px] text-stone-500 pl-6">
-                        <span>Data limite: {d.date}</span>
+                        <span>Data limite: {formatCivilDateIt(d.date)}</span>
                         {d.location && <span className="truncate max-w-[120px]">{d.location}</span>}
                       </div>
                     </div>
@@ -664,7 +664,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
                         </div>
 
                         <div className="flex items-center justify-between text-[11px] text-stone-500 pl-6">
-                          <span>Data limite: {d.date}</span>
+                          <span>Data limite: {formatCivilDateIt(d.date)}</span>
                           {d.location && <span className="truncate max-w-[120px]">{d.location}</span>}
                         </div>
                       </div>

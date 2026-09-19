@@ -81,8 +81,8 @@ test('due studenti omonimi restano distinti tramite id e le assessments corrette
   let renderer: any;
   await act(async () => { renderer = create(React.createElement(RegisterView, props({ students: [first, second], initialStudentId: 'same-b', assessments: [assessment('a', 'same-a', '2026-09-01'), assessment('b', 'same-b', '2026-09-02')] }))); });
   assert.match(text(renderer.toJSON()), /3A/);
-  assert.match(text(renderer.toJSON()), /2026-09-02/);
-  assert.doesNotMatch(text(renderer.toJSON()), /2026-09-01/);
+  assert.match(text(renderer.toJSON()), /02\/09\/2026/);
+  assert.doesNotMatch(text(renderer.toJSON()), /01\/09\/2026/);
 });
 
 test('studentId inesistente o archived ricade nella lista Registro e non apre una scheda vuota', async () => {

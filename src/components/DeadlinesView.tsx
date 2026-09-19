@@ -1,4 +1,4 @@
-import { localDateISO } from "../utils/dates";
+import { formatCivilDateIt, localDateISO } from "../utils/dates";
 import React, { useState } from "react";
 import {
   AlertTriangle,
@@ -209,7 +209,7 @@ export const DeadlinesView: React.FC<DeadlinesViewProps> = ({
                   <div className="flex flex-wrap items-center gap-4 text-xs text-stone-500">
                     <div className="flex items-center space-x-1">
                       <Clock className="w-3.5 h-3.5 text-stone-400" />
-                      <span>Data limite: {item.date} {item.startTime && `ore ${item.startTime}`}</span>
+                      <span>Data limite: {formatCivilDateIt(item.date)} {item.startTime && `ore ${item.startTime}`}</span>
                     </div>
                     {item.location && (
                       <div className="flex items-center space-x-1">

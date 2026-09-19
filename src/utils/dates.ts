@@ -42,6 +42,13 @@ export function nextDateISO(value: string): string {
   return localDateISO(new Date(y, m - 1, d + 1, 12));
 }
 
+/** Format a stored civil date for Italian UI without constructing a UTC Date. */
+export function formatCivilDateIt(iso: string): string {
+  if (!isValidDate(iso)) return iso;
+  const [year, month, day] = iso.split("-");
+  return `${day}/${month}/${year}`;
+}
+
 export function isValidTime(value: unknown): value is string {
   return typeof value === "string" && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value);
 }

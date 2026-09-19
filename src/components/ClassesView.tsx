@@ -1,5 +1,5 @@
 import { usePersistenceAction } from "../hooks/usePersistenceAction";
-import { localDateISO } from "../utils/dates";
+import { formatCivilDateIt, localDateISO } from "../utils/dates";
 import { parseSupportHoursDraft } from "../utils/supportHours";
 import React, { useState, useMemo, useRef } from "react";
 import {
@@ -815,7 +815,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
                           <MessageSquare className="w-3 h-3 mr-1 text-stone-400" />
                           Ultima nota ({noteCount} totali)
                         </span>
-                        <span>{lastNote.date}</span>
+                        <span>{formatCivilDateIt(lastNote.date)}</span>
                       </div>
                       <p className="text-xs text-stone-600 font-medium line-clamp-1">
                         {lastNote.title}
@@ -976,7 +976,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
                     {activeDetailStudent.gloDate && (
                       <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-900 border border-amber-300">
                         <Calendar className="w-3.5 h-3.5 mr-1 text-amber-700" />
-                        Data GLO: {activeDetailStudent.gloDate}
+                        Data GLO: {formatCivilDateIt(activeDetailStudent.gloDate)}
                       </span>
                     )}
                   </div>
@@ -1186,7 +1186,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
                             <div className="flex items-center space-x-2">
                               <span className="text-[11px] text-stone-400 flex items-center">
                                 <Clock className="w-3 h-3 mr-1" />
-                                {note.date}
+                                {formatCivilDateIt(note.date)}
                               </span>
                               <button
                                 type="button"
