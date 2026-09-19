@@ -135,6 +135,8 @@ export const MonthView: React.FC<MonthViewProps> = ({
         return { label: "Collegio", color: "bg-blue-100 text-blue-800 border-blue-200" };
       case "scadenza":
         return { label: "Scadenza", color: "bg-rose-100 text-rose-800 border-rose-200" };
+      case "uscita_didattica":
+        return { label: "Uscita didattica", color: "bg-sky-100 text-sky-800 border-sky-200" };
       default:
         return { label: category.replace("_", " "), color: "bg-stone-100 text-stone-700 border-stone-200" };
     }

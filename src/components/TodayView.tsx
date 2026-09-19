@@ -142,6 +142,8 @@ export const TodayView: React.FC<TodayViewProps> = ({
         return "bg-rose-100 text-rose-800 border-rose-200";
       case "formazione":
         return "bg-indigo-100 text-indigo-800 border-indigo-200";
+      case "uscita_didattica":
+        return "bg-sky-100 text-sky-800 border-sky-200";
       case "ricevimento_genitori":
         return "bg-amber-100 text-amber-800 border-amber-200";
       default:
@@ -167,6 +169,8 @@ export const TodayView: React.FC<TodayViewProps> = ({
         return "Scadenza";
       case "formazione":
         return "Formazione";
+      case "uscita_didattica":
+        return "Uscita didattica";
       case "ricevimento_genitori":
         return "Ricevimento";
       default:

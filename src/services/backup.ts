@@ -12,7 +12,7 @@ const number = (v: unknown) => typeof v === 'number' && Number.isFinite(v);
 const nonEmptyText = (v: unknown) => text(v) && v.trim().length > 0;
 const timestamp = (v: unknown) => nonEmptyText(v) && !Number.isNaN(Date.parse(v as string));
 const boundedText = (max: number) => (v: unknown) => text(v) && v.length <= max;
-const categories = ['lezione','consiglio_classe','collegio_docenti','dipartimento','dipartimento_sostegno','glo','pei','riunione','ricevimento_genitori','formazione','scadenza','promemoria','personale'];
+const categories = ['lezione','consiglio_classe','collegio_docenti','dipartimento','dipartimento_sostegno','glo','pei','riunione','ricevimento_genitori','formazione','uscita_didattica','scadenza','promemoria','personale'];
 function list(value: unknown, validate: (v: Record<string, any>) => boolean): boolean {
   return Array.isArray(value) && value.every(v => record(v) && required(v.id) && validate(v)) && new Set(value.map(v => v.id)).size === value.length;
 }

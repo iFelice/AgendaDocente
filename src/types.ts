@@ -9,6 +9,7 @@ export type EventCategory =
   | "riunione"
   | "ricevimento_genitori"
   | "formazione"
+  | "uscita_didattica"
   | "scadenza"
   | "promemoria"
   | "personale";

@@ -142,6 +142,8 @@ export const WeekView: React.FC<WeekViewProps> = ({
         return "border-teal-300 bg-teal-50 text-teal-900";
       case "scadenza":
         return "border-rose-300 bg-rose-50 text-rose-900";
+      case "uscita_didattica":
+        return "border-sky-300 bg-sky-50 text-sky-900";
       case "ricevimento_genitori":
         return "border-amber-300 bg-amber-50 text-amber-900";
       default:
