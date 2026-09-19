@@ -112,7 +112,8 @@ test('on the real today the badge is green and the Oggi button reads as already 
 
   const button = byId(renderer, 'today-back-to-today');
   assert.equal(flatText(button), 'Oggi', 'the label is always "Oggi"');
-  assert.equal(button.props.disabled, true, 'nothing to do when already on today');
+  assert.equal(button.props.disabled, undefined, 'the active button opens the native date picker');
+  assert.equal(button.props['aria-label'], 'Scegli una data');
   assert.equal(button.props['aria-pressed'], true, 'screen readers hear the active state');
   assert.ok(hasClass(button, 'bg-emerald-700'), 'active state is solid green');
   assert.ok(hasClass(button, 'text-white'));
@@ -138,8 +139,9 @@ test('on a future day the badge is amber "Futuro" and the Oggi button becomes an
   await click(renderer, 'today-next-day');
 
   const button = byId(renderer, 'today-back-to-today');
-  assert.equal(flatText(button), 'Oggi', 'the label stays "Oggi"');
-  assert.equal(button.props.disabled, false, 'the shortcut is clickable');
+  assert.match(flatText(button), /SET|SEP|OTT|NOV|DIC|GEN|FEB|MAR|APR|MAG|GIU|LUG|AGO/, 'the selected date is visible');
+  assert.equal(button.props.disabled, undefined, 'the shortcut is clickable');
+  assert.equal(button.props['aria-label'], 'Torna a oggi');
   assert.equal(button.props['aria-pressed'], false);
   assert.ok(hasClass(button, 'bg-amber-400'), 'amber = "attention / return to the present"');
   assert.ok(hasClass(button, 'text-amber-950'), 'text/background pair keeps contrast');
@@ -165,8 +167,9 @@ test('on a past day the badge is neutral "Passato" and the Oggi button stays amb
   await click(renderer, 'today-previous-day');
 
   const button = byId(renderer, 'today-back-to-today');
-  assert.equal(flatText(button), 'Oggi');
-  assert.equal(button.props.disabled, false);
+  assert.match(flatText(button), /SET|SEP|OTT|NOV|DIC|GEN|FEB|MAR|APR|MAG|GIU|LUG|AGO/);
+  assert.equal(button.props.disabled, undefined);
+  assert.equal(button.props['aria-label'], 'Torna a oggi');
   assert.ok(hasClass(button, 'bg-amber-400'), 'still an amber "back to today" affordance');
   assert.ok(!classString(button).includes('emerald'));
 
@@ -187,13 +190,24 @@ test('on a past day the badge is neutral "Passato" and the Oggi button stays amb
 test('clicking the amber Oggi button returns to the real today state', async () => {
   const renderer = await renderToday();
   await click(renderer, 'today-next-day');
-  assert.equal(byId(renderer, 'today-back-to-today').props.disabled, false);
+  assert.equal(byId(renderer, 'today-back-to-today').props.disabled, undefined);
 
   await click(renderer, 'today-back-to-today');
   const button = byId(renderer, 'today-back-to-today');
-  assert.equal(button.props.disabled, true, 'back on today the button is the active one again');
+  assert.equal(button.props['aria-label'], 'Scegli una data', 'back on today the button opens the picker again');
   assert.ok(hasClass(button, 'bg-emerald-700'));
   assert.ok(dateBadges(renderer, 'Oggi').length >= 2, 'the green "Oggi" badge is back');
+});
+
+test('the native date input changes the selected day and amber control returns to today', async () => {
+  const renderer = await renderToday();
+  const picker = renderer.root.findByProps({ id: 'today-date-picker' });
+  await act(async () => { picker.props.onChange({ target: { value: '2099-09-25' } }); });
+  const button = byId(renderer, 'today-back-to-today');
+  assert.equal(button.props['aria-label'], 'Torna a oggi');
+  assert.match(flatText(button), /SET/);
+  await click(renderer, 'today-back-to-today');
+  assert.equal(byId(renderer, 'today-back-to-today').props['aria-label'], 'Scegli una data');
 });
 
 // ---------------------------------------------------------------------------

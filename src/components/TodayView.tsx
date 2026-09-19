@@ -94,6 +94,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
   // Selected civil date (defaults to the real today). Navigation is day-by-day and must
   // survive month/year/weekend crossings because it works on local Date parts, never UTC.
   const [selectedIso, setSelectedIso] = React.useState<string>(() => localDateISO());
+  const datePickerRef = React.useRef<HTMLInputElement>(null);
   const todayIso = localDateISO();
   const [collapsed, setCollapsed] = React.useState(() => readDailyCollapse(localDateISO()));
   React.useEffect(() => { setCollapsed(readDailyCollapse(selectedIso)); }, [selectedIso]);
@@ -241,20 +242,36 @@ export const TodayView: React.FC<TodayViewProps> = ({
               never an ambiguous gray); on any other date it turns amber as a "come back
               to the present" call-to-action. Text is always "Oggi".
             */}
+            <input
+              ref={datePickerRef}
+              id="today-date-picker"
+              type="date"
+              value={selectedIso}
+              onChange={(event) => { if (event.target.value) setSelectedIso(event.target.value); }}
+              aria-label="Seleziona una data per la vista Oggi"
+              className="pointer-events-none absolute h-px w-px opacity-0"
+              tabIndex={-1}
+            />
             <button
               id="today-back-to-today"
               type="button"
-              onClick={() => setSelectedIso(todayIso)}
-              disabled={isToday}
+              onClick={() => {
+                if (!isToday) { setSelectedIso(todayIso); return; }
+                const picker = datePickerRef.current as (HTMLInputElement & { showPicker?: () => void }) | null;
+                if (picker?.showPicker) {
+                  try { picker.showPicker(); } catch { picker?.focus(); picker?.click(); }
+                } else { picker?.focus(); picker?.click(); }
+              }}
+              aria-label={isToday ? "Scegli una data" : "Torna a oggi"}
               aria-pressed={isToday}
-              title={isToday ? "Stai già visualizzando la data di oggi" : "Torna alla data corrente"}
-              className={`min-h-[44px] px-2.5 sm:px-3 py-2 rounded-lg border text-xs font-semibold transition-colors ${
+              title={isToday ? "Scegli una data" : "Torna alla data corrente"}
+              className={`min-h-[44px] min-w-[66px] px-2.5 sm:px-3 py-2 rounded-lg border text-xs font-semibold transition-colors ${
                 isToday
-                  ? "border-emerald-700 bg-emerald-700 text-white cursor-default shadow-xs"
+                  ? "border-emerald-700 bg-emerald-700 text-white shadow-xs"
                   : "border-amber-400 bg-amber-400 text-amber-950 hover:bg-amber-300 hover:border-amber-500 active:bg-amber-200"
               }`}
             >
-              Oggi
+              {isToday ? "Oggi" : new Intl.DateTimeFormat("it-IT", { weekday: "short", day: "numeric", month: "short" }).format(parseCivilDate(selectedIso)).replace(".", "").toUpperCase()}
             </button>
             <button
               id="today-next-day"
