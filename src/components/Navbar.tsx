@@ -40,6 +40,7 @@ interface NavbarProps {
   };
   updateAvailable?: boolean;
   onOpenUpdatePrompt?: () => void;
+  onCheckUpdates?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -57,6 +58,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   stats,
   updateAvailable = false,
   onOpenUpdatePrompt,
+  onCheckUpdates,
 }) => {
   const views: { id: ViewMode; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
     { id: "oggi", label: "Oggi", icon: Clock },
@@ -195,19 +197,17 @@ export const Navbar: React.FC<NavbarProps> = ({
               </button>
             )}
 
-            {updateAvailable && (
-              <button
-                id="btn-pwa-update"
-                type="button"
-                onClick={onOpenUpdatePrompt}
-                className="relative inline-flex items-center justify-center w-[44px] h-[44px] rounded-lg text-amber-800 hover:bg-amber-50 active:bg-amber-100 transition-colors"
-                title="Aggiornamento disponibile"
-                aria-label="Aggiornamento disponibile"
-              >
-                <Bell className="w-5 h-5" />
-                <span aria-hidden="true" className="absolute right-1.5 top-1.5 h-2.5 w-2.5 rounded-full bg-amber-500 ring-2 ring-white" />
-              </button>
-            )}
+            <button
+              id="btn-pwa-update"
+              type="button"
+              onClick={updateAvailable ? onOpenUpdatePrompt : onCheckUpdates}
+              className="relative inline-flex items-center justify-center w-[44px] h-[44px] rounded-lg text-stone-600 hover:text-amber-800 hover:bg-amber-50 active:bg-amber-100 transition-colors"
+              title={updateAvailable ? "Aggiornamento disponibile" : "Controlla aggiornamenti"}
+              aria-label={updateAvailable ? "Aggiornamento disponibile" : "Controlla aggiornamenti"}
+            >
+              <Bell className="w-5 h-5" />
+              {updateAvailable && <span aria-hidden="true" className="absolute right-1.5 top-1.5 h-2.5 w-2.5 rounded-full bg-amber-500 ring-2 ring-white" />}
+            </button>
             <button
               id="btn-open-profile"
               onClick={onOpenProfileModal}

@@ -394,15 +394,21 @@ test('on phones the header keeps only brand and profile', async () => {
   assert.ok(classes(profileButton).includes('w-[44px]') && classes(profileButton).includes('h-[44px]'));
 });
 
-test('PWA update indicator is absent without update and persistent in the header when available', async () => {
-  const absent = await render(React.createElement(Navbar, navbarProps({ updateAvailable: false })));
-  assert.equal(absent.root.findAll((el: any) => el.props?.id === 'btn-pwa-update').length, 0);
+test('PWA bell is always present, exposes the correct state and keeps Account independent', async () => {
+  let checked = 0;
+  const absent = await render(React.createElement(Navbar, navbarProps({ updateAvailable: false, onCheckUpdates: () => { checked++; } })));
+  const noUpdateBell = byId(absent, 'btn-pwa-update');
+  assert.equal(noUpdateBell.props['aria-label'], 'Controlla aggiornamenti');
+  assert.equal(noUpdateBell.findAll((el: any) => el.type === 'span' && el.props?.className?.includes('bg-amber-500')).length, 0);
+  assert.ok(noUpdateBell.props.className.includes('w-[44px]') && noUpdateBell.props.className.includes('h-[44px]'));
+  await act(async () => { noUpdateBell.props.onClick(); });
+  assert.equal(checked, 1);
+
   let opened = 0;
   const available = await render(React.createElement(Navbar, navbarProps({ updateAvailable: true, onOpenUpdatePrompt: () => { opened++; } })));
   const bell = byId(available, 'btn-pwa-update');
   assert.equal(bell.props['aria-label'], 'Aggiornamento disponibile');
-  assert.equal(bell.props['aria-hidden'], undefined);
-  assert.ok(bell.props.className.includes('w-[44px]') && bell.props.className.includes('h-[44px]'));
+  assert.equal(bell.findAll((el: any) => el.type === 'span' && el.props?.className?.includes('bg-amber-500')).length, 1);
   await act(async () => { bell.props.onClick(); });
   assert.equal(opened, 1);
   assert.equal(available.root.findAll((el: any) => el.type === 'button' && el.props['aria-label'] === 'Profilo e Impostazioni').length, 1);

@@ -188,9 +188,15 @@ export default function App({ initialData }: { initialData: LocalData }) {
   // Service-worker update availability for the installed PWA (explicit, never surprise reloads).
   const pwaUpdate = usePWAUpdates();
   const [updatePromptOpen, setUpdatePromptOpen] = useState(false);
+  const [updateCheckFeedback, setUpdateCheckFeedback] = useState(false);
   useEffect(() => {
     if (pwaUpdate.updateAvailable) setUpdatePromptOpen(true);
   }, [pwaUpdate.updateAvailable]);
+  useEffect(() => {
+    if (!updateCheckFeedback) return;
+    const timeout = window.setTimeout(() => setUpdateCheckFeedback(false), 2600);
+    return () => window.clearTimeout(timeout);
+  }, [updateCheckFeedback]);
 
   const handleGoogleLogin = async () => {
     try {
@@ -617,6 +623,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
         }}
         updateAvailable={pwaUpdate.updateAvailable}
         onOpenUpdatePrompt={() => setUpdatePromptOpen(true)}
+        onCheckUpdates={() => setUpdateCheckFeedback(true)}
       />
 
       {/* Floating notification toast (clears the mobile bottom navigation) */}
@@ -859,6 +866,15 @@ export default function App({ initialData }: { initialData: LocalData }) {
         googleUser={googleUser}
         onGoogleLogin={handleGoogleLogin}
       />
+      )}
+
+      {!pwaUpdate.updateAvailable && updateCheckFeedback && (
+        <div
+          role="status"
+          className="fixed left-1/2 bottom-20 md:bottom-20 z-[80] -translate-x-1/2 rounded-xl border border-stone-200 bg-white px-4 py-3 text-sm font-semibold text-stone-700 shadow-lg"
+        >
+          Agenda Docente è aggiornata
+        </div>
       )}
 
       {pwaUpdate.updateAvailable && updatePromptOpen && (
