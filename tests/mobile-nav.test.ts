@@ -394,6 +394,20 @@ test('on phones the header keeps only brand and profile', async () => {
   assert.ok(classes(profileButton).includes('w-[44px]') && classes(profileButton).includes('h-[44px]'));
 });
 
+test('PWA update indicator is absent without update and persistent in the header when available', async () => {
+  const absent = await render(React.createElement(Navbar, navbarProps({ updateAvailable: false })));
+  assert.equal(absent.root.findAll((el: any) => el.props?.id === 'btn-pwa-update').length, 0);
+  let opened = 0;
+  const available = await render(React.createElement(Navbar, navbarProps({ updateAvailable: true, onOpenUpdatePrompt: () => { opened++; } })));
+  const bell = byId(available, 'btn-pwa-update');
+  assert.equal(bell.props['aria-label'], 'Aggiornamento disponibile');
+  assert.equal(bell.props['aria-hidden'], undefined);
+  assert.ok(bell.props.className.includes('w-[44px]') && bell.props.className.includes('h-[44px]'));
+  await act(async () => { bell.props.onClick(); });
+  assert.equal(opened, 1);
+  assert.equal(available.root.findAll((el: any) => el.type === 'button' && el.props['aria-label'] === 'Profilo e Impostazioni').length, 1);
+});
+
 test('desktop navigation is unchanged: every section stays in the header tabs', async () => {
   const renderer = await render(React.createElement(Navbar, navbarProps({ currentView: 'orario' })));
   const expected: [string, string][] = [

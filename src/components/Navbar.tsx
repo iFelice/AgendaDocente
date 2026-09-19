@@ -14,6 +14,7 @@ import {
   HeartHandshake,
   Users,
   BookOpen,
+  Bell,
 } from "lucide-react";
 import { TeacherProfile, ViewMode } from "../types";
 import { PWAInstallButton } from "./PWAInstallButton";
@@ -37,6 +38,8 @@ interface NavbarProps {
     todayEventsCount: number;
     pendingDeadlinesCount: number;
   };
+  updateAvailable?: boolean;
+  onOpenUpdatePrompt?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -52,6 +55,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenGoogleLogin,
   onOpenGoogleTab,
   stats,
+  updateAvailable = false,
+  onOpenUpdatePrompt,
 }) => {
   const views: { id: ViewMode; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
     { id: "oggi", label: "Oggi", icon: Clock },
@@ -190,6 +195,19 @@ export const Navbar: React.FC<NavbarProps> = ({
               </button>
             )}
 
+            {updateAvailable && (
+              <button
+                id="btn-pwa-update"
+                type="button"
+                onClick={onOpenUpdatePrompt}
+                className="relative inline-flex items-center justify-center w-[44px] h-[44px] rounded-lg text-amber-800 hover:bg-amber-50 active:bg-amber-100 transition-colors"
+                title="Aggiornamento disponibile"
+                aria-label="Aggiornamento disponibile"
+              >
+                <Bell className="w-5 h-5" />
+                <span aria-hidden="true" className="absolute right-1.5 top-1.5 h-2.5 w-2.5 rounded-full bg-amber-500 ring-2 ring-white" />
+              </button>
+            )}
             <button
               id="btn-open-profile"
               onClick={onOpenProfileModal}

@@ -187,6 +187,10 @@ export default function App({ initialData }: { initialData: LocalData }) {
 
   // Service-worker update availability for the installed PWA (explicit, never surprise reloads).
   const pwaUpdate = usePWAUpdates();
+  const [updatePromptOpen, setUpdatePromptOpen] = useState(false);
+  useEffect(() => {
+    if (pwaUpdate.updateAvailable) setUpdatePromptOpen(true);
+  }, [pwaUpdate.updateAvailable]);
 
   const handleGoogleLogin = async () => {
     try {
@@ -611,6 +615,8 @@ export default function App({ initialData }: { initialData: LocalData }) {
           todayEventsCount,
           pendingDeadlinesCount,
         }}
+        updateAvailable={pwaUpdate.updateAvailable}
+        onOpenUpdatePrompt={() => setUpdatePromptOpen(true)}
       />
 
       {/* Floating notification toast (clears the mobile bottom navigation) */}
@@ -855,19 +861,31 @@ export default function App({ initialData }: { initialData: LocalData }) {
       />
       )}
 
-      {pwaUpdate.updateAvailable && (
+      {pwaUpdate.updateAvailable && updatePromptOpen && (
         <div
-          role="status"
-          className="app-update-banner fixed left-1/2 md:bottom-20 z-[80] w-[calc(100vw-2rem)] max-w-md -translate-x-1/2 rounded-xl border border-amber-300 bg-white px-4 py-3 shadow-lg flex items-center gap-3"
+          role="dialog"
+          aria-labelledby="pwa-update-title"
+          className="app-update-banner fixed left-1/2 bottom-20 md:bottom-20 z-[80] w-[calc(100vw-2rem)] max-w-md -translate-x-1/2 rounded-xl border border-amber-300 bg-white px-4 py-3 shadow-lg"
         >
-          <span className="text-sm font-semibold text-amber-900 flex-1">È disponibile una nuova versione</span>
-          <button
-            type="button"
-            onClick={pwaUpdate.applyUpdate}
-            className="px-3 py-1.5 rounded-lg bg-amber-600 text-white text-xs font-bold shadow-xs hover:bg-amber-700"
-          >
-            Aggiorna adesso
-          </button>
+          <div className="flex items-center gap-3">
+            <span id="pwa-update-title" className="text-sm font-semibold text-amber-900 flex-1">Nuovo aggiornamento disponibile</span>
+            <button
+              type="button"
+              onClick={() => setUpdatePromptOpen(false)}
+              aria-label="Più tardi"
+              className="min-h-[44px] px-2 text-xs font-semibold text-stone-600 hover:text-stone-900"
+            >
+              Più tardi
+            </button>
+            <button
+              type="button"
+              onClick={pwaUpdate.applyUpdate}
+              className="min-h-[44px] px-3 rounded-lg bg-amber-600 text-white text-xs font-bold shadow-xs hover:bg-amber-700"
+            >
+              Aggiorna adesso
+            </button>
+          </div>
+          {pwaUpdate.failed && <p role="alert" className="mt-2 text-xs text-rose-700">Aggiornamento non riuscito. Puoi riprovare.</p>}
         </div>
       )}
       <OfflineIndicator />
