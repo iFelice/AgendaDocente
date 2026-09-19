@@ -14,6 +14,8 @@ import {
 } from "lucide-react";
 import { CalendarEvent, TeacherProfile, TimetableSlot } from "../types";
 import { coTeachingSummary } from "../utils/coTeaching";
+import type { ScheduledAssessmentCalendarItem } from "../utils/scheduledAssessmentCalendar";
+import { scheduledAssessmentTypeLabel } from "../utils/scheduledAssessmentCalendar";
 
 interface WeekViewProps {
   profile?: TeacherProfile;
@@ -24,6 +26,8 @@ interface WeekViewProps {
   onEditEvent: (event: CalendarEvent) => void;
   onDeleteEvent?: (id: string) => void;
   targetDateIso?: string;
+  scheduledAssessments?: ScheduledAssessmentCalendarItem[];
+  onOpenScheduledAssessment?: (studentId: string) => void;
 }
 
 export const WeekView: React.FC<WeekViewProps> = ({
@@ -35,6 +39,8 @@ export const WeekView: React.FC<WeekViewProps> = ({
   onEditEvent,
   onDeleteEvent,
   targetDateIso,
+  scheduledAssessments = [],
+  onOpenScheduledAssessment,
 }) => {
   const [currentWeekOffset, setCurrentWeekOffset] = useState<number>(0);
   
@@ -251,6 +257,7 @@ export const WeekView: React.FC<WeekViewProps> = ({
 
           // Events on this specific date
           const rawDayEvents = events.filter((e) => e.date === day.iso);
+          const dayScheduled = scheduledAssessments.filter(item => item.date === day.iso);
           const dayEvents = (
             filterMode === "CIRCULARS"
               ? rawDayEvents.filter((e) => e.sourceType === "circolare")
@@ -344,6 +351,9 @@ export const WeekView: React.FC<WeekViewProps> = ({
                     </div>
                   )}
                 </div>
+
+                {/* Derived scheduled assessments: never persisted as CalendarEvent. */}
+                {dayScheduled.length > 0 && <div className="mb-2 space-y-1.5"><div className="px-1 text-[11px] font-bold text-amber-900">Prove programmate ({dayScheduled.length})</div>{dayScheduled.map(item => <button key={`scheduled-${item.id}`} type="button" onClick={() => onOpenScheduledAssessment?.(item.studentId)} className="w-full min-h-[72px] rounded-lg border border-amber-300 bg-amber-50 p-2 text-left text-xs"><span className="block font-bold uppercase text-amber-900">Prova programmata</span><span className="block font-semibold text-stone-900">{item.studentName}</span><span className="block text-stone-700">{item.subject || "Materia non indicata"} · {scheduledAssessmentTypeLabel[item.assessmentType]}</span>{item.topic && <span className="block truncate font-semibold text-stone-900">{item.topic}</span>}</button>)}</div>}
 
                 {/* Events Block */}
                 <div className="flex-1 flex flex-col">

@@ -2,6 +2,8 @@ import { localDateISO } from "../utils/dates";
 import React, { useState, useEffect } from "react";
 import { ChevronLeft, ChevronRight, Clock, MapPin, Plus, FileText, Trash2, Calendar } from "lucide-react";
 import { CalendarEvent } from "../types";
+import type { ScheduledAssessmentCalendarItem } from "../utils/scheduledAssessmentCalendar";
+import { scheduledAssessmentTypeLabel } from "../utils/scheduledAssessmentCalendar";
 
 interface MonthViewProps {
   events: CalendarEvent[];
@@ -10,6 +12,8 @@ interface MonthViewProps {
   onDeleteEvent?: (id: string) => void;
   onNavigateToPlanning?: (dateIso: string, view?: "oggi" | "settimana" | "mese") => void;
   targetDateIso?: string;
+  scheduledAssessments?: ScheduledAssessmentCalendarItem[];
+  onOpenScheduledAssessment?: (studentId: string) => void;
 }
 
 export const MonthView: React.FC<MonthViewProps> = ({
@@ -19,6 +23,8 @@ export const MonthView: React.FC<MonthViewProps> = ({
   onDeleteEvent,
   onNavigateToPlanning,
   targetDateIso,
+  scheduledAssessments = [],
+  onOpenScheduledAssessment,
 }) => {
   const [currentDate, setCurrentDate] = useState<Date>(new Date());
   const [selectedDateIso, setSelectedDateIso] = useState<string>(
@@ -109,6 +115,7 @@ export const MonthView: React.FC<MonthViewProps> = ({
   const todayIso = localDateISO();
 
   // Selected date events
+  const selectedScheduled = scheduledAssessments.filter(item => item.date === selectedDateIso);
   const selectedEvents = events
     .filter((e) => e.date === selectedDateIso)
     .filter((e) => (filterCircularsOnly ? e.sourceType === "circolare" : true))
@@ -182,6 +189,7 @@ export const MonthView: React.FC<MonthViewProps> = ({
           <div className="grid grid-cols-7 gap-1">
             {daysArray.map((cell, idx) => {
               const cellEvents = events.filter((e) => e.date === cell.iso);
+              const cellScheduled = scheduledAssessments.filter(item => item.date === cell.iso);
               const isSelected = selectedDateIso === cell.iso;
               const isToday = todayIso === cell.iso;
 
@@ -209,9 +217,9 @@ export const MonthView: React.FC<MonthViewProps> = ({
                     >
                       {cell.dayNum}
                     </span>
-                    {cellEvents.length > 0 && (
-                      <span className="text-[9px] sm:text-[10px] px-1 py-px rounded-full font-bold bg-purple-100 text-purple-800">
-                        {cellEvents.length}
+                    {cellEvents.length + cellScheduled.length > 0 && (
+                      <span className={`text-[9px] sm:text-[10px] px-1 py-px rounded-full font-bold ${cellScheduled.length ? "bg-amber-100 text-amber-900" : "bg-purple-100 text-purple-800"}`}>
+                        {cellEvents.length + cellScheduled.length}
                       </span>
                     )}
                   </div>
@@ -226,6 +234,7 @@ export const MonthView: React.FC<MonthViewProps> = ({
                         {ev.title}
                       </div>
                     ))}
+                    {cellScheduled.length > 0 && <div className="text-[10px] font-semibold truncate px-1 py-0.5 rounded-xs bg-amber-100 text-amber-900">{cellScheduled.length} {cellScheduled.length === 1 ? "prova" : "prove"}</div>}
                     {cellEvents.length > 2 && (
                       <div className="text-[9px] text-stone-400 pl-1">
                         +{cellEvents.length - 2} altri
@@ -292,7 +301,7 @@ export const MonthView: React.FC<MonthViewProps> = ({
           </div>
 
           <div className="mt-4 flex-1 overflow-y-auto space-y-3">
-            {selectedEvents.length === 0 ? (
+            {selectedEvents.length === 0 && selectedScheduled.length === 0 ? (
               <div className="py-12 text-center text-stone-400 text-xs">
                 {filterCircularsOnly ? "Nessun impegno da circolare in questa data." : "Nessun impegno in questa data."}
                 <button
@@ -303,7 +312,16 @@ export const MonthView: React.FC<MonthViewProps> = ({
                 </button>
               </div>
             ) : (
-              selectedEvents.map((ev) => (
+              <>
+              {selectedScheduled.map(item => (
+                <button key={`scheduled-${item.id}`} type="button" onClick={() => onOpenScheduledAssessment?.(item.studentId)} className="w-full rounded-lg border border-amber-300 bg-amber-50 p-3 text-left shadow-sm min-h-[88px]">
+                  <span className="text-[11px] font-bold uppercase text-amber-900">Prova programmata</span>
+                  <span className="mt-1 block text-sm font-bold text-stone-900">{item.studentName}</span>
+                  <span className="block text-xs font-semibold text-stone-700">{item.subject || "Materia non indicata"} · {scheduledAssessmentTypeLabel[item.assessmentType]}</span>
+                  {item.topic && <span className="mt-1 block text-sm font-semibold text-stone-900 break-words">{item.topic}</span>}
+                </button>
+              ))}
+              {selectedEvents.map((ev) => (
                 <div
                   key={ev.id}
                   onClick={() => onEditEvent(ev)}
@@ -384,7 +402,8 @@ export const MonthView: React.FC<MonthViewProps> = ({
                     )}
                   </div>
                 </div>
-              ))
+              ))}
+              </>
             )}
           </div>
         </div>

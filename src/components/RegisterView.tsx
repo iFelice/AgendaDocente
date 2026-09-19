@@ -10,6 +10,7 @@ interface RegisterViewProps {
   assessments: StudentAssessment[];
   scheduledAssessments?: StudentScheduledAssessment[];
   initialStudentId?: string | null;
+  initialSection?: "assessments" | "scheduled";
   onBackToOrigin?: () => void;
   onSaveAssessment: (assessment: StudentAssessment) => void | false | Promise<void | false>;
   onDeleteAssessment: (id: string) => void | false | Promise<void | false>;
@@ -147,7 +148,7 @@ function AssessmentForm({
   );
 }
 
-export const RegisterView: React.FC<RegisterViewProps> = ({ profile, students, assessments, scheduledAssessments = [], initialStudentId, onBackToOrigin, onSaveAssessment, onDeleteAssessment, onSaveScheduledAssessment, onDeleteScheduledAssessment }) => {
+export const RegisterView: React.FC<RegisterViewProps> = ({ profile, students, assessments, scheduledAssessments = [], initialStudentId, initialSection = "assessments", onBackToOrigin, onSaveAssessment, onDeleteAssessment, onSaveScheduledAssessment, onDeleteScheduledAssessment }) => {
   const activeStudents = useMemo(() => getActiveRegisterStudents(students), [students]);
   const initialStudent = initialStudentId ? activeStudents.find(student => student.id === initialStudentId) ?? null : null;
   const classOptions = useMemo(() => getRegisterClasses(profile, students), [profile, students]);
@@ -155,7 +156,8 @@ export const RegisterView: React.FC<RegisterViewProps> = ({ profile, students, a
   const [selectedStudentId, setSelectedStudentId] = useState<string | null>(initialStudent?.id ?? null);
   const [editing, setEditing] = useState<StudentAssessment | null | undefined>(undefined);
   const [editingScheduled, setEditingScheduled] = useState<StudentScheduledAssessment | null | undefined>(undefined);
-  const [section, setSection] = useState<"assessments" | "scheduled">("assessments");
+  const [section, setSection] = useState<"assessments" | "scheduled">(initialSection);
+  useEffect(() => { setSection(initialSection); }, [initialSection]);
   useEffect(() => {
     if (initialStudentId === undefined) return;
     const direct = activeStudents.find(student => student.id === initialStudentId) ?? null;

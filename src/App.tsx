@@ -2,6 +2,7 @@ import { deleteEventLocallyFirst } from "./services/eventWorkflows";
 import { observeLocalData, retainEqual } from "./services/observeLocalData";
 import { persistenceErrorMessage } from "./services/persistenceErrors";
 import { isStudentActive } from "./utils/studentMatcher";
+import { deriveScheduledAssessmentCalendarItems } from "./utils/scheduledAssessmentCalendar";
 import { database, type LocalData } from "./services/db";
 import { localDateISO } from "./utils/dates";
 import React, { useState, useEffect, useRef, lazy, Suspense } from "react";
@@ -76,6 +77,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
   const [students, setStudents] = useState<Student[]>(() => initialData.students);
   const [assessments, setAssessments] = useState<StudentAssessment[]>(() => initialData.assessments);
   const [scheduledAssessments, setScheduledAssessments] = useState<StudentScheduledAssessment[]>(() => initialData.scheduledAssessments);
+  const calendarScheduledAssessments = deriveScheduledAssessmentCalendarItems(scheduledAssessments, students);
 
   // Active Timetable logic: defaults to provisional if definitive is uncompiled
   const activeType = timetableMode !== 'provvisorio' && definitiveTimetable.length > 0 ? 'definitivo' : 'provvisorio';
@@ -90,6 +92,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
 
   const [currentView, setCurrentView] = useState<ViewMode>("oggi");
   const [registerStudentId, setRegisterStudentId] = useState<string | null>(null);
+  const [registerSection, setRegisterSection] = useState<"assessments" | "scheduled">("assessments");
   const [isCircularModalOpen, setIsCircularModalOpen] = useState(false);
   const [isScannerOpen, setIsScannerOpen] = useState(false);
   // File pre-scansionato dal flusso unificato, da alimentare alla pipeline circolare esistente.
@@ -568,8 +571,9 @@ export default function App({ initialData }: { initialData: LocalData }) {
     setCurrentView(view);
     if (view !== "registro") setRegisterStudentId(null);
   };
-  const handleOpenRegister = (studentId: string) => {
+  const handleOpenRegister = (studentId: string, section: "assessments" | "scheduled" = "assessments") => {
     setRegisterStudentId(studentId);
+    setRegisterSection(section);
     setCurrentView("registro");
   };
 
@@ -646,6 +650,8 @@ export default function App({ initialData }: { initialData: LocalData }) {
             profile={profile}
             timetable={timetable}
             events={events}
+            scheduledAssessments={calendarScheduledAssessments}
+            onOpenScheduledAssessment={(studentId) => handleOpenRegister(studentId, "scheduled")}
             isProvisionalTimetable={isProvisionalActive}
             onOpenNewEvent={handleOpenNewEvent}
             onEditEvent={handleEditEvent}
@@ -657,6 +663,8 @@ export default function App({ initialData }: { initialData: LocalData }) {
         {currentView === "mese" && (
           <MonthView
             events={events}
+            scheduledAssessments={calendarScheduledAssessments}
+            onOpenScheduledAssessment={(studentId) => handleOpenRegister(studentId, "scheduled")}
             onOpenNewEvent={handleOpenNewEvent}
             onEditEvent={handleEditEvent}
             onDeleteEvent={handleDeleteEvent}
@@ -699,6 +707,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
             assessments={assessments}
             scheduledAssessments={scheduledAssessments}
             initialStudentId={registerStudentId}
+            initialSection={registerSection}
             onBackToOrigin={registerStudentId ? () => { setRegisterStudentId(null); setCurrentView("classi"); } : undefined}
             onSaveAssessment={handleSaveAssessment}
             onDeleteAssessment={handleDeleteAssessment}
