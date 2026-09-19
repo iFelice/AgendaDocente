@@ -231,6 +231,11 @@ test('circular import entry points are neutral while keeping their text and icon
   const renderer = await renderToday();
   const mobileCta = byId(renderer, 'today-circular-cta-mobile');
   const desktopCta = byId(renderer, 'today-circular-cta');
+  const circularTitle = renderer.root.findAll((el: any) => el.type === 'span' && flatText(el).includes('Hai ricevuto una nuova circolare?'))[0];
+  const circularCard = renderer.root.findAll((el: any) => el.type === 'div' && String(el.props.className).includes('bg-white') && String(el.props.className).includes('border-stone-200') && flatText(el).includes('Hai ricevuto una nuova circolare?'))[0];
+  assert.ok(circularCard, 'circular entry card remains present');
+  assert.ok(!String(circularCard.props.className).includes('amber-'));
+  assert.ok(!String(circularTitle.props.className).includes('amber-'));
   assert.ok(!String(mobileCta.props.className).includes('bg-amber-600'));
   assert.ok(!String(desktopCta.props.className).includes('bg-amber-600'));
   assert.match(flatText(renderer.root), /Hai ricevuto una nuova circolare/);

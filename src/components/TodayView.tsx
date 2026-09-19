@@ -303,7 +303,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
           <button
             id="today-quick-scan"
             onClick={onOpenCircularModal}
-            className="inline-flex items-center px-3 py-2 text-sm font-medium rounded-lg text-amber-800 bg-amber-50 hover:bg-amber-100 transition-colors border border-amber-200 min-h-[44px]"
+            className="inline-flex items-center px-3 py-2 text-sm font-medium rounded-lg text-stone-800 bg-white hover:bg-stone-50 transition-colors border border-stone-300 min-h-[44px]"
           >
             <Sparkles className="w-4 h-4 mr-1.5 text-amber-600" />
             Importa circolare
@@ -675,9 +675,9 @@ export const TodayView: React.FC<TodayViewProps> = ({
           )}
 
           {/* Quick AI Circular Promo Box */}
-          <div className="bg-gradient-to-br from-amber-50 to-orange-50 rounded-xl border border-amber-200 p-3 sm:p-4">
+          <div className="bg-white rounded-xl border border-stone-200 p-3 sm:p-4 shadow-xs">
             <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center space-x-2 text-amber-900 font-semibold text-xs sm:text-sm min-w-0">
+              <div className="flex items-center space-x-2 text-stone-800 font-semibold text-xs sm:text-sm min-w-0">
                 <Sparkles className="w-4 h-4 text-amber-600 shrink-0" />
                 <span className="truncate">Hai ricevuto una nuova circolare?</span>
               </div>
@@ -689,7 +689,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
                 Analizza
               </button>
             </div>
-            <p className="hidden sm:block text-xs text-amber-800 leading-relaxed mt-3">
+            <p className="hidden sm:block text-xs text-stone-600 leading-relaxed mt-3">
               Non ricopiare a mano gli orari dei consigli o le date del collegio. Carica il PDF o scatta una foto: l'app seleziona
               solo gli impegni pertinenti alle tue classi e al tuo grado.
             </p>
