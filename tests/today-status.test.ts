@@ -227,6 +227,16 @@ test('today assessments are green and future assessments are amber with an Itali
   assert.match(flatText(renderer.root), /Oggi/i);
 });
 
+test('circular import entry points are neutral while keeping their text and icon identity', async () => {
+  const renderer = await renderToday();
+  const mobileCta = byId(renderer, 'today-circular-cta-mobile');
+  const desktopCta = byId(renderer, 'today-circular-cta');
+  assert.ok(!String(mobileCta.props.className).includes('bg-amber-600'));
+  assert.ok(!String(desktopCta.props.className).includes('bg-amber-600'));
+  assert.match(flatText(renderer.root), /Hai ricevuto una nuova circolare/);
+  assert.match(flatText(renderer.root), /Apri Analizzatore Circolari/);
+});
+
 test('the native date input changes the selected day and amber control returns to today', async () => {
   const renderer = await renderToday();
   const picker = renderer.root.findByProps({ id: 'today-date-picker' });

@@ -684,7 +684,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
               <button
                 onClick={onOpenCircularModal}
                 id="today-circular-cta-mobile"
-                className="shrink-0 sm:hidden min-h-[40px] py-2 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-medium text-xs shadow-xs transition-colors text-center"
+                className="shrink-0 sm:hidden min-h-[40px] py-2 px-3 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 font-medium text-xs shadow-xs transition-colors text-center"
               >
                 Analizza
               </button>
@@ -696,7 +696,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
             <button
               onClick={onOpenCircularModal}
               id="today-circular-cta"
-              className="hidden sm:block w-full mt-3 py-2 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-medium text-xs shadow-xs transition-colors text-center"
+              className="hidden sm:block w-full mt-3 py-2 px-3 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 font-medium text-xs shadow-xs transition-colors text-center"
             >
               Apri Analizzatore Circolari
             </button>

@@ -132,7 +132,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             <button
               id="btn-scan-circular"
               onClick={onOpenCircularModal}
-              className="hidden md:inline-flex items-center justify-center gap-1.5 px-2.5 sm:px-3.5 min-h-[44px] min-w-[44px] rounded-lg text-sm font-medium bg-amber-500 hover:bg-amber-600 text-white transition-colors shadow-xs"
+              className="hidden md:inline-flex items-center justify-center gap-1.5 px-2.5 sm:px-3.5 min-h-[44px] min-w-[44px] rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 transition-colors shadow-xs"
               title="Analizza circolare con intelligenza semantica"
               aria-label="Analizza circolare"
             >

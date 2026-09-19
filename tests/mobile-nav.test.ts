@@ -433,7 +433,10 @@ test('desktop navigation is unchanged: every section stays in the header tabs', 
   assert.equal(byId(renderer, 'nav-tab-orario').props['aria-current'], 'page');
   // The desktop action row is intact (visible from 768px up).
   assert.ok(hasClass(byId(renderer, 'btn-new-event'), 'md:inline-flex'));
-  assert.ok(hasClass(byId(renderer, 'btn-scan-circular'), 'md:inline-flex'));
+  const circularCta = byId(renderer, 'btn-scan-circular');
+  assert.ok(hasClass(circularCta, 'md:inline-flex'));
+  assert.ok(!String(circularCta.props.className).includes('bg-amber-500'), 'circular action is not a temporal warning surface');
+  assert.ok(circularCta.findAll((el: any) => el.type === 'svg' && String(el.props.className).includes('w-4')).length >= 1, 'circular action keeps its icon accent');
 });
 
 // ---------------------------------------------------------------------------
