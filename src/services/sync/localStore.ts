@@ -1,4 +1,5 @@
 import { database, type LocalData } from "../db";
+import type { StudentScheduledAssessment } from "../../types";
 import type { SyncableSnapshot } from "./types";
 import type { LocalApply, SyncStore } from "./engine";
 import { liveQuery } from "dexie";
@@ -25,7 +26,7 @@ export function createStoreAdapter(): SyncStore {
       await database.atomic(async () => {
         const write = async <K extends keyof LocalData>(name: K, value: LocalData[K]) => database.write(name, value);
         if (full) {
-          await applySnapshot(normalizeSchoolLinkedData(full));
+          await applySnapshot({ ...normalizeSchoolLinkedData(full), scheduledAssessments: full.scheduledAssessments ?? [] } as SyncableSnapshot & { scheduledAssessments: StudentScheduledAssessment[] });
           return;
         }
         if ("profile" in state) await write("profile", normalizeTeacherProfile(state.profile as LocalData["profile"]));
@@ -44,13 +45,15 @@ export function createStoreAdapter(): SyncStore {
         }
         if (changes.localEvents) await write("events", changes.localEvents);
         if (changes.localCirculars) await write("circulars", changes.localCirculars);
+        if (changes.localAssessments) await write("assessments", changes.localAssessments);
+        if (changes.localScheduledAssessments) await write("scheduledAssessments", changes.localScheduledAssessments);
       });
     },
   };
 }
 
-async function applySnapshot(snapshot: SyncableSnapshot): Promise<void> {
-  await database.restore(snapshot);
+async function applySnapshot(snapshot: SyncableSnapshot & { scheduledAssessments?: StudentScheduledAssessment[] }): Promise<void> {
+  await database.restore({ ...snapshot, assessments: snapshot.assessments ?? [], scheduledAssessments: snapshot.scheduledAssessments ?? await database.read("scheduledAssessments") });
 }
 
 /**

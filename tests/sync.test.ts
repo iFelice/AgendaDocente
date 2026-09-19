@@ -147,7 +147,7 @@ interface FakeCloud {
 function makeFakeCloud(clock: { now: string }): FakeCloud {
   const cloud = {
     state: {} as Record<string, unknown>,
-    items: { events: new Map<string, RemoteItem>(), circulars: new Map<string, RemoteItem>() } as Record<ItemsCollection, Map<string, RemoteItem>>,
+    items: { events: new Map<string, RemoteItem>(), circulars: new Map<string, RemoteItem>(), assessments: new Map<string, RemoteItem>() } as Record<ItemsCollection, Map<string, RemoteItem>>,
     conflicts: [] as { kind: string; loser: unknown }[],
     writes: 0,
     gateway(): SyncGateway {
@@ -193,6 +193,7 @@ function makeDevice(initial?: Partial<SyncableSnapshot>): FakeDevice {
       if ('settings' in st) { const s = st.settings as { timetableMode?: never; onboardingCompleted?: boolean }; if (s.timetableMode) db.timetableMode = s.timetableMode; if (typeof s.onboardingCompleted === 'boolean') db.onboardingCompleted = s.onboardingCompleted; }
       if (changes.localEvents) db.events = clone(changes.localEvents);
       if (changes.localCirculars) db.circulars = clone(changes.localCirculars) as never;
+      if (changes.localAssessments) db.assessments = clone(changes.localAssessments) as never;
     },
   };
   return { db, meta, store };
@@ -251,6 +252,36 @@ test('two devices converge through the engine: push, pull, delete, and zero writ
   // sync metadata is recorded and stays tied to the uid
   const state = a.meta['sync:state'] as SyncStateV1;
   assert.equal(state.uid, 'uid-1');
+});
+
+test('two devices sync StudentAssessment create, update, download, and delete without resurrection', async () => {
+  const clock = { now: '2026-09-09T10:00:00.000Z' };
+  const cloud = makeFakeCloud(clock);
+  const row = { id: 'assessment-e2e', studentId: 'student-1', className: '2E', date: '2026-09-09', assessmentType: 'oral' as const, valueKind: 'numeric' as const, numericValue: 7.25, createdAt: clock.now, updatedAt: clock.now };
+  const a = makeDevice({ assessments: [row] });
+  const b = makeDevice();
+  (b.db as { profile: TeacherProfile }).profile = { ...emptyInstallation().profile } as TeacherProfile;
+  const engineA = makeEngine(a, cloud, clock);
+  const engineB = makeEngine(b, cloud, clock);
+
+  await engineA.syncNow();
+  assert.deepEqual(cloud.items.assessments.get(row.id)?.payload, row);
+  await engineB.syncNow();
+  assert.equal(b.db.assessments[0].numericValue, 7.25);
+
+  clock.now = '2026-09-09T11:00:00.000Z';
+  a.db.assessments = [{ ...row, numericValue: 8.5, updatedAt: clock.now }];
+  await engineA.syncNow();
+  await engineB.syncNow();
+  assert.equal(b.db.assessments[0].numericValue, 8.5);
+
+  a.db.assessments = [];
+  clock.now = '2026-09-09T12:00:00.000Z';
+  await engineA.syncNow();
+  assert.equal(cloud.items.assessments.has(row.id), false);
+  await engineB.syncNow();
+  assert.deepEqual(b.db.assessments, []);
+  assert.equal(cloud.items.assessments.has(row.id), false);
 });
 
 test('a conflicting concurrent edit keeps the newer side and archives the loser copy', async () => {
@@ -416,7 +447,7 @@ test('firestore.rules: owner-scoped namespace only, valid rule APIs, paths mirro
   assert.match(rules, /request\.auth != null && request\.auth\.uid == uid/); // total user separation
   assert.doesNotMatch(rules, /size\(\)\.hashCode/, 'Firestore Rules have no document-size API; must not be faked');
   assert.match(rules, /match \/users\/\{uid\}/);
-  for (const path of ['/state/{stateDoc}', '/events/{eventId}', '/circulars/{circularId}', '/conflicts/{conflictId}'])
+  for (const path of ['/state/{stateDoc}', '/events/{eventId}', '/circulars/{circularId}', '/assessments/{assessmentId}', '/conflicts/{conflictId}'])
     assert.ok(rules.includes(path), `rules must scope ${path}`);
   assert.ok(rules.indexOf('match /conflicts/') < rules.indexOf('allow update, delete: if false;'), 'conflict archives stay immutable');
   assert.ok(rules.includes('allow read, write: if false;'), 'explicit deny outside the allowed subtree');

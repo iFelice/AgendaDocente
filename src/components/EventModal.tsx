@@ -19,7 +19,7 @@ interface EventModalProps {
   googleUserEmail?: string;
 }
 
-const CATEGORIES: { id: EventCategory; label: string }[] = [
+export const EVENT_CATEGORIES: { id: EventCategory; label: string }[] = [
   { id: "glo", label: "G.L.O. (Gruppo Lavoro Operativo)" },
   { id: "pei", label: "P.E.I. / P.D.P. (Scadenza / Stesura)" },
   { id: "dipartimento_sostegno", label: "Dipartimento Sostegno / Inclusione" },
@@ -30,6 +30,7 @@ const CATEGORIES: { id: EventCategory; label: string }[] = [
   { id: "scadenza", label: "Scadenza Istituzionale" },
   { id: "promemoria", label: "Promemoria Didattico" },
   { id: "formazione", label: "Formazione / Aggiornamento" },
+  { id: "uscita_didattica", label: "Uscita didattica" },
   { id: "riunione", label: "Altra Riunione" },
   { id: "personale", label: "Personale" },
 ];
@@ -179,7 +180,7 @@ export const EventModal: React.FC<EventModalProps> = ({
           <div>
             <label className="block font-semibold text-stone-700 mb-1.5">Tipologia Impegno</label>
             <div className="flex flex-wrap gap-1.5">
-              {CATEGORIES.map((cat) => (
+              {EVENT_CATEGORIES.map((cat) => (
                 <button
                   key={cat.id}
                   type="button"

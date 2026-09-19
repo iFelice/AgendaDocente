@@ -1,6 +1,8 @@
 import { deleteEventLocallyFirst } from "./services/eventWorkflows";
 import { observeLocalData, retainEqual } from "./services/observeLocalData";
 import { persistenceErrorMessage } from "./services/persistenceErrors";
+import { isStudentActive } from "./utils/studentMatcher";
+import { deriveScheduledAssessmentCalendarItems } from "./utils/scheduledAssessmentCalendar";
 import { database, type LocalData } from "./services/db";
 import { localDateISO } from "./utils/dates";
 import React, { useState, useEffect, useRef, lazy, Suspense } from "react";
@@ -9,6 +11,8 @@ import {
   CircularDocument,
   ExtractedItem,
   Student,
+  StudentAssessment,
+  StudentScheduledAssessment,
   StudentNote,
   TeacherProfile,
   TimeSlotConfig,
@@ -28,6 +32,7 @@ import { DeadlinesView } from "./components/DeadlinesView";
 const TimetableEditor = lazy(() => import("./components/TimetableEditor").then(module => ({default: module.TimetableEditor})));
 const CircularsArchiveView = lazy(() => import("./components/CircularsArchiveView").then(module => ({default: module.CircularsArchiveView})));
 const ClassesView = lazy(() => import("./components/ClassesView").then(module => ({default: module.ClassesView})));
+const RegisterView = lazy(() => import("./components/RegisterView").then(module => ({default: module.RegisterView})));
 const CircularAnalyzerModal = lazy(() => import("./components/CircularAnalyzerModal").then(module => ({default: module.CircularAnalyzerModal})));
 const DocumentScannerModal = lazy(() => import("./components/DocumentScannerModal").then(module => ({default: module.DocumentScannerModal})));
 import { EventModal } from "./components/EventModal";
@@ -70,6 +75,9 @@ export default function App({ initialData }: { initialData: LocalData }) {
   const [events, setEvents] = useState<CalendarEvent[]>(() => initialData.events);
   const [circulars, setCirculars] = useState<CircularDocument[]>(() => initialData.circulars);
   const [students, setStudents] = useState<Student[]>(() => initialData.students);
+  const [assessments, setAssessments] = useState<StudentAssessment[]>(() => initialData.assessments);
+  const [scheduledAssessments, setScheduledAssessments] = useState<StudentScheduledAssessment[]>(() => initialData.scheduledAssessments);
+  const calendarScheduledAssessments = deriveScheduledAssessmentCalendarItems(scheduledAssessments, students);
 
   // Active Timetable logic: defaults to provisional if definitive is uncompiled
   const activeType = timetableMode !== 'provvisorio' && definitiveTimetable.length > 0 ? 'definitivo' : 'provvisorio';
@@ -83,6 +91,8 @@ export default function App({ initialData }: { initialData: LocalData }) {
   const isDefinitiveCompiled = activeTimetableInfo.isDefinitiveCompiled;
 
   const [currentView, setCurrentView] = useState<ViewMode>("oggi");
+  const [registerStudentId, setRegisterStudentId] = useState<string | null>(null);
+  const [registerSection, setRegisterSection] = useState<"assessments" | "scheduled">("assessments");
   const [isCircularModalOpen, setIsCircularModalOpen] = useState(false);
   const [isScannerOpen, setIsScannerOpen] = useState(false);
   // File pre-scansionato dal flusso unificato, da alimentare alla pipeline circolare esistente.
@@ -132,6 +142,8 @@ export default function App({ initialData }: { initialData: LocalData }) {
     setEvents(previous => retainEqual(previous, data.events));
     setCirculars(previous => retainEqual(previous, data.circulars));
     setStudents(previous => retainEqual(previous, data.students));
+    setAssessments(previous => retainEqual(previous, data.assessments));
+    setScheduledAssessments(previous => retainEqual(previous, data.scheduledAssessments));
     if (lastOnboarding.current !== data.onboardingCompleted) setIsOnboardingOpen(!data.onboardingCompleted);
     lastOnboarding.current = data.onboardingCompleted;
   }
@@ -175,6 +187,16 @@ export default function App({ initialData }: { initialData: LocalData }) {
 
   // Service-worker update availability for the installed PWA (explicit, never surprise reloads).
   const pwaUpdate = usePWAUpdates();
+  const [updatePromptOpen, setUpdatePromptOpen] = useState(false);
+  const [updateCheckFeedback, setUpdateCheckFeedback] = useState(false);
+  useEffect(() => {
+    if (pwaUpdate.updateAvailable) setUpdatePromptOpen(true);
+  }, [pwaUpdate.updateAvailable]);
+  useEffect(() => {
+    if (!updateCheckFeedback) return;
+    const timeout = window.setTimeout(() => setUpdateCheckFeedback(false), 2600);
+    return () => window.clearTimeout(timeout);
+  }, [updateCheckFeedback]);
 
   const handleGoogleLogin = async () => {
     try {
@@ -406,9 +428,13 @@ export default function App({ initialData }: { initialData: LocalData }) {
   });
 
   const handleDeleteStudent = withPersistenceFeedback(async (studentId: string) => {
-    await storage.deleteStudent(studentId);
+    await storage.archiveStudent(studentId);
+    showToast("Alunno archiviato. I dati e le note sono stati conservati.");
+  });
 
-    showToast("Alunno rimosso dall'elenco.");
+  const handleRestoreStudent = withPersistenceFeedback(async (studentId: string) => {
+    await storage.restoreStudent(studentId);
+    showToast("Alunno ripristinato nell'elenco attivo.");
   });
 
   const handleAddStudentNote = withPersistenceFeedback(async (studentId: string, note: StudentNote) => {
@@ -425,10 +451,17 @@ export default function App({ initialData }: { initialData: LocalData }) {
 
   const handleDeleteMultipleStudents = withPersistenceFeedback(async (studentIds: string[]) => {
     await database.atomic(async () => {
-      const list = (await storage.getStudents()).filter((s) => !studentIds.includes(s.id));
-    await storage.saveStudents(list);
+      const list = await storage.getStudents();
+      const archivedAt = new Date().toISOString();
+      for (const student of list) {
+        if (studentIds.includes(student.id)) {
+          student.status = "archived";
+          student.archivedAt = archivedAt;
+        }
+      }
+      await storage.saveStudents(list);
     });
-    showToast(`${studentIds.length} alunni rimossi.`);
+    showToast(`${studentIds.length} alunni archiviati. I dati sono stati conservati.`);
   });
 
   const handleReassignStudentsClass = withPersistenceFeedback(async (studentIds: string[], targetClass: string) => {
@@ -445,8 +478,14 @@ export default function App({ initialData }: { initialData: LocalData }) {
   });
 
   const handleClearAllStudents = withPersistenceFeedback(async () => {
-    await storage.saveStudents([]);
-    showToast("Elenco alunni azzerato.");
+    const list = await storage.getStudents();
+    const archivedAt = new Date().toISOString();
+    for (const student of list) {
+      student.status = "archived";
+      student.archivedAt = archivedAt;
+    }
+    await storage.saveStudents(list);
+    showToast("Alunni archiviati. I dati sono stati conservati.");
   });
 
   const handleScheduleStudentEvent = (prefill: Partial<CalendarEvent>) => {
@@ -521,6 +560,33 @@ export default function App({ initialData }: { initialData: LocalData }) {
     showToast(`${addedCount} impegni dal registro aggiunti all'agenda.`);
   });
 
+  const handleSaveAssessment = withPersistenceFeedback(async (assessment: StudentAssessment) => {
+    await storage.saveAssessment(assessment);
+    showToast("Valutazione salvata.");
+  });
+  const handleDeleteAssessment = withPersistenceFeedback(async (assessmentId: string) => {
+    await storage.deleteAssessment(assessmentId);
+    showToast("Valutazione eliminata.");
+  });
+  const handleSaveScheduledAssessment = withPersistenceFeedback(async (assessment: StudentScheduledAssessment) => {
+    await storage.saveScheduledAssessment(assessment);
+    showToast("Prova programmata salvata.");
+  });
+  const handleDeleteScheduledAssessment = withPersistenceFeedback(async (id: string) => {
+    await storage.deleteScheduledAssessment(id);
+    showToast("Prova programmata eliminata.");
+  });
+
+  const handleViewChange = (view: ViewMode) => {
+    setCurrentView(view);
+    if (view !== "registro") setRegisterStudentId(null);
+  };
+  const handleOpenRegister = (studentId: string, section: "assessments" | "scheduled" = "assessments") => {
+    setRegisterStudentId(studentId);
+    setRegisterSection(section);
+    setCurrentView("registro");
+  };
+
   // Stats for badges
   const todayIso = localDateISO();
   const todayEventsCount = events.filter((e) => e.date === todayIso && !e.completed).length;
@@ -535,7 +601,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
       {/* Top Navigation */}
       <Navbar
         currentView={currentView}
-        onViewChange={setCurrentView}
+        onViewChange={handleViewChange}
         profile={profile}
         onOpenCircularModal={() => setIsCircularModalOpen(true)}
         onOpenScanner={() => setIsScannerOpen(true)}
@@ -555,6 +621,9 @@ export default function App({ initialData }: { initialData: LocalData }) {
           todayEventsCount,
           pendingDeadlinesCount,
         }}
+        updateAvailable={pwaUpdate.updateAvailable}
+        onOpenUpdatePrompt={() => setUpdatePromptOpen(true)}
+        onCheckUpdates={() => setUpdateCheckFeedback(true)}
       />
 
       {/* Floating notification toast (clears the mobile bottom navigation) */}
@@ -577,6 +646,8 @@ export default function App({ initialData }: { initialData: LocalData }) {
             profile={profile}
             timetable={timetable}
             events={events}
+            scheduledAssessments={calendarScheduledAssessments}
+            onOpenScheduledAssessment={(studentId) => handleOpenRegister(studentId, "scheduled")}
             isProvisionalTimetable={isProvisionalActive}
             isDefinitiveCompiled={isDefinitiveCompiled}
             onOpenNewEvent={handleOpenNewEvent}
@@ -594,6 +665,8 @@ export default function App({ initialData }: { initialData: LocalData }) {
             profile={profile}
             timetable={timetable}
             events={events}
+            scheduledAssessments={calendarScheduledAssessments}
+            onOpenScheduledAssessment={(studentId) => handleOpenRegister(studentId, "scheduled")}
             isProvisionalTimetable={isProvisionalActive}
             onOpenNewEvent={handleOpenNewEvent}
             onEditEvent={handleEditEvent}
@@ -605,6 +678,8 @@ export default function App({ initialData }: { initialData: LocalData }) {
         {currentView === "mese" && (
           <MonthView
             events={events}
+            scheduledAssessments={calendarScheduledAssessments}
+            onOpenScheduledAssessment={(studentId) => handleOpenRegister(studentId, "scheduled")}
             onOpenNewEvent={handleOpenNewEvent}
             onEditEvent={handleEditEvent}
             onDeleteEvent={handleDeleteEvent}
@@ -629,12 +704,30 @@ export default function App({ initialData }: { initialData: LocalData }) {
             students={students}
             onSaveStudent={handleSaveStudent}
             onDeleteStudent={handleDeleteStudent}
+            onRestoreStudent={handleRestoreStudent}
             onAddNote={handleAddStudentNote}
             onDeleteNote={handleDeleteStudentNote}
             onScheduleEvent={handleScheduleStudentEvent}
             onDeleteMultipleStudents={handleDeleteMultipleStudents}
             onReassignStudentsClass={handleReassignStudentsClass}
             onClearAllStudents={handleClearAllStudents}
+            onOpenRegister={handleOpenRegister}
+          />
+        )}
+
+        {currentView === "registro" && (
+          <RegisterView
+            profile={profile}
+            students={students}
+            assessments={assessments}
+            scheduledAssessments={scheduledAssessments}
+            initialStudentId={registerStudentId}
+            initialSection={registerSection}
+            onBackToOrigin={registerStudentId ? () => { setRegisterStudentId(null); setCurrentView("classi"); } : undefined}
+            onSaveAssessment={handleSaveAssessment}
+            onDeleteAssessment={handleDeleteAssessment}
+            onSaveScheduledAssessment={handleSaveScheduledAssessment}
+            onDeleteScheduledAssessment={handleDeleteScheduledAssessment}
           />
         )}
 
@@ -676,7 +769,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
           where the header navigation stays in charge. */}
       <MobileNav
         currentView={currentView}
-        onViewChange={setCurrentView}
+        onViewChange={handleViewChange}
         onOpenNewEvent={() => handleOpenNewEvent()}
         onOpenScanner={() => setIsScannerOpen(true)}
         onOpenProfileModal={() => {
@@ -700,7 +793,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
         isOpen={isScannerOpen}
         onClose={() => setIsScannerOpen(false)}
         profile={profile}
-        students={students}
+        students={students.filter(isStudentActive)}
         timeSlotConfig={timeSlotConfig}
         provisionalTimetable={provisionalTimetable}
         definitiveTimetable={definitiveTimetable}
@@ -775,19 +868,40 @@ export default function App({ initialData }: { initialData: LocalData }) {
       />
       )}
 
-      {pwaUpdate.updateAvailable && (
+      {!pwaUpdate.updateAvailable && updateCheckFeedback && (
         <div
           role="status"
-          className="app-update-banner fixed left-1/2 md:bottom-20 z-[80] w-[calc(100vw-2rem)] max-w-md -translate-x-1/2 rounded-xl border border-amber-300 bg-white px-4 py-3 shadow-lg flex items-center gap-3"
+          className="fixed left-1/2 bottom-20 md:bottom-20 z-[80] -translate-x-1/2 rounded-xl border border-stone-200 bg-white px-4 py-3 text-sm font-semibold text-stone-700 shadow-lg"
         >
-          <span className="text-sm font-semibold text-amber-900 flex-1">È disponibile una nuova versione</span>
-          <button
-            type="button"
-            onClick={pwaUpdate.applyUpdate}
-            className="px-3 py-1.5 rounded-lg bg-amber-600 text-white text-xs font-bold shadow-xs hover:bg-amber-700"
-          >
-            Aggiorna adesso
-          </button>
+          Agenda Docente è aggiornata
+        </div>
+      )}
+
+      {pwaUpdate.updateAvailable && updatePromptOpen && (
+        <div
+          role="dialog"
+          aria-labelledby="pwa-update-title"
+          className="app-update-banner fixed left-1/2 bottom-20 md:bottom-20 z-[80] w-[calc(100vw-2rem)] max-w-md -translate-x-1/2 rounded-xl border border-amber-300 bg-white px-4 py-3 shadow-lg"
+        >
+          <div className="flex items-center gap-3">
+            <span id="pwa-update-title" className="text-sm font-semibold text-amber-900 flex-1">Nuovo aggiornamento disponibile</span>
+            <button
+              type="button"
+              onClick={() => setUpdatePromptOpen(false)}
+              aria-label="Più tardi"
+              className="min-h-[44px] px-2 text-xs font-semibold text-stone-600 hover:text-stone-900"
+            >
+              Più tardi
+            </button>
+            <button
+              type="button"
+              onClick={pwaUpdate.applyUpdate}
+              className="min-h-[44px] px-3 rounded-lg bg-amber-600 text-white text-xs font-bold shadow-xs hover:bg-amber-700"
+            >
+              Aggiorna adesso
+            </button>
+          </div>
+          {pwaUpdate.failed && <p role="alert" className="mt-2 text-xs text-rose-700">Aggiornamento non riuscito. Puoi riprovare.</p>}
         </div>
       )}
       <OfflineIndicator />

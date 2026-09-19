@@ -1,4 +1,4 @@
-import { addDaysISO, civilDayOfWeek, civilTimetableDay, localDateISO, parseCivilDate } from "../utils/dates";
+import { addDaysISO, civilDayOfWeek, civilTimetableDay, formatCivilDateIt, localDateISO, parseCivilDate } from "../utils/dates";
 import React from "react";
 import {
   BookOpen,
@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   Circle,
   Clock,
   MapPin,
@@ -17,6 +18,9 @@ import {
   Trash2,
 } from "lucide-react";
 import { CalendarEvent, TeacherProfile, TimetableSlot } from "../types";
+import type { ScheduledAssessmentCalendarItem } from "../utils/scheduledAssessmentCalendar";
+import { scheduledAssessmentTypeLabel } from "../utils/scheduledAssessmentCalendar";
+import { readDailyCollapse, writeDailyCollapse, type CollapseGroup } from "../utils/collapsePreferences";
 import { coTeachingSummary } from "../utils/coTeaching";
 
 /**
@@ -58,6 +62,8 @@ interface TodayViewProps {
   profile: TeacherProfile;
   timetable: TimetableSlot[];
   events: CalendarEvent[];
+  scheduledAssessments?: ScheduledAssessmentCalendarItem[];
+  onOpenScheduledAssessment?: (studentId: string) => void;
   isProvisionalTimetable?: boolean;
   isDefinitiveCompiled?: boolean;
   onOpenNewEvent: (initialDate?: string) => void;
@@ -72,6 +78,8 @@ interface TodayViewProps {
 export const TodayView: React.FC<TodayViewProps> = ({
   timetable,
   events,
+  scheduledAssessments = [],
+  onOpenScheduledAssessment,
   isProvisionalTimetable,
   isDefinitiveCompiled,
   onOpenNewEvent,
@@ -86,7 +94,13 @@ export const TodayView: React.FC<TodayViewProps> = ({
   // Selected civil date (defaults to the real today). Navigation is day-by-day and must
   // survive month/year/weekend crossings because it works on local Date parts, never UTC.
   const [selectedIso, setSelectedIso] = React.useState<string>(() => localDateISO());
+  const datePickerRef = React.useRef<HTMLInputElement>(null);
   const todayIso = localDateISO();
+  const [collapsed, setCollapsed] = React.useState(() => readDailyCollapse(localDateISO()));
+  React.useEffect(() => { setCollapsed(readDailyCollapse(selectedIso)); }, [selectedIso]);
+  const toggleCollapse = (group: CollapseGroup) => setCollapsed(previous => { const next = { ...previous, [group]: !previous[group] }; writeDailyCollapse(selectedIso, next); return next; });
+  const dayScheduled = scheduledAssessments.filter(item => item.date === selectedIso);
+  const nextScheduled = scheduledAssessments.filter(item => item.date > selectedIso && item.date <= new Date(new Date(`${selectedIso}T12:00:00`).getTime() + 7 * 86400000).toISOString().slice(0, 10)).sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
 
   const {
     isToday,
@@ -128,6 +142,8 @@ export const TodayView: React.FC<TodayViewProps> = ({
         return "bg-rose-100 text-rose-800 border-rose-200";
       case "formazione":
         return "bg-indigo-100 text-indigo-800 border-indigo-200";
+      case "uscita_didattica":
+        return "bg-sky-100 text-sky-800 border-sky-200";
       case "ricevimento_genitori":
         return "bg-amber-100 text-amber-800 border-amber-200";
       default:
@@ -153,6 +169,8 @@ export const TodayView: React.FC<TodayViewProps> = ({
         return "Scadenza";
       case "formazione":
         return "Formazione";
+      case "uscita_didattica":
+        return "Uscita didattica";
       case "ricevimento_genitori":
         return "Ricevimento";
       default:
@@ -228,21 +246,37 @@ export const TodayView: React.FC<TodayViewProps> = ({
               never an ambiguous gray); on any other date it turns amber as a "come back
               to the present" call-to-action. Text is always "Oggi".
             */}
-            <button
-              id="today-back-to-today"
-              type="button"
-              onClick={() => setSelectedIso(todayIso)}
-              disabled={isToday}
-              aria-pressed={isToday}
-              title={isToday ? "Stai già visualizzando la data di oggi" : "Torna alla data corrente"}
-              className={`min-h-[44px] px-2.5 sm:px-3 py-2 rounded-lg border text-xs font-semibold transition-colors ${
-                isToday
-                  ? "border-emerald-700 bg-emerald-700 text-white cursor-default shadow-xs"
-                  : "border-amber-400 bg-amber-400 text-amber-950 hover:bg-amber-300 hover:border-amber-500 active:bg-amber-200"
-              }`}
-            >
-              Oggi
-            </button>
+            <div id="today-date-control" className="relative min-h-[44px] min-w-[66px]">
+              <input
+                ref={datePickerRef}
+                id="today-date-picker"
+                type="date"
+                value={selectedIso}
+                onChange={(event) => { if (event.target.value) setSelectedIso(event.target.value); }}
+                aria-label="Scegli una data"
+                tabIndex={isToday ? 0 : -1}
+                className={isToday
+                  ? "absolute inset-0 z-10 h-full w-full cursor-pointer opacity-0"
+                  : "pointer-events-none absolute h-px w-px opacity-0"}
+              />
+              <button
+                id="today-back-to-today"
+                type="button"
+                onClick={() => { if (!isToday) setSelectedIso(todayIso); }}
+                aria-label={isToday ? "Scegli una data" : "Torna a oggi"}
+                aria-pressed={isToday}
+                aria-hidden={isToday ? true : undefined}
+                tabIndex={isToday ? -1 : 0}
+                title={isToday ? "Scegli una data" : "Torna alla data corrente"}
+                className={`min-h-[44px] min-w-[66px] h-full w-full px-2.5 sm:px-3 py-2 rounded-lg border text-xs font-semibold transition-colors ${
+                  isToday
+                    ? "pointer-events-none border-emerald-700 bg-emerald-700 text-white shadow-xs"
+                    : "border-amber-400 bg-amber-400 text-amber-950 hover:bg-amber-300 hover:border-amber-500 active:bg-amber-200"
+                }`}
+              >
+                {isToday ? "Oggi" : new Intl.DateTimeFormat("it-IT", { weekday: "short", day: "numeric", month: "short" }).format(parseCivilDate(selectedIso)).replace(".", "").toUpperCase()}
+              </button>
+            </div>
             <button
               id="today-next-day"
               type="button"
@@ -269,7 +303,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
           <button
             id="today-quick-scan"
             onClick={onOpenCircularModal}
-            className="inline-flex items-center px-3 py-2 text-sm font-medium rounded-lg text-amber-800 bg-amber-50 hover:bg-amber-100 transition-colors border border-amber-200 min-h-[44px]"
+            className="inline-flex items-center px-3 py-2 text-sm font-medium rounded-lg text-stone-800 bg-white hover:bg-stone-50 transition-colors border border-stone-300 min-h-[44px]"
           >
             <Sparkles className="w-4 h-4 mr-1.5 text-amber-600" />
             Importa circolare
@@ -284,7 +318,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
         <div className="md:col-span-1 lg:col-span-2 space-y-4 sm:space-y-6">
           {/* Section 1: Morning Lessons */}
           <div className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-hidden">
-            <div className="p-3 sm:p-4 border-b border-stone-100 flex items-center justify-between gap-2 bg-stone-50/70">
+            <button type="button" aria-expanded={!collapsed.timetable} aria-controls="today-timetable-content" onClick={() => toggleCollapse("timetable")} className="p-3 sm:p-4 border-b border-stone-100 flex min-h-[56px] w-full items-center justify-between gap-2 bg-stone-50/70 text-left">
               <div className="flex items-center space-x-2 min-w-0">
                 <BookOpen className="w-5 h-5 text-emerald-700 shrink-0" />
                 <h2 className="text-sm sm:text-base font-semibold text-stone-900 truncate">Lezioni Curricolari{isToday ? " di Oggi" : " del Giorno"}</h2>
@@ -307,10 +341,11 @@ export const TodayView: React.FC<TodayViewProps> = ({
                 <span className="text-xs font-semibold px-2.5 py-1 bg-stone-100 text-stone-700 rounded-full whitespace-nowrap">
                   {todayLessons.length} {todayLessons.length === 1 ? "ora" : "ore"}
                 </span>
+                {collapsed.timetable ? <ChevronRight className="h-4 w-4 text-stone-500" /> : <ChevronDown className="h-4 w-4 text-stone-500" />}
               </div>
-            </div>
+            </button>
 
-            <div className="p-3 sm:p-4">
+            {!collapsed.timetable && <div id="today-timetable-content" className="p-3 sm:p-4">
               {todayLessons.length === 0 ? (
                 <div className="py-5 sm:py-8 text-center space-y-1.5 sm:space-y-2">
                   <p className="text-sm text-stone-600 font-medium">
@@ -394,9 +429,9 @@ export const TodayView: React.FC<TodayViewProps> = ({
                   })}
                 </div>
               )}
-            </div>
+            </div>}
 
-            {isProvisionalTimetable && !isDefinitiveCompiled && (
+            {!collapsed.timetable && isProvisionalTimetable && !isDefinitiveCompiled && (
               /* Compact informational row on phones (no big yellow block): short label +
                  link to complete the timetable; the full explanation stays on >= 640px. */
               <div className="px-3 sm:px-4 py-2 sm:py-3 bg-amber-50/70 border-t border-amber-200 text-[11px] sm:text-xs text-amber-900 flex items-center justify-between gap-2">
@@ -424,6 +459,8 @@ export const TodayView: React.FC<TodayViewProps> = ({
             )}
           </div>
 
+          <section className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-hidden"><button type="button" aria-expanded={!collapsed.scheduledAssessments} onClick={() => toggleCollapse("scheduledAssessments")} className="flex min-h-[52px] w-full items-center justify-between gap-2 px-3 py-3 text-left"><span className="text-sm font-bold text-stone-900">Prove degli alunni ({dayScheduled.length})</span><span className="text-stone-500">{collapsed.scheduledAssessments ? "›" : "⌄"}</span></button>{!collapsed.scheduledAssessments && <div className="border-t border-stone-100 p-3 space-y-3">{dayScheduled.concat(nextScheduled).length === 0 ? <p className="text-sm text-stone-500">Nessuna prova programmata in questa finestra.</p> : <>{dayScheduled.length > 0 && <h3 className="text-xs font-bold uppercase tracking-wide text-emerald-900">Oggi</h3>}{dayScheduled.map(item => <button type="button" key={`today-${item.id}`} data-testid="scheduled-assessment-today" onClick={() => onOpenScheduledAssessment?.(item.studentId)} className="block w-full min-h-[72px] rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-left"><span className="block font-bold text-stone-900">{item.studentName}{item.className ? ` · ${item.className}` : ""} </span><span className="block text-xs text-stone-700">{item.subject || "Materia non indicata"} · {scheduledAssessmentTypeLabel[item.assessmentType]}</span>{item.topic && <span className="mt-1 block text-sm font-semibold text-stone-900">{item.topic}</span>}</button>)}{nextScheduled.length > 0 && <h3 className="pt-1 text-xs font-bold uppercase tracking-wide text-amber-900">Prossime prove</h3>}{nextScheduled.map(item => <button type="button" key={`next-${item.id}`} data-testid="scheduled-assessment-future" onClick={() => onOpenScheduledAssessment?.(item.studentId)} className="block w-full min-h-[64px] rounded-lg border border-amber-300 bg-amber-50 p-3 text-left"><span className="block text-xs font-bold text-amber-900">{formatCivilDateIt(item.date)}</span><span className="block font-semibold text-stone-900">{item.studentName}</span><span className="block text-xs text-stone-700">{item.subject || "Materia non indicata"} · {scheduledAssessmentTypeLabel[item.assessmentType]}</span>{item.topic && <span className="block truncate text-xs font-semibold">{item.topic}</span>}</button>)}</>}</div>}</section>
+
           {/* Section 2: Meetings & Events. With no data the section collapses to a
               single compact row ("Nessun impegno oggi · + Aggiungi") instead of a big
               empty card, and expands only when real items exist. */}
@@ -445,21 +482,22 @@ export const TodayView: React.FC<TodayViewProps> = ({
             </div>
           ) : (
           <div className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-hidden">
-            <div className="p-3 sm:p-4 border-b border-stone-100 flex items-center justify-between bg-stone-50/70">
+            <div role="button" tabIndex={0} aria-expanded={!collapsed.commitments} onClick={() => toggleCollapse("commitments")} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggleCollapse("commitments"); } }} className="p-3 sm:p-4 border-b border-stone-100 flex items-center justify-between bg-stone-50/70 min-h-[56px] cursor-pointer">
               <div className="flex items-center space-x-2 min-w-0">
                 <Calendar className="w-5 h-5 text-purple-700 shrink-0" />
                 <h2 className="text-sm sm:text-base font-semibold text-stone-900 truncate">Impegni & Riunioni{isToday ? "" : " del giorno selezionato"}</h2>
               </div>
               <button
-                onClick={() => onOpenNewEvent(selectedIso)}
+                onClick={(event) => { event.stopPropagation(); onOpenNewEvent(selectedIso); }}
                 className="text-xs font-semibold text-emerald-700 hover:text-emerald-800 flex items-center min-h-[36px] px-2 shrink-0"
               >
                 <Plus className="w-3.5 h-3.5 mr-1" />
                 Aggiungi
               </button>
+              {collapsed.commitments ? <ChevronRight className="h-4 w-4 text-stone-500" /> : <ChevronDown className="h-4 w-4 text-stone-500" />}
             </div>
 
-            <div className="p-3 sm:p-4">
+            {!collapsed.commitments && <div className="p-3 sm:p-4">
                 <div className="space-y-3">
                   {todayEvents.map((ev) => (
                     <div
@@ -547,7 +585,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
                     </div>
                   ))}
                 </div>
-            </div>
+            </div>}
           </div>
           )}
         </div>
@@ -601,7 +639,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
                       </div>
 
                       <div className="flex items-center justify-between text-[11px] text-stone-500 pl-6">
-                        <span>Data limite: {d.date}</span>
+                        <span>Data limite: {formatCivilDateIt(d.date)}</span>
                         {d.location && <span className="truncate max-w-[120px]">{d.location}</span>}
                       </div>
                     </div>
@@ -626,7 +664,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
                         </div>
 
                         <div className="flex items-center justify-between text-[11px] text-stone-500 pl-6">
-                          <span>Data limite: {d.date}</span>
+                          <span>Data limite: {formatCivilDateIt(d.date)}</span>
                           {d.location && <span className="truncate max-w-[120px]">{d.location}</span>}
                         </div>
                       </div>
@@ -637,28 +675,28 @@ export const TodayView: React.FC<TodayViewProps> = ({
           )}
 
           {/* Quick AI Circular Promo Box */}
-          <div className="bg-gradient-to-br from-amber-50 to-orange-50 rounded-xl border border-amber-200 p-3 sm:p-4">
+          <div className="bg-white rounded-xl border border-stone-200 p-3 sm:p-4 shadow-xs">
             <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center space-x-2 text-amber-900 font-semibold text-xs sm:text-sm min-w-0">
+              <div className="flex items-center space-x-2 text-stone-800 font-semibold text-xs sm:text-sm min-w-0">
                 <Sparkles className="w-4 h-4 text-amber-600 shrink-0" />
                 <span className="truncate">Hai ricevuto una nuova circolare?</span>
               </div>
               <button
                 onClick={onOpenCircularModal}
                 id="today-circular-cta-mobile"
-                className="shrink-0 sm:hidden min-h-[40px] py-2 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-medium text-xs shadow-xs transition-colors text-center"
+                className="shrink-0 sm:hidden min-h-[40px] py-2 px-3 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 font-medium text-xs shadow-xs transition-colors text-center"
               >
                 Analizza
               </button>
             </div>
-            <p className="hidden sm:block text-xs text-amber-800 leading-relaxed mt-3">
+            <p className="hidden sm:block text-xs text-stone-600 leading-relaxed mt-3">
               Non ricopiare a mano gli orari dei consigli o le date del collegio. Carica il PDF o scatta una foto: l'app seleziona
               solo gli impegni pertinenti alle tue classi e al tuo grado.
             </p>
             <button
               onClick={onOpenCircularModal}
               id="today-circular-cta"
-              className="hidden sm:block w-full mt-3 py-2 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-medium text-xs shadow-xs transition-colors text-center"
+              className="hidden sm:block w-full mt-3 py-2 px-3 rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 font-medium text-xs shadow-xs transition-colors text-center"
             >
               Apri Analizzatore Circolari
             </button>

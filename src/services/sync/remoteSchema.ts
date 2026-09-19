@@ -1,5 +1,6 @@
 import { isValidTime } from "../../utils/dates";
 import { TEACHER_ROLE_KINDS } from "../../types";
+import { isValidStudentAssessment } from "../backup";
 import type { RemoteStateDoc, StateDocName } from "./types";
 
 /**
@@ -49,6 +50,10 @@ const strings = (v: unknown): boolean => Array.isArray(v) && v.every(x => typeof
 const optional = (v: unknown, fn: (v: unknown) => boolean): boolean => v === undefined || fn(v);
 const isIsoTimestamp = (v: unknown): boolean =>
   typeof v === "string" && v.length >= 10 && !Number.isNaN(Date.parse(v));
+const boundedText = (max: number) => (v: unknown): boolean => text(v) && (v as string).length <= max;
+
+/** Shared runtime validator for item-level assessment documents. */
+export { isValidStudentAssessment };
 
 // ---------------------------------------------------------------------------
 // Semantic payload validators (per state document type)
@@ -156,7 +161,12 @@ export function isValidStudentPayload(v: unknown): boolean {
         text(n.title) &&
         text(n.content) &&
         text(n.createdAt)
-    )
+    ) &&
+    optional(v.schoolId, requiredText) &&
+    optional(v.schoolYear, requiredText) &&
+    optional(v.status, status => status === "active" || status === "archived") &&
+    optional(v.archivedAt, isIsoTimestamp) &&
+    optional(v.archivedReason, boundedText(500))
   );
 }
 

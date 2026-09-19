@@ -314,7 +314,7 @@ test('"Altro" opens an accessible sheet with the secondary destinations', async 
   for (const label of ['Orario Lezioni', 'Classi & Alunni', 'Archivio Circolari', 'Analizza Circolare', 'Profilo / Impostazioni', 'Accedi con Google', 'Guida rapida', 'Installa App']) {
     assert.ok(sheetText.includes(label), `"${label}" must be reachable from Altro`);
   }
-  assert.deepEqual(MOBILE_MORE_VIEWS.map((item) => item.id), ['orario', 'classi', 'circolari']);
+  assert.deepEqual(MOBILE_MORE_VIEWS.map((item) => item.id), ['orario', 'classi', 'registro', 'circolari']);
 
   // Choosing a destination closes the sheet and navigates.
   await act(async () => { byId(renderer, 'mobile-more-orario').props.onClick(); });
@@ -394,14 +394,35 @@ test('on phones the header keeps only brand and profile', async () => {
   assert.ok(classes(profileButton).includes('w-[44px]') && classes(profileButton).includes('h-[44px]'));
 });
 
+test('PWA bell is always present, exposes the correct state and keeps Account independent', async () => {
+  let checked = 0;
+  const absent = await render(React.createElement(Navbar, navbarProps({ updateAvailable: false, onCheckUpdates: () => { checked++; } })));
+  const noUpdateBell = byId(absent, 'btn-pwa-update');
+  assert.equal(noUpdateBell.props['aria-label'], 'Controlla aggiornamenti');
+  assert.equal(noUpdateBell.findAll((el: any) => el.type === 'span' && el.props?.className?.includes('bg-amber-500')).length, 0);
+  assert.ok(noUpdateBell.props.className.includes('w-[44px]') && noUpdateBell.props.className.includes('h-[44px]'));
+  await act(async () => { noUpdateBell.props.onClick(); });
+  assert.equal(checked, 1);
+
+  let opened = 0;
+  const available = await render(React.createElement(Navbar, navbarProps({ updateAvailable: true, onOpenUpdatePrompt: () => { opened++; } })));
+  const bell = byId(available, 'btn-pwa-update');
+  assert.equal(bell.props['aria-label'], 'Aggiornamento disponibile');
+  assert.equal(bell.findAll((el: any) => el.type === 'span' && el.props?.className?.includes('bg-amber-500')).length, 1);
+  await act(async () => { bell.props.onClick(); });
+  assert.equal(opened, 1);
+  assert.equal(available.root.findAll((el: any) => el.type === 'button' && el.props['aria-label'] === 'Profilo e Impostazioni').length, 1);
+});
+
 test('desktop navigation is unchanged: every section stays in the header tabs', async () => {
-  const renderer = await render(React.createElement(Navbar, navbarProps({ currentView: 'orario' })));
+  const renderer = await render(React.createElement(Navbar, navbarProps({ currentView: 'orario', onOpenScanner: () => {} })));
   const expected: [string, string][] = [
     ['nav-tab-oggi', 'Oggi'],
     ['nav-tab-settimana', 'Settimana'],
     ['nav-tab-mese', 'Mese'],
     ['nav-tab-scadenze', 'Scadenze & PEI'],
     ['nav-tab-classi', 'Classi & Alunni'],
+    ['nav-tab-registro', 'Registro'],
     ['nav-tab-orario', 'Orario Lezioni'],
     ['nav-tab-circolari', 'Archivio Circolari'],
   ];
@@ -412,7 +433,21 @@ test('desktop navigation is unchanged: every section stays in the header tabs', 
   assert.equal(byId(renderer, 'nav-tab-orario').props['aria-current'], 'page');
   // The desktop action row is intact (visible from 768px up).
   assert.ok(hasClass(byId(renderer, 'btn-new-event'), 'md:inline-flex'));
-  assert.ok(hasClass(byId(renderer, 'btn-scan-circular'), 'md:inline-flex'));
+  const circularCta = byId(renderer, 'btn-scan-circular');
+  assert.ok(hasClass(circularCta, 'md:inline-flex'));
+  assert.ok(!String(circularCta.props.className).includes('bg-amber-500'), 'circular action is not a temporal warning surface');
+  assert.ok(!String(circularCta.props.className).includes('bg-emerald-700'), 'circular action remains neutral');
+  assert.ok(circularCta.findAll((el: any) => el.type === 'svg' && String(el.props.className).includes('text-orange-500')).length >= 1, 'circular action keeps its orange icon accent');
+
+  const scannerCta = byId(renderer, 'btn-scan-document');
+  assert.ok(!String(scannerCta.props.className).includes('bg-emerald-700'), 'scanner action is not a green status surface');
+  assert.ok(String(scannerCta.props.className).includes('bg-white'));
+  assert.ok(scannerCta.findAll((el: any) => el.type === 'svg' && String(el.props.className).includes('text-sky-600')).length >= 1);
+
+  const newEventCta = byId(renderer, 'btn-new-event');
+  assert.ok(!String(newEventCta.props.className).includes('bg-emerald-700'), 'new event action is not a green status surface');
+  assert.ok(String(newEventCta.props.className).includes('bg-white'));
+  assert.ok(newEventCta.findAll((el: any) => el.type === 'svg' && String(el.props.className).includes('text-sky-600')).length >= 1);
 });
 
 // ---------------------------------------------------------------------------

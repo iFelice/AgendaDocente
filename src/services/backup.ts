@@ -1,5 +1,5 @@
 import { isValidDate, isValidTime, eventDateError } from '../utils/dates';
-import { TEACHER_ROLE_KINDS } from '../types';
+import { TEACHER_ROLE_KINDS, type StudentAssessment, type StudentScheduledAssessment } from '../types';
 import { normalizeTeacherProfile } from '../utils/multiSchool';
 
 const record = (v: unknown): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v);
@@ -9,7 +9,10 @@ const required = (v: unknown) => text(v) && (v as string).trim().length > 0;
 const optional = (v: unknown, fn: (v: unknown) => boolean) => v === undefined || fn(v);
 const bool = (v: unknown) => typeof v === 'boolean';
 const number = (v: unknown) => typeof v === 'number' && Number.isFinite(v);
-const categories = ['lezione','consiglio_classe','collegio_docenti','dipartimento','dipartimento_sostegno','glo','pei','riunione','ricevimento_genitori','formazione','scadenza','promemoria','personale'];
+const nonEmptyText = (v: unknown) => text(v) && v.trim().length > 0;
+const timestamp = (v: unknown) => nonEmptyText(v) && !Number.isNaN(Date.parse(v as string));
+const boundedText = (max: number) => (v: unknown) => text(v) && v.length <= max;
+const categories = ['lezione','consiglio_classe','collegio_docenti','dipartimento','dipartimento_sostegno','glo','pei','riunione','ricevimento_genitori','formazione','uscita_didattica','scadenza','promemoria','personale'];
 function list(value: unknown, validate: (v: Record<string, any>) => boolean): boolean {
   return Array.isArray(value) && value.every(v => record(v) && required(v.id) && validate(v)) && new Set(value.map(v => v.id)).size === value.length;
 }
@@ -37,6 +40,43 @@ function timeSlotConfigValidator(v: unknown): boolean {
     && optional(v.customSlots, slots => Array.isArray(slots) && slots.every(periodSlotValidator));
 }
 
+const assessmentTypes = ['oral', 'written', 'practical', 'other'];
+const valueKinds = ['numeric', 'judgement'];
+const assessmentText = (v: unknown, max: number) => text(v) && v.length <= max;
+
+export function isValidStudentAssessment(v: unknown): v is StudentAssessment {
+  if (!record(v) || !required(v.id) || !required(v.studentId) || !required(v.className)
+    || !isValidDate(v.date) || !assessmentTypes.includes(v.assessmentType)
+    || !valueKinds.includes(v.valueKind) || !timestamp(v.createdAt) || !timestamp(v.updatedAt)
+    || !optional(v.schoolId, nonEmptyText) || !optional(v.schoolYear, nonEmptyText)
+    || !optional(v.subject, value => assessmentText(value, 120))
+    || !optional(v.note, value => assessmentText(value, 2000))) return false;
+  if (v.valueKind === 'numeric') {
+    return number(v.numericValue) && v.judgementValue === undefined;
+  }
+  return required(v.judgementValue) && assessmentText(v.judgementValue, 120) && v.numericValue === undefined;
+}
+
+export function validateStudentAssessment(v: unknown): asserts v is StudentAssessment {
+  if (!isValidStudentAssessment(v)) throw new Error('Valutazione non valida.');
+}
+
+export function isValidStudentScheduledAssessment(v: unknown): v is StudentScheduledAssessment {
+  return record(v) && required(v.id) && required(v.studentId) && required(v.className)
+    && isValidDate(v.date) && assessmentTypes.includes(v.assessmentType)
+    && ['scheduled', 'completed', 'cancelled'].includes(v.status)
+    && timestamp(v.createdAt) && timestamp(v.updatedAt)
+    && optional(v.schoolId, nonEmptyText) && optional(v.schoolYear, nonEmptyText)
+    && optional(v.subject, value => assessmentText(value, 120))
+    && optional(v.topic, value => assessmentText(value, 500))
+    && optional(v.note, value => assessmentText(value, 2000))
+    && v.numericValue === undefined && v.judgementValue === undefined && v.valueKind === undefined;
+}
+
+export function validateStudentScheduledAssessment(v: unknown): asserts v is StudentScheduledAssessment {
+  if (!isValidStudentScheduledAssessment(v)) throw new Error('Prova programmata non valida.');
+}
+
 /** Validate the entire document before touching live storage, including nested arrays used by views. */
 export function validateBackup(data: unknown): asserts data is Record<string, any> {
   if (!record(data) || ![2,3].includes(data.version)) throw new Error('Versione backup non supportata.');
@@ -58,8 +98,21 @@ export function validateBackup(data: unknown): asserts data is Record<string, an
   if (!list(data.students, s => text(s.fullName) && text(s.className) && Array.isArray(s.notes)
     && s.notes.every(n => record(n) && required(n.id) && isValidDate(n.date) && text(n.category) && text(n.title) && text(n.content) && text(n.createdAt))
     && ['birthDate','peiType','diagnosticSummary','specialists','gloDate','updatedAt'].every(k => optional(s[k],text))
+    && optional(s.schoolId, nonEmptyText)
+    && optional(s.schoolYear, nonEmptyText)
+    && optional(s.status, status => status === 'active' || status === 'archived')
+    && optional(s.archivedAt, timestamp)
+    && optional(s.archivedReason, boundedText(500))
     && ['isSupportStudent','hasBesDsa','pdpApproved'].every(k => optional(s[k],bool)) && optional(s.supportHoursPerWeek,number)
     && optional(s.contactParents,v => record(v) && ['parentNames','phone','email','notes'].every(k => optional(v[k],text))))) throw new Error('Alunni nel backup non validi.');
+  const assessments = data.assessments ?? [];
+  if (!Array.isArray(assessments) || new Set(assessments.map((assessment: any) => assessment?.id)).size !== assessments.length || !assessments.every(isValidStudentAssessment)) {
+    throw new Error('Valutazioni nel backup non valide.');
+  }
+  const scheduledAssessments = data.scheduledAssessments ?? [];
+  if (!Array.isArray(scheduledAssessments) || new Set(scheduledAssessments.map((item: any) => item?.id)).size !== scheduledAssessments.length || !scheduledAssessments.every(isValidStudentScheduledAssessment)) {
+    throw new Error('Prove programmate nel backup non valide.');
+  }
   if (data.version === 2) {
     if (!timetable(data.timetable)) throw new Error('Orario nel backup non valido.');
   } else if (!timetable(data.definitiveTimetable) || !timetable(data.provisionalTimetable)

@@ -1,6 +1,6 @@
 import { linkLegacyCircularEvents } from '../utils/circularLinks';
 import Dexie, { type Table } from 'dexie';
-import type { CalendarEvent, CircularDocument, Student, TeacherProfile, TimetableSlot, TimetableMode, TimeSlotConfig } from '../types';
+import type { CalendarEvent, CircularDocument, Student, StudentAssessment, StudentScheduledAssessment, TeacherProfile, TimetableSlot, TimetableMode, TimeSlotConfig } from '../types';
 import { validateBackup, recoverBackupRestore } from './backup';
 import { normalizeSchoolLinkedData } from '../utils/multiSchool';
 
@@ -9,15 +9,15 @@ export const LEGACY_KEYS = {
   students: 'agedoc_students_v2', definitiveTimetable: 'agedoc_timetable_v2',
   provisionalTimetable: 'agedoc_timetable_provvisorio_v2', timetableMode: 'agedoc_timetable_mode_v2',
   onboardingCompleted: 'agedoc_onboarding_completed_v2',
-  timeSlotConfig: 'agedoc_time_slot_config_v2',
+  timeSlotConfig: 'agedoc_time_slot_config_v2', assessments: 'agedoc_assessments_v1', scheduledAssessments: 'agedoc_scheduled_assessments_v1',
 } as const;
 export interface LocalData {
-  profile: TeacherProfile; events: CalendarEvent[]; circulars: CircularDocument[]; students: Student[];
+  profile: TeacherProfile; events: CalendarEvent[]; circulars: CircularDocument[]; students: Student[]; assessments: StudentAssessment[]; scheduledAssessments: StudentScheduledAssessment[];
   definitiveTimetable: TimetableSlot[]; provisionalTimetable: TimetableSlot[];
   timetableMode: TimetableMode; onboardingCompleted: boolean;
   timeSlotConfig?: TimeSlotConfig;
 }
-const collections = ['events','circulars','students','definitiveTimetable','provisionalTimetable'] as const;
+const collections = ['events','circulars','students','assessments','scheduledAssessments','definitiveTimetable','provisionalTimetable'] as const;
 const stores = ['profile', ...collections, 'metadata'];
 interface Row { id: string; position: number; value: any }
 interface Meta { key: string; value: any }
@@ -62,7 +62,12 @@ export class AgendaDatabase extends Dexie {
   private commitListeners = new Set<() => void>();
   constructor(name = 'agenda-docente') {
     super(name);
-    this.version(1).stores(Object.fromEntries(stores.map(name => [name, name === 'metadata' ? '&key' : '&id,position'])));
+    const schema = Object.fromEntries(stores.map(name => [name, name === 'metadata' ? '&key' : '&id,position']));
+    const version2Schema = Object.fromEntries(stores.filter(name => name !== 'scheduledAssessments').map(name => [name, name === 'metadata' ? '&key' : '&id,position']));
+    const legacySchema = Object.fromEntries(stores.filter(name => name !== 'assessments' && name !== 'scheduledAssessments').map(name => [name, name === 'metadata' ? '&key' : '&id,position']));
+    this.version(1).stores(legacySchema);
+    this.version(2).stores(version2Schema);
+    this.version(3).stores(schema);
   }
   override close(options?: { disableAutoOpen: boolean }): void {
     super.close(options);
@@ -142,7 +147,7 @@ export class AgendaDatabase extends Dexie {
     }
   }
   private ordered(data: LocalData): LocalData {
-    return {profile:data.profile,events:data.events,circulars:data.circulars,students:data.students,
+    return {profile:data.profile,events:data.events,circulars:data.circulars,students:data.students,assessments:data.assessments ?? [],scheduledAssessments:data.scheduledAssessments ?? [],
       definitiveTimetable:data.definitiveTimetable,provisionalTimetable:data.provisionalTimetable,
       timetableMode:data.timetableMode,onboardingCompleted:data.onboardingCompleted,
       timeSlotConfig:data.timeSlotConfig};

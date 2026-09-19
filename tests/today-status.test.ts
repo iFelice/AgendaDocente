@@ -110,9 +110,19 @@ test('selectDayAgenda marks only the real civil today as isToday', () => {
 test('on the real today the badge is green and the Oggi button reads as already active', async () => {
   const renderer = await renderToday();
 
+  const picker = byId(renderer, 'today-date-picker');
+  assert.equal(picker.props.type, 'date');
+  assert.equal(picker.props.tabIndex, 0);
+  assert.equal(picker.props['aria-label'], 'Scegli una data');
+  assert.ok(String(picker.props.className).includes('absolute') && String(picker.props.className).includes('inset-0'), 'native input covers the complete Oggi control');
+  assert.ok(!String(picker.props.className).includes('h-px'), 'native input has a real hit area on today');
+  assert.ok(!String(picker.props.className).includes('pointer-events-none'));
+  const control = byId(renderer, 'today-date-control');
+  assert.ok(String(control.props.className).includes('relative'));
   const button = byId(renderer, 'today-back-to-today');
   assert.equal(flatText(button), 'Oggi', 'the label is always "Oggi"');
-  assert.equal(button.props.disabled, true, 'nothing to do when already on today');
+  assert.equal(button.props.disabled, undefined, 'the active button opens the native date picker');
+  assert.equal(button.props['aria-label'], 'Scegli una data');
   assert.equal(button.props['aria-pressed'], true, 'screen readers hear the active state');
   assert.ok(hasClass(button, 'bg-emerald-700'), 'active state is solid green');
   assert.ok(hasClass(button, 'text-white'));
@@ -138,8 +148,12 @@ test('on a future day the badge is amber "Futuro" and the Oggi button becomes an
   await click(renderer, 'today-next-day');
 
   const button = byId(renderer, 'today-back-to-today');
-  assert.equal(flatText(button), 'Oggi', 'the label stays "Oggi"');
-  assert.equal(button.props.disabled, false, 'the shortcut is clickable');
+  assert.match(flatText(button), /SET|SEP|OTT|NOV|DIC|GEN|FEB|MAR|APR|MAG|GIU|LUG|AGO/, 'the selected date is visible');
+  const picker = byId(renderer, 'today-date-picker');
+  assert.equal(picker.props.tabIndex, -1);
+  assert.ok(String(picker.props.className).includes('pointer-events-none'), 'date input no longer intercepts the amber shortcut');
+  assert.equal(button.props.disabled, undefined, 'the shortcut is clickable');
+  assert.equal(button.props['aria-label'], 'Torna a oggi');
   assert.equal(button.props['aria-pressed'], false);
   assert.ok(hasClass(button, 'bg-amber-400'), 'amber = "attention / return to the present"');
   assert.ok(hasClass(button, 'text-amber-950'), 'text/background pair keeps contrast');
@@ -165,8 +179,9 @@ test('on a past day the badge is neutral "Passato" and the Oggi button stays amb
   await click(renderer, 'today-previous-day');
 
   const button = byId(renderer, 'today-back-to-today');
-  assert.equal(flatText(button), 'Oggi');
-  assert.equal(button.props.disabled, false);
+  assert.match(flatText(button), /SET|SEP|OTT|NOV|DIC|GEN|FEB|MAR|APR|MAG|GIU|LUG|AGO/);
+  assert.equal(button.props.disabled, undefined);
+  assert.equal(button.props['aria-label'], 'Torna a oggi');
   assert.ok(hasClass(button, 'bg-amber-400'), 'still an amber "back to today" affordance');
   assert.ok(!classString(button).includes('emerald'));
 
@@ -187,13 +202,55 @@ test('on a past day the badge is neutral "Passato" and the Oggi button stays amb
 test('clicking the amber Oggi button returns to the real today state', async () => {
   const renderer = await renderToday();
   await click(renderer, 'today-next-day');
-  assert.equal(byId(renderer, 'today-back-to-today').props.disabled, false);
+  assert.equal(byId(renderer, 'today-back-to-today').props.disabled, undefined);
 
   await click(renderer, 'today-back-to-today');
   const button = byId(renderer, 'today-back-to-today');
-  assert.equal(button.props.disabled, true, 'back on today the button is the active one again');
+  assert.equal(button.props['aria-label'], 'Scegli una data', 'back on today the button opens the picker again');
   assert.ok(hasClass(button, 'bg-emerald-700'));
   assert.ok(dateBadges(renderer, 'Oggi').length >= 2, 'the green "Oggi" badge is back');
+});
+
+test('today assessments are green and future assessments are amber with an Italian date', async () => {
+  const futureIso = addDaysISO(localDateISO(), 2);
+  const scheduled = [{ kind: 'scheduled-assessment', id: 'assessment-future', date: futureIso, studentId: 's1', studentName: 'Rossi Luca', subject: 'Matematica', assessmentType: 'written', status: 'scheduled' as const }];
+  const renderer = await renderToday({ scheduledAssessments: scheduled as any });
+  await act(async () => { byId(renderer, 'today-next-day').props.onClick(); });
+  const futureCard = renderer.root.findByProps({ 'data-testid': 'scheduled-assessment-future' });
+  assert.ok(String(futureCard.props.className).includes('bg-amber-50'));
+  assert.ok(flatText(futureCard).includes(futureIso.split('-').reverse().join('/')));
+  assert.match(flatText(renderer.root), /Prossime prove/i);
+
+  await act(async () => { byId(renderer, 'today-next-day').props.onClick(); });
+  const todayCard = renderer.root.findByProps({ 'data-testid': 'scheduled-assessment-today' });
+  assert.ok(String(todayCard.props.className).includes('bg-emerald-50'));
+  assert.match(flatText(renderer.root), /Oggi/i);
+});
+
+test('circular import entry points are neutral while keeping their text and icon identity', async () => {
+  const renderer = await renderToday();
+  const mobileCta = byId(renderer, 'today-circular-cta-mobile');
+  const desktopCta = byId(renderer, 'today-circular-cta');
+  const circularTitle = renderer.root.findAll((el: any) => el.type === 'span' && flatText(el).includes('Hai ricevuto una nuova circolare?'))[0];
+  const circularCard = renderer.root.findAll((el: any) => el.type === 'div' && String(el.props.className).includes('bg-white') && String(el.props.className).includes('border-stone-200') && flatText(el).includes('Hai ricevuto una nuova circolare?'))[0];
+  assert.ok(circularCard, 'circular entry card remains present');
+  assert.ok(!String(circularCard.props.className).includes('amber-'));
+  assert.ok(!String(circularTitle.props.className).includes('amber-'));
+  assert.ok(!String(mobileCta.props.className).includes('bg-amber-600'));
+  assert.ok(!String(desktopCta.props.className).includes('bg-amber-600'));
+  assert.match(flatText(renderer.root), /Hai ricevuto una nuova circolare/);
+  assert.match(flatText(renderer.root), /Apri Analizzatore Circolari/);
+});
+
+test('the native date input changes the selected day and amber control returns to today', async () => {
+  const renderer = await renderToday();
+  const picker = renderer.root.findByProps({ id: 'today-date-picker' });
+  await act(async () => { picker.props.onChange({ target: { value: '2099-09-25' } }); });
+  const button = byId(renderer, 'today-back-to-today');
+  assert.equal(button.props['aria-label'], 'Torna a oggi');
+  assert.match(flatText(button), /SET/);
+  await click(renderer, 'today-back-to-today');
+  assert.equal(byId(renderer, 'today-back-to-today').props['aria-label'], 'Scegli una data');
 });
 
 // ---------------------------------------------------------------------------

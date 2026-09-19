@@ -9,6 +9,7 @@ export type EventCategory =
   | "riunione"
   | "ricevimento_genitori"
   | "formazione"
+  | "uscita_didattica"
   | "scadenza"
   | "promemoria"
   | "personale";
@@ -225,10 +226,55 @@ export interface StudentParentContact {
   notes?: string;
 }
 
+export type StudentAssessmentType = "oral" | "written" | "practical" | "other";
+export type StudentAssessmentValueKind = "numeric" | "judgement";
+export type StudentScheduledAssessmentStatus = "scheduled" | "completed" | "cancelled";
+
+export interface StudentScheduledAssessment {
+  id: string;
+  studentId: string;
+  schoolId?: string;
+  schoolYear?: string;
+  className: string;
+  date: string;
+  subject?: string;
+  assessmentType: StudentAssessmentType;
+  topic?: string;
+  note?: string;
+  status: StudentScheduledAssessmentStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StudentAssessment {
+  id: string;
+  studentId: string;
+  schoolId?: string;
+  schoolYear?: string;
+  className: string;
+  date: string;
+  subject?: string;
+  assessmentType: StudentAssessmentType;
+  valueKind: StudentAssessmentValueKind;
+  numericValue?: number;
+  judgementValue?: string;
+  note?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Student {
   id: string;
   fullName: string;
   className: string;
+  /** Optional school identity metadata; legacy students may omit it. */
+  schoolId?: string;
+  /** Optional school year metadata; legacy students may omit it. */
+  schoolYear?: string;
+  /** Lifecycle state reserved for future safe archiving UI. */
+  status?: "active" | "archived";
+  archivedAt?: string;
+  archivedReason?: string;
   birthDate?: string;
   // Sostegno & Inclusione
   isSupportStudent?: boolean; // L. 104/92
@@ -253,4 +299,5 @@ export type ViewMode =
   | "scadenze"
   | "orario"
   | "classi"
+  | "registro"
   | "circolari";

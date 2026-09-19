@@ -37,7 +37,7 @@ const baseStudent = (overrides: Partial<Student> = {}): Student => ({
   ...overrides,
 });
 
-interface Props { students: Student[]; onSaveStudent: (s: Student) => Promise<void> }
+interface Props { students: Student[]; onSaveStudent: (s: Student) => Promise<void>; onOpenRegister?: (studentId: string) => void }
 
 async function mount(props: Props) {
   let renderer: any;
@@ -50,6 +50,7 @@ async function mount(props: Props) {
       onAddNote: () => {},
       onDeleteNote: () => {},
       onScheduleEvent: () => {},
+      onOpenRegister: props.onOpenRegister,
     }));
   });
   return renderer;
@@ -87,6 +88,15 @@ test('parseSupportHoursDraft: empty/valid/invalid classification', () => {
   assert.equal(parseSupportHoursDraft('abc').kind, 'invalid');
   assert.equal(parseSupportHoursDraft('1e').kind, 'invalid');
   assert.equal(parseSupportHoursDraft('-').kind, 'invalid');
+});
+
+test('Classi & Alunni exposes Apri Registro and passes the selected student id', async () => {
+  const opened: string[] = [];
+  const renderer = await mount({ students: [baseStudent({ id: 'student-by-id' })], onSaveStudent: async () => {}, onOpenRegister: id => opened.push(id) });
+  const button = renderer.root.findAllByType('button').find((item: any) => item.children?.includes('Apri Registro'));
+  assert.ok(button, 'active student exposes Apri Registro');
+  await act(async () => { button.props.onClick(); });
+  assert.deepEqual(opened, ['student-by-id']);
 });
 
 test('9 -> Backspace -> "" -> 10: typing works normally and 10 is saved', async () => {

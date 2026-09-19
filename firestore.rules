@@ -45,6 +45,18 @@ service cloud.firestore {
         allow delete: if isOwner();
       }
 
+      match /assessments/{assessmentId} {
+        allow read: if isOwner();
+        allow create, update: if isOwner() && syncedDocShape();
+        allow delete: if isOwner();
+      }
+
+      match /scheduledAssessments/{scheduledAssessmentId} {
+        allow read: if isOwner();
+        allow create, update: if isOwner() && syncedDocShape();
+        allow delete: if isOwner();
+      }
+
       match /conflicts/{conflictId} {
         // conflict archives: written once, kept for manual recovery — immutable by design
         allow read: if isOwner();

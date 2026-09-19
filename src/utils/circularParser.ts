@@ -2,7 +2,7 @@ import type { ExtractedItem, TeacherProfile, EventCategory } from "../types";
 import { evaluateItemRelevance, extractClassesFromText, detectSubjects, isGenericSubject } from "./circularRelevance";
 import { eventDateError, isValidDate, isValidTime } from "./dates";
 
-const categories: EventCategory[] = ["lezione", "consiglio_classe", "collegio_docenti", "dipartimento", "dipartimento_sostegno", "glo", "pei", "riunione", "ricevimento_genitori", "formazione", "scadenza", "promemoria", "personale"];
+const categories: EventCategory[] = ["lezione", "consiglio_classe", "collegio_docenti", "dipartimento", "dipartimento_sostegno", "glo", "pei", "riunione", "ricevimento_genitori", "formazione", "uscita_didattica", "scadenza", "promemoria", "personale"];
 const datePattern = /\b(\d{1,2})[/.\-](\d{1,2})(?:[/.\-](\d{4}|\d{2}))?\b/g;
 const timePattern = /\b([01]?\d|2[0-3])[.:]([0-5]\d)(?:\s*(?:[-–—]|alle|a)\s*([01]?\d|2[0-3])[.:]([0-5]\d))?\b/i;
 const months = ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre"];

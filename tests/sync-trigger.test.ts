@@ -6,7 +6,7 @@ import { initializeStorage, storage } from '../src/services/storage';
 import { createStoreAdapter, observeLocalCommits } from '../src/services/sync/localStore';
 import { SyncEngine } from '../src/services/sync/engine';
 import type { ItemsCollection, RemoteItem, RemoteStateDoc, SyncGateway, StateDocName } from '../src/services/sync/types';
-import type { TimetableSlot } from '../src/types';
+import type { StudentAssessment, TimetableSlot } from '../src/types';
 
 /**
  * REAL trigger-path regression tests:
@@ -38,6 +38,18 @@ beforeEach(async () => {
   await initializeStorage();
 });
 
+const newAssessment = (id: string): StudentAssessment => ({
+  id,
+  studentId: 'student-trigger',
+  className: '2E',
+  date: '2026-09-09',
+  assessmentType: 'oral',
+  valueKind: 'numeric',
+  numericValue: 7.25,
+  createdAt: '2026-09-09T18:00:00.000Z',
+  updatedAt: '2026-09-09T18:00:00.000Z',
+});
+
 const newSlot = (id: string, dayOfWeek: 1 | 2 | 3 | 4 | 5 | 6, periodNumber: number): TimetableSlot => ({
   id,
   dayOfWeek,
@@ -54,7 +66,7 @@ const newSlot = (id: string, dayOfWeek: 1 | 2 | 3 | 4 | 5 | 6, periodNumber: num
 function makeFakeCloud(clock: { now: string }) {
   const cloud = {
     state: {} as Record<string, RemoteStateDoc>,
-    items: { events: new Map<string, RemoteItem>(), circulars: new Map<string, RemoteItem>() } as Record<ItemsCollection, Map<string, RemoteItem>>,
+    items: { events: new Map<string, RemoteItem>(), circulars: new Map<string, RemoteItem>(), assessments: new Map<string, RemoteItem>() } as Record<ItemsCollection, Map<string, RemoteItem>>,
     conflicts: [] as { kind: string; loser: unknown }[],
     writes: 0,
   };
@@ -153,6 +165,20 @@ test('storage.saveTimetableSlot commits to IndexedDB, is observed, schedules the
   assert.equal(local.length, 1);
   assert.equal(local[0].id, 'tt-commit-1');
   assert.equal(engine.getStatus().phase, 'idle');
+});
+
+test('storage.saveAssessment follows the real commit trigger and uploads the item-level assessment', async () => {
+  const clock = { now: '2026-09-09T18:00:00.000Z' };
+  const { engine, cloud, queue, drain } = makeEngineWithQueue(clock);
+  engine.startSession('uid-trigger');
+  await drain();
+  await storage.saveAssessment(newAssessment('assessment-trigger'));
+  assert.ok(queue.length > 0, 'assessment commit must schedule the shared sync cycle');
+  await drain();
+  const uploaded = cloud.items.assessments.get('assessment-trigger')?.payload as StudentAssessment;
+  assert.equal(uploaded.id, 'assessment-trigger');
+  assert.equal(uploaded.studentId, 'student-trigger');
+  assert.equal(uploaded.numericValue, 7.25);
 });
 
 test('no ping-pong loop: after convergence the engine stops writing to the cloud', async () => {

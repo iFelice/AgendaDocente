@@ -1,5 +1,5 @@
 import { usePersistenceAction } from "../hooks/usePersistenceAction";
-import { localDateISO } from "../utils/dates";
+import { formatCivilDateIt, localDateISO } from "../utils/dates";
 import { parseSupportHoursDraft } from "../utils/supportHours";
 import React, { useState, useMemo, useRef } from "react";
 import {
@@ -27,7 +27,10 @@ import {
   MessageSquare,
   FileSpreadsheet,
   Stethoscope,
+  Archive,
+  RotateCcw,
 } from "lucide-react";
+import { compareStudentNames, isStudentActive } from "../utils/studentMatcher";
 import {
   Student,
   StudentNote,
@@ -41,12 +44,14 @@ interface ClassesViewProps {
   students: Student[];
   onSaveStudent: (student: Student, expected?: Student) => void | false | Promise<void | false>;
   onDeleteStudent: (studentId: string) => void | false | Promise<void | false>;
+  onRestoreStudent?: (studentId: string) => void | false | Promise<void | false>;
   onAddNote: (studentId: string, note: StudentNote) => void | false | Promise<void | false>;
   onDeleteNote: (studentId: string, noteId: string) => void | false | Promise<void | false>;
   onScheduleEvent: (prefill: Partial<CalendarEvent>) => void;
   onDeleteMultipleStudents?: (studentIds: string[]) => void | false | Promise<void | false>;
   onReassignStudentsClass?: (studentIds: string[], targetClass: string) => void;
   onClearAllStudents?: () => void;
+  onOpenRegister?: (studentId: string) => void;
 }
 
 const CATEGORY_CONFIG: Record<
@@ -100,12 +105,14 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
   students,
   onSaveStudent,
   onDeleteStudent,
+  onRestoreStudent,
   onAddNote,
   onDeleteNote,
   onScheduleEvent,
   onDeleteMultipleStudents,
   onReassignStudentsClass,
   onClearAllStudents,
+  onOpenRegister,
 }) => {
   const save = usePersistenceAction();
   const editBaseline = useRef<Student | undefined>(undefined);
@@ -114,6 +121,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
   const [filterType, setFilterType] = useState<"tutti" | "sostegno" | "dsa_bes" | "con_note">("tutti");
   const [searchQuery, setSearchQuery] = useState("");
   const [onlyMyClasses, setOnlyMyClasses] = useState<boolean>(true);
+  const [showArchived, setShowArchived] = useState(false);
   const [studentIdConfirmingDelete, setStudentIdConfirmingDelete] = useState<string | null>(null);
 
   // Modals / Drawer state
@@ -148,7 +156,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
   const unassignedStudents = useMemo(() => {
     if (teacherClasses.length === 0) return [];
     return students.filter(
-      (s) => !teacherClasses.includes(s.className.trim().toUpperCase())
+      (s) => isStudentActive(s) && !teacherClasses.includes(s.className.trim().toUpperCase())
     );
   }, [students, teacherClasses]);
 
@@ -162,13 +170,14 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
   const displayClasses = useMemo(() => {
     if (teacherClasses.length > 0) return teacherClasses;
     const set = new Set<string>();
-    students.forEach((s) => s.className && set.add(s.className.trim().toUpperCase()));
+    students.filter(isStudentActive).forEach((s) => s.className && set.add(s.className.trim().toUpperCase()));
     return Array.from(set).sort();
   }, [teacherClasses, students]);
 
   // Filtered students
   const filteredStudents = useMemo(() => {
     return students.filter((s) => {
+      if (showArchived !== !isStudentActive(s)) return false;
       // Class filter
       const sClass = s.className.trim().toUpperCase();
 
@@ -218,7 +227,12 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
       }
       return true;
     });
-  }, [students, selectedClass, filterType, searchQuery]);
+  }, [students, selectedClass, filterType, searchQuery, showArchived, onlyMyClasses, teacherClasses]);
+
+  const sortedFilteredStudents = useMemo(
+    () => [...filteredStudents].sort(compareStudentNames),
+    [filteredStudents],
+  );
 
   // Overall Statistics
   const totalStudentsCount = students.length;
@@ -499,11 +513,11 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
               }`}
             >
               {onlyMyClasses && teacherClasses.length > 0
-                ? `Le mie classi (${students.filter((s) => teacherClasses.includes(s.className.trim().toUpperCase())).length})`
+                ? `Le mie classi (${students.filter((s) => isStudentActive(s) && teacherClasses.includes(s.className.trim().toUpperCase())).length})`
                 : `Tutte le classi (${students.length})`}
             </button>
             {displayClasses.map((cls) => {
-              const count = students.filter((s) => s.className.trim().toUpperCase() === cls).length;
+              const count = students.filter((s) => isStudentActive(s) && s.className.trim().toUpperCase() === cls).length;
               return (
                 <button
                   key={cls}
@@ -613,12 +627,22 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
             >
               Con Note
             </button>
+            <button
+              onClick={() => setShowArchived((current) => !current)}
+              className={`px-2.5 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-colors ${
+                showArchived
+                  ? "bg-stone-700 text-white font-semibold"
+                  : "text-stone-700 bg-stone-100 hover:bg-stone-200"
+              }`}
+            >
+              {showArchived ? "Attivi" : `Archiviati (${students.filter((s) => !isStudentActive(s)).length})`}
+            </button>
           </div>
         </div>
       </div>
 
       {/* Students List / Grid */}
-      {filteredStudents.length === 0 ? (
+      {sortedFilteredStudents.length === 0 ? (
         <div className="bg-white rounded-2xl p-10 border border-stone-200 text-center space-y-3">
           <div className="w-12 h-12 rounded-full bg-stone-100 text-stone-400 mx-auto flex items-center justify-center">
             <Users className="w-6 h-6" />
@@ -637,7 +661,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {filteredStudents.map((student) => {
+          {sortedFilteredStudents.map((student) => {
             const noteCount = student.notes?.length || 0;
             const lastNote = noteCount > 0 ? student.notes[0] : null;
 
@@ -695,6 +719,19 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
                       </div>
                     ) : (
                       <div className="flex items-center space-x-1">
+                        {!isStudentActive(student) && onRestoreStudent && (
+                          <button
+                            type="button"
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              if (!await save.run(() => onRestoreStudent(student.id))) return;
+                            }}
+                            className="p-1.5 text-emerald-600 hover:text-emerald-800 rounded-lg hover:bg-emerald-50 transition-colors"
+                            title="Ripristina alunno"
+                          >
+                            <RotateCcw className="w-4 h-4" />
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={(e) => {
@@ -706,17 +743,19 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
                         >
                           <Edit3 className="w-4 h-4" />
                         </button>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setStudentIdConfirmingDelete(student.id);
-                          }}
-                          className="p-1.5 text-stone-400 hover:text-rose-600 rounded-lg hover:bg-rose-50 transition-colors"
-                          title="Elimina alunno"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        {isStudentActive(student) && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setStudentIdConfirmingDelete(student.id);
+                            }}
+                            className="p-1.5 text-stone-400 hover:text-rose-600 rounded-lg hover:bg-rose-50 transition-colors"
+                            title="Archivia alunno"
+                          >
+                            <Archive className="w-4 h-4" />
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>
@@ -776,7 +815,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
                           <MessageSquare className="w-3 h-3 mr-1 text-stone-400" />
                           Ultima nota ({noteCount} totali)
                         </span>
-                        <span>{lastNote.date}</span>
+                        <span>{formatCivilDateIt(lastNote.date)}</span>
                       </div>
                       <p className="text-xs text-stone-600 font-medium line-clamp-1">
                         {lastNote.title}
@@ -799,6 +838,15 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
                   </button>
 
                   <div className="flex items-center space-x-1.5">
+                    {onOpenRegister && isStudentActive(student) && (
+                      <button
+                        type="button"
+                        onClick={() => onOpenRegister(student.id)}
+                        className="min-h-[44px] rounded-lg border border-emerald-200 bg-emerald-50 px-3 text-xs font-semibold text-emerald-800 hover:bg-emerald-100"
+                      >
+                        Apri Registro
+                      </button>
+                    )}
                     {student.isSupportStudent && (
                       <button
                         onClick={() => handleScheduleGlo(student)}
@@ -849,6 +897,15 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
               </div>
 
               <div className="flex items-center space-x-2">
+                {onOpenRegister && isStudentActive(activeDetailStudent) && (
+                  <button
+                    type="button"
+                    onClick={() => onOpenRegister(activeDetailStudent.id)}
+                    className="min-h-[44px] rounded-lg bg-emerald-600 px-3 text-xs font-bold text-white hover:bg-emerald-700"
+                  >
+                    Apri Registro
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={handlePrintStudentSheet}
@@ -859,7 +916,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
                 </button>
                 {studentIdConfirmingDelete === activeDetailStudent.id ? (
                   <div className="flex items-center space-x-2 bg-rose-950/90 border border-rose-600 px-3 py-1 rounded-xl text-xs">
-                    <span className="text-white text-xs font-bold">Eliminare definitivamente?</span>
+                    <span className="text-white text-xs font-bold">Archiviare definitivamente?</span>
                     <button
                       type="button"
                       onClick={async () => {
@@ -869,7 +926,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
                       }}
                       className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-lg text-xs transition-colors"
                     >
-                      Sì, Elimina
+                      Sì, Archivia
                     </button>
                     <button
                       type="button"
@@ -919,7 +976,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
                     {activeDetailStudent.gloDate && (
                       <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-900 border border-amber-300">
                         <Calendar className="w-3.5 h-3.5 mr-1 text-amber-700" />
-                        Data GLO: {activeDetailStudent.gloDate}
+                        Data GLO: {formatCivilDateIt(activeDetailStudent.gloDate)}
                       </span>
                     )}
                   </div>
@@ -1129,7 +1186,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
                             <div className="flex items-center space-x-2">
                               <span className="text-[11px] text-stone-400 flex items-center">
                                 <Clock className="w-3 h-3 mr-1" />
-                                {note.date}
+                                {formatCivilDateIt(note.date)}
                               </span>
                               <button
                                 type="button"
@@ -1514,10 +1571,10 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
             </div>
             <div className="text-center space-y-1.5">
               <h3 className="text-base font-bold text-stone-900">
-                Eliminare la scheda di {studentToDelete.fullName}?
+                Archiviare la scheda di {studentToDelete.fullName}?
               </h3>
               <p className="text-xs text-stone-500 leading-relaxed">
-                Verranno eliminati la scheda anagrafica, i recapiti e tutte le annotazioni o verbali riservati associati all'alunno (Classe {studentToDelete.className}). L'operazione non può essere annullata.
+                La scheda resterà conservata con le note e i dati associati, ma non apparirà più tra gli alunni attivi (Classe {studentToDelete.className}).
               </p>
             </div>
             <div className="flex items-center space-x-2 pt-2">
@@ -1540,7 +1597,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
                 }}
                 className="flex-1 py-2.5 bg-rose-600 hover:bg-rose-700 text-white font-semibold text-xs rounded-xl shadow-xs transition-colors"
               >
-                Elimina Alunno
+                Archivia Alunno
               </button>
             </div>
           </div>
