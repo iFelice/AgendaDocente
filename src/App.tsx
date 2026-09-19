@@ -633,6 +633,8 @@ export default function App({ initialData }: { initialData: LocalData }) {
             profile={profile}
             timetable={timetable}
             events={events}
+            scheduledAssessments={calendarScheduledAssessments}
+            onOpenScheduledAssessment={(studentId) => handleOpenRegister(studentId, "scheduled")}
             isProvisionalTimetable={isProvisionalActive}
             isDefinitiveCompiled={isDefinitiveCompiled}
             onOpenNewEvent={handleOpenNewEvent}

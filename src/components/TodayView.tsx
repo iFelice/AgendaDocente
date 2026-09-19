@@ -17,6 +17,9 @@ import {
   Trash2,
 } from "lucide-react";
 import { CalendarEvent, TeacherProfile, TimetableSlot } from "../types";
+import type { ScheduledAssessmentCalendarItem } from "../utils/scheduledAssessmentCalendar";
+import { scheduledAssessmentTypeLabel } from "../utils/scheduledAssessmentCalendar";
+import { readDailyCollapse, writeDailyCollapse, type CollapseGroup } from "../utils/collapsePreferences";
 import { coTeachingSummary } from "../utils/coTeaching";
 
 /**
@@ -58,6 +61,8 @@ interface TodayViewProps {
   profile: TeacherProfile;
   timetable: TimetableSlot[];
   events: CalendarEvent[];
+  scheduledAssessments?: ScheduledAssessmentCalendarItem[];
+  onOpenScheduledAssessment?: (studentId: string) => void;
   isProvisionalTimetable?: boolean;
   isDefinitiveCompiled?: boolean;
   onOpenNewEvent: (initialDate?: string) => void;
@@ -72,6 +77,8 @@ interface TodayViewProps {
 export const TodayView: React.FC<TodayViewProps> = ({
   timetable,
   events,
+  scheduledAssessments = [],
+  onOpenScheduledAssessment,
   isProvisionalTimetable,
   isDefinitiveCompiled,
   onOpenNewEvent,
@@ -87,6 +94,11 @@ export const TodayView: React.FC<TodayViewProps> = ({
   // survive month/year/weekend crossings because it works on local Date parts, never UTC.
   const [selectedIso, setSelectedIso] = React.useState<string>(() => localDateISO());
   const todayIso = localDateISO();
+  const [collapsed, setCollapsed] = React.useState(() => readDailyCollapse(localDateISO()));
+  React.useEffect(() => { setCollapsed(readDailyCollapse(selectedIso)); }, [selectedIso]);
+  const toggleCollapse = (group: CollapseGroup) => setCollapsed(previous => { const next = { ...previous, [group]: !previous[group] }; writeDailyCollapse(selectedIso, next); return next; });
+  const dayScheduled = scheduledAssessments.filter(item => item.date === selectedIso);
+  const nextScheduled = scheduledAssessments.filter(item => item.date > selectedIso && item.date <= new Date(new Date(`${selectedIso}T12:00:00`).getTime() + 7 * 86400000).toISOString().slice(0, 10)).sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
 
   const {
     isToday,
@@ -423,6 +435,8 @@ export const TodayView: React.FC<TodayViewProps> = ({
               </div>
             )}
           </div>
+
+          <section className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-hidden"><button type="button" aria-expanded={!collapsed.scheduledAssessments} onClick={() => toggleCollapse("scheduledAssessments")} className="flex min-h-[52px] w-full items-center justify-between gap-2 px-3 py-3 text-left"><span className="text-sm font-bold text-stone-900">Prove degli alunni ({dayScheduled.length})</span><span className="text-stone-500">{collapsed.scheduledAssessments ? "›" : "⌄"}</span></button>{!collapsed.scheduledAssessments && <div className="border-t border-stone-100 p-3 space-y-3">{dayScheduled.concat(nextScheduled).length === 0 ? <p className="text-sm text-stone-500">Nessuna prova programmata in questa finestra.</p> : <>{dayScheduled.length > 0 && <h3 className="text-xs font-bold uppercase tracking-wide text-amber-900">Oggi</h3>}{dayScheduled.map(item => <button type="button" key={`today-${item.id}`} onClick={() => onOpenScheduledAssessment?.(item.studentId)} className="block w-full min-h-[72px] rounded-lg border border-amber-300 bg-amber-50 p-3 text-left"><span className="block font-bold text-stone-900">{item.studentName}{item.className ? ` · ${item.className}` : ""} </span><span className="block text-xs text-stone-700">{item.subject || "Materia non indicata"} · {scheduledAssessmentTypeLabel[item.assessmentType]}</span>{item.topic && <span className="mt-1 block text-sm font-semibold text-stone-900">{item.topic}</span>}</button>)}{nextScheduled.length > 0 && <h3 className="pt-1 text-xs font-bold uppercase tracking-wide text-stone-600">Prossime prove</h3>}{nextScheduled.map(item => <button type="button" key={`next-${item.id}`} onClick={() => onOpenScheduledAssessment?.(item.studentId)} className="block w-full min-h-[64px] rounded-lg border border-stone-200 bg-stone-50 p-3 text-left"><span className="block text-xs font-bold text-stone-700">{item.date}</span><span className="block font-semibold text-stone-900">{item.studentName}</span><span className="block text-xs text-stone-700">{item.subject || "Materia non indicata"} · {scheduledAssessmentTypeLabel[item.assessmentType]}</span>{item.topic && <span className="block truncate text-xs font-semibold">{item.topic}</span>}</button>)}</>}</div>}</section>
 
           {/* Section 2: Meetings & Events. With no data the section collapses to a
               single compact row ("Nessun impegno oggi · + Aggiungi") instead of a big

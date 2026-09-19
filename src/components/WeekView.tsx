@@ -4,6 +4,7 @@ import React, { useState, useEffect } from "react";
 import {
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   Clock,
   MapPin,
   Plus,
@@ -16,6 +17,7 @@ import { CalendarEvent, TeacherProfile, TimetableSlot } from "../types";
 import { coTeachingSummary } from "../utils/coTeaching";
 import type { ScheduledAssessmentCalendarItem } from "../utils/scheduledAssessmentCalendar";
 import { scheduledAssessmentTypeLabel } from "../utils/scheduledAssessmentCalendar";
+import { readWeeklyCollapse, writeWeeklyCollapse, type CollapseGroup } from "../utils/collapsePreferences";
 
 interface WeekViewProps {
   profile?: TeacherProfile;
@@ -49,6 +51,8 @@ export const WeekView: React.FC<WeekViewProps> = ({
   const isSsig = profile?.schoolLevel === "ssig";
   const [includeSaturday, setIncludeSaturday] = useState<boolean>(!isSsig);
   const [filterMode, setFilterMode] = useState<"ALL" | "CIRCULARS">("ALL");
+  const [collapsed, setCollapsed] = useState(() => readWeeklyCollapse());
+  const toggleCollapse = (group: CollapseGroup) => setCollapsed(previous => { const next = { ...previous, [group]: !previous[group] }; writeWeeklyCollapse(next); return next; });
   const [confirmingDeleteEventId, setConfirmingDeleteEventId] = useState<string | null>(null);
 
   // Aggiorna la selezione di default se il profilo cambia livello a SSIG
@@ -302,13 +306,9 @@ export const WeekView: React.FC<WeekViewProps> = ({
               <div className="p-2 flex-1 flex flex-col space-y-3">
                 {/* Lessons Block */}
                 <div>
-                  <div className="flex items-center justify-between text-[11px] font-semibold text-stone-500 mb-1.5 px-1">
-                    <span className="flex items-center">
-                      <BookOpen className="w-3 h-3 mr-1 text-emerald-700" />
-                      Orario lezioni ({dayLessons.length}h)
-                    </span>
-                  </div>
+                  <button type="button" aria-expanded={!collapsed.timetable} className="flex min-h-[44px] w-full items-center justify-between text-[11px] font-semibold text-stone-500 mb-1.5 px-1" onClick={() => toggleCollapse("timetable")}><span className="flex items-center"><BookOpen className="w-3 h-3 mr-1 text-emerald-700" />Orario lezioni ({dayLessons.length}h)</span>{collapsed.timetable ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}</button>
 
+                  {!collapsed.timetable && <>
                   {dayLessons.length === 0 ? (
                     <div className="text-[11px] text-stone-400 italic text-center py-2 bg-stone-50/50 rounded-md">
                       Nessuna lezione
@@ -350,18 +350,15 @@ export const WeekView: React.FC<WeekViewProps> = ({
                       })}
                     </div>
                   )}
+                  </>}
                 </div>
 
                 {/* Derived scheduled assessments: never persisted as CalendarEvent. */}
-                {dayScheduled.length > 0 && <div className="mb-2 space-y-1.5"><div className="px-1 text-[11px] font-bold text-amber-900">Prove programmate ({dayScheduled.length})</div>{dayScheduled.map(item => <button key={`scheduled-${item.id}`} type="button" onClick={() => onOpenScheduledAssessment?.(item.studentId)} className="w-full min-h-[72px] rounded-lg border border-amber-300 bg-amber-50 p-2 text-left text-xs"><span className="block font-bold uppercase text-amber-900">Prova programmata</span><span className="block font-semibold text-stone-900">{item.studentName}</span><span className="block text-stone-700">{item.subject || "Materia non indicata"} · {scheduledAssessmentTypeLabel[item.assessmentType]}</span>{item.topic && <span className="block truncate font-semibold text-stone-900">{item.topic}</span>}</button>)}</div>}
+                <div className="mb-2"><button type="button" aria-expanded={!collapsed.scheduledAssessments} className="flex min-h-[44px] w-full items-center justify-between px-1 text-[11px] font-bold text-amber-900" onClick={() => toggleCollapse("scheduledAssessments")}><span>Prove programmate ({dayScheduled.length})</span>{collapsed.scheduledAssessments ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}</button>{!collapsed.scheduledAssessments && dayScheduled.length > 0 && <div className="space-y-1.5">{dayScheduled.map(item => <button key={`scheduled-${item.id}`} type="button" onClick={() => onOpenScheduledAssessment?.(item.studentId)} className="w-full min-h-[72px] rounded-lg border border-amber-300 bg-amber-50 p-2 text-left text-xs"><span className="block font-bold uppercase text-amber-900">Prova programmata</span><span className="block font-semibold text-stone-900">{item.studentName}</span><span className="block text-stone-700">{item.subject || "Materia non indicata"} · {scheduledAssessmentTypeLabel[item.assessmentType]}</span>{item.topic && <span className="block truncate font-semibold text-stone-900">{item.topic}</span>}</button>)}</div>}</div>
 
                 {/* Events Block */}
                 <div className="flex-1 flex flex-col">
-                  <div className="flex items-center justify-between text-[11px] font-semibold text-stone-500 mb-1.5 px-1">
-                    <span className="flex items-center">
-                      <Calendar className="w-3 h-3 mr-1 text-purple-700" />
-                      Impegni ({dayEvents.length})
-                    </span>
+                  <button type="button" aria-expanded={!collapsed.commitments} className="flex min-h-[44px] w-full items-center justify-between text-[11px] font-semibold text-stone-500 mb-1.5 px-1" onClick={() => toggleCollapse("commitments")}><span className="flex items-center"><Calendar className="w-3 h-3 mr-1 text-purple-700" />Impegni ({dayEvents.length})</span>{collapsed.commitments ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />} </button><div className={collapsed.commitments ? "hidden" : ""}>
                     <button
                       onClick={() => onOpenNewEvent(day.iso)}
                       className="text-emerald-700 hover:text-emerald-900 p-0.5 rounded-xs"
@@ -369,7 +366,6 @@ export const WeekView: React.FC<WeekViewProps> = ({
                     >
                       <Plus className="w-3 h-3" />
                     </button>
-                  </div>
 
                   {dayEvents.length === 0 ? (
                     <div className="text-[11px] text-stone-400 italic text-center py-3 bg-stone-50/30 rounded-md flex-1">
@@ -449,6 +445,7 @@ export const WeekView: React.FC<WeekViewProps> = ({
                       ))}
                     </div>
                   )}
+                </div>
                 </div>
               </div>
             </div>

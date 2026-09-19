@@ -8,6 +8,7 @@ export interface ScheduledAssessmentCalendarItem {
   date: string;
   studentId: string;
   studentName: string;
+  className?: string;
   subject?: string;
   assessmentType: StudentScheduledAssessment["assessmentType"];
   topic?: string;
@@ -28,6 +29,7 @@ export function deriveScheduledAssessmentCalendarItems(
       date: item.date,
       studentId: item.studentId,
       studentName: names.get(item.studentId) || "Studente non disponibile",
+      ...(students.find(student => student.id === item.studentId)?.className ? { className: students.find(student => student.id === item.studentId)!.className } : {}),
       ...(item.subject ? { subject: item.subject } : {}),
       assessmentType: item.assessmentType,
       ...(item.topic ? { topic: item.topic } : {}),
