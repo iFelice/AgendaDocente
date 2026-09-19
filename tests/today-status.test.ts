@@ -113,6 +113,8 @@ test('on the real today the badge is green and the Oggi button reads as already 
   const picker = byId(renderer, 'today-date-picker');
   assert.equal(picker.props.type, 'date');
   assert.equal(picker.props.tabIndex, 0);
+  assert.equal(picker.props['aria-label'], 'Scegli una data');
+  assert.ok(String(picker.props.className).includes('absolute') && String(picker.props.className).includes('inset-0'), 'native input covers the complete Oggi control');
   assert.ok(!String(picker.props.className).includes('h-px'), 'native input has a real hit area on today');
   assert.ok(!String(picker.props.className).includes('pointer-events-none'));
   const control = byId(renderer, 'today-date-control');

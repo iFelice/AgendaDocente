@@ -253,7 +253,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
                 type="date"
                 value={selectedIso}
                 onChange={(event) => { if (event.target.value) setSelectedIso(event.target.value); }}
-                aria-label="Seleziona una data per la vista Oggi"
+                aria-label="Scegli una data"
                 tabIndex={isToday ? 0 : -1}
                 className={isToday
                   ? "absolute inset-0 z-10 h-full w-full cursor-pointer opacity-0"
