@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   Circle,
   Clock,
   MapPin,
@@ -296,7 +297,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
         <div className="md:col-span-1 lg:col-span-2 space-y-4 sm:space-y-6">
           {/* Section 1: Morning Lessons */}
           <div className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-hidden">
-            <div className="p-3 sm:p-4 border-b border-stone-100 flex items-center justify-between gap-2 bg-stone-50/70">
+            <button type="button" aria-expanded={!collapsed.timetable} aria-controls="today-timetable-content" onClick={() => toggleCollapse("timetable")} className="p-3 sm:p-4 border-b border-stone-100 flex min-h-[56px] w-full items-center justify-between gap-2 bg-stone-50/70 text-left">
               <div className="flex items-center space-x-2 min-w-0">
                 <BookOpen className="w-5 h-5 text-emerald-700 shrink-0" />
                 <h2 className="text-sm sm:text-base font-semibold text-stone-900 truncate">Lezioni Curricolari{isToday ? " di Oggi" : " del Giorno"}</h2>
@@ -319,10 +320,11 @@ export const TodayView: React.FC<TodayViewProps> = ({
                 <span className="text-xs font-semibold px-2.5 py-1 bg-stone-100 text-stone-700 rounded-full whitespace-nowrap">
                   {todayLessons.length} {todayLessons.length === 1 ? "ora" : "ore"}
                 </span>
+                {collapsed.timetable ? <ChevronRight className="h-4 w-4 text-stone-500" /> : <ChevronDown className="h-4 w-4 text-stone-500" />}
               </div>
-            </div>
+            </button>
 
-            <div className="p-3 sm:p-4">
+            {!collapsed.timetable && <div id="today-timetable-content" className="p-3 sm:p-4">
               {todayLessons.length === 0 ? (
                 <div className="py-5 sm:py-8 text-center space-y-1.5 sm:space-y-2">
                   <p className="text-sm text-stone-600 font-medium">
@@ -406,9 +408,9 @@ export const TodayView: React.FC<TodayViewProps> = ({
                   })}
                 </div>
               )}
-            </div>
+            </div>}
 
-            {isProvisionalTimetable && !isDefinitiveCompiled && (
+            {!collapsed.timetable && isProvisionalTimetable && !isDefinitiveCompiled && (
               /* Compact informational row on phones (no big yellow block): short label +
                  link to complete the timetable; the full explanation stays on >= 640px. */
               <div className="px-3 sm:px-4 py-2 sm:py-3 bg-amber-50/70 border-t border-amber-200 text-[11px] sm:text-xs text-amber-900 flex items-center justify-between gap-2">
@@ -459,21 +461,22 @@ export const TodayView: React.FC<TodayViewProps> = ({
             </div>
           ) : (
           <div className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-hidden">
-            <div className="p-3 sm:p-4 border-b border-stone-100 flex items-center justify-between bg-stone-50/70">
+            <div role="button" tabIndex={0} aria-expanded={!collapsed.commitments} onClick={() => toggleCollapse("commitments")} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggleCollapse("commitments"); } }} className="p-3 sm:p-4 border-b border-stone-100 flex items-center justify-between bg-stone-50/70 min-h-[56px] cursor-pointer">
               <div className="flex items-center space-x-2 min-w-0">
                 <Calendar className="w-5 h-5 text-purple-700 shrink-0" />
                 <h2 className="text-sm sm:text-base font-semibold text-stone-900 truncate">Impegni & Riunioni{isToday ? "" : " del giorno selezionato"}</h2>
               </div>
               <button
-                onClick={() => onOpenNewEvent(selectedIso)}
+                onClick={(event) => { event.stopPropagation(); onOpenNewEvent(selectedIso); }}
                 className="text-xs font-semibold text-emerald-700 hover:text-emerald-800 flex items-center min-h-[36px] px-2 shrink-0"
               >
                 <Plus className="w-3.5 h-3.5 mr-1" />
                 Aggiungi
               </button>
+              {collapsed.commitments ? <ChevronRight className="h-4 w-4 text-stone-500" /> : <ChevronDown className="h-4 w-4 text-stone-500" />}
             </div>
 
-            <div className="p-3 sm:p-4">
+            {!collapsed.commitments && <div className="p-3 sm:p-4">
                 <div className="space-y-3">
                   {todayEvents.map((ev) => (
                     <div
@@ -561,7 +564,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
                     </div>
                   ))}
                 </div>
-            </div>
+            </div>}
           </div>
           )}
         </div>
