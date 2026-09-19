@@ -211,6 +211,22 @@ test('clicking the amber Oggi button returns to the real today state', async () 
   assert.ok(dateBadges(renderer, 'Oggi').length >= 2, 'the green "Oggi" badge is back');
 });
 
+test('today assessments are amber and future assessments are blue with an Italian date', async () => {
+  const futureIso = addDaysISO(localDateISO(), 2);
+  const scheduled = [{ kind: 'scheduled-assessment', id: 'assessment-future', date: futureIso, studentId: 's1', studentName: 'Rossi Luca', subject: 'Matematica', assessmentType: 'written', status: 'scheduled' as const }];
+  const renderer = await renderToday({ scheduledAssessments: scheduled as any });
+  await act(async () => { byId(renderer, 'today-next-day').props.onClick(); });
+  const futureCard = renderer.root.findByProps({ 'data-testid': 'scheduled-assessment-future' });
+  assert.ok(String(futureCard.props.className).includes('bg-sky-50'));
+  assert.ok(flatText(futureCard).includes(futureIso.split('-').reverse().join('/')));
+  assert.match(flatText(renderer.root), /Prossime prove/i);
+
+  await act(async () => { byId(renderer, 'today-next-day').props.onClick(); });
+  const todayCard = renderer.root.findByProps({ 'data-testid': 'scheduled-assessment-today' });
+  assert.ok(String(todayCard.props.className).includes('bg-amber-50'));
+  assert.match(flatText(renderer.root), /Oggi/i);
+});
+
 test('the native date input changes the selected day and amber control returns to today', async () => {
   const renderer = await renderToday();
   const picker = renderer.root.findByProps({ id: 'today-date-picker' });
