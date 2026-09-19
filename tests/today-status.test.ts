@@ -110,6 +110,13 @@ test('selectDayAgenda marks only the real civil today as isToday', () => {
 test('on the real today the badge is green and the Oggi button reads as already active', async () => {
   const renderer = await renderToday();
 
+  const picker = byId(renderer, 'today-date-picker');
+  assert.equal(picker.props.type, 'date');
+  assert.equal(picker.props.tabIndex, 0);
+  assert.ok(!String(picker.props.className).includes('h-px'), 'native input has a real hit area on today');
+  assert.ok(!String(picker.props.className).includes('pointer-events-none'));
+  const control = byId(renderer, 'today-date-control');
+  assert.ok(String(control.props.className).includes('relative'));
   const button = byId(renderer, 'today-back-to-today');
   assert.equal(flatText(button), 'Oggi', 'the label is always "Oggi"');
   assert.equal(button.props.disabled, undefined, 'the active button opens the native date picker');
@@ -140,6 +147,9 @@ test('on a future day the badge is amber "Futuro" and the Oggi button becomes an
 
   const button = byId(renderer, 'today-back-to-today');
   assert.match(flatText(button), /SET|SEP|OTT|NOV|DIC|GEN|FEB|MAR|APR|MAG|GIU|LUG|AGO/, 'the selected date is visible');
+  const picker = byId(renderer, 'today-date-picker');
+  assert.equal(picker.props.tabIndex, -1);
+  assert.ok(String(picker.props.className).includes('pointer-events-none'), 'date input no longer intercepts the amber shortcut');
   assert.equal(button.props.disabled, undefined, 'the shortcut is clickable');
   assert.equal(button.props['aria-label'], 'Torna a oggi');
   assert.equal(button.props['aria-pressed'], false);

@@ -246,37 +246,37 @@ export const TodayView: React.FC<TodayViewProps> = ({
               never an ambiguous gray); on any other date it turns amber as a "come back
               to the present" call-to-action. Text is always "Oggi".
             */}
-            <input
-              ref={datePickerRef}
-              id="today-date-picker"
-              type="date"
-              value={selectedIso}
-              onChange={(event) => { if (event.target.value) setSelectedIso(event.target.value); }}
-              aria-label="Seleziona una data per la vista Oggi"
-              className="pointer-events-none absolute h-px w-px opacity-0"
-              tabIndex={-1}
-            />
-            <button
-              id="today-back-to-today"
-              type="button"
-              onClick={() => {
-                if (!isToday) { setSelectedIso(todayIso); return; }
-                const picker = datePickerRef.current as (HTMLInputElement & { showPicker?: () => void }) | null;
-                if (picker?.showPicker) {
-                  try { picker.showPicker(); } catch { picker?.focus(); picker?.click(); }
-                } else { picker?.focus(); picker?.click(); }
-              }}
-              aria-label={isToday ? "Scegli una data" : "Torna a oggi"}
-              aria-pressed={isToday}
-              title={isToday ? "Scegli una data" : "Torna alla data corrente"}
-              className={`min-h-[44px] min-w-[66px] px-2.5 sm:px-3 py-2 rounded-lg border text-xs font-semibold transition-colors ${
-                isToday
-                  ? "border-emerald-700 bg-emerald-700 text-white shadow-xs"
-                  : "border-amber-400 bg-amber-400 text-amber-950 hover:bg-amber-300 hover:border-amber-500 active:bg-amber-200"
-              }`}
-            >
-              {isToday ? "Oggi" : new Intl.DateTimeFormat("it-IT", { weekday: "short", day: "numeric", month: "short" }).format(parseCivilDate(selectedIso)).replace(".", "").toUpperCase()}
-            </button>
+            <div id="today-date-control" className="relative min-h-[44px] min-w-[66px]">
+              <input
+                ref={datePickerRef}
+                id="today-date-picker"
+                type="date"
+                value={selectedIso}
+                onChange={(event) => { if (event.target.value) setSelectedIso(event.target.value); }}
+                aria-label="Seleziona una data per la vista Oggi"
+                tabIndex={isToday ? 0 : -1}
+                className={isToday
+                  ? "absolute inset-0 z-10 h-full w-full cursor-pointer opacity-0"
+                  : "pointer-events-none absolute h-px w-px opacity-0"}
+              />
+              <button
+                id="today-back-to-today"
+                type="button"
+                onClick={() => { if (!isToday) setSelectedIso(todayIso); }}
+                aria-label={isToday ? "Scegli una data" : "Torna a oggi"}
+                aria-pressed={isToday}
+                aria-hidden={isToday ? true : undefined}
+                tabIndex={isToday ? -1 : 0}
+                title={isToday ? "Scegli una data" : "Torna alla data corrente"}
+                className={`min-h-[44px] min-w-[66px] h-full w-full px-2.5 sm:px-3 py-2 rounded-lg border text-xs font-semibold transition-colors ${
+                  isToday
+                    ? "pointer-events-none border-emerald-700 bg-emerald-700 text-white shadow-xs"
+                    : "border-amber-400 bg-amber-400 text-amber-950 hover:bg-amber-300 hover:border-amber-500 active:bg-amber-200"
+                }`}
+              >
+                {isToday ? "Oggi" : new Intl.DateTimeFormat("it-IT", { weekday: "short", day: "numeric", month: "short" }).format(parseCivilDate(selectedIso)).replace(".", "").toUpperCase()}
+              </button>
+            </div>
             <button
               id="today-next-day"
               type="button"
