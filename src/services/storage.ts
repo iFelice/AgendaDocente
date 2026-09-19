@@ -1201,7 +1201,7 @@ export const storage = {
       const existing = index >= 0 ? list[index] : undefined;
       const saved: StudentScheduledAssessment = {
         ...item,
-        status: existing?.status ?? item.status ?? "scheduled",
+        status: item.status ?? existing?.status ?? "scheduled",
         createdAt: existing?.createdAt ?? item.createdAt,
         updatedAt: new Date().toISOString(),
       };

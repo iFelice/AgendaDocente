@@ -11,6 +11,7 @@ import {
   ExtractedItem,
   Student,
   StudentAssessment,
+  StudentScheduledAssessment,
   StudentNote,
   TeacherProfile,
   TimeSlotConfig,
@@ -74,6 +75,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
   const [circulars, setCirculars] = useState<CircularDocument[]>(() => initialData.circulars);
   const [students, setStudents] = useState<Student[]>(() => initialData.students);
   const [assessments, setAssessments] = useState<StudentAssessment[]>(() => initialData.assessments);
+  const [scheduledAssessments, setScheduledAssessments] = useState<StudentScheduledAssessment[]>(() => initialData.scheduledAssessments);
 
   // Active Timetable logic: defaults to provisional if definitive is uncompiled
   const activeType = timetableMode !== 'provvisorio' && definitiveTimetable.length > 0 ? 'definitivo' : 'provvisorio';
@@ -138,6 +140,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
     setCirculars(previous => retainEqual(previous, data.circulars));
     setStudents(previous => retainEqual(previous, data.students));
     setAssessments(previous => retainEqual(previous, data.assessments));
+    setScheduledAssessments(previous => retainEqual(previous, data.scheduledAssessments));
     if (lastOnboarding.current !== data.onboardingCompleted) setIsOnboardingOpen(!data.onboardingCompleted);
     lastOnboarding.current = data.onboardingCompleted;
   }
@@ -552,6 +555,14 @@ export default function App({ initialData }: { initialData: LocalData }) {
     await storage.deleteAssessment(assessmentId);
     showToast("Valutazione eliminata.");
   });
+  const handleSaveScheduledAssessment = withPersistenceFeedback(async (assessment: StudentScheduledAssessment) => {
+    await storage.saveScheduledAssessment(assessment);
+    showToast("Prova programmata salvata.");
+  });
+  const handleDeleteScheduledAssessment = withPersistenceFeedback(async (id: string) => {
+    await storage.deleteScheduledAssessment(id);
+    showToast("Prova programmata eliminata.");
+  });
 
   const handleViewChange = (view: ViewMode) => {
     setCurrentView(view);
@@ -686,10 +697,13 @@ export default function App({ initialData }: { initialData: LocalData }) {
             profile={profile}
             students={students}
             assessments={assessments}
+            scheduledAssessments={scheduledAssessments}
             initialStudentId={registerStudentId}
             onBackToOrigin={registerStudentId ? () => { setRegisterStudentId(null); setCurrentView("classi"); } : undefined}
             onSaveAssessment={handleSaveAssessment}
             onDeleteAssessment={handleDeleteAssessment}
+            onSaveScheduledAssessment={handleSaveScheduledAssessment}
+            onDeleteScheduledAssessment={handleDeleteScheduledAssessment}
           />
         )}
 

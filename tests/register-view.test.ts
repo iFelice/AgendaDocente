@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import React from 'react';
 import { act, create } from 'react-test-renderer';
-import { getActiveRegisterStudents, getRegisterClasses, parseAssessmentNumericInput, sortStudentAssessments, RegisterView } from '../src/components/RegisterView';
-import type { Student, StudentAssessment, TeacherProfile } from '../src/types';
+import { getActiveRegisterStudents, getRegisterClasses, parseAssessmentNumericInput, sortStudentAssessments, sortScheduledAssessments, RegisterView } from '../src/components/RegisterView';
+import type { Student, StudentAssessment, StudentScheduledAssessment, TeacherProfile } from '../src/types';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -110,4 +110,27 @@ test('back da apertura normale torna alla lista Registro', async () => {
   await act(async () => { button.props.onClick(); });
   assert.match(text(renderer.toJSON()), /Tutte le classi/);
   assert.doesNotMatch(text(renderer.toJSON()), /Scheda studente/);
+});
+
+const scheduled = (id: string, studentId: string, date: string, status: StudentScheduledAssessment['status'] = 'scheduled'): StudentScheduledAssessment => ({
+  id, studentId, className: '2E', date, assessmentType: 'written', topic: 'Equazioni', status, createdAt: date, updatedAt: date,
+});
+
+test('Prove programmate filtrate per studentId e ordinate: scheduled future prima dello storico', () => {
+  const rows = sortScheduledAssessments([
+    scheduled('cancelled', 's1', '2026-09-01', 'cancelled'),
+    scheduled('near', 's1', '2026-09-25'),
+    scheduled('other-student', 's2', '2026-09-20'),
+    scheduled('far', 's1', '2026-10-01'),
+    scheduled('completed', 's1', '2026-09-10', 'completed'),
+  ].filter(row => row.studentId === 's1'));
+  assert.deepEqual(rows.map(row => row.id), ['near', 'far', 'cancelled', 'completed']);
+});
+
+test('scheda studente espone separatamente Valutazioni e Prove programmate', () => {
+  let renderer: any;
+  act(() => { renderer = create(React.createElement(RegisterView, { ...props({ scheduledAssessments: [scheduled('p1', 's1', '2026-09-25')] }), initialStudentId: 's1' })); });
+  const output = text(renderer.toJSON());
+  assert.match(output, /Valutazioni/);
+  assert.match(output, /Prove programmate/);
 });
