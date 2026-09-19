@@ -136,7 +136,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               title="Analizza circolare con intelligenza semantica"
               aria-label="Analizza circolare"
             >
-              <Sparkles className="w-4 h-4" />
+              <Sparkles className="w-4 h-4 text-orange-500" />
               <span className="hidden md:inline">Analizza Circolare</span>
             </button>
 
@@ -144,11 +144,11 @@ export const Navbar: React.FC<NavbarProps> = ({
               <button
                 id="btn-scan-document"
                 onClick={onOpenScanner}
-                className="hidden md:inline-flex items-center justify-center gap-1.5 px-2.5 sm:px-3.5 min-h-[44px] min-w-[44px] rounded-lg text-sm font-medium bg-emerald-700 hover:bg-emerald-800 text-white transition-colors shadow-xs"
+                className="hidden md:inline-flex items-center justify-center gap-1.5 px-2.5 sm:px-3.5 min-h-[44px] min-w-[44px] rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 transition-colors shadow-xs"
                 title="Scansiona documento (circolare, orari, registro) con fotocamera o file"
                 aria-label="Scansiona documento"
               >
-                <ScanLine className="w-4 h-4" />
+                <ScanLine className="w-4 h-4 text-sky-600" />
                 <span className="hidden md:inline">Scansiona Documento</span>
               </button>
             )}
@@ -156,9 +156,9 @@ export const Navbar: React.FC<NavbarProps> = ({
             <button
               id="btn-new-event"
               onClick={onOpenNewEventModal}
-              className="hidden md:inline-flex items-center justify-center gap-1 px-3 sm:px-3.5 min-h-[44px] rounded-lg text-sm font-medium bg-emerald-700 hover:bg-emerald-800 text-white transition-colors shadow-xs"
+              className="hidden md:inline-flex items-center justify-center gap-1 px-3 sm:px-3.5 min-h-[44px] rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 transition-colors shadow-xs"
             >
-              <Plus className="w-4 h-4" />
+              <Plus className="w-4 h-4 text-sky-600" />
               <span className="hidden sm:inline">Nuovo Impegno</span>
               <span className="sm:hidden">Nuovo</span>
             </button>

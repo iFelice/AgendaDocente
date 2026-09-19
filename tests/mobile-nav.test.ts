@@ -415,7 +415,7 @@ test('PWA bell is always present, exposes the correct state and keeps Account in
 });
 
 test('desktop navigation is unchanged: every section stays in the header tabs', async () => {
-  const renderer = await render(React.createElement(Navbar, navbarProps({ currentView: 'orario' })));
+  const renderer = await render(React.createElement(Navbar, navbarProps({ currentView: 'orario', onOpenScanner: () => {} })));
   const expected: [string, string][] = [
     ['nav-tab-oggi', 'Oggi'],
     ['nav-tab-settimana', 'Settimana'],
@@ -436,7 +436,18 @@ test('desktop navigation is unchanged: every section stays in the header tabs', 
   const circularCta = byId(renderer, 'btn-scan-circular');
   assert.ok(hasClass(circularCta, 'md:inline-flex'));
   assert.ok(!String(circularCta.props.className).includes('bg-amber-500'), 'circular action is not a temporal warning surface');
-  assert.ok(circularCta.findAll((el: any) => el.type === 'svg' && String(el.props.className).includes('w-4')).length >= 1, 'circular action keeps its icon accent');
+  assert.ok(!String(circularCta.props.className).includes('bg-emerald-700'), 'circular action remains neutral');
+  assert.ok(circularCta.findAll((el: any) => el.type === 'svg' && String(el.props.className).includes('text-orange-500')).length >= 1, 'circular action keeps its orange icon accent');
+
+  const scannerCta = byId(renderer, 'btn-scan-document');
+  assert.ok(!String(scannerCta.props.className).includes('bg-emerald-700'), 'scanner action is not a green status surface');
+  assert.ok(String(scannerCta.props.className).includes('bg-white'));
+  assert.ok(scannerCta.findAll((el: any) => el.type === 'svg' && String(el.props.className).includes('text-sky-600')).length >= 1);
+
+  const newEventCta = byId(renderer, 'btn-new-event');
+  assert.ok(!String(newEventCta.props.className).includes('bg-emerald-700'), 'new event action is not a green status surface');
+  assert.ok(String(newEventCta.props.className).includes('bg-white'));
+  assert.ok(newEventCta.findAll((el: any) => el.type === 'svg' && String(el.props.className).includes('text-sky-600')).length >= 1);
 });
 
 // ---------------------------------------------------------------------------
