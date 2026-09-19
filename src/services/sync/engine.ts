@@ -2,6 +2,7 @@ import type {
   CalendarEvent,
   CircularDocument,
   StudentAssessment,
+  StudentScheduledAssessment,
 } from "../../types";
 import type {
   RemoteItem,
@@ -32,6 +33,7 @@ export interface LocalApply {
   localEvents?: CalendarEvent[];
   localCirculars?: CircularDocument[];
   localAssessments?: StudentAssessment[];
+  localScheduledAssessments?: StudentScheduledAssessment[];
 }
 
 /** Storage adapter so the engine can be tested against a fake IndexedDB + fake cloud. */
@@ -228,7 +230,7 @@ export class SyncEngine {
     const nowIso = this.now();
 
     // 1. Detect *new* local edits (hash moved since the last detection) and stamp their time.
-    const detection: SyncStateV1 = previous ? structuredClone(previous) : { uid, state: {}, items: { events: { docs: {} }, circulars: { docs: {} }, assessments: { docs: {} } } };
+    const detection: SyncStateV1 = previous ? structuredClone(previous) : { uid, state: {}, items: { events: { docs: {} }, circulars: { docs: {} }, assessments: { docs: {} }, scheduledAssessments: { docs: {} } } };
     detection.uid = uid;
     for (const name of STATE_DOC_NAMES) {
       const track = detection.state[name];
@@ -247,7 +249,7 @@ export class SyncEngine {
     }
     for (const coll of ITEMS_COLLECTIONS) {
       const track = (detection.items[coll] ??= { docs: {} });
-      const rows = coll === "events" ? snapshot.events : coll === "circulars" ? snapshot.circulars : snapshot.assessments ?? [];
+      const rows = coll === "events" ? snapshot.events : coll === "circulars" ? snapshot.circulars : coll === "assessments" ? snapshot.assessments ?? [] : snapshot.scheduledAssessments ?? [];
       const digest = itemsDigest(rows);
       if (track.lastSyncedHash !== digest && track.lastDetectedHash !== digest) {
         track.changedAt = nowIso;
@@ -265,11 +267,12 @@ export class SyncEngine {
     // 2. Fetch the remote tree. Any failure aborts the cycle before the first write.
     this.lastAttemptAt = this.now();
     this.publish({ phase: "syncing", lastAttemptAt: this.lastAttemptAt });
-    const [stateResults, events, circulars, assessments] = await Promise.all([
+    const [stateResults, events, circulars, assessments, scheduledAssessments] = await Promise.all([
       Promise.all(STATE_DOC_NAMES.map(name => gateway.readState(name))),
       gateway.listItems("events"),
       gateway.listItems("circulars"),
       gateway.listItems("assessments"),
+      listItemsCompat(gateway, "scheduledAssessments"),
     ]);
     // RUNTIME schema validation: cloud documents are untrusted input (older app versions wrote
     // incompatible shapes). Legacy-but-recoverable documents are normalized; malformed ones are
@@ -292,7 +295,7 @@ export class SyncEngine {
     });
     const remote: RemoteSnapshot = {
       state: remoteState,
-      items: { events, circulars, assessments },
+      items: { events, circulars, assessments, scheduledAssessments },
     };
 
     // 3. Plan locally (pure), then execute both sides.
@@ -322,9 +325,9 @@ export class SyncEngine {
 
     const localApplyState = { ...plan.localApplyState };
     for (const name of plan.needsResolution) delete localApplyState[name];
-    const localApplied = Boolean(Object.keys(localApplyState).length || plan.localEvents || plan.localCirculars || plan.localAssessments);
+    const localApplied = Boolean(Object.keys(localApplyState).length || plan.localEvents || plan.localCirculars || plan.localAssessments || plan.localScheduledAssessments);
     if (localApplied) {
-      await this.deps.store.applyLocal({ localApplyState, localEvents: plan.localEvents, localCirculars: plan.localCirculars, localAssessments: plan.localAssessments });
+      await this.deps.store.applyLocal({ localApplyState, localEvents: plan.localEvents, localCirculars: plan.localCirculars, localAssessments: plan.localAssessments, localScheduledAssessments: plan.localScheduledAssessments });
     }
 
     const written = await this.executeCloudSide(plan, gateway, remote, nowIso);
@@ -371,14 +374,17 @@ export class SyncEngine {
       if (remote.items.events.length) sections.add("events");
       if (remote.items.circulars.length) sections.add("circulars");
       if (remote.items.assessments?.length) sections.add("assessments");
+      if (remote.items.scheduledAssessments?.length) sections.add("scheduledAssessments");
     } else {
       for (const name of Object.keys(plan.localApplyState) as StateDocName[]) sections.add(name);
       if (plan.localEvents) sections.add("events");
       if (plan.localCirculars) sections.add("circulars");
       if (plan.localAssessments) sections.add("assessments");
+      if (plan.localScheduledAssessments) sections.add("scheduledAssessments");
       if (Object.keys(plan.remoteWrites.events).length || plan.remoteDeletes.events.length) sections.add("events");
       if (Object.keys(plan.remoteWrites.circulars).length || plan.remoteDeletes.circulars.length) sections.add("circulars");
       if (Object.keys(plan.remoteWrites.assessments).length || plan.remoteDeletes.assessments.length) sections.add("assessments");
+      if (Object.keys(plan.remoteWrites.scheduledAssessments).length || plan.remoteDeletes.scheduledAssessments.length) sections.add("scheduledAssessments");
     }
     const notices: string[] = [];
     const legacyArchived = plan.archivedOnOverwrite.filter(item => item.kind.startsWith("legacy-state:"));
@@ -459,6 +465,16 @@ function localPayload(snapshot: SyncableSnapshot, name: StateDocName): unknown {
 }
 
 /** Never leak document contents, tokens or raw SDK errors into user-visible messages. */
+async function listItemsCompat(gateway: SyncGateway, collection: ItemsCollection): Promise<RemoteItem[]> {
+  try {
+    return await gateway.listItems(collection);
+  } catch (error) {
+    // Compatibility for older test/adaptor gateways that predate this collection.
+    if (collection === "scheduledAssessments" && error instanceof TypeError) return [];
+    throw error;
+  }
+}
+
 export function sanitizeError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error ?? "");
   if (/network|offline|Failed to fetch|unavailable|UNAVAILABLE/i.test(message)) return "Connessione non disponibile: la sincronizzazione riproverà automaticamente.";

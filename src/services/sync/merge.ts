@@ -1,4 +1,4 @@
-import type { CalendarEvent, CircularDocument, StudentAssessment, TeacherProfile, TimetableSlot, TimeSlotConfig } from "../../types";
+import type { CalendarEvent, CircularDocument, StudentAssessment, StudentScheduledAssessment, TeacherProfile, TimetableSlot, TimeSlotConfig } from "../../types";
 import type {
   ItemsCollection,
   RemoteItem,
@@ -10,7 +10,7 @@ import type {
 } from "./types";
 import { ITEMS_COLLECTIONS, STATE_DOC_NAMES } from "./types";
 import { isPlaceholderFullName } from "../../utils/names";
-import { isValidStudentAssessment } from "../backup";
+import { isValidStudentAssessment, isValidStudentScheduledAssessment } from "../backup";
 
 /** Deterministic key-order-insensitive serialization + FNV-1a hash: content identity only. */
 export function canonicalStringify(value: unknown): string {
@@ -64,6 +64,7 @@ export interface SyncPlan {
   localEvents?: CalendarEvent[];
   localCirculars?: CircularDocument[];
   localAssessments?: StudentAssessment[];
+  localScheduledAssessments?: StudentScheduledAssessment[];
   localApplyState: Partial<Record<StateDocName, unknown>>;
   remoteWrites: Record<ItemsCollection, Record<string, unknown>>;
   remoteDeletes: Record<ItemsCollection, string[]>;
@@ -85,7 +86,7 @@ export function itemsDigest(rows: { id: string }[]): string {
 const emptyState = (uid: string): SyncStateV1 => ({
   uid,
   state: {},
-  items: { events: { docs: {} }, circulars: { docs: {} }, assessments: { docs: {} } },
+  items: { events: { docs: {} }, circulars: { docs: {} }, assessments: { docs: {} }, scheduledAssessments: { docs: {} } },
 });
 
 const isNonEmptyArray = (v: unknown): boolean => Array.isArray(v) && v.length > 0;
@@ -96,6 +97,7 @@ export function isPristineLocal(snapshot: SyncableSnapshot): boolean {
     snapshot.events.length === 0 &&
     snapshot.circulars.length === 0 &&
     (snapshot.assessments ?? []).length === 0 &&
+    (snapshot.scheduledAssessments ?? []).length === 0 &&
     snapshot.students.length === 0 &&
     snapshot.definitiveTimetable.length === 0 &&
     snapshot.provisionalTimetable.length === 0 &&
@@ -125,6 +127,7 @@ export function snapshotFromRemote(remote: RemoteSnapshot): Partial<Record<State
   if (remote.items.events.length) out.events = remote.items.events.map(i => i.payload);
   if (remote.items.circulars.length) out.circulars = remote.items.circulars.map(i => i.payload);
   if (remote.items.assessments?.length) out.assessments = remote.items.assessments.map(i => i.payload);
+  if (remote.items.scheduledAssessments?.length) out.scheduledAssessments = remote.items.scheduledAssessments.map(i => i.payload);
   return out;
 }
 
@@ -149,8 +152,8 @@ export function planSync(ctx: PlanContext): SyncPlan {
   const plan: SyncPlan = {
     fullRestore: null,
     localApplyState: {},
-    remoteWrites: { events: {}, circulars: {}, assessments: {} },
-    remoteDeletes: { events: [], circulars: [], assessments: [] },
+    remoteWrites: { events: {}, circulars: {}, assessments: {}, scheduledAssessments: {} },
+    remoteDeletes: { events: [], circulars: [], assessments: [], scheduledAssessments: [] },
     stateWrites: {},
     needsResolution: [],
     archivedOnOverwrite: [],
@@ -171,6 +174,16 @@ export function planSync(ctx: PlanContext): SyncPlan {
     }
   }
   remote.items.assessments = validAssessments;
+  const validScheduledAssessments: RemoteItem[] = [];
+  for (const item of remote.items.scheduledAssessments ?? []) {
+    if (isValidStudentScheduledAssessment(item.payload)) validScheduledAssessments.push(item);
+    else {
+      plan.archivedOnOverwrite.push({ kind: `invalid-item:scheduledAssessments:${item.id}`, loser: item.payload });
+      plan.remoteDeletes.scheduledAssessments.push(item.id);
+      plan.changedSomething = true;
+    }
+  }
+  remote.items.scheduledAssessments = validScheduledAssessments;
 
   const remoteKnown = remoteHasData(remote);
   if (!syncState && !resolution && isPristineLocal(snapshot) && remoteKnown) {
@@ -269,14 +282,15 @@ export function planSync(ctx: PlanContext): SyncPlan {
   // --- item collections: id-level three-way merge (union + conflict archive + assessment tombstones) ---
   for (const coll of ITEMS_COLLECTIONS) {
     const track = (nextState.items[coll] ??= { docs: {} });
-    const rows = coll === "events" ? snapshot.events : coll === "circulars" ? snapshot.circulars : snapshot.assessments ?? [];
-    const localRows = new Map<string, { row: CalendarEvent | CircularDocument | StudentAssessment; hash: string }>(
-      rows.map(row => [row.id, { row, hash: contentHash(row) }] as [string, { row: CalendarEvent | CircularDocument | StudentAssessment; hash: string }])
+    const rows = coll === "events" ? snapshot.events : coll === "circulars" ? snapshot.circulars : coll === "assessments" ? snapshot.assessments ?? [] : snapshot.scheduledAssessments ?? [];
+    const localRows = new Map<string, { row: CalendarEvent | CircularDocument | StudentAssessment | StudentScheduledAssessment; hash: string }>(
+      rows.map(row => [row.id, { row, hash: contentHash(row) }] as [string, { row: CalendarEvent | CircularDocument | StudentAssessment | StudentScheduledAssessment; hash: string }])
     );
     const rawRemoteRows = remote.items[coll] ?? [];
     const remoteRows = new Map<string, RemoteItem>();
     for (const item of rawRemoteRows) {
-      if (coll === "assessments" && !isValidStudentAssessment(item.payload)) {
+      if ((coll === "assessments" && !isValidStudentAssessment(item.payload))
+        || (coll === "scheduledAssessments" && !isValidStudentScheduledAssessment(item.payload))) {
         plan.archivedOnOverwrite.push({ kind: `invalid-item:${coll}:${item.id}`, loser: item.payload });
         plan.remoteDeletes[coll].push(item.id);
         plan.changedSomething = true;
@@ -288,9 +302,10 @@ export function planSync(ctx: PlanContext): SyncPlan {
     const ensureLocalList = () => {
       if (coll === "events") plan.localEvents ??= [...snapshot.events];
       else if (coll === "circulars") plan.localCirculars ??= [...snapshot.circulars];
-      else plan.localAssessments ??= [...(snapshot.assessments ?? [])];
+      else if (coll === "assessments") plan.localAssessments ??= [...(snapshot.assessments ?? [])];
+      else plan.localScheduledAssessments ??= [...(snapshot.scheduledAssessments ?? [])];
     };
-    const localList = () => coll === "events" ? plan.localEvents ?? snapshot.events : coll === "circulars" ? plan.localCirculars ?? snapshot.circulars : plan.localAssessments ?? (snapshot.assessments ?? []);
+    const localList = () => coll === "events" ? plan.localEvents ?? snapshot.events : coll === "circulars" ? plan.localCirculars ?? snapshot.circulars : coll === "assessments" ? plan.localAssessments ?? (snapshot.assessments ?? []) : plan.localScheduledAssessments ?? (snapshot.scheduledAssessments ?? []);
     const recordSync = (id: string, hash: string, updatedAt: string) => {
       track.docs[id] = { hash, updatedAt };
       if (track.deleted) delete track.deleted[id];
@@ -299,12 +314,13 @@ export function planSync(ctx: PlanContext): SyncPlan {
       ensureLocalList();
       if (coll === "events") plan.localEvents = plan.localEvents!.filter(row => row.id !== id);
       else if (coll === "circulars") plan.localCirculars = plan.localCirculars!.filter(row => row.id !== id);
-      else plan.localAssessments = plan.localAssessments!.filter(row => row.id !== id);
+      else if (coll === "assessments") plan.localAssessments = plan.localAssessments!.filter(row => row.id !== id);
+      else plan.localScheduledAssessments = plan.localScheduledAssessments!.filter(row => row.id !== id);
     };
     const apply = (payload: unknown) => {
       ensureLocalList();
-      const incoming = payload as CalendarEvent | CircularDocument | StudentAssessment;
-      const list = localList() as Array<CalendarEvent | CircularDocument | StudentAssessment>;
+      const incoming = payload as CalendarEvent | CircularDocument | StudentAssessment | StudentScheduledAssessment;
+      const list = localList() as Array<CalendarEvent | CircularDocument | StudentAssessment | StudentScheduledAssessment>;
       const index = list.findIndex(row => row.id === incoming.id);
       if (index >= 0) list[index] = incoming;
       else list.push(incoming);
@@ -363,7 +379,7 @@ export function planSync(ctx: PlanContext): SyncPlan {
     for (const [id, remoteItem] of remoteRows) {
       if (localRows.has(id)) continue;
       const synced = track.docs[id];
-      const tombstone = coll === "assessments" ? track.deleted?.[id] : undefined;
+      const tombstone = (coll === "assessments" || coll === "scheduledAssessments") ? track.deleted?.[id] : undefined;
       if (tombstone) {
         // A local assessment deletion wins over a stale or concurrently surviving remote copy.
         if (remoteItem.updatedAt !== tombstone.updatedAt) plan.archivedOnOverwrite.push({ kind: `item:${coll}:${id}`, loser: remoteItem.payload });
@@ -380,7 +396,7 @@ export function planSync(ctx: PlanContext): SyncPlan {
         continue;
       }
       // A missing local item is a deletion. Assessments retain a tombstone so they cannot resurrect.
-      if (coll === "assessments") {
+      if (coll === "assessments" || coll === "scheduledAssessments") {
         (track.deleted ??= {})[id] = { deletedAt: nowIso, updatedAt: synced.updatedAt };
         if (remoteItem.updatedAt !== synced.updatedAt) plan.archivedOnOverwrite.push({ kind: `item:${coll}:${id}`, loser: remoteItem.payload });
         plan.remoteDeletes[coll].push(id);

@@ -102,12 +102,12 @@ test('invalid scheduled assessment restore remains atomic', async () => {
   assert.deepEqual((await storage.getScheduledAssessments()).map(row => row.id), ['scheduled-1']);
 });
 
-test('remote full restore path preserves local scheduled assessments until cloud sync exists', async () => {
+test('remote full restore applies the scheduled-assessment collection from the sync snapshot', async () => {
   await reset();
   await storage.saveScheduledAssessment(item());
   const snapshot = await database.readSnapshot();
-  await createStoreAdapter().applyLocal({ fullRestore: { ...snapshot, scheduledAssessments: undefined } as never });
-  assert.equal((await storage.getScheduledAssessments())[0].id, 'scheduled-1');
+  await createStoreAdapter().applyLocal({ fullRestore: { ...snapshot, scheduledAssessments: [] } });
+  assert.deepEqual(await storage.getScheduledAssessments(), []);
 });
 
 test('new Dexie collection coexists with existing StudentAssessment data', async () => {

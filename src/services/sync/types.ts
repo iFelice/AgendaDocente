@@ -3,6 +3,7 @@ import type {
   CircularDocument,
   Student,
   StudentAssessment,
+  StudentScheduledAssessment,
   TeacherProfile,
   TimeSlotConfig,
   TimetableMode,
@@ -12,10 +13,10 @@ import type {
 /** Collections synced as one Firestore document each under users/{uid}/state/{name}. */
 export type StateDocName = "profile" | "settings" | "definitiveTimetable" | "provisionalTimetable" | "students";
 /** Collections synced as one Firestore document per entity under users/{uid}/{events|circulars}/{id}. */
-export type ItemsCollection = "events" | "circulars" | "assessments";
+export type ItemsCollection = "events" | "circulars" | "assessments" | "scheduledAssessments";
 
 export const STATE_DOC_NAMES: StateDocName[] = ["profile", "settings", "definitiveTimetable", "provisionalTimetable", "students"];
-export const ITEMS_COLLECTIONS: ItemsCollection[] = ["events", "circulars", "assessments"];
+export const ITEMS_COLLECTIONS: ItemsCollection[] = ["events", "circulars", "assessments", "scheduledAssessments"];
 
 /** Snapshot of the IndexedDB local state (the app's source of truth). */
 export interface SyncableSnapshot {
@@ -24,6 +25,7 @@ export interface SyncableSnapshot {
   circulars: CircularDocument[];
   students: Student[];
   assessments?: StudentAssessment[];
+  scheduledAssessments?: StudentScheduledAssessment[];
   definitiveTimetable: TimetableSlot[];
   provisionalTimetable: TimetableSlot[];
   timetableMode: TimetableMode;
@@ -47,6 +49,7 @@ export interface RemoteSnapshot {
     events: RemoteItem[];
     circulars: RemoteItem[];
     assessments?: RemoteItem[];
+    scheduledAssessments?: RemoteItem[];
   };
 }
 
@@ -79,6 +82,7 @@ export interface SyncStateV1 {
     events: ItemsTrack;
     circulars: ItemsTrack;
     assessments?: ItemsTrack;
+    scheduledAssessments?: ItemsTrack;
   };
 }
 

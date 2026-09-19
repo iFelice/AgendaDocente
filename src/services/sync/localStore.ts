@@ -26,10 +26,7 @@ export function createStoreAdapter(): SyncStore {
       await database.atomic(async () => {
         const write = async <K extends keyof LocalData>(name: K, value: LocalData[K]) => database.write(name, value);
         if (full) {
-          // Scheduled assessments are intentionally local-only in this step: a remote
-          // restore must never erase this collection before its cloud sync is implemented.
-          const scheduledAssessments = await database.read("scheduledAssessments");
-          await applySnapshot({ ...normalizeSchoolLinkedData(full), scheduledAssessments } as SyncableSnapshot & { scheduledAssessments: StudentScheduledAssessment[] });
+          await applySnapshot({ ...normalizeSchoolLinkedData(full), scheduledAssessments: full.scheduledAssessments ?? [] } as SyncableSnapshot & { scheduledAssessments: StudentScheduledAssessment[] });
           return;
         }
         if ("profile" in state) await write("profile", normalizeTeacherProfile(state.profile as LocalData["profile"]));
@@ -49,6 +46,7 @@ export function createStoreAdapter(): SyncStore {
         if (changes.localEvents) await write("events", changes.localEvents);
         if (changes.localCirculars) await write("circulars", changes.localCirculars);
         if (changes.localAssessments) await write("assessments", changes.localAssessments);
+        if (changes.localScheduledAssessments) await write("scheduledAssessments", changes.localScheduledAssessments);
       });
     },
   };
