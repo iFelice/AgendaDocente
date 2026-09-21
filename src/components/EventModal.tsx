@@ -268,12 +268,13 @@ export const EventModal: React.FC<EventModalProps> = ({
             grid non può restringersi (accavallamento/overflow).
           */}
           {!isAllDay && (
-            /* Due colonne anche su smartphone: il vecchio bug di sovrapposizione
-               su iOS era l'assenza di min-width:0 (la larghezza intrinseca del
-               time input rompeva la griglia). Con min-w-0 su celle e input,
-               w-full sugli input e gap adeguato le colonne non si toccano mai,
-               a qualsiasi larghezza; touch target >= 44px. */
-            <div className="grid grid-cols-2 gap-3">
+            /* Smartphone: i due campi nativi type="time" di iOS sono IMPILATI su
+               una colonna — qualunque sia la larghezza non possono mai
+               sovrapporsi (verificato su iPhone reale: grid-cols-2 + min-w-0 NON
+               basta ai controlli time di iOS). Da sm (640px) in su: due colonne.
+               min-w-0 resta su celle e input come difesa strutturale; touch
+               target >= 44px. */
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div className="min-w-0">
                 <label className="block font-semibold text-stone-700 mb-1">Ora Inizio</label>
                 <input

@@ -52,16 +52,18 @@ function assertTimeLabels(renderer: any) {
 }
 
 /**
- * Verifica strutturale del layout: DUE COLONNE a ogni larghezza (anche iPhone),
- * gap adeguato, e ogni pezzo può restringersi senza sovrapposizioni (il vecchio
- * bug iOS nasceva dall'assenza di min-width: 0, non dalla griglia a due
- * colonne). Etichette leggibili e touch target >= 44px.
+ * Verifica strutturale del layout: UNA COLONNA su smartphone (i campi nativi
+ * type="time" di iOS si sovrappongono se forzati sulla stessa riga — verificato
+ * su iPhone reale) e DUE COLONNE da sm (640px) in su. Nessuna sovrapposizione
+ * possibile: la riga mobile è impilata per costruzione. min-w-0/w-full come
+ * difesa strutturale, touch target >= 44px, etichette leggibili.
  */
 function assertResponsiveTimeLayout(renderer: any) {
   const { inputs, cells, grid } = timeFields(renderer);
   const tokens = classTokens(grid);
-  assert.ok(tokens.includes('grid-cols-2'), 'due colonne anche su smartphone');
-  assert.ok(!tokens.includes('grid-cols-1'), 'niente riga impilata: i campi stanno affiancati');
+  assert.ok(tokens.includes('grid-cols-1'), 'smartphone: una colonna (campi impilati, mai sovrapposti)');
+  assert.ok(tokens.includes('sm:grid-cols-2'), 'da sm (640px) in su: due colonne affiancate');
+  assert.ok(!tokens.includes('grid-cols-2'), 'nessuna griglia a due colonne fissa a tutti i breakpoint (iOS sovrappone i time input)');
   assert.ok(tokens.includes('gap-3'), 'gap adeguato fra le colonne');
   for (const cell of cells) {
     assert.ok(classTokens(cell).includes('min-w-0'), 'cella della grid può restringersi (min-width: 0)');
@@ -96,7 +98,7 @@ async function submitForm(renderer: any) {
   await act(async () => { await form.props.onSubmit({ preventDefault: () => {} }); });
 }
 
-test('1. creazione: i campi orari sono affiancati su due colonne anche su mobile e salvano i loro valori', async () => {
+test('1. creazione: i campi orari sono impilati su mobile, affiancati da sm, e salvano i loro valori', async () => {
   const { renderer, saved } = await renderModal();
   assertResponsiveTimeLayout(renderer);
   assertTimeLabels(renderer);
