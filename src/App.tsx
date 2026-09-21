@@ -39,6 +39,7 @@ import {
   isSlotEditOpen,
   openSlotForEdit,
   type SlotEditNavigation,
+  type SlotEditOriginView,
 } from "./utils/timetableEditNavigation";
 import { Navbar } from "./components/Navbar";
 import { MobileNav } from "./components/MobileNav";
@@ -627,15 +628,33 @@ export default function App({ initialData }: { initialData: LocalData }) {
     setCurrentView("registro");
   };
 
-  // Tap su una lezione del Planning (Oggi): apre la modifica diretta della
-  // lezione toccata nell'orario ATTIVO (type = activeType, mai il flag dello
-  // slot). La data selezionata di Oggi resta quella del tap. L'origine qui è
-  // "oggi": Settimana aggancerà lo stesso meccanismo nel suo micro-step.
-  const handleOpenTimetableSlotForEdit = useCallback((slot: TimetableSlot, type: TimetableType, selectedIso: string) => {
-    setSlotEditNav(openSlotForEdit(slot, type, "oggi", selectedIso));
-    setOggiTargetDate(selectedIso);
+  // Tap su una lezione del Planning (Oggi/Settimana): apre la modifica diretta
+  // della lezione toccata nell'orario ATTIVO (type = activeType, mai il flag
+  // dello slot). La data registrata è quella della vista di provenienza
+  // (selectedIso di Oggi / day.iso della Settimana): è il contesto da
+  // ripristinare al ritorno. setCurrentView diretto (come per il Registro):
+  // non passa da handleViewChange, che chiuderebbe la sessione.
+  const openSlotEditSession = useCallback((slot: TimetableSlot, type: TimetableType, dateIso: string, origin: SlotEditOriginView) => {
+    setSlotEditNav(openSlotForEdit(slot, type, origin, dateIso));
+    if (origin === "oggi") {
+      setOggiTargetDate(dateIso);
+    } else {
+      setPlanningTargetDate(dateIso);
+    }
     setCurrentView("orario");
   }, []);
+
+  // Oggi: wrapper sottile, firma e comportamento IDENTICI a prima della
+  // generalizzazione (nessun impatto su TodayView e sui suoi test).
+  const handleOpenTimetableSlotForEdit = useCallback((slot: TimetableSlot, type: TimetableType, selectedIso: string) => {
+    openSlotEditSession(slot, type, selectedIso, "oggi");
+  }, [openSlotEditSession]);
+
+  // Settimana: stessa logica centralizzata, origine "settimana" e contesto =
+  // planningTargetDate (riutilizzato da WeekView via targetDateIso).
+  const handleOpenTimetableSlotFromWeek = useCallback((slot: TimetableSlot, type: TimetableType, dayIso: string) => {
+    openSlotEditSession(slot, type, dayIso, "settimana");
+  }, [openSlotEditSession]);
 
   // "Torna al Planning" nell'editor: vista e data di ritorno sono quelle
   // REGISTRATE all'apertura (mai dedotte dagli altri stati); la sessione si
@@ -646,6 +665,12 @@ export default function App({ initialData }: { initialData: LocalData }) {
     if (targetView === "oggi") {
       if (targetDateIso) setOggiTargetDate(targetDateIso);
       setCurrentView("oggi");
+    } else if (targetView === "settimana") {
+      // La settimana da riaprire è quella REGISTRATA (il day.iso della lezione
+      // toccata), non la "settimana corrente" dell'app: WeekView la
+      // sincronizza al mount tramite targetDateIso (planningTargetDate).
+      if (targetDateIso) setPlanningTargetDate(targetDateIso);
+      setCurrentView("settimana");
     }
   }, [slotEditNav]);
 
@@ -738,6 +763,8 @@ export default function App({ initialData }: { initialData: LocalData }) {
             onEditEvent={handleEditEvent}
             onDeleteEvent={handleDeleteEvent}
             targetDateIso={planningTargetDate}
+            timetableType={activeTimetableInfo.activeType}
+            onOpenTimetableSlotForEdit={handleOpenTimetableSlotFromWeek}
           />
         )}
 

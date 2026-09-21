@@ -13,7 +13,7 @@ import {
   FileText,
   Trash2,
 } from "lucide-react";
-import { CalendarEvent, TeacherProfile, TimetableSlot } from "../types";
+import { CalendarEvent, TeacherProfile, TimetableSlot, TimetableType } from "../types";
 import { coTeachingSummary } from "../utils/coTeaching";
 import type { ScheduledAssessmentCalendarItem } from "../utils/scheduledAssessmentCalendar";
 import { scheduledAssessmentTypeLabel } from "../utils/scheduledAssessmentCalendar";
@@ -30,6 +30,16 @@ interface WeekViewProps {
   targetDateIso?: string;
   scheduledAssessments?: ScheduledAssessmentCalendarItem[];
   onOpenScheduledAssessment?: (studentId: string) => void;
+  /**
+   * Apre la modifica DIRETTA di una lezione dell'orario (tap sulla card).
+   * Come in Oggi il tipo orario NON è dedotto da `slot.isProvisional`: la
+   * fonte autorevole arriva da App (`activeType` dell'orario visualizzato,
+   * passata tramite `timetableType`) e la data è il `day.iso` DEL GIORNO
+   * VISUALIZZATO (è ciò che permette il ritorno alla stessa settimana).
+   */
+  onOpenTimetableSlotForEdit?: (slot: TimetableSlot, type: TimetableType, dateIso: string) => void;
+  /** Orario a cui appartiene l'array `timetable` (da App: activeType). */
+  timetableType?: TimetableType;
 }
 
 export const WeekView: React.FC<WeekViewProps> = ({
@@ -43,6 +53,8 @@ export const WeekView: React.FC<WeekViewProps> = ({
   targetDateIso,
   scheduledAssessments = [],
   onOpenScheduledAssessment,
+  onOpenTimetableSlotForEdit,
+  timetableType,
 }) => {
   const [currentWeekOffset, setCurrentWeekOffset] = useState<number>(0);
   
@@ -125,6 +137,13 @@ export const WeekView: React.FC<WeekViewProps> = ({
   });
 
   const circularEventsCount = events.filter((e) => e.sourceType === "circolare").length;
+
+  // Tipo orario della richiesta di modifica: fonte autorevole da App
+  // (timetableType = activeType dell'orario visualizzato). Per i chiamanti
+  // legacy che passano solo il flag storico, quel flag arriva comunque da App
+  // e descrive lo stesso array; mai `slot.isProvisional`.
+  const lessonType: TimetableType =
+    timetableType ?? (isProvisionalTimetable ? "provvisorio" : "definitivo");
 
   const getCategoryBorder = (category: string) => {
     switch (category) {
@@ -319,11 +338,7 @@ export const WeekView: React.FC<WeekViewProps> = ({
                     <div className="space-y-1.5">
                       {dayLessons.map((slot) => {
                         const summary = coTeachingSummary(slot);
-                        return (
-                          <div
-                            key={slot.id}
-                            className="p-2 rounded-lg border border-emerald-100 bg-emerald-50/40 text-xs"
-                          >
+                        const lessonBody = (
                             <div className="min-w-0">
                               <div className="flex items-center gap-1.5 flex-wrap">
                                 <span className="font-bold text-emerald-950 shrink-0">{slot.periodNumber}ª</span>
@@ -347,6 +362,34 @@ export const WeekView: React.FC<WeekViewProps> = ({
                                 </span>
                               )}
                             </div>
+                        );
+                        // Con il callback di modifica la card diventa
+                        // semanticamente interattiva: button a larghezza piena,
+                        // touch target comodo, focus visibile, stessa estetica.
+                        // Il marker `data-slot-cell="lesson"` la identifica
+                        // (stesso attributo delle card di Oggi; qui lo swipe
+                        // non esiste e il tap passa il `day.iso` del giorno
+                        // visualizzato, base del ritorno alla settimana).
+                        if (onOpenTimetableSlotForEdit) {
+                          return (
+                            <button
+                              key={slot.id}
+                              type="button"
+                              data-slot-cell="lesson"
+                              aria-label={`Modifica la lezione: ${slot.subject}, classe ${slot.className}, ${slot.periodNumber}\u00aa ora (${slot.startTime}\u2013${slot.endTime})`}
+                              onClick={() => onOpenTimetableSlotForEdit(slot, lessonType, day.iso)}
+                              className="block w-full min-h-[44px] text-left p-2 rounded-lg border border-emerald-100 bg-emerald-50/40 text-xs hover:border-emerald-300 active:border-emerald-400 focus-visible:outline-2 focus-visible:outline-emerald-600 focus-visible:outline-offset-2 transition-colors"
+                            >
+                              {lessonBody}
+                            </button>
+                          );
+                        }
+                        return (
+                          <div
+                            key={slot.id}
+                            className="p-2 rounded-lg border border-emerald-100 bg-emerald-50/40 text-xs"
+                          >
+                            {lessonBody}
                           </div>
                         );
                       })}
