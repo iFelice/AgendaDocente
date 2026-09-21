@@ -35,32 +35,32 @@ import {
 import { MultiChipInput } from "./MultiChipInput";
 import { collectKnownTeacherNames, coTeachingSummary, coTeachingSubjectsOf, pruneCoTeachingFields } from "../utils/coTeaching";
 import { DEFAULT_SUBJECTS, mergeSubjectSuggestions, normalizeSubjectName } from "../utils/subjects";
+import {
+  DAY_SWIPE_HORIZONTAL_RATIO,
+  DAY_SWIPE_INTERACTIVE_SELECTOR,
+  DAY_SWIPE_MIN_DISTANCE_PX,
+  daySwipeDirection,
+  isInteractiveSwipeTarget as isInteractiveSwipeControl,
+  type DaySwipeDirection,
+} from "../utils/daySwipe";
 
 // ---------------------------------------------------------------------------
 // Swipe fra i giorni dell'orario (scorciatoia mobile: i chip restano il controllo
-// principale, accessibile anche da tastiera)
+// principale, accessibile anche da tastiera). Le regole del gesto (soglia,
+// prevalenza orizzontale, esclusione dei controlli) vivono in `../utils/daySwipe`
+// e sono condivise con la vista Oggi, così lo swipe si comporta uguale in tutta
+// l'app.
 // ---------------------------------------------------------------------------
 
-/**
- * Spostamento orizzontale minimo perché il gesto sia considerato uno swipe (px
- * CSS). Sotto questa soglia restano tocchi, micro-movimenti e scroll: nessun
- * cambio di giorno.
- */
-export const DAY_SWIPE_MIN_DISTANCE_PX = 48;
-
-/**
- * Quanto il gesto deve essere orizzontale: lo spostamento orizzontale deve
- * essere almeno questo multiplo di quello verticale. Con 1.5 una diagonale a 45°
- * e un normale scroll verticale non cambiano mai il giorno.
- */
-export const DAY_SWIPE_HORIZONTAL_RATIO = 1.5;
-
-/**
- * Controlli da cui uno swipe NON deve mai partire: chip dei giorni, pulsanti di
- * navigazione, campi dei modali, link. Il gesto resta riservato alle superfici
- * non interattive dell'area del giorno.
- */
-export const DAY_SWIPE_INTERACTIVE_SELECTOR = 'button, input, select, textarea, a, label, [role="button"]';
+// Ri-esportati per compatibilità: i consumatori esistenti (e i test) importano
+// le regole dello swipe da questo file; l'unica fonte è `../utils/daySwipe`.
+export {
+  DAY_SWIPE_HORIZONTAL_RATIO,
+  DAY_SWIPE_INTERACTIVE_SELECTOR,
+  DAY_SWIPE_MIN_DISTANCE_PX,
+  daySwipeDirection,
+  type DaySwipeDirection,
+};
 
 /**
  * Marcatore SEMANTICO della cella libera della griglia (il "+" che aggiunge
@@ -69,25 +69,6 @@ export const DAY_SWIPE_INTERACTIVE_SELECTOR = 'button, input, select, textarea, 
  * questo attributo, non il testo o l'icona del pulsante.
  */
 export const DAY_SWIPE_CELL_SELECTOR = '[data-slot-cell="empty"]';
-
-/** Direzione di uno swipe fra i giorni: `null` = il gesto non è uno swipe. */
-export type DaySwipeDirection = "next" | "previous" | null;
-
-/**
- * Decide se lo spostamento di un gesto è uno swipe fra i giorni e in che
- * direzione: sinistra = giorno successivo, destra = giorno precedente.
- *
- * Regole (nessuna ambiguità con lo scroll verticale):
- *  - almeno `DAY_SWIPE_MIN_DISTANCE_PX` px di spostamento orizzontale;
- *  - spostamento orizzontale >= `DAY_SWIPE_HORIZONTAL_RATIO` x quello verticale.
- */
-export function daySwipeDirection(deltaX: number, deltaY: number): DaySwipeDirection {
-  const horizontal = Math.abs(deltaX);
-  const vertical = Math.abs(deltaY);
-  if (horizontal < DAY_SWIPE_MIN_DISTANCE_PX) return null;
-  if (horizontal < vertical * DAY_SWIPE_HORIZONTAL_RATIO) return null;
-  return deltaX < 0 ? "next" : "previous";
-}
 
 /**
  * Giorno raggiunto da uno swipe, senza MAI uscire dalla settimana mostrata:
@@ -118,10 +99,8 @@ export function swipeTargetDay(
  * restano esclusi.
  */
 export function isInteractiveSwipeTarget(target: unknown): boolean {
-  const element = target as Element | null | undefined;
-  if (!element || typeof element.closest !== "function") return false;
-  const control = element.closest(DAY_SWIPE_INTERACTIVE_SELECTOR);
-  if (!control) return false;
+  if (!isInteractiveSwipeControl(target)) return false;
+  const control = (target as Element).closest(DAY_SWIPE_INTERACTIVE_SELECTOR);
   // Cella libera: il controllo coincide col marcatore semantico della cella.
   if (typeof control.closest === "function" && control.closest(DAY_SWIPE_CELL_SELECTOR) === control) return false;
   return true;

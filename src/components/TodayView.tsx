@@ -22,6 +22,7 @@ import type { ScheduledAssessmentCalendarItem } from "../utils/scheduledAssessme
 import { scheduledAssessmentTypeLabel } from "../utils/scheduledAssessmentCalendar";
 import { readDailyCollapse, writeDailyCollapse, type CollapseGroup } from "../utils/collapsePreferences";
 import { coTeachingSummary } from "../utils/coTeaching";
+import { daySwipeDirection, isInteractiveSwipeTarget } from "../utils/daySwipe";
 
 /**
  * Pure day selector for the "Oggi" view: everything is computed from the *selected civil
@@ -99,6 +100,36 @@ export const TodayView: React.FC<TodayViewProps> = ({
   const [collapsed, setCollapsed] = React.useState(() => readDailyCollapse(localDateISO()));
   React.useEffect(() => { setCollapsed(readDailyCollapse(selectedIso)); }, [selectedIso]);
   const toggleCollapse = (group: CollapseGroup) => setCollapsed(previous => { const next = { ...previous, [group]: !previous[group] }; writeDailyCollapse(selectedIso, next); return next; });
+  /**
+    Swipe orizzontale fra i giorni (scorciatoia mobile sulle superfici non
+    interattive della vista; le frecce restano il controllo principale).
+    Stessa logica di cambio data delle frecce: esattamente ±1 giorno con
+    addDaysISO, quindi attraversa fine settimana, mese e anno senza casi
+    speciali. Solo tocco/penna: il mouse non è una gesture e il desktop resta
+    invariato. Nessun preventDefault e touch-action: pan-y sulla radice: lo
+    scroll verticale resta nativo; se il browser prende lo scroll arriva
+    pointercancel e il gesto viene scartato.
+  */
+  const todaySwipeStartRef = React.useRef<{ pointerId: number; x: number; y: number } | null>(null);
+  const handleTodaySwipeStart = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
+    // Frecce, badge "Oggi", date picker, card di sezione, pulsanti: il gesto
+    // non parte mai da un controllo interattivo, così tap/click restano intatti.
+    if (isInteractiveSwipeTarget(event.target)) return;
+    todaySwipeStartRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+  };
+  const handleTodaySwipeEnd = (event: React.PointerEvent<HTMLDivElement>) => {
+    const start = todaySwipeStartRef.current;
+    todaySwipeStartRef.current = null;
+    if (!start || start.pointerId !== event.pointerId) return;
+    const direction = daySwipeDirection(event.clientX - start.x, event.clientY - start.y);
+    if (!direction) return;
+    // Identica alle frecce: sinistra = giorno successivo, destra = precedente.
+    setSelectedIso((iso) => addDaysISO(iso, direction === "next" ? 1 : -1));
+  };
+  const handleTodaySwipeCancel = () => {
+    todaySwipeStartRef.current = null;
+  };
   const dayScheduled = scheduledAssessments.filter(item => item.date === selectedIso);
   const nextScheduled = scheduledAssessments.filter(item => item.date > selectedIso && item.date <= new Date(new Date(`${selectedIso}T12:00:00`).getTime() + 7 * 86400000).toISOString().slice(0, 10)).sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
 
@@ -179,7 +210,16 @@ export const TodayView: React.FC<TodayViewProps> = ({
   };
 
   return (
-    <div className="space-y-4 sm:space-y-6">
+    <div
+      id="today-view"
+      className="space-y-4 sm:space-y-6"
+      // Solo lo scroll verticale resta al browser; i gesti orizzontali arrivano
+      // ai pointer event qui sotto. Nessun effetto sul desktop.
+      style={{ touchAction: "pan-y" }}
+      onPointerDown={handleTodaySwipeStart}
+      onPointerUp={handleTodaySwipeEnd}
+      onPointerCancel={handleTodaySwipeCancel}
+    >
       {/*
         Day overview: deliberately compact on phones (date + day navigation + one-line
         summary) so the lesson list is above the fold almost immediately. The duplicate
