@@ -40,6 +40,13 @@ interface WeekViewProps {
   onOpenTimetableSlotForEdit?: (slot: TimetableSlot, type: TimetableType, dateIso: string) => void;
   /** Orario a cui appartiene l'array `timetable` (da App: activeType). */
   timetableType?: TimetableType;
+  /**
+   * Data da EVIDENZIARE con "SELEZIONATO" (header/bordo arancio): solo le
+   * navigazioni INTENZIONALI verso una data precisa (da Oggi, Mese, circolari).
+   * `targetDateIso` resta invece un semplice ANCHOR per ripristinare la
+   * settimana e non produce alcuna evidenza permanente.
+   */
+  highlightDateIso?: string;
 }
 
 export const WeekView: React.FC<WeekViewProps> = ({
@@ -55,6 +62,7 @@ export const WeekView: React.FC<WeekViewProps> = ({
   onOpenScheduledAssessment,
   onOpenTimetableSlotForEdit,
   timetableType,
+  highlightDateIso,
 }) => {
   const [currentWeekOffset, setCurrentWeekOffset] = useState<number>(0);
   
@@ -118,7 +126,9 @@ export const WeekView: React.FC<WeekViewProps> = ({
     const iso = localDateISO(d);
     const dayOfWeek = (i + 1) as 1 | 2 | 3 | 4 | 5 | 6;
     const isToday = localDateISO() === iso;
-    const isTarget = targetDateIso === iso;
+    // "SELEZIONATO" solo per navigazione intenzionale (highlightDateIso);
+    // l'anchor targetDateIso ripristina la settimana senza marcare nessun giorno.
+    const isTarget = highlightDateIso != null && iso === highlightDateIso;
     const dayName = new Intl.DateTimeFormat("it-IT", { weekday: "short" }).format(d);
     const dayNum = d.getDate();
     const monthName = new Intl.DateTimeFormat("it-IT", { month: "short" }).format(d);

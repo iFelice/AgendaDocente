@@ -221,6 +221,9 @@ async function bootApp() {
     onboardingCompleted: true,
   };
   await database.initialize(localData as any, legacyStorage);
+  // database è un singleton condiviso fra i test del file: initialize è un no-op
+  // sulle chiamate successive, quindi il reset vero avviene con restore.
+  await database.restore(localData as any);
   let renderer: any;
   await act(async () => {
     renderer = create(React.createElement(AgendaApp, { initialData: localData }));
@@ -248,21 +251,66 @@ async function openLessonFromWeek(renderer: any, weeksAhead = 0) {
   return weekRange;
 }
 
-test('8. round-trip App: Settimana corrente -> tap lezione -> Annulla -> Torna -> STESSA settimana', async () => {
+test('8. round-trip App: Settimana corrente -> tap lezione -> ANNULLA -> RITORNO AUTOMATICO alla STESSA settimana', async () => {
   const renderer = await bootApp();
   try {
     const weekRangeBefore = await openLessonFromWeek(renderer, 0);
 
     assert.ok(flatText(renderer.root).includes('Modifica Ora di Lezione'), 'il modale si apre da solo');
+    // Annulla: NON resta nell'editor (evidenza iPhone): torna da solo alla
+    // Settimana visualizzata prima del tap.
     await act(async () => { renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Annulla')[0].props.onClick(); });
     await flush(renderer);
-    const back = byId(renderer, 'back-to-planning');
-    assert.equal(back.length, 1);
-    await act(async () => { back[0].props.onClick(); });
+
+    assert.ok(byId(renderer, 'week-range').length > 0, 'ritorno AUTOMATICO alla vista Settimana');
+    assert.equal(flatText(byId(renderer, 'week-range')[0]), weekRangeBefore, 'stessa settimana visualizzata, non quella corrente dell\'app');
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('E. Settimana -> SAVE riuscito -> ritorno AUTOMATICO alla stessa settimana', async () => {
+  const renderer = await bootApp();
+  try {
+    const weekRangeBefore = await openLessonFromWeek(renderer, 1);
+    const subjectInput = renderer.root.findAllByType('input').find((el: any) => el.props.value === 'Storia');
+    await act(async () => { subjectInput.props.onChange({ target: { value: 'Geografia' } }); });
+    await act(async () => { await renderer.root.findByType('form').props.onSubmit({ preventDefault: () => {} }); });
     await flush(renderer);
 
-    assert.ok(byId(renderer, 'week-range').length > 0, 'si torna alla vista Settimana');
-    assert.equal(flatText(byId(renderer, 'week-range')[0]), weekRangeBefore, 'stessa settimana visualizzata, non quella corrente dell\'app');
+    assert.ok(byId(renderer, 'week-range').length > 0, 'ritorno AUTOMATICO alla Settimana dopo il salvataggio');
+    assert.equal(flatText(byId(renderer, 'week-range')[0]), weekRangeBefore, 'stessa settimana (quella navigata, +1)');
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('F. Settimana -> X/Chiudi -> ritorno AUTOMATICO alla stessa settimana', async () => {
+  const renderer = await bootApp();
+  try {
+    const weekRangeBefore = await openLessonFromWeek(renderer, 0);
+    const close = renderer.root.findAll((el: any) => el.props?.['aria-label'] === 'Chiudi');
+    assert.equal(close.length, 1);
+    await act(async () => { close[0].props.onClick(); });
+    await flush(renderer);
+    assert.ok(byId(renderer, 'week-range').length > 0);
+    assert.equal(flatText(byId(renderer, 'week-range')[0]), weekRangeBefore, 'stessa settimana dopo X');
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('G. Settimana -> DELETE riuscito -> ritorno AUTOMATICO alla stessa settimana', async () => {
+  const renderer = await bootApp();
+  try {
+    const weekRangeBefore = await openLessonFromWeek(renderer, 0);
+    await act(async () => {
+      renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Elimina ora')[0].props.onClick();
+    });
+    await flush(renderer);
+
+    assert.ok(byId(renderer, 'week-range').length > 0, 'ritorno AUTOMATICO alla Settimana dopo l\'eliminazione');
+    assert.equal(flatText(byId(renderer, 'week-range')[0]), weekRangeBefore, 'stessa settimana');
   } finally {
     await act(async () => { renderer.unmount(); });
   }
@@ -277,11 +325,9 @@ test('9. round-trip da SETTIMANA NON CORRENTE (+1): il ritorno riapre ESATTAMENT
 
     await act(async () => { renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Annulla')[0].props.onClick(); });
     await flush(renderer);
-    await act(async () => { byId(renderer, 'back-to-planning')[0].props.onClick(); });
-    await flush(renderer);
 
     assert.ok(byId(renderer, 'week-range').length > 0);
-    assert.equal(flatText(byId(renderer, 'week-range')[0]), weekRangeBefore, 'ritorno alla settimana NAVIGATA (day.iso), non a quella corrente');
+    assert.equal(flatText(byId(renderer, 'week-range')[0]), weekRangeBefore, 'ritorno AUTOMATICO alla settimana NAVIGATA (day.iso), non a quella corrente');
   } finally {
     await act(async () => { renderer.unmount(); });
   }
@@ -303,15 +349,15 @@ test('10. sessione consumata: dopo il ritorno, Orario aperto MANUALMENTE è stan
   try {
     await openLessonFromWeek(renderer, 0);
     await act(async () => { renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Annulla')[0].props.onClick(); });
-    await act(async () => { byId(renderer, 'back-to-planning')[0].props.onClick(); });
     await flush(renderer);
+    assert.ok(byId(renderer, 'week-range').length > 0, 'ritorno automatico alla Settimana');
 
     await act(async () => { byId(renderer, 'nav-tab-orario')[0].props.onClick(); });
     await flush(renderer, 200);
 
     assert.ok(byId(renderer, 'nav-tab-orario')[0].props['aria-current'] === 'page');
     assert.equal(renderer.root.findAll((el: any) => el.type === 'form').length, 0, 'nessuna riapertura automatica');
-    assert.equal(byId(renderer, 'back-to-planning').length, 0, 'nessun ritorno fuori dal flusso');
+    assert.ok(!flatText(renderer.root).includes('Torna al Planning'), 'nessuna UI di ritorno fuori dal flusso');
   } finally {
     await act(async () => { renderer.unmount(); });
   }
@@ -321,17 +367,14 @@ test('11. abbandono via navigazione principale: la sessione viene pulita', async
   const renderer = await bootApp();
   try {
     await openLessonFromWeek(renderer, 0);
-    await act(async () => { renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Annulla')[0].props.onClick(); });
-    await flush(renderer);
-    assert.equal(byId(renderer, 'back-to-planning').length, 1, 'sessione ancora aperta: c\'è il ritorno');
-
+    // Abbandono del flusso col modale ancora aperto, via navigazione principale.
     await act(async () => { byId(renderer, 'nav-tab-oggi')[0].props.onClick(); });
     await flush(renderer);
     await act(async () => { byId(renderer, 'nav-tab-orario')[0].props.onClick(); });
     await flush(renderer, 200);
 
     assert.equal(renderer.root.findAll((el: any) => el.type === 'form').length, 0);
-    assert.equal(byId(renderer, 'back-to-planning').length, 0, 'sessione chiusa dall\'uscita volontaria');
+    assert.ok(!flatText(renderer.root).includes('Torna al Planning'), 'sessione chiusa dall\'uscita volontaria');
   } finally {
     await act(async () => { renderer.unmount(); });
   }
@@ -350,7 +393,62 @@ test('12. l\'editor riceve la sessione: slot giusto precompilato, tipo giusto, r
     assert.ok(selects.includes('2'), 'numero ora precompilato (periodNumber 2)');
     assert.ok(selects.includes('1A'), 'classe precompilata');
     assert.ok(flatText(renderer.root).includes('Salva in Provvisorio'), 'tipo = orario attivo al tap (provvisorio)');
-    assert.equal(byId(renderer, 'back-to-planning').length, 0, 'il ritorno non è disponibile mentre il modale è aperto');
+    assert.ok(!flatText(renderer.root).includes('Torna al Planning'), 'il ritorno e\' automatico: nessun bottone dedicato');
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Selezione arancione "SELEZIONATO": solo per navigazione INTENZIONALE
+// ---------------------------------------------------------------------------
+
+/** Nessun resto dell'evidenza "SELEZIONATO" nell'albero renderizzato. */
+function selezionatoCount(renderer: any): number {
+  const badge = flatText(renderer.root).includes('SELEZIONATO') ? 1 : 0;
+  const orangeCards = renderer.root.findAll((el: any) =>
+    String(el.props?.className ?? '').includes('border-amber-500') ||
+    String(el.props?.className ?? '').includes('ring-amber-500')).length;
+  return badge + orangeCards;
+}
+
+test('M. ritorno dalla modifica lezione: settimana ripristinata SENZA giorno "SELEZIONATO" permanente', async () => {
+  const renderer = await bootApp();
+  try {
+    const weekRangeBefore = await openLessonFromWeek(renderer, 1);
+    await act(async () => { renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Annulla')[0].props.onClick(); });
+    await flush(renderer);
+
+    assert.ok(byId(renderer, 'week-range').length > 0, 'si torna alla Settimana');
+    assert.equal(flatText(byId(renderer, 'week-range')[0]), weekRangeBefore, 'la settimana e\' quella giusta (anchor rispettato)');
+    assert.equal(selezionatoCount(renderer), 0, 'nessun giorno marcato SELEZIONATO: la data era solo un anchor di ripristino');
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('N. navigazione INTENZIONALE ("Visualizza la Settimana" da Oggi): l\'evidenza SELEZIONATO resta', async () => {
+  const renderer = await bootApp();
+  try {
+    // Giovedi' 17/09 (giorno senza lezioni): la card di oggi mostra la CTA per la settimana.
+    await act(async () => { byId(renderer, 'today-date-picker')[0].props.onChange({ target: { value: '2026-09-17' } }); });
+    await flush(renderer);
+    const cta = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Visualizza la Settimana');
+    assert.equal(cta.length, 1, 'la CTA di navigazione intenzionale e\' presente');
+    await act(async () => { cta[0].props.onClick(); });
+    await flush(renderer);
+
+    assert.ok(byId(renderer, 'week-range').length > 0);
+    assert.ok(flatText(byId(renderer, 'week-range')[0]).includes('14'), 'settimana del 14-20 settembre aperta');
+    assert.ok(selezionatoCount(renderer) > 0, 'navigazione intenzionale: il giorno scelto e\' evidenziato come prima');
+    assert.ok(flatText(renderer.root).includes('SELEZIONATO'));
+
+    // E il round-trip successivo NON deve lasciare l'evidenza: tap lezione -> Annulla.
+    await openLessonFromWeek(renderer, 0);
+    await act(async () => { renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Annulla')[0].props.onClick(); });
+    await flush(renderer);
+    assert.ok(byId(renderer, 'week-range').length > 0);
+    assert.equal(selezionatoCount(renderer), 0, 'dopo il round-trip dalla modifica, nessuna selezione permanente');
   } finally {
     await act(async () => { renderer.unmount(); });
   }

@@ -1,7 +1,6 @@
 import { usePersistenceAction } from "../hooks/usePersistenceAction";
 import React, { useState, useRef, useMemo, useEffect } from "react";
 import {
-  ArrowLeft,
   Clock,
   MapPin,
   Plus,
@@ -149,8 +148,14 @@ interface TimetableEditorProps {
    */
   initialSlotType?: TimetableType | null;
   /**
-   * Presente solo quando l'editor è aperto dal Planning: mostra "Torna al
-   * Planning". Senza questo callback il controllo non esiste (editor normale).
+   * Presente SOLO quando l'editor è stato aperto dal Planning (sessione di
+   * navigazione in corso): ogni chiusura del modale — Salvataggio riuscito,
+   * Eliminazione riuscita, Annulla o X — torna AUTOMATICAMENTE al Planning di
+   * origine chiamando questo callback (che l'App implementa con
+   * backFromSlotEdit). In caso di errore di salvataggio/eliminazione NON viene
+   * chiamato: si resta nell'editor con il messaggio di errore. Editor
+   * standalone (aperto dalla navigazione "Orario"): prop assente, ogni
+   * chiusura resta nell'editor come sempre.
    */
   onBackToOrigin?: () => void;
 }
@@ -430,6 +435,19 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Chiusura del modale di modifica. Con sessione dal Planning (onBackToOrigin
+  // presente) OGNI chiusura torna al Planning di origine: il callback dell'App
+  // consuma backFromSlotEdit e naviga (editor smontato). Standalone: solo
+  // chiusura, comportamento storico invariato. Chiamare SOLO dopo un esito
+  // definitivo: su errore di salvataggio/eliminazione si resta nell'editor.
+  const closeSlotModal = () => {
+    if (onBackToOrigin) {
+      onBackToOrigin();
+      return;
+    }
+    setIsModalOpen(false);
+  };
+
   // When changing period number in modal, automatically update start & end times
   const handlePeriodChange = (newPeriodNum: number) => {
     if (!editingSlot) return;
@@ -504,9 +522,11 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
     }
     // Co-teaching fields are optional: drop the empty ones so saved slots stay clean.
     const slot = pruneCoTeachingFields(editingSlot);
+    // Su fallimento (CAS/persistenza) si resta nell'editor con l'errore mostrato:
+    // nessun ritorno automatico al Planning.
     if (!await save.run(() => onSaveSlot(slot, activeTab, editBaseline.current))) return;
-    setIsModalOpen(false);
     setEditingSlot(null);
+    closeSlotModal();
   };
 
   // Open config drawer and sync draft state
@@ -736,20 +756,9 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   // =========================================================================
   return (
     <div className="space-y-6 pb-12 max-w-full overflow-x-hidden">
-      {/* Aperto dal Planning (Oggi/Settimana): ritorno esplicito all'origine.
-          Nascosto mentre il modale è aperto: prima Salva / Elimina / Annulla. */}
-      {onBackToOrigin && !isModalOpen && (
-        <button
-          type="button"
-          id="back-to-planning"
-          onClick={onBackToOrigin}
-          className="flex min-h-[44px] items-center gap-2 rounded-xl px-2 font-semibold text-emerald-800 hover:bg-emerald-50 transition-colors"
-        >
-          <ArrowLeft className="h-5 w-5" />
-          Torna al Planning
-        </button>
-      )}
-      {save.error && (
+      {/* Aperto dal Planning: il ritorno è AUTOMATICO a ogni chiusura del
+          modale (Salva/Elimina riusciti, Annulla, X) tramite onBackToOrigin —
+          nessun bottone dedicato, nessuna UI morta. */}{save.error && (
         <p role="alert" className="p-3 text-sm text-rose-700 bg-rose-50 rounded-xl border border-rose-200">
           {save.error}
         </p>
@@ -1209,7 +1218,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
               </div>
               <button
                 type="button"
-                onClick={() => setIsModalOpen(false)}
+                onClick={closeSlotModal}
                 aria-label="Chiudi"
                 className="p-1.5 rounded-lg text-stone-400 hover:text-stone-700 hover:bg-stone-100"
               >
@@ -1541,13 +1550,14 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                   <button
                     type="button"
                     onClick={async () => {
+                      // Su fallimento si resta nell'editor con l'errore mostrato.
                       if (
                         !await save.run(() =>
                           onDeleteSlot(editingSlot.id, activeTab)
                         )
                       )
                         return;
-                      setIsModalOpen(false);
+                      closeSlotModal();
                     }}
                     className="text-rose-600 hover:text-rose-800 text-xs font-semibold flex items-center p-2 rounded-lg hover:bg-rose-50 transition-colors"
                   >
@@ -1561,7 +1571,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                 <div className="flex space-x-2">
                   <button
                     type="button"
-                    onClick={() => setIsModalOpen(false)}
+                    onClick={closeSlotModal}
                     className="px-3 py-2 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-lg min-h-[42px]"
                   >
                     Annulla

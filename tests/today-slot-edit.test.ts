@@ -348,6 +348,9 @@ async function bootApp() {
     onboardingCompleted: true,
   };
   await database.initialize(localData as any, legacyStorage);
+  // database è un singleton condiviso fra i test del file: initialize è un no-op
+  // sulle chiamate successive, quindi il reset vero avviene con restore.
+  await database.restore(localData as any);
   let renderer: any;
   await act(async () => {
     renderer = create(React.createElement(AgendaApp, { initialData: localData }));
@@ -374,27 +377,131 @@ async function openLessonFromOggi(renderer: any) {
   await flush(renderer, 200);
 }
 
-test('5. round-trip App: Oggi su data diversa -> apertura lezione -> Annulla -> Torna al Planning -> stessa data', async () => {
+test('5. round-trip App: Oggi su data diversa -> apertura lezione -> ANNULLA -> RITORNO AUTOMATICO alla stessa data', async () => {
   const renderer = await bootApp();
   try {
     await openLessonFromOggi(renderer);
 
-    // L'editor è aperto con la lezione GIUSTA già in modifica (test 16 per i dettagli).
     assert.ok(flatText(renderer.root).includes('Modifica Ora di Lezione'), 'il modale di modifica si apre da solo');
     assert.ok(flatText(renderer.root).includes('Salva in Provvisorio'), 'orario attivo = provvisorio (definitivo vuoto)');
 
-    // Annulla: il modale si chiude, l'editor resta e compare il ritorno.
+    // Annulla: NON resta nell'editor (evidenza iPhone): torna da solo a Oggi
+    // sulla STESSA data selezionata prima del tap.
     await act(async () => { renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Annulla')[0].props.onClick(); });
     await flush(renderer);
-    assert.equal(renderer.root.findAll((el: any) => el.type === 'form').length, 0);
-    const back = byId(renderer, 'back-to-planning');
-    assert.equal(back.length, 1, '"Torna al Planning" è visibile dopo la chiusura del modale');
-
-    // Ritorno: Oggi sulla STESSA data selezionata prima del tap.
-    await act(async () => { back[0].props.onClick(); });
-    await flush(renderer);
-    assert.ok(byId(renderer, 'today-date-picker').length > 0, 'si torna alla vista Oggi');
+    assert.ok(byId(renderer, 'today-date-picker').length > 0, 'ritorno AUTOMATICO alla vista Oggi');
     assert.equal(byId(renderer, 'today-date-picker')[0].props.value, FIXED_TUESDAY, 'stessa data, non il reale oggi');
+    assert.ok(byId(renderer, 'nav-tab-oggi')[0].props['aria-current'] === 'page');
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('5b. SAVE riuscito -> ritorno AUTOMATICO a Oggi sulla stessa data', async () => {
+  const renderer = await bootApp();
+  try {
+    await openLessonFromOggi(renderer);
+    // Cambia la materia e salva: operazione riuscita -> si torna a Oggi.
+    const subjectInput = renderer.root.findAllByType('input').find((el: any) => el.props.value === 'Storia');
+    await act(async () => { subjectInput.props.onChange({ target: { value: 'Geografia' } }); });
+    await act(async () => { await renderer.root.findByType('form').props.onSubmit({ preventDefault: () => {} }); });
+    await flush(renderer);
+
+    assert.ok(byId(renderer, 'today-date-picker').length > 0, 'ritorno AUTOMATICO a Oggi dopo il salvataggio');
+    assert.equal(byId(renderer, 'today-date-picker')[0].props.value, FIXED_TUESDAY, 'stessa data');
+    // La modifica è davvero arrivata allo storage: riaprendo la card si vede.
+    const cards = renderer.root.findAll((el: any) => el.type === 'button' && el.props?.['data-slot-cell'] === 'lesson');
+    assert.ok(cards.some((c: any) => String(c.props['aria-label']).includes('Geografia')), 'salvataggio applicato alla lezione toccata');
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('5c. X/Chiudi -> ritorno AUTOMATICO a Oggi sulla stessa data', async () => {
+  const renderer = await bootApp();
+  try {
+    await openLessonFromOggi(renderer);
+    const close = renderer.root.findAll((el: any) => el.props?.['aria-label'] === 'Chiudi');
+    assert.equal(close.length, 1);
+    await act(async () => { close[0].props.onClick(); });
+    await flush(renderer);
+    assert.ok(byId(renderer, 'today-date-picker').length > 0, 'ritorno AUTOMATICO a Oggi dopo X');
+    assert.equal(byId(renderer, 'today-date-picker')[0].props.value, FIXED_TUESDAY);
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('5d. DELETE riuscito -> ritorno AUTOMATICO a Oggi (lezione rimossa)', async () => {
+  const renderer = await bootApp();
+  try {
+    await openLessonFromOggi(renderer);
+    await act(async () => {
+      renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Elimina ora')[0].props.onClick();
+    });
+    await flush(renderer);
+
+    assert.ok(byId(renderer, 'today-date-picker').length > 0, 'ritorno AUTOMATICO a Oggi dopo l\'eliminazione');
+    assert.equal(byId(renderer, 'today-date-picker')[0].props.value, FIXED_TUESDAY, 'stessa data');
+    assert.equal(renderer.root.findAll((el: any) => el.type === 'button' && el.props?.['data-slot-cell'] === 'lesson').length, 0, 'la lezione eliminata non e\' piu\' nella lista');
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('5e. save FALLITO (conflitto CAS reale): NESSUN ritorno, errore visibile, si resta nell editor', async () => {
+  const renderer = await bootApp();
+  try {
+    await openLessonFromOggi(renderer);
+    // Conflitto CAS reale: un altro "tab" modifica lo stesso orario aggirando il CAS.
+    await act(async () => {
+      await database.write('provisionalTimetable', [{
+        id: 'tt-app-1', dayOfWeek: 2, periodNumber: 5, startTime: '11:00', endTime: '12:00',
+        subject: 'Sostegno', className: '1A',
+      }] as any);
+    });
+    await flush(renderer, 150);
+    // L'editor rilegge i dati osservati; riapriamo la lezione se il modale si e' chiuso per il remount.
+    if (renderer.root.findAll((el: any) => el.type === 'form').length === 0) {
+      await openLessonFromOggi(renderer);
+    }
+    await act(async () => { await renderer.root.findByType('form').props.onSubmit({ preventDefault: () => {} }); });
+    await flush(renderer);
+
+    assert.equal(byId(renderer, 'today-date-picker').length, 0, 'NESSUN ritorno a Oggi su fallimento');
+    assert.ok(byId(renderer, 'nav-tab-orario')[0].props['aria-current'] === 'page', 'si resta nella vista Orario');
+    assert.equal(renderer.root.findAll((el: any) => el.type === 'form').length, 1, 'il modale resta aperto');
+    assert.ok(renderer.root.findAll((el: any) => el.props?.role === 'alert').length >= 1, 'errore di persistenza visibile');
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('5f. editor STANDALONE (aperto dalla nav Orario): Save e Annulla NON navigano altrove', async () => {
+  const renderer = await bootApp();
+  try {
+    await act(async () => { byId(renderer, 'nav-tab-orario')[0].props.onClick(); });
+    await flush(renderer, 200);
+    assert.ok(byId(renderer, 'nav-tab-orario')[0].props['aria-current'] === 'page');
+
+    // Modifica manuale di una cella esistente (flusso storico della griglia).
+    const cells = renderer.root.findAll((el: any) => el.type === 'div' && String(el.props.className ?? '').includes('cursor-pointer'));
+    assert.ok(cells.length > 0, 'la griglia ha una cella occupata');
+    await act(async () => { cells[0].props.onClick(); });
+    await flush(renderer);
+    assert.equal(renderer.root.findAll((el: any) => el.type === 'form').length, 1);
+
+    // Annulla: resta nell'editor (nessuna navigazione).
+    await act(async () => { renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Annulla')[0].props.onClick(); });
+    await flush(renderer);
+    assert.ok(byId(renderer, 'nav-tab-orario')[0].props['aria-current'] === 'page', 'standalone: Annulla resta nell Orario');
+    assert.equal(byId(renderer, 'today-date-picker').length, 0);
+
+    // Save: resta nell'editor (nessuna navigazione).
+    await act(async () => { cells[0].props.onClick(); });
+    await act(async () => { await renderer.root.findByType('form').props.onSubmit({ preventDefault: () => {} }); });
+    await flush(renderer);
+    assert.ok(byId(renderer, 'nav-tab-orario')[0].props['aria-current'] === 'page', 'standalone: Save resta nell Orario');
   } finally {
     await act(async () => { renderer.unmount(); });
   }
@@ -405,8 +512,8 @@ test('6. la sessione è consumata: dopo il ritorno, Orario aperto MANUALMENTE è
   try {
     await openLessonFromOggi(renderer);
     await act(async () => { renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Annulla')[0].props.onClick(); });
-    await act(async () => { byId(renderer, 'back-to-planning')[0].props.onClick(); });
     await flush(renderer);
+    assert.ok(byId(renderer, 'today-date-picker').length > 0, 'ritorno automatico a Oggi');
 
     // Accesso manuale alla vista Orario dalla navigazione principale.
     await act(async () => { byId(renderer, 'nav-tab-orario')[0].props.onClick(); });
@@ -414,7 +521,7 @@ test('6. la sessione è consumata: dopo il ritorno, Orario aperto MANUALMENTE è
 
     assert.ok(byId(renderer, 'nav-tab-orario')[0].props['aria-current'] === 'page', 'Orario è la vista corrente');
     assert.equal(renderer.root.findAll((el: any) => el.type === 'form').length, 0, 'nessun modale riaperto automaticamente');
-    assert.equal(byId(renderer, 'back-to-planning').length, 0, 'nessun bottone di ritorno fuori dal flusso');
+    assert.ok(!flatText(renderer.root).includes('Torna al Planning'), 'nessuna UI di ritorno fuori dal flusso');
   } finally {
     await act(async () => { renderer.unmount(); });
   }
@@ -424,18 +531,15 @@ test('7. abbandono con la navigazione principale: la sessione viene pulita', asy
   const renderer = await bootApp();
   try {
     await openLessonFromOggi(renderer);
-    // Chiude il modale (sessione ancora aperta: c'è il ritorno) ...
-    await act(async () => { renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Annulla')[0].props.onClick(); });
-    await flush(renderer);
-    assert.equal(byId(renderer, 'back-to-planning').length, 1);
-    // ... e lascia il flusso con la navigazione principale.
+    // Abbandono del flusso col modale ancora aperto, via navigazione principale:
+    // la sessione si chiude e nessun vecchio slot puo' essere riconsumato.
     await act(async () => { byId(renderer, 'nav-tab-oggi')[0].props.onClick(); });
     await flush(renderer);
     await act(async () => { byId(renderer, 'nav-tab-orario')[0].props.onClick(); });
     await flush(renderer, 200);
 
     assert.equal(renderer.root.findAll((el: any) => el.type === 'form').length, 0, 'nessuna riapertura della lezione');
-    assert.equal(byId(renderer, 'back-to-planning').length, 0, 'sessione chiusa: nessun ritorno al Planning');
+    assert.ok(!flatText(renderer.root).includes('Torna al Planning'), 'sessione chiusa: nessuna UI di ritorno');
   } finally {
     await act(async () => { renderer.unmount(); });
   }
@@ -456,8 +560,8 @@ test('16. l\'editor riceve la sessione: slot giusto precompilato, tipo giusto, r
     assert.ok(selects.includes('1A'), 'classe precompilata');
     // initialSlotType: destinazione di salvataggio = orario attivo al tap.
     assert.ok(flatText(renderer.root).includes('Salva in Provvisorio'));
-    // onBackToOrigin esiste ma il bottone è nascosto mentre il modale è aperto.
-    assert.equal(byId(renderer, 'back-to-planning').length, 0, 'niente ritorno a modale aperto');
+    // Il ritorno non ha piu' un bottone dedicato: e' automatico a ogni chiusura.
+    assert.ok(!flatText(renderer.root).includes('Torna al Planning'), 'nessun bottone di ritorno (UI morta rimossa)');
   } finally {
     await act(async () => { renderer.unmount(); });
   }

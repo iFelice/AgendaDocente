@@ -273,7 +273,7 @@ test('F. Delete via apertura diretta: onDeleteSlot riceve id e tipo dell\'orario
 // G. Annulla / X: zero scritture, chiusura, MAI onBackToOrigin
 // ---------------------------------------------------------------------------
 
-test('G. Annulla e X chiudono il modale senza salvare, eliminare o tornare al Planning', async () => {
+test('G. Annulla e X: zero scritture e RITORNO AUTOMATICO al Planning (chiamano onBackToOrigin)', async () => {
   let saves = 0; let deletes = 0; let backs = 0;
   const base = {
     initialSlot: defSlot as TimetableSlot,
@@ -283,21 +283,39 @@ test('G. Annulla e X chiudono il modale senza salvare, eliminare o tornare al Pl
     onDeleteSlot: () => { deletes += 1; },
   };
 
-  // Annulla
+  // Annulla: non scrive nulla e torna al Planning di origine (dall'iPhone reale:
+  // l'utente si aspetta di tornare da dove è venuto, non di restare nell'editor).
   const renderer = await renderEditor(base);
   await act(async () => { buttonByText(renderer, 'Annulla').props.onClick(); });
-  assert.equal(formCount(renderer), 0, 'Annulla chiude il modale');
   assert.equal(saves, 0); assert.equal(deletes, 0);
-  assert.equal(backs, 0, 'Annulla NON torna al Planning');
+  assert.equal(backs, 1, 'Annulla torna al Planning di origine');
 
-  // X
-  const renderer2 = await renderEditor(base);
+  // X: identico (contatore dedicato: il contatore di Annulla era gia' a 1).
+  let backsX = 0;
+  const renderer2 = await renderEditor({ ...base, onBackToOrigin: () => { backsX += 1; } });
   const closeButtons = renderer2.root.findAll((el: any) => el.props?.['aria-label'] === 'Chiudi');
   assert.equal(closeButtons.length, 1, 'il bottone X del modale è accessibile');
   await act(async () => { closeButtons[0].props.onClick(); });
-  assert.equal(formCount(renderer2), 0, 'X chiude il modale');
   assert.equal(saves, 0); assert.equal(deletes, 0);
-  assert.equal(backs, 0, 'X NON torna al Planning');
+  assert.equal(backsX, 1, 'X torna al Planning di origine');
+});
+
+test('G2. standalone (nessuna sessione): Annulla/X chiudono il modale e NON chiamano nessun callback', async () => {
+  let backs = 0;
+  // onBackToOrigin assente: apertura dalla navigazione "Orario".
+  const renderer = await renderEditor({ onBackToOrigin: undefined });
+  await act(async () => {
+    renderer.root.findAll((el: any) => el.type === 'div' && String(el.props.className ?? '').includes('cursor-pointer'))[0].props.onClick();
+  });
+  assert.equal(formCount(renderer), 1);
+  await act(async () => { buttonByText(renderer, 'Annulla').props.onClick(); });
+  assert.equal(formCount(renderer), 0, 'Annulla chiude il modale e resta nell\'editor');
+  assert.equal(backs, 0);
+
+  const renderer2 = await renderEditor({ onBackToOrigin: () => { backs += 1; } });
+  // senza initialSlot non c'e' sessione in App: qui si verifica solo che il
+  // bottone "Torna al Planning" non esista piu' in nessun caso (rimosso).
+  assert.equal(byId(renderer2, 'back-to-planning').length, 0, 'nessuna UI morta: il bottone dedicato e stato rimosso');
 });
 
 // ---------------------------------------------------------------------------
@@ -328,33 +346,70 @@ test('H. tab normali fuori dalla modifica, disabilitati mentre il modale edita u
 // I. "Torna al Planning"
 // ---------------------------------------------------------------------------
 
-test('I. "Torna al Planning": solo con callback, chiama il callback, assente a modale aperto', async () => {
-  // Standalone: il controllo non esiste.
+test('I. il bottone "Torna al Planning" è stato RIMOSSO (il ritorno è automatico a ogni chiusura)', async () => {
+  // Nessun caso, con o senza sessione, a modale aperto o chiuso: nessuna UI morta.
   const solo = await renderEditor({});
-  assert.equal(byId(solo, 'back-to-planning').length, 0, 'nessun bottone di ritorno nell\'editor normale');
+  assert.equal(byId(solo, 'back-to-planning').length, 0, 'standalone: nessun bottone di ritorno');
+  assert.ok(!rootText(solo).includes('Torna al Planning'), 'nessuna traccia del bottone rimosso');
 
-  // Con callback: presente, accessibile, chiama SOLO il callback.
   let backs = 0;
-  const renderer = await renderEditor({ onBackToOrigin: () => { backs += 1; } });
-  const back = byId(renderer, 'back-to-planning');
-  assert.equal(back.length, 1, 'bottone di ritorno presente con onBackToOrigin');
-  assert.ok(String(back[0].props.className ?? '').includes('min-h-[44px]'), 'touch target >= 44px');
-  await act(async () => { back[0].props.onClick(); });
-  assert.equal(backs, 1, 'chiama onBackToOrigin');
+  const session = await renderEditor({ onBackToOrigin: () => { backs += 1; } });
+  assert.equal(byId(session, 'back-to-planning').length, 0, 'nemmeno con sessione aperta: il ritorno e\' automatico');
+  assert.ok(!rootText(session).includes('Torna al Planning'));
+  assert.equal(backs, 0, 'il callback non viene chiamato senza una chiusura del modale');
+});
 
-  // A modale aperto (apertura diretta): non disponibile.
-  const withModal = await renderEditor({
+test('H. save FALLITO (CAS/persistenza): NESSUN ritorno automatico, errore visibile, si resta nell\'editor', async () => {
+  let backs = 0; let saves = 0;
+  const renderer = await renderEditor({
+    initialSlot: defSlot,
+    initialSlotType: 'definitivo',
+    onBackToOrigin: () => { backs += 1; },
+    onSaveSlot: () => { saves += 1; return false; }, // save.run -> false = fallimento
+  });
+  const form = formOf(renderer);
+  await act(async () => { await form.props.onSubmit({ preventDefault: () => {} }); });
+  assert.equal(saves, 1, 'onSaveSlot e\' stato tentato');
+  assert.equal(backs, 0, 'nessun ritorno automatico su fallimento');
+  assert.equal(formCount(renderer), 1, 'il modale resta aperto per correggere/riprovare');
+  assert.ok(renderer.root.findAll((el: any) => el.props?.role === 'alert').length >= 1, 'messaggio di errore visibile');
+});
+
+test('I2. delete FALLITO: NESSUN ritorno automatico, errore visibile, si resta nell\'editor', async () => {
+  let backs = 0; let deletes = 0;
+  const renderer = await renderEditor({
+    initialSlot: defSlot,
+    initialSlotType: 'definitivo',
+    onBackToOrigin: () => { backs += 1; },
+    onDeleteSlot: () => { deletes += 1; return false; },
+  });
+  await act(async () => { await buttonByText(renderer, 'Elimina ora').props.onClick(); });
+  assert.equal(deletes, 1);
+  assert.equal(backs, 0, 'nessun ritorno automatico su fallimento');
+  assert.equal(formCount(renderer), 1, 'il modale resta aperto');
+  assert.ok(renderer.root.findAll((el: any) => el.props?.role === 'alert').length >= 1, 'messaggio di errore visibile');
+});
+
+test('E2. save riuscito con sessione: chiamata onBackToOrigin (ritorno automatico)', async () => {
+  let backs = 0;
+  const renderer = await renderEditor({
     initialSlot: defSlot,
     initialSlotType: 'definitivo',
     onBackToOrigin: () => { backs += 1; },
   });
-  assert.equal(formCount(withModal), 1);
-  assert.equal(byId(withModal, 'back-to-planning').length, 0, 'mentre il modale è aperto il ritorno non è disponibile');
+  await act(async () => { await formOf(renderer).props.onSubmit({ preventDefault: () => {} }); });
+  assert.equal(backs, 1, 'salvataggio riuscito -> ritorno automatico al Planning');
+});
 
-  // Dopo Annulla torna disponibile (e non ha chiamato il callback nel frattempo).
-  await act(async () => { buttonByText(withModal, 'Annulla').props.onClick(); });
-  assert.equal(byId(withModal, 'back-to-planning').length, 1, 'dopo la chiusura del modale il ritorno torna disponibile');
-  assert.equal(backs, 1);
+test('F2. delete riuscito con sessione: chiamata onBackToOrigin (ritorno automatico)', async () => {
+  let backs = 0;
+  const renderer = await renderEditor({
+    initialSlot: defSlot,
+    initialSlotType: 'definitivo',
+    onBackToOrigin: () => { backs += 1; },
+  });
+  await act(async () => { await buttonByText(renderer, 'Elimina ora').props.onClick(); });
+  assert.equal(backs, 1, 'eliminazione riuscita -> ritorno automatico al Planning');
 });
 
 // ---------------------------------------------------------------------------

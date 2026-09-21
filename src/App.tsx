@@ -129,6 +129,12 @@ export default function App({ initialData }: { initialData: LocalData }) {
   const [editingEvent, setEditingEvent] = useState<CalendarEvent | null>(null);
   const [targetDateForNewEvent, setTargetDateForNewEvent] = useState<string | undefined>();
   const [planningTargetDate, setPlanningTargetDate] = useState<string | undefined>();
+  // Data da EVIDENZIARE in Settimana ("SELEZIONATO"): è la navigazione
+  // INTENZIONALE verso una data precisa (es. "Visualizza la Settimana" da Oggi,
+  // tap su un giorno in Mese, circolari). La data usata SOLO come anchor per
+  // ripristinare la settimana (ritorno dalla modifica di una lezione) NON viene
+  // evidenziata: al ritorno dal Planning non resta nessun giorno marcato.
+  const [planningHighlightDate, setPlanningHighlightDate] = useState<string | undefined>();
   // Data civile selezionata nella vista Oggi. Settimana/Mese preservano il
   // contesto tramite planningTargetDate; Oggi porta la data dentro se stesso,
   // quindi la conserviamo qui per riaprirla sullo stesso giorno (es. dopo
@@ -301,6 +307,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
     view: "oggi" | "settimana" | "mese" = "settimana"
   ) => {
     setPlanningTargetDate(dateIso);
+    setPlanningHighlightDate(dateIso);
     setCurrentView(view);
   };
 
@@ -639,7 +646,10 @@ export default function App({ initialData }: { initialData: LocalData }) {
     if (origin === "oggi") {
       setOggiTargetDate(dateIso);
     } else {
+      // Anchor per RIPRISTINARE la settimana al ritorno: senza evidenza
+      // "SELEZIONATO" (non è una navigazione intenzionale verso quel giorno).
       setPlanningTargetDate(dateIso);
+      setPlanningHighlightDate(undefined);
     }
     setCurrentView("orario");
   }, []);
@@ -668,8 +678,10 @@ export default function App({ initialData }: { initialData: LocalData }) {
     } else if (targetView === "settimana") {
       // La settimana da riaprire è quella REGISTRATA (il day.iso della lezione
       // toccata), non la "settimana corrente" dell'app: WeekView la
-      // sincronizza al mount tramite targetDateIso (planningTargetDate).
+      // sincronizza al mount tramite targetDateIso (planningTargetDate). La
+      // data resta un ANCHOR: nessun giorno evidenziato come "SELEZIONATO".
       if (targetDateIso) setPlanningTargetDate(targetDateIso);
+      setPlanningHighlightDate(undefined);
       setCurrentView("settimana");
     }
   }, [slotEditNav]);
@@ -763,6 +775,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
             onEditEvent={handleEditEvent}
             onDeleteEvent={handleDeleteEvent}
             targetDateIso={planningTargetDate}
+            highlightDateIso={planningHighlightDate}
             timetableType={activeTimetableInfo.activeType}
             onOpenTimetableSlotForEdit={handleOpenTimetableSlotFromWeek}
           />

@@ -52,22 +52,25 @@ function assertTimeLabels(renderer: any) {
 }
 
 /**
- * Verifica strutturale del layout responsive: impilati di default (smartphone),
- * affiancati da sm, e ogni pezzo può restringersi senza overflow.
+ * Verifica strutturale del layout: DUE COLONNE a ogni larghezza (anche iPhone),
+ * gap adeguato, e ogni pezzo può restringersi senza sovrapposizioni (il vecchio
+ * bug iOS nasceva dall'assenza di min-width: 0, non dalla griglia a due
+ * colonne). Etichette leggibili e touch target >= 44px.
  */
 function assertResponsiveTimeLayout(renderer: any) {
   const { inputs, cells, grid } = timeFields(renderer);
   const tokens = classTokens(grid);
-  assert.ok(tokens.includes('grid-cols-1'), 'smartphone: una colonna (campi impilati)');
-  assert.ok(tokens.includes('sm:grid-cols-2'), 'da sm (640px) in su: affiancati');
-  assert.ok(!tokens.includes('grid-cols-2'), 'nessuna griglia a due colonne fissa a tutti i breakpoint');
+  assert.ok(tokens.includes('grid-cols-2'), 'due colonne anche su smartphone');
+  assert.ok(!tokens.includes('grid-cols-1'), 'niente riga impilata: i campi stanno affiancati');
+  assert.ok(tokens.includes('gap-3'), 'gap adeguato fra le colonne');
   for (const cell of cells) {
     assert.ok(classTokens(cell).includes('min-w-0'), 'cella della grid può restringersi (min-width: 0)');
   }
   for (const input of inputs) {
     const it = classTokens(input);
-    assert.ok(it.includes('w-full'), 'input a tutta la larghezza disponibile');
+    assert.ok(it.includes('w-full'), 'input a tutta la larghezza della sua colonna');
     assert.ok(it.includes('min-w-0'), 'input si restringe senza overflow (min-width: 0, serve a iOS)');
+    assert.ok(it.includes('min-h-[44px]'), 'touch target >= 44px');
   }
   assert.deepEqual(inputs.map((i: any) => i.props.type), ['time', 'time'], 'entrambi restano input nativi time');
 }
@@ -93,7 +96,7 @@ async function submitForm(renderer: any) {
   await act(async () => { await form.props.onSubmit({ preventDefault: () => {} }); });
 }
 
-test('1. creazione: i campi orari sono impilati su mobile, affiancati da sm, e salvano i loro valori', async () => {
+test('1. creazione: i campi orari sono affiancati su due colonne anche su mobile e salvano i loro valori', async () => {
   const { renderer, saved } = await renderModal();
   assertResponsiveTimeLayout(renderer);
   assertTimeLabels(renderer);
