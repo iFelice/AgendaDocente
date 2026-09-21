@@ -24,12 +24,19 @@ import { normalizeTeacherProfile } from "./multiSchool";
 import { getEffectivePeriodSlots, generateDefaultPeriodSlots } from "./timeSlots";
 import type { ReconstructedSlot } from "./timetableCrossref";
 import { normalizeSubjectName } from "./subjects";
+import { isSupportTeacherOf } from "./teacherType";
 
 /** Materia canonica usata in archivio per il sostegno (coerente con i seed). */
 export const SUPPORT_TEACHER_SUBJECT = "Sostegno";
 
-export function isSupportTeacherProfile(profile: Pick<TeacherProfile, "isSupportTeacher" | "primarySubjects">): boolean {
-  return !!profile.isSupportTeacher || (profile.primarySubjects ?? []).some(s => /sostegno/i.test(s));
+/**
+ * DELEGA all'helper canonico (src/utils/teacherType.ts): non è una seconda
+ * fonte di verità. La semantica è quella canonica — un `isSupportTeacher`
+ * esplicito (anche `false`) vince sull'euristica "sostegno" su primarySubjects,
+ * che resta fallback SOLO per i profili legacy senza flag.
+ */
+export function isSupportTeacherProfile(profile: Pick<TeacherProfile, "isSupportTeacher" | "primarySubjects"> | null | undefined): boolean {
+  return isSupportTeacherOf(profile);
 }
 
 /**

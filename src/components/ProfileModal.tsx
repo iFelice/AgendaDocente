@@ -35,6 +35,7 @@ import type { SyncStatus } from "../services/sync/types";
 import { CloudSync } from "./CloudSyncCard";
 import { useManualSync } from "../hooks/useManualSync";
 import { hasActiveSecondarySchool, normalizeTeacherProfile } from "../utils/multiSchool";
+import { isSupportTeacherOf } from "../utils/teacherType";
 
 interface ProfileModalProps {
   isOpen: boolean;
@@ -119,9 +120,9 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   const [classes, setClasses] = useState<string[]>(profile.classes);
   const [campuses, setCampuses] = useState<string[]>(profile.campuses);
   const [roles, setRoles] = useState<TeacherRole[]>(profile.roles || []);
-  const [isSupportTeacher, setIsSupportTeacher] = useState<boolean>(
-    profile.isSupportTeacher || profile.primarySubjects.some(s => s.toLowerCase().includes("sostegno"))
-  );
+  // Tipo docente canonico: un flag esplicito (anche false) vince; l'euristica
+  // "sostegno" su primarySubjects vale solo per i profili legacy senza flag.
+  const [isSupportTeacher, setIsSupportTeacher] = useState<boolean>(isSupportTeacherOf(profile));
 
   const [newSubjectInput, setNewSubjectInput] = useState("");
   const [newClassInput, setNewClassInput] = useState("");
@@ -434,29 +435,54 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
         <div className="flex-1 min-h-0 overflow-y-auto px-4 pt-4 sm:px-5 sm:pt-5 pb-[max(1rem,env(safe-area-inset-bottom))] sm:pb-[max(1.25rem,env(safe-area-inset-bottom))] text-xs momentum-scroll">
           {activeTab === "profilo" && (
             <form onSubmit={handleSave} className="space-y-4">
-              {/* Docente di Sostegno Quick Preset & Toggle */}
-              <div className="p-3.5 rounded-xl border border-emerald-200 bg-emerald-50/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div>
-                  <div className="flex items-center space-x-2">
-                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-600 animate-pulse" />
-                    <span className="font-bold text-emerald-950 text-xs">Profilo Docente di Sostegno</span>
-                  </div>
-                  <p className="text-[11px] text-emerald-800 mt-0.5">
-                    Attiva la prioritizzazione semantica per GLO, PEI, convocazioni ASL e dipartimento inclusione
-                  </p>
+              {/* Tipo docente: curricolare | sostegno. Due opzioni mutuamente
+                  esclusive (radiogroup), mobile-first (impilate su smartphone,
+                  affiancate da sm); al salvataggio scrive SEMPRE un valore
+                  esplicito di isSupportTeacher (niente più ratchet). */}
+              <fieldset>
+                <legend className="block font-semibold text-stone-700 mb-1.5">Tipo docente</legend>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3" role="radiogroup" aria-label="Tipo docente">
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={!isSupportTeacher}
+                    onClick={() => setIsSupportTeacher(false)}
+                    className={`p-3.5 rounded-xl border-2 text-left transition-all min-h-[44px] ${
+                      !isSupportTeacher
+                        ? "border-emerald-600 bg-emerald-50/60"
+                        : "border-stone-200 hover:border-emerald-300 bg-white"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold text-stone-900 text-xs sm:text-sm">Docente curricolare</span>
+                      {!isSupportTeacher && <Check className="w-4 h-4 shrink-0 text-emerald-700" />}
+                    </div>
+                    <p className="text-[11px] text-stone-600 mt-1">
+                      Insegna una materia: in compresenza puoi indicare il docente di sostegno presente nell'ora.
+                    </p>
+                  </button>
+
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={isSupportTeacher}
+                    onClick={() => setIsSupportTeacher(true)}
+                    className={`p-3.5 rounded-xl border-2 text-left transition-all min-h-[44px] ${
+                      isSupportTeacher
+                        ? "border-emerald-600 bg-emerald-50/60"
+                        : "border-stone-200 hover:border-emerald-300 bg-white"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold text-stone-900 text-xs sm:text-sm">Docente di sostegno</span>
+                      {isSupportTeacher && <Check className="w-4 h-4 shrink-0 text-emerald-700" />}
+                    </div>
+                    <p className="text-[11px] text-stone-600 mt-1">
+                      Insegna sostegno: in compresenza puoi indicare la materia curricolare e gli eventuali colleghi di sostegno presenti.
+                    </p>
+                  </button>
                 </div>
-                <div className="flex items-center space-x-2">
-                  <label className="flex items-center space-x-1.5 cursor-pointer text-xs font-semibold text-emerald-900">
-                    <input
-                      type="checkbox"
-                      checked={isSupportTeacher}
-                      onChange={(e) => setIsSupportTeacher(e.target.checked)}
-                      className="rounded text-emerald-700 focus:ring-emerald-600"
-                    />
-                    <span>Attivo</span>
-                  </label>
-                </div>
-              </div>
+              </fieldset>
 
               {/* Studenti seguiti: la gestione è nell'area "Classi & Alunni"; il profilo
                   docente non contiene più l'elenco studenti (i dati esistenti restano). */}

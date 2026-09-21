@@ -34,6 +34,7 @@ import {
 } from "../utils/timeSlots";
 import { MultiChipInput } from "./MultiChipInput";
 import { collectKnownTeacherNames, coTeachingSummary, coTeachingSubjectsOf, pruneCoTeachingFields } from "../utils/coTeaching";
+import { isSupportTeacherOf } from "../utils/teacherType";
 import { DEFAULT_SUBJECTS, mergeSubjectSuggestions, normalizeSubjectName } from "../utils/subjects";
 import {
   DAY_SWIPE_HORIZONTAL_RATIO,
@@ -203,7 +204,9 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   // Co-teaching (compresenza): suggestions come from the predefined subject list, the
   // teacher's profile and the subjects/names already used in the timetables. A future
   // school directory can replace these sources without migrations.
-  const isSupportTeacher = profile?.isSupportTeacher === true;
+  // Tipo docente canonico (sostegno vs curricolare): fonte unica, con fallback
+  // legacy sui profili senza flag. Decide la UI della compresenza e la materia.
+  const isSupportTeacher = isSupportTeacherOf(profile);
   const usedSubjects = useMemo(() => {
     const used: string[] = [];
     for (const timetable of [definitiveTimetable, provisionalTimetable]) {

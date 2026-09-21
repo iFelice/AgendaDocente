@@ -17,6 +17,7 @@ import {
   Bell,
 } from "lucide-react";
 import { TeacherProfile, ViewMode } from "../types";
+import { isSupportTeacherOf } from "../utils/teacherType";
 import { PWAInstallButton } from "./PWAInstallButton";
 import { GoogleGlyph } from "./GoogleGlyph";
 import { User as FirebaseUser } from "firebase/auth";
@@ -71,7 +72,8 @@ export const Navbar: React.FC<NavbarProps> = ({
     { id: "circolari", label: "Archivio Circolari", icon: FileSearch },
   ];
 
-  const isSupport = profile.isSupportTeacher || profile.primarySubjects.some(s => s.toLowerCase().includes("sostegno"));
+  // Badge "Sostegno": stesso helper canonico usato in tutta l'app.
+  const isSupport = isSupportTeacherOf(profile);
   const schoolLevelLabel =
     profile.schoolLevel === "ssig" ? "SSIG"
     : profile.schoolLevel === "primaria" ? "Primaria"

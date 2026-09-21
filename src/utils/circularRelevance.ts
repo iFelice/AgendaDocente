@@ -1,4 +1,5 @@
 import type { TeacherProfile } from "../types";
+import { isSupportTeacherOf } from "./teacherType";
 
 /**
  * Utility per l'estrazione delle classi e la valutazione rigorosa della pertinenza
@@ -177,7 +178,7 @@ export function evaluateItemRelevance(
   const explicitSubjects = (item.subject || '').split(/[,;]/).map(s => s.trim()).filter(s => s && !isGenericSubject(s)).map(normalizeSubject);
   const targetedSubjects = explicitSubjects.length ? explicitSubjects : subjects;
   const ownSubjects = (profile.primarySubjects || []).flatMap(s => { const detected = detectSubjects(s); return detected.length ? detected : [normalizeSubject(s)]; });
-  if (profile.isSupportTeacher) ownSubjects.push('sostegno');
+  if (isSupportTeacherOf(profile)) ownSubjects.push('sostegno');
   if (targetedSubjects.length && !targetedSubjects.some(s => ownSubjects.includes(s))) return result('ROSSO', `Destinato ad altra materia: ${targetedSubjects.join(', ')}.`);
   if (/facoltativ|chi non impegnato/.test(lower)) return result('GIALLO', "Partecipazione facoltativa o subordinata ad altri impegni.");
   if (matched.length) return result('VERDE', `Pertinente per ${matched.join(', ')}${targetedSubjects.length ? ' e per la materia del docente' : ''}.`);

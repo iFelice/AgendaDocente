@@ -31,6 +31,7 @@ import {
   RotateCcw,
 } from "lucide-react";
 import { compareStudentNames, isStudentActive } from "../utils/studentMatcher";
+import { isSupportTeacherOf } from "../utils/teacherType";
 import {
   Student,
   StudentNote,
@@ -258,7 +259,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
       fullName: "",
       className: selectedClass !== "TUTTE" && selectedClass !== "ALTRE" ? selectedClass : teacherClasses[0] || "1A",
       birthDate: "",
-      isSupportStudent: profile.isSupportTeacher || false,
+      isSupportStudent: isSupportTeacherOf(profile),
       peiType: "ordinario",
       supportHoursPerWeek: 9,
       hasBesDsa: false,
