@@ -491,25 +491,30 @@ test('the day overview is compact on phones so lessons appear immediately', asyn
   assert.ok(renderer.root.findAll((el: any) => el.type === 'div' && hasClass(el, 'p-3') && hasClass(el, 'sm:p-5')).length >= 1,
     'the overview card uses reduced phone padding');
 
-  // Duplicated quick actions are desktop only: the phone uses the FAB and "Altro".
-  for (const id of ['today-quick-add', 'today-quick-scan']) {
-    assert.ok(ancestorWithClass(byId(renderer, id), 'hidden', 'md:flex'), `${id} is hidden on phones`);
-  }
+  // The inline quick-add is gone (the FAB is the only quick-add point in the view;
+  // on desktop the global "Nuovo Impegno" in the navbar covers it). Only the
+  // circular-import shortcut remains, and it is desktop-only.
+  assert.equal(renderer.root.findAll((el: any) => el.props?.id === 'today-quick-add').length, 0,
+    'the inline "Aggiungi" quick action is removed');
+  assert.ok(ancestorWithClass(byId(renderer, 'today-quick-scan'), 'hidden', 'md:flex'),
+    'the circular-import shortcut is hidden on phones');
 });
 
 test('empty mobile sections are compact rows, not big empty cards', async () => {
   const renderer = await render(React.createElement(TodayView, todayProps()));
   const text = flatText(renderer.root);
 
-  // "Impegni & Riunioni" collapses to a single row with an inline action.
+  // "Impegni & Riunioni" keeps a compact empty row, WITHOUT the old inline add action:
+  // the section header now carries the count and the FAB is the only quick-add point.
   assert.match(text, /Nessun impegno oggi/);
-  assert.ok(byId(renderer, 'today-empty-add-event'), 'a compact "+ Aggiungi" action replaces the big empty card');
-  assert.ok(!text.includes('Nessun impegno registrato per questa data.'), 'the tall empty block is gone');
-  assert.ok(!text.includes('I consigli di classe o le riunioni appariranno qui quando inseriti.'));
+  assert.match(text, /Impegni & Riunioni \( ?0 ?\)/, 'the header shows the empty count');
+  assert.equal(renderer.root.findAll((el: any) => el.props?.id === 'today-empty-add-event').length, 0,
+    'the inline "+ Aggiungi" of the section is removed');
 
-  // Same for "Scadenze".
+  // Same for "Scadenze": compact row, no inline add shortcut.
   assert.match(text, /Nessuna scadenza oggi/);
-  assert.ok(byId(renderer, 'today-empty-add-deadline'));
+  assert.equal(renderer.root.findAll((el: any) => el.props?.id === 'today-empty-add-deadline').length, 0,
+    'the "Aggiungi scadenza" shortcut is removed');
   assert.ok(!text.includes('Nessuna scadenza in sospeso per questa data. Ottimo lavoro!'));
 
   // The standalone Scadenze view behaves the same way.

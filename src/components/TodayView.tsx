@@ -10,7 +10,6 @@ import {
   Circle,
   Clock,
   MapPin,
-  Plus,
   Sparkles,
   Users,
   AlertCircle,
@@ -92,7 +91,9 @@ export const TodayView: React.FC<TodayViewProps> = ({
   onOpenScheduledAssessment,
   isProvisionalTimetable,
   isDefinitiveCompiled,
-  onOpenNewEvent,
+  // NB: onOpenNewEvent resta nel contratto (l'app lo passa ancora), ma la vista
+  // Oggi non lo usa più: l'aggiunta rapida è delegata al FAB (mobile) e al
+  // pulsante globale "Nuovo Impegno" (desktop).
   onOpenCircularModal,
   onEditEvent,
   onDeleteEvent,
@@ -350,16 +351,11 @@ export const TodayView: React.FC<TodayViewProps> = ({
           </div>
         </div>
 
-        {/* Quick actions: desktop/tablet only (on phones: floating "+" and "Altro"). */}
+        {/* Quick actions: desktop/tablet only (on phones: floating "+" and "Altro").
+            The inline "Aggiungi" is intentionally absent: adding an event is the
+            FAB's job on phones, and on desktop the global "Nuovo Impegno" in the
+            navbar covers it. Only the circular-import shortcut stays here. */}
         <div className="hidden md:flex items-center justify-end gap-2 mt-3">
-          <button
-            id="today-quick-add"
-            onClick={() => onOpenNewEvent(selectedIso)}
-            className="inline-flex items-center px-3 py-2 text-sm font-medium rounded-lg text-emerald-800 bg-emerald-50 hover:bg-emerald-100 transition-colors border border-emerald-200 min-h-[44px]"
-          >
-            <Plus className="w-4 h-4 mr-1.5" />
-            Aggiungi{isToday ? " per oggi" : ""}
-          </button>
           <button
             id="today-quick-scan"
             onClick={onOpenCircularModal}
@@ -521,43 +517,25 @@ export const TodayView: React.FC<TodayViewProps> = ({
 
           <section className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-hidden"><button type="button" aria-expanded={!collapsed.scheduledAssessments} onClick={() => toggleCollapse("scheduledAssessments")} className="flex min-h-[52px] w-full items-center justify-between gap-2 px-3 py-3 text-left"><span className="text-sm font-bold text-stone-900">Prove degli alunni ({dayScheduled.length})</span><span className="text-stone-500">{collapsed.scheduledAssessments ? "›" : "⌄"}</span></button>{!collapsed.scheduledAssessments && <div className="border-t border-stone-100 p-3 space-y-3">{dayScheduled.concat(nextScheduled).length === 0 ? <p className="text-sm text-stone-500">Nessuna prova programmata in questa finestra.</p> : <>{dayScheduled.length > 0 && <h3 className="text-xs font-bold uppercase tracking-wide text-emerald-900">Oggi</h3>}{dayScheduled.map(item => <button type="button" key={`today-${item.id}`} data-testid="scheduled-assessment-today" onClick={() => onOpenScheduledAssessment?.(item.studentId)} className="block w-full min-h-[72px] rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-left"><span className="block font-bold text-stone-900">{item.studentName}{item.className ? ` · ${item.className}` : ""} </span><span className="block text-xs text-stone-700">{item.subject || "Materia non indicata"} · {scheduledAssessmentTypeLabel[item.assessmentType]}</span>{item.topic && <span className="mt-1 block text-sm font-semibold text-stone-900">{item.topic}</span>}</button>)}{nextScheduled.length > 0 && <h3 className="pt-1 text-xs font-bold uppercase tracking-wide text-amber-900">Prossime prove</h3>}{nextScheduled.map(item => <button type="button" key={`next-${item.id}`} data-testid="scheduled-assessment-future" onClick={() => onOpenScheduledAssessment?.(item.studentId)} className="block w-full min-h-[64px] rounded-lg border border-amber-300 bg-amber-50 p-3 text-left"><span className="block text-xs font-bold text-amber-900">{formatCivilDateIt(item.date)}</span><span className="block font-semibold text-stone-900">{item.studentName}</span><span className="block text-xs text-stone-700">{item.subject || "Materia non indicata"} · {scheduledAssessmentTypeLabel[item.assessmentType]}</span>{item.topic && <span className="block truncate text-xs font-semibold">{item.topic}</span>}</button>)}</>}</div>}</section>
 
-          {/* Section 2: Meetings & Events. With no data the section collapses to a
-              single compact row ("Nessun impegno oggi · + Aggiungi") instead of a big
-              empty card, and expands only when real items exist. */}
-          {todayEvents.length === 0 ? (
-            <div className="bg-white rounded-xl border border-stone-200 shadow-xs px-3 py-2.5 flex items-center justify-between gap-2">
-              <p className="text-xs text-stone-500 min-w-0 truncate">
-                Nessun impegno {isToday ? "oggi" : "in questa data"}
-                <span className="text-stone-400"> · i consigli di classe appariranno qui</span>
-              </p>
-              <button
-                type="button"
-                id="today-empty-add-event"
-                onClick={() => onOpenNewEvent(selectedIso)}
-                className="shrink-0 inline-flex items-center gap-1 min-h-[40px] px-3 rounded-lg text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                Aggiungi
-              </button>
-            </div>
-          ) : (
+          {/* Section 2: Meetings & Events. The header always shows the count of the
+              SELECTED day ("Impegni & Riunioni (N)"); adding an event is the FAB's
+              job (the only quick-add point in this view), so this section carries no
+              inline add actions. With no data the body is a single compact row. */}
           <div className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-hidden">
             <div role="button" tabIndex={0} aria-expanded={!collapsed.commitments} onClick={() => toggleCollapse("commitments")} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggleCollapse("commitments"); } }} className="p-3 sm:p-4 border-b border-stone-100 flex items-center justify-between bg-stone-50/70 min-h-[56px] cursor-pointer">
               <div className="flex items-center space-x-2 min-w-0">
                 <Calendar className="w-5 h-5 text-purple-700 shrink-0" />
-                <h2 className="text-sm sm:text-base font-semibold text-stone-900 truncate">Impegni & Riunioni{isToday ? "" : " del giorno selezionato"}</h2>
+                <h2 className="text-sm sm:text-base font-semibold text-stone-900 truncate">Impegni & Riunioni{isToday ? "" : " del giorno selezionato"} ({todayEvents.length})</h2>
               </div>
-              <button
-                onClick={(event) => { event.stopPropagation(); onOpenNewEvent(selectedIso); }}
-                className="text-xs font-semibold text-emerald-700 hover:text-emerald-800 flex items-center min-h-[36px] px-2 shrink-0"
-              >
-                <Plus className="w-3.5 h-3.5 mr-1" />
-                Aggiungi
-              </button>
               {collapsed.commitments ? <ChevronRight className="h-4 w-4 text-stone-500" /> : <ChevronDown className="h-4 w-4 text-stone-500" />}
             </div>
 
-            {!collapsed.commitments && <div className="p-3 sm:p-4">
+            {!collapsed.commitments && (todayEvents.length === 0 ? <div className="p-3 sm:p-4">
+              <p className="text-xs text-stone-500 min-w-0 truncate">
+                Nessun impegno {isToday ? "oggi" : "in questa data"}
+                <span className="text-stone-400"> · i consigli di classe appariranno qui</span>
+              </p>
+            </div> : <div className="p-3 sm:p-4">
                 <div className="space-y-3">
                   {todayEvents.map((ev) => (
                     <div
@@ -645,9 +623,8 @@ export const TodayView: React.FC<TodayViewProps> = ({
                     </div>
                   ))}
                 </div>
-            </div>}
+            </div>)}
           </div>
-          )}
         </div>
 
         {/* Right Col: Deadlines & Quick Reference */}
@@ -655,19 +632,10 @@ export const TodayView: React.FC<TodayViewProps> = ({
           {/* Deadlines of the selected day, then the nearest upcoming ones. With no
               data at all the section is a single compact row, not a big empty card. */}
           {dayDeadlines.length === 0 && nextDeadlines.length === 0 ? (
-            <div className="bg-white rounded-xl border border-stone-200 shadow-xs px-3 py-2.5 flex items-center justify-between gap-2">
+            <div className="bg-white rounded-xl border border-stone-200 shadow-xs px-3 py-2.5">
               <p className="text-xs text-stone-500 min-w-0 truncate">
                 Nessuna scadenza {isToday ? "oggi" : "in questa data"}
               </p>
-              <button
-                type="button"
-                id="today-empty-add-deadline"
-                onClick={() => onOpenNewEvent(selectedIso)}
-                className="shrink-0 inline-flex items-center gap-1 min-h-[40px] px-3 rounded-lg text-xs font-semibold text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                Aggiungi
-              </button>
             </div>
           ) : (
           <div className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-hidden">

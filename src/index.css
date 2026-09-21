@@ -236,12 +236,15 @@ button {
   align-items: center;
   justify-content: center;
   border-radius: var(--radius-full);
-  background: #047857;
+  /* emerald-600: verde più chiaro e morbido dell'ex emerald-700, nella stessa
+     famiglia delle tonalità emerald usate dalle celle verdi dell'orario; il "+"
+     bianco mantiene contrasto ~3.8:1 (sufficiente per grafici WCAG). */
+  background: #059669;
   color: #fff;
   box-shadow: 0 6px 20px rgb(28 25 23 / 0.3);
 }
 .app-fab:active {
-  background: #065f46;
+  background: #047857; /* emerald-700 */
 }
 
 /* Quick-actions sheet: small menu anchored just above the floating "+" button
