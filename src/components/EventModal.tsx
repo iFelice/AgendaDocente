@@ -240,26 +240,33 @@ export const EventModal: React.FC<EventModalProps> = ({
           {eventToEdit?.googleEventId && !syncWithGoogle && (
             <p className="text-xs text-stone-600">Sincronizzazione disattivata: la copia su Google resta disponibile e non verrà aggiornata o eliminata da questa agenda.</p>
           )}
-          {/* Times */}
+          {/*
+            Times — smartphone: un campo per riga a tutta larghezza (stessa
+            convenzione responsive delle altre coppie del form:
+            grid-cols-1 sm:grid-cols-2); da sm (640px) in su tornano affiancati.
+            min-w-0 su cella e input: su iOS Safari il type="time" ha una
+            larghezza intrinseca rilevante e, senza min-w-0, la colonna della
+            grid non può restringersi (accavallamento/overflow).
+          */}
           {!isAllDay && (
-            <div className="grid grid-cols-2 gap-3">
-              <div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="min-w-0">
                 <label className="block font-semibold text-stone-700 mb-1">Ora Inizio</label>
                 <input
                   type="time"
                   value={startTime}
                   onChange={(e) => setStartTime(e.target.value)}
-                  className="w-full p-2 border border-stone-300 rounded-lg text-xs"
+                  className="w-full min-w-0 p-2 border border-stone-300 rounded-lg text-xs"
                 />
               </div>
 
-              <div>
+              <div className="min-w-0">
                 <label className="block font-semibold text-stone-700 mb-1">Ora Fine</label>
                 <input
                   type="time"
                   value={endTime}
                   onChange={(e) => setEndTime(e.target.value)}
-                  className="w-full p-2 border border-stone-300 rounded-lg text-xs"
+                  className="w-full min-w-0 p-2 border border-stone-300 rounded-lg text-xs"
                 />
               </div>
             </div>
