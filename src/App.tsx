@@ -32,6 +32,14 @@ import {
   type RegisterNavigation,
   type RegisterSection,
 } from "./utils/registerNavigation";
+import {
+  backFromSlotEdit,
+  clearSlotEdit,
+  initialSlotEditNavigation,
+  isSlotEditOpen,
+  openSlotForEdit,
+  type SlotEditNavigation,
+} from "./utils/timetableEditNavigation";
 import { Navbar } from "./components/Navbar";
 import { MobileNav } from "./components/MobileNav";
 import { TodayView } from "./components/TodayView";
@@ -104,6 +112,11 @@ export default function App({ initialData }: { initialData: LocalData }) {
   // navigazione (vista di provenienza per il pulsante "Indietro"). Stato
   // dedicato: non si deduce mai da altri stati.
   const [registerNav, setRegisterNav] = useState<RegisterNavigation>(initialRegisterNavigation);
+  // Navigazione della MODIFICA LEZIONE aperta dal Planning (stesso pattern del
+  // Registro, logica in timetableEditNavigation.ts): quale lezione è in
+  // modifica, in quale orario, da quale vista di Planning e con quale
+  // data/settimana tornare. Mai dedotta da altri stati.
+  const [slotEditNav, setSlotEditNav] = useState<SlotEditNavigation>(initialSlotEditNavigation);
   const [isCircularModalOpen, setIsCircularModalOpen] = useState(false);
   const [isScannerOpen, setIsScannerOpen] = useState(false);
   // File pre-scansionato dal flusso unificato, da alimentare alla pipeline circolare esistente.
@@ -597,6 +610,12 @@ export default function App({ initialData }: { initialData: LocalData }) {
   const handleViewChange = (view: ViewMode) => {
     setCurrentView(view);
     if (view !== "registro") setRegisterNav((nav) => clearRegisterStudent(nav));
+    // Uscita volontaria dal flusso di modifica lezione (o arrivo manuale in
+    // Orario dalla navigazione principale): la sessione si chiude qui, così un
+    // vecchio initialSlot non può più essere ri-consumato da un futuro remount
+    // dell'editor. Il flusso di modifica usa setCurrentView diretto (come il
+    // Registro) e non passa da qui.
+    setSlotEditNav((nav) => clearSlotEdit(nav));
   };
   const handleOpenRegister = (studentId: string, section: RegisterSection = "assessments") => {
     // L'origine è la vista in cui l'utente si trova al momento dell'apertura:
@@ -607,6 +626,28 @@ export default function App({ initialData }: { initialData: LocalData }) {
     setRegisterNav(openRegisterForStudent(studentId, section, currentView));
     setCurrentView("registro");
   };
+
+  // Tap su una lezione del Planning (Oggi): apre la modifica diretta della
+  // lezione toccata nell'orario ATTIVO (type = activeType, mai il flag dello
+  // slot). La data selezionata di Oggi resta quella del tap. L'origine qui è
+  // "oggi": Settimana aggancerà lo stesso meccanismo nel suo micro-step.
+  const handleOpenTimetableSlotForEdit = useCallback((slot: TimetableSlot, type: TimetableType, selectedIso: string) => {
+    setSlotEditNav(openSlotForEdit(slot, type, "oggi", selectedIso));
+    setOggiTargetDate(selectedIso);
+    setCurrentView("orario");
+  }, []);
+
+  // "Torna al Planning" nell'editor: vista e data di ritorno sono quelle
+  // REGISTRATE all'apertura (mai dedotte dagli altri stati); la sessione si
+  // chiude con `next` restituito dall'helper.
+  const handleBackFromSlotEdit = useCallback(() => {
+    const { targetView, targetDateIso, next } = backFromSlotEdit(slotEditNav);
+    setSlotEditNav(next);
+    if (targetView === "oggi") {
+      if (targetDateIso) setOggiTargetDate(targetDateIso);
+      setCurrentView("oggi");
+    }
+  }, [slotEditNav]);
 
   // Stats for badges
   const todayIso = localDateISO();
@@ -673,6 +714,8 @@ export default function App({ initialData }: { initialData: LocalData }) {
             onSelectedDateChange={handleTodaySelectedDate}
             isProvisionalTimetable={isProvisionalActive}
             isDefinitiveCompiled={isDefinitiveCompiled}
+            timetableType={activeTimetableInfo.activeType}
+            onOpenTimetableSlotForEdit={handleOpenTimetableSlotForEdit}
             onOpenNewEvent={handleOpenNewEvent}
             onOpenCircularModal={() => setIsCircularModalOpen(true)}
             onEditEvent={handleEditEvent}
@@ -780,6 +823,9 @@ export default function App({ initialData }: { initialData: LocalData }) {
             onClearTimetable={handleClearTimetable}
             onSaveProfile={handleSaveProfile}
             onSaveTimeSlotConfig={handleSaveTimeSlotConfig}
+            initialSlot={isSlotEditOpen(slotEditNav) ? slotEditNav.slot : null}
+            initialSlotType={isSlotEditOpen(slotEditNav) ? slotEditNav.type : null}
+            onBackToOrigin={isSlotEditOpen(slotEditNav) ? handleBackFromSlotEdit : undefined}
           />
         )}
 

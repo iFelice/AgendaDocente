@@ -16,12 +16,20 @@ import {
   Pencil,
   Trash2,
 } from "lucide-react";
-import { CalendarEvent, TeacherProfile, TimetableSlot } from "../types";
+import { CalendarEvent, TeacherProfile, TimetableSlot, TimetableType } from "../types";
 import type { ScheduledAssessmentCalendarItem } from "../utils/scheduledAssessmentCalendar";
 import { scheduledAssessmentTypeLabel } from "../utils/scheduledAssessmentCalendar";
 import { readDailyCollapse, writeDailyCollapse, type CollapseGroup } from "../utils/collapsePreferences";
 import { coTeachingSummary } from "../utils/coTeaching";
-import { daySwipeDirection, isInteractiveSwipeTarget } from "../utils/daySwipe";
+import { daySwipeDirection, isInteractiveSwipeTarget, DAY_SWIPE_INTERACTIVE_SELECTOR } from "../utils/daySwipe";
+
+/**
+ * Marcatore SEMANTICO della card lezione tappabile in Oggi. La card è un
+ * `<button>` (apre la modifica diretta della lezione), ma è anche superficie
+ * del giorno: lo swipe che inizia su di essa cambia data, e solo un tap la
+ * apre. Il riconoscimento usa questo attributo, non il testo o la struttura.
+ */
+export const TODAY_LESSON_CELL_SELECTOR = '[data-slot-cell="lesson"]';
 
 /**
  * Pure day selector for the "Oggi" view: everything is computed from the *selected civil
@@ -74,6 +82,18 @@ interface TodayViewProps {
   onNavigateToPlanning?: (dateIso: string, view?: "oggi" | "settimana" | "mese") => void;
   onNavigateToTimetable?: () => void;
   /**
+   * Apre la modifica DIRETTA di una lezione dell'orario (tap sulla card).
+   * Il tipo orario NON è dedotto da `slot.isProvisional`: la fonte autorevole
+   * arriva da App (`activeType` dell'orario visualizzato), passata qui tramite
+   * `timetableType` e inoltrata esplicitamente al callback.
+   */
+  onOpenTimetableSlotForEdit?: (slot: TimetableSlot, type: TimetableType, selectedIso: string) => void;
+  /**
+   * Orario a cui appartiene l'array `timetable` (da App: activeType). La card
+   * lezione lo usa come tipo della richiesta di modifica.
+   */
+  timetableType?: TimetableType;
+  /**
    * Data civile da mostrare al primo montaggio (default: il reale oggi). Usata
    * per preservare il contesto quando si torna alla vista (es. dal Registro):
    * la vista si riapre sullo stesso giorno che l'utente stava guardando.
@@ -100,6 +120,8 @@ export const TodayView: React.FC<TodayViewProps> = ({
   onToggleComplete,
   onNavigateToPlanning,
   onNavigateToTimetable,
+  onOpenTimetableSlotForEdit,
+  timetableType,
   initialDateIso,
   onSelectedDateChange,
 }) => {
@@ -132,11 +154,45 @@ export const TodayView: React.FC<TodayViewProps> = ({
     pointercancel e il gesto viene scartato.
   */
   const todaySwipeStartRef = React.useRef<{ pointerId: number; x: number; y: number } | null>(null);
+  /**
+   * Uno swipe riconosciuto non è un tap: il click che alcuni browser fanno
+   * comunque arrivare al rilascio NON deve aprire la lezione toccata (stessa
+   * soppressione esplicita delle celle dell'editor, senza preventDefault né
+   * timer, così lo scroll verticale resta nativo).
+   */
+  const suppressLessonClickRef = React.useRef(false);
+  /** Consuma l'eventuale soppressione lasciata da uno swipe appena concluso. */
+  const consumeLessonSwipeClick = (): boolean => {
+    if (!suppressLessonClickRef.current) return false;
+    suppressLessonClickRef.current = false;
+    return true;
+  };
+  // Tipo orario della richiesta di modifica: fonte autorevole da App
+  // (timetableType = activeType dell'orario visualizzato). Per i chiamanti
+  // legacy che passano solo il flag storico, quel flag arriva comunque da App
+  // e descrive lo stesso array; mai `slot.isProvisional`.
+  const lessonType: TimetableType =
+    timetableType ?? (isProvisionalTimetable ? "provvisorio" : "definitivo");
   const handleTodaySwipeStart = (event: React.PointerEvent<HTMLDivElement>) => {
+    // Ogni gesto riparte pulito: la soppressione vale solo per il gesto appena concluso.
+    suppressLessonClickRef.current = false;
     if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
     // Frecce, badge "Oggi", date picker, card di sezione, pulsanti: il gesto
     // non parte mai da un controllo interattivo, così tap/click restano intatti.
-    if (isInteractiveSwipeTarget(event.target)) return;
+    if (isInteractiveSwipeTarget(event.target)) {
+      // Unica eccezione: la CARD LEZIONE (button) è anche superficie del
+      // giorno, come le celle "+" dell'editor. Il controllo interattivo
+      // raggiunto dal target deve essere la card marcata; ogni altro controllo
+      // resta escluso dallo swipe.
+      const control = typeof (event.target as Element | null)?.closest === "function"
+        ? (event.target as Element).closest(DAY_SWIPE_INTERACTIVE_SELECTOR)
+        : null;
+      if (
+        !control ||
+        typeof control.closest !== "function" ||
+        control.closest(TODAY_LESSON_CELL_SELECTOR) !== control
+      ) return;
+    }
     todaySwipeStartRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
   };
   const handleTodaySwipeEnd = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -145,6 +201,8 @@ export const TodayView: React.FC<TodayViewProps> = ({
     if (!start || start.pointerId !== event.pointerId) return;
     const direction = daySwipeDirection(event.clientX - start.x, event.clientY - start.y);
     if (!direction) return;
+    // Era uno swipe, non un tap: nessuna apertura di lezione al rilascio.
+    suppressLessonClickRef.current = true;
     // Identica alle frecce: sinistra = giorno successivo, destra = precedente.
     setSelectedIso((iso) => addDaysISO(iso, direction === "next" ? 1 : -1));
   };
@@ -427,11 +485,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
                 <div className="space-y-2.5">
                   {todayLessons.map((slot) => {
                     const summary = coTeachingSummary(slot);
-                    return (
-                      <div
-                        key={slot.id}
-                        className="p-3 rounded-xl border border-stone-200 hover:border-emerald-300 active:border-emerald-400 transition-colors bg-white"
-                      >
+                    const lessonBody = (
                         <div className="flex items-start gap-3">
                           {/* Ora & periodo: blocco verticale compatto */}
                           <div
@@ -450,9 +504,9 @@ export const TodayView: React.FC<TodayViewProps> = ({
                           {/* Materia + classe, aula/plesso e compresenza */}
                           <div className="min-w-0 flex-1">
                             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                              <h3 className="text-sm font-bold text-stone-900 leading-snug break-words">
+                              <span className="block text-sm font-bold text-stone-900 leading-snug break-words">
                                 {slot.subject}
-                              </h3>
+                              </span>
                               <span className="text-[11px] font-semibold px-1.5 py-0.5 rounded-md bg-stone-100 text-stone-700 border border-stone-200 whitespace-nowrap">
                                 {slot.className}
                               </span>
@@ -480,6 +534,38 @@ export const TodayView: React.FC<TodayViewProps> = ({
                             )}
                           </div>
                         </div>
+                    );
+                    // Con il callback di modifica la card diventa semanticamente
+                    // interattiva: un button a larghezza piena, touch target
+                    // comodo, focus visibile, nessuna nuova estetica. Il marker
+                    // `data-slot-cell` lo abilita come unica eccezione swipe
+                    // (tap = apre; swipe = cambia giorno senza aprire).
+                    if (onOpenTimetableSlotForEdit) {
+                      return (
+                        <button
+                          key={slot.id}
+                          type="button"
+                          data-slot-cell="lesson"
+                          aria-label={`Modifica la lezione: ${slot.subject}, classe ${slot.className}, ${slot.periodNumber}ª ora (${slot.startTime}–${slot.endTime})`}
+                          onClick={() => {
+                            // Uno swipe riconosciuto può lasciare un click residuo
+                            // al rilascio: non deve aprire la lezione (sotto
+                            // soglia nessuna soppressione → tap normale).
+                            if (consumeLessonSwipeClick()) return;
+                            onOpenTimetableSlotForEdit(slot, lessonType, selectedIso);
+                          }}
+                          className="block w-full min-h-[44px] text-left p-3 rounded-xl border border-stone-200 hover:border-emerald-300 active:border-emerald-400 focus-visible:outline-2 focus-visible:outline-emerald-600 focus-visible:outline-offset-2 transition-colors bg-white"
+                        >
+                          {lessonBody}
+                        </button>
+                      );
+                    }
+                    return (
+                      <div
+                        key={slot.id}
+                        className="p-3 rounded-xl border border-stone-200 hover:border-emerald-300 active:border-emerald-400 transition-colors bg-white"
+                      >
+                        {lessonBody}
                       </div>
                     );
                   })}
