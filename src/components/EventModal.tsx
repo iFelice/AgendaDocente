@@ -25,7 +25,6 @@ export const EVENT_CATEGORIES: { id: EventCategory; label: string }[] = [
   { id: "dipartimento_sostegno", label: "Dipartimento Sostegno / Inclusione" },
   { id: "consiglio_classe", label: "Consiglio di Classe" },
   { id: "collegio_docenti", label: "Collegio Docenti" },
-  { id: "dipartimento", label: "Dipartimento Disciplinare" },
   { id: "ricevimento_genitori", label: "Ricevimento Genitori / Terapisti" },
   { id: "scadenza", label: "Scadenza Istituzionale" },
   { id: "promemoria", label: "Promemoria Didattico" },
@@ -34,6 +33,19 @@ export const EVENT_CATEGORIES: { id: EventCategory; label: string }[] = [
   { id: "riunione", label: "Altra Riunione" },
   { id: "personale", label: "Personale" },
 ];
+
+/**
+ * Categoria LEGACY "Dipartimento disciplinare": non è più fra le opzioni
+ * normali (EVENT_CATEGORIES) per i nuovi eventi, ma resta selezionabile SOLO
+ * mentre si modifica un evento che la possiede già, così una scelta storica
+ * non viene mai persa o convertita in silenzio. L'identificatore "dipartimento"
+ * resta valido nei tipi e nei formatter/parser (dati salvati e estratti da
+ * circolari continuano a caricarsi, vedersi ed esportarsi).
+ */
+export const LEGACY_DIPARTIMENTO_CATEGORY: { id: EventCategory; label: string } = {
+  id: "dipartimento",
+  label: "Dipartimento Disciplinare (legacy)",
+};
 
 /** Defaults are only suggestions for a new manual event, never replacements for source data. */
 export function getEventModalTimeFields(source?: Partial<CalendarEvent> | null) {
@@ -69,6 +81,13 @@ export const EventModal: React.FC<EventModalProps> = ({
   const [notes, setNotes] = useState("");
   const [syncWithGoogle, setSyncWithGoogle] = useState(false);
   const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
+  // L'evento in modifica (o precompilato dallo scanner) possiede gia' la
+  // categoria legacy? Allora l'opzione resta disponibile per tutta la sessione
+  // di modifica: si puo' anche tornare indietro dopo un cambio di idea. Per un
+  // evento nuovo senza quella categoria, l'opzione non esiste.
+  const editingLegacyDipartimento =
+    eventToEdit?.category === "dipartimento" ||
+    initialEventData?.category === "dipartimento";
 
   useEffect(() => {
     const timeFields = getEventModalTimeFields(eventToEdit ?? initialEventData);
@@ -180,7 +199,7 @@ export const EventModal: React.FC<EventModalProps> = ({
           <div>
             <label className="block font-semibold text-stone-700 mb-1.5">Tipologia Impegno</label>
             <div className="flex flex-wrap gap-1.5">
-              {EVENT_CATEGORIES.map((cat) => (
+              {(editingLegacyDipartimento ? [...EVENT_CATEGORIES, LEGACY_DIPARTIMENTO_CATEGORY] : EVENT_CATEGORIES).map((cat) => (
                 <button
                   key={cat.id}
                   type="button"

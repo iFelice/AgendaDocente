@@ -694,7 +694,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
           <div className="bg-emerald-50/70 rounded-xl p-4 border border-emerald-200 space-y-2">
             <div className="flex items-center justify-between">
               <span className="font-bold text-xs text-emerald-950">
-                Anteprima scansione oraria ({initialPreviewSlots.length} ore):
+                Anteprima scansione oraria ({initialPreviewSlots.length} {initialPreviewSlots.length === 1 ? "ora" : "ore"}):
               </span>
               <span className="text-[11px] font-medium text-emerald-800">
                 Calcolata automaticamente
@@ -879,7 +879,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
             )}
           </div>
           <p className="text-xs text-stone-600 mt-1.5">
-            Primi giorni di scuola • <strong>{provisionalTimetable.length} ore</strong>
+            Primi giorni di scuola • <strong>{provisionalTimetable.length} {provisionalTimetable.length === 1 ? "ora" : "ore"}</strong>
           </p>
           {!isDefinitiveCompiled && (
             <p className="text-[11px] text-amber-800 font-medium mt-1">
@@ -917,7 +917,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                 </span>
               ) : (
                 <span className="px-2 py-0.5 rounded-full text-[10px] sm:text-[11px] font-semibold bg-stone-100 text-stone-700 border border-stone-200">
-                  {definitiveTimetable.length} ore
+                  {definitiveTimetable.length} {definitiveTimetable.length === 1 ? "ora" : "ore"}
                 </span>
               )
             ) : (
@@ -928,7 +928,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
           </div>
           <p className="text-xs text-stone-600 mt-1.5">
             Orario di cattedra a regime •{" "}
-            <strong>{definitiveTimetable.length} ore</strong>
+            <strong>{definitiveTimetable.length} {definitiveTimetable.length === 1 ? "ora" : "ore"}</strong>
           </p>
           {!isDefinitiveCompiled && (
             <p className="text-[11px] text-rose-700 font-medium mt-1">
@@ -970,7 +970,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
             {activeTab === "provvisorio" ? "Griglia Provvisorio" : "Griglia Definitivo"}
           </span>
           <span className="text-xs font-semibold px-2 py-0.5 bg-stone-100 text-stone-700 rounded-full">
-            {currentSlots.length} ore
+            {currentSlots.length} {currentSlots.length === 1 ? "ora" : "ore"}
           </span>
         </div>
 
@@ -1794,7 +1794,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
               {/* Preview of Effective Slots */}
               <div className="bg-emerald-50/50 rounded-xl p-3 border border-emerald-200 text-xs">
                 <span className="font-bold text-emerald-950 block mb-1">
-                  Anteprima scansione oraria ({customSlotsDraft.length} ore):
+                  Anteprima scansione oraria ({customSlotsDraft.length} {customSlotsDraft.length === 1 ? "ora" : "ore"}):
                 </span>
                 <div className="flex flex-wrap gap-1.5">
                   {customSlotsDraft.map((s) => (

@@ -330,7 +330,9 @@ export const TodayView: React.FC<TodayViewProps> = ({
               <h1 className="text-base sm:text-2xl font-bold text-stone-900 mt-0.5 break-words leading-snug">{displayDate}</h1>
               <p className="text-xs sm:text-sm text-stone-500 mt-0.5 truncate">
                 {todayLessons.length > 0
-                  ? `${todayLessons.length} ore di lezione in programma`
+                  ? todayLessons.length === 1
+                    ? "1 ora di lezione in programma"
+                    : `${todayLessons.length} ore di lezione in programma`
                   : "Nessuna lezione curricolare prevista"}
                 {todayEvents.length > 0 && ` • ${todayEvents.length} impegni/riunioni`}
               </p>
