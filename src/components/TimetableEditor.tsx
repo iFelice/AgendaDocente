@@ -1,6 +1,7 @@
 import { usePersistenceAction } from "../hooks/usePersistenceAction";
 import React, { useState, useRef, useMemo, useEffect } from "react";
 import {
+  ArrowLeft,
   Clock,
   MapPin,
   Plus,
@@ -135,6 +136,23 @@ interface TimetableEditorProps {
   onSaveTimeSlotConfig?: (
     config: TimeSlotConfig
   ) => void | false | Promise<void | false>;
+  /**
+   * Lezione da aprire DIRETTAMENTE in modifica (tap su una lezione del
+   * Planning: Oggi/Settimana). È solo l'handle della richiesta: la validazione
+   * vera avviene cercando lo slot PER ID nell'orario dichiarato da
+   * `initialSlotType` (vedi l'effetto one-shot più sotto).
+   */
+  initialSlot?: TimetableSlot | null;
+  /**
+   * Orario a cui la lezione da aprire appartiene. Fonte AUTOREVOLE del tab di
+   * destinazione: non ci si può fidare di `initialSlot.isProvisional`.
+   */
+  initialSlotType?: TimetableType | null;
+  /**
+   * Presente solo quando l'editor è aperto dal Planning: mostra "Torna al
+   * Planning". Senza questo callback il controllo non esiste (editor normale).
+   */
+  onBackToOrigin?: () => void;
 }
 
 export const TimetableEditor: React.FC<TimetableEditorProps> = ({
@@ -153,6 +171,9 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   onClearTimetable,
   onSaveProfile,
   onSaveTimeSlotConfig,
+  initialSlot = null,
+  initialSlotType = null,
+  onBackToOrigin,
 }) => {
   const save = usePersistenceAction();
   const slotConfigSave = usePersistenceAction();
@@ -166,6 +187,21 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   const [editingSlot, setEditingSlot] = useState<TimetableSlot | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+
+  // Avviso (una tantum) quando la richiesta di apertura diretta non trova più
+  // la lezione nell'orario dichiarato: niente modale, niente fallback, niente
+  // scritture — solo un messaggio chiaro e chiudibile.
+  const [slotEditNotice, setSlotEditNotice] = useState<string | null>(null);
+
+  // Richiesta ONE-SHOT di apertura diretta (tap su una lezione del Planning):
+  // catturata al primo render e consumata una sola volta per mount. La fonte
+  // autorevole del tipo è `initialSlotType`, NON il flag dello slot; lo slot
+  // verrà cercato PER ID nell'array di quell'orario al momento dell'apertura.
+  const initialEditRequestRef = useRef<{ slotId: string; type: TimetableType } | null>(
+    initialSlot && initialSlotType
+      ? { slotId: initialSlot.id, type: initialSlotType }
+      : null
+  );
 
   // Class selection state in slot modal
   const [isAddingNewClass, setIsAddingNewClass] = useState(false);
@@ -228,6 +264,16 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
 
   const currentSlots =
     activeTab === "provvisorio" ? provisionalTimetable : definitiveTimetable;
+
+  // Il modale sta modificando una lezione ESISTENTE dell'orario mostrato
+  // (stesso criterio di titolo ed "Elimina ora" del modale). Mentre è aperta,
+  // cambiare tab cambierebbe la destinazione di Salva/Elimina: i tab restano
+  // quindi DISABILITATI. Non bloccano: modale chiuso, e creazione di una nuova
+  // ora (baseline assente, id nuovo non presente nell'orario).
+  const isEditingExistingSlot =
+    isModalOpen &&
+    editingSlot !== null &&
+    currentSlots.some((s) => s.id === editingSlot.id);
 
   // Effective period slots calculated from config
   const periods = useMemo(
@@ -354,6 +400,35 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
     setEditingSlot({ ...slot, isProvisional: activeTab === "provvisorio" });
     setIsModalOpen(true);
   };
+
+  // Apertura diretta di una lezione arrivata dal Planning (Oggi/Settimana):
+  // seleziona il tab dell'orario DICHIARATO e apre il normale modale di
+  // modifica con lo stesso percorso del tap sulla griglia (handleEditSlot), così
+  // editBaseline — il terzo argomento CAS di onSaveSlot — è lo slot REALMENTE
+  // presente nell'array al momento dell'apertura, non una copia inventata.
+  // Guard-rail: lo slot viene cercato PER ID SOLO nell'array dell'orario
+  // dichiarato; se non c'è (slot cancellato nel frattempo, tipo sbagliato,
+  // stato stale) NON si apre nulla, NON si crea nulla e NON si cerca
+  // nell'altro orario: resta un avviso esplicito. Consumo one-shot: dopo
+  // Salva/Elimina/Annulla la richiesta non riesiste e l'effetto (mount-only)
+  // non può produrre loop né riaperture.
+  useEffect(() => {
+    const request = initialEditRequestRef.current;
+    if (!request) return;
+    initialEditRequestRef.current = null;
+    const source =
+      request.type === "provvisorio" ? provisionalTimetable : definitiveTimetable;
+    const liveSlot = source.find((s) => s.id === request.slotId);
+    if (!liveSlot) {
+      setSlotEditNotice(
+        "La lezione non è più disponibile nell'orario selezionato."
+      );
+      return;
+    }
+    setActiveTab(request.type);
+    handleEditSlot(liveSlot);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // When changing period number in modal, automatically update start & end times
   const handlePeriodChange = (newPeriodNum: number) => {
@@ -661,10 +736,43 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   // =========================================================================
   return (
     <div className="space-y-6 pb-12 max-w-full overflow-x-hidden">
+      {/* Aperto dal Planning (Oggi/Settimana): ritorno esplicito all'origine.
+          Nascosto mentre il modale è aperto: prima Salva / Elimina / Annulla. */}
+      {onBackToOrigin && !isModalOpen && (
+        <button
+          type="button"
+          id="back-to-planning"
+          onClick={onBackToOrigin}
+          className="flex min-h-[44px] items-center gap-2 rounded-xl px-2 font-semibold text-emerald-800 hover:bg-emerald-50 transition-colors"
+        >
+          <ArrowLeft className="h-5 w-5" />
+          Torna al Planning
+        </button>
+      )}
       {save.error && (
         <p role="alert" className="p-3 text-sm text-rose-700 bg-rose-50 rounded-xl border border-rose-200">
           {save.error}
         </p>
+      )}
+      {slotEditNotice && (
+        <div
+          id="slot-edit-notice"
+          role="alert"
+          className="p-3 text-sm text-amber-900 bg-amber-50 rounded-xl border border-amber-200 flex items-start justify-between gap-3"
+        >
+          <span className="flex items-start gap-2 min-w-0">
+            <AlertCircle className="w-4 h-4 mt-0.5 shrink-0 text-amber-700" />
+            <span>{slotEditNotice}</span>
+          </span>
+          <button
+            type="button"
+            onClick={() => setSlotEditNotice(null)}
+            aria-label="Chiudi avviso"
+            className="p-1.5 rounded-lg text-amber-700 hover:bg-amber-100 transition-colors shrink-0"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
       )}
 
       {/* Header with Title, Slot Config trigger & Mode Selector */}
@@ -746,11 +854,14 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
         <button
           type="button"
           onClick={() => setActiveTab("provvisorio")}
+          disabled={isEditingExistingSlot}
+          aria-disabled={isEditingExistingSlot || undefined}
+          title={isEditingExistingSlot ? "Chiudi la modifica della lezione prima di cambiare orario" : undefined}
           className={`p-4 rounded-xl border text-left transition-all ${
             activeTab === "provvisorio"
               ? "bg-amber-50/70 border-amber-400 ring-2 ring-amber-300 shadow-sm"
               : "bg-white border-stone-200 hover:border-stone-300 shadow-2xs"
-          }`}
+          } ${isEditingExistingSlot ? "opacity-60 cursor-not-allowed" : ""}`}
         >
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-2">
@@ -781,11 +892,14 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
         <button
           type="button"
           onClick={() => setActiveTab("definitivo")}
+          disabled={isEditingExistingSlot}
+          aria-disabled={isEditingExistingSlot || undefined}
+          title={isEditingExistingSlot ? "Chiudi la modifica della lezione prima di cambiare orario" : undefined}
           className={`p-4 rounded-xl border text-left transition-all ${
             activeTab === "definitivo"
               ? "bg-emerald-50/70 border-emerald-500 ring-2 ring-emerald-300 shadow-sm"
               : "bg-white border-stone-200 hover:border-stone-300 shadow-2xs"
-          }`}
+          } ${isEditingExistingSlot ? "opacity-60 cursor-not-allowed" : ""}`}
         >
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-2">
@@ -1096,6 +1210,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
               <button
                 type="button"
                 onClick={() => setIsModalOpen(false)}
+                aria-label="Chiudi"
                 className="p-1.5 rounded-lg text-stone-400 hover:text-stone-700 hover:bg-stone-100"
               >
                 <X className="w-5 h-5" />
