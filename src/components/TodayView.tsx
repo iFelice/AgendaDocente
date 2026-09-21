@@ -1,4 +1,4 @@
-import { addDaysISO, civilDayOfWeek, civilTimetableDay, formatCivilDateIt, localDateISO, parseCivilDate } from "../utils/dates";
+import { addDaysISO, civilDayOfWeek, civilTimetableDay, formatCivilDateIt, isValidDate, localDateISO, parseCivilDate } from "../utils/dates";
 import React from "react";
 import {
   BookOpen,
@@ -74,6 +74,15 @@ interface TodayViewProps {
   onToggleComplete: (id: string) => void;
   onNavigateToPlanning?: (dateIso: string, view?: "oggi" | "settimana" | "mese") => void;
   onNavigateToTimetable?: () => void;
+  /**
+   * Data civile da mostrare al primo montaggio (default: il reale oggi). Usata
+   * per preservare il contesto quando si torna alla vista (es. dal Registro):
+   * la vista si riapre sullo stesso giorno che l'utente stava guardando.
+   * Solo l'inizializzazione: successivamente lo stato segue le interazioni.
+   */
+  initialDateIso?: string;
+  /** Comunica al parent la data civile selezionata (per conservarne il contesto). */
+  onSelectedDateChange?: (iso: string) => void;
 }
 
 export const TodayView: React.FC<TodayViewProps> = ({
@@ -90,11 +99,22 @@ export const TodayView: React.FC<TodayViewProps> = ({
   onToggleComplete,
   onNavigateToPlanning,
   onNavigateToTimetable,
+  initialDateIso,
+  onSelectedDateChange,
 }) => {
   const [confirmingDeleteEventId, setConfirmingDeleteEventId] = React.useState<string | null>(null);
-  // Selected civil date (defaults to the real today). Navigation is day-by-day and must
-  // survive month/year/weekend crossings because it works on local Date parts, never UTC.
-  const [selectedIso, setSelectedIso] = React.useState<string>(() => localDateISO());
+  // Selected civil date (defaults to the real today, or to initialDateIso when
+  // the parent restores a previously viewed context). Navigation is day-by-day
+  // and must survive month/year/weekend crossings because it works on local
+  // Date parts, never UTC.
+  const [selectedIso, setSelectedIso] = React.useState<string>(() =>
+    initialDateIso && isValidDate(initialDateIso) ? initialDateIso : localDateISO()
+  );
+  // Report the selected civil date to the parent so its context survives a
+  // remount (e.g. round-trip through the Registro). Presentation-only.
+  React.useEffect(() => {
+    onSelectedDateChange?.(selectedIso);
+  }, [selectedIso, onSelectedDateChange]);
   const datePickerRef = React.useRef<HTMLInputElement>(null);
   const todayIso = localDateISO();
   const [collapsed, setCollapsed] = React.useState(() => readDailyCollapse(localDateISO()));

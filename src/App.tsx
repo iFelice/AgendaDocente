@@ -5,7 +5,7 @@ import { isStudentActive } from "./utils/studentMatcher";
 import { deriveScheduledAssessmentCalendarItems } from "./utils/scheduledAssessmentCalendar";
 import { database, type LocalData } from "./services/db";
 import { localDateISO } from "./utils/dates";
-import React, { useState, useEffect, useRef, lazy, Suspense } from "react";
+import React, { useState, useEffect, useRef, lazy, Suspense, useCallback } from "react";
 import {
   CalendarEvent,
   CircularDocument,
@@ -23,6 +23,15 @@ import {
 } from "./types";
 import { storage } from "./services/storage";
 import { applyReconstruction, type TimetableMergeMode } from "./utils/reconstructTimetable";
+import {
+  backFromRegister,
+  clearRegisterStudent,
+  initialRegisterNavigation,
+  isRegisterOpenForStudent,
+  openRegisterForStudent,
+  type RegisterNavigation,
+  type RegisterSection,
+} from "./utils/registerNavigation";
 import { Navbar } from "./components/Navbar";
 import { MobileNav } from "./components/MobileNav";
 import { TodayView } from "./components/TodayView";
@@ -91,8 +100,10 @@ export default function App({ initialData }: { initialData: LocalData }) {
   const isDefinitiveCompiled = activeTimetableInfo.isDefinitiveCompiled;
 
   const [currentView, setCurrentView] = useState<ViewMode>("oggi");
-  const [registerStudentId, setRegisterStudentId] = useState<string | null>(null);
-  const [registerSection, setRegisterSection] = useState<"assessments" | "scheduled">("assessments");
+  // Navigazione del Registro: studente aperto, sezione e ORIGINE della
+  // navigazione (vista di provenienza per il pulsante "Indietro"). Stato
+  // dedicato: non si deduce mai da altri stati.
+  const [registerNav, setRegisterNav] = useState<RegisterNavigation>(initialRegisterNavigation);
   const [isCircularModalOpen, setIsCircularModalOpen] = useState(false);
   const [isScannerOpen, setIsScannerOpen] = useState(false);
   // File pre-scansionato dal flusso unificato, da alimentare alla pipeline circolare esistente.
@@ -104,6 +115,12 @@ export default function App({ initialData }: { initialData: LocalData }) {
   const [editingEvent, setEditingEvent] = useState<CalendarEvent | null>(null);
   const [targetDateForNewEvent, setTargetDateForNewEvent] = useState<string | undefined>();
   const [planningTargetDate, setPlanningTargetDate] = useState<string | undefined>();
+  // Data civile selezionata nella vista Oggi. Settimana/Mese preservano il
+  // contesto tramite planningTargetDate; Oggi porta la data dentro se stesso,
+  // quindi la conserviamo qui per riaprirla sullo stesso giorno (es. dopo
+  // essersi fermati al Registro) invece che riportare arbitrariamente a oggi.
+  const [oggiTargetDate, setOggiTargetDate] = useState<string | undefined>();
+  const handleTodaySelectedDate = useCallback((iso: string) => { setOggiTargetDate(iso); }, []);
   const [prefilledEventData, setPrefilledEventData] = useState<Partial<CalendarEvent> | null>(null);
 
   // Google Workspace / Institutional Account State
@@ -579,11 +596,15 @@ export default function App({ initialData }: { initialData: LocalData }) {
 
   const handleViewChange = (view: ViewMode) => {
     setCurrentView(view);
-    if (view !== "registro") setRegisterStudentId(null);
+    if (view !== "registro") setRegisterNav((nav) => clearRegisterStudent(nav));
   };
-  const handleOpenRegister = (studentId: string, section: "assessments" | "scheduled" = "assessments") => {
-    setRegisterStudentId(studentId);
-    setRegisterSection(section);
+  const handleOpenRegister = (studentId: string, section: RegisterSection = "assessments") => {
+    // L'origine è la vista in cui l'utente si trova al momento dell'apertura:
+    // le uniche viste che aprono il Registro per uno studente sono le viste di
+    // planning (prova programmata: Oggi/Settimana/Mese) e Classi (scheda alunno).
+    // "Indietro" tornerà lì, preservando i contesti temporali già in memoria
+    // (planningTargetDate per Settimana/Mese, oggiTargetDate per Oggi).
+    setRegisterNav(openRegisterForStudent(studentId, section, currentView));
     setCurrentView("registro");
   };
 
@@ -648,6 +669,8 @@ export default function App({ initialData }: { initialData: LocalData }) {
             events={events}
             scheduledAssessments={calendarScheduledAssessments}
             onOpenScheduledAssessment={(studentId) => handleOpenRegister(studentId, "scheduled")}
+            initialDateIso={oggiTargetDate}
+            onSelectedDateChange={handleTodaySelectedDate}
             isProvisionalTimetable={isProvisionalActive}
             isDefinitiveCompiled={isDefinitiveCompiled}
             onOpenNewEvent={handleOpenNewEvent}
@@ -721,9 +744,18 @@ export default function App({ initialData }: { initialData: LocalData }) {
             students={students}
             assessments={assessments}
             scheduledAssessments={scheduledAssessments}
-            initialStudentId={registerStudentId}
-            initialSection={registerSection}
-            onBackToOrigin={registerStudentId ? () => { setRegisterStudentId(null); setCurrentView("classi"); } : undefined}
+            initialStudentId={registerNav.studentId}
+            initialSection={registerNav.section}
+            onBackToOrigin={isRegisterOpenForStudent(registerNav)
+              ? () => {
+                  // Torna alla vista di ORIGINE reale (Oggi/Settimana/Mese/Classi),
+                  // non arbitrariamente a Classi. I contesti temporali
+                  // (planningTargetDate / oggiTargetDate) restano in memoria.
+                  const { targetView, next } = backFromRegister(registerNav);
+                  setRegisterNav(next);
+                  setCurrentView(targetView);
+                }
+              : undefined}
             onSaveAssessment={handleSaveAssessment}
             onDeleteAssessment={handleDeleteAssessment}
             onSaveScheduledAssessment={handleSaveScheduledAssessment}
