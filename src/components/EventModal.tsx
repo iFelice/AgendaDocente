@@ -260,19 +260,22 @@ export const EventModal: React.FC<EventModalProps> = ({
             <p className="text-xs text-stone-600">Sincronizzazione disattivata: la copia su Google resta disponibile e non verrà aggiornata o eliminata da questa agenda.</p>
           )}
           {/*
-            Times — smartphone: un campo per riga a tutta larghezza (stessa
-            convenzione responsive delle altre coppie del form:
-            grid-cols-1 sm:grid-cols-2); da sm (640px) in su tornano affiancati.
-            min-w-0 su cella e input: su iOS Safari il type="time" ha una
-            larghezza intrinseca rilevante e, senza min-w-0, la colonna della
-            grid non può restringersi (accavallamento/overflow).
+            Orari + Classe/Materia — UNA SOLA griglia 2 righe x 2 colonne anche
+            su smartphone, stesso principio robusto del modal slot-edit:
+              RIGA 1: Ora Inizio | Classe Interessata
+              RIGA 2: Ora Fine   | Materia
+            Mai due input type="time" sulla stessa riga: il controllo nativo
+            iOS ha una larghezza intrinseca rilevante (a 16px ~160-170px).
+            Ordine DOM: Ora Inizio, Classe, Ora Fine, Materia (la grid riempie
+            riga per riga). Colonne minmax(0,...): entrambe realmente
+            restringibili; quella degli orari leggermente piu larga (1.15fr vs
+            0.85fr, ~199px @390px) perche il controllo time richiede piu spazio
+            di un input testuale. Con "Intera giornata" le due celle orarie
+            spariscono e la griglia mostra Classe | Materia su una riga, senza
+            buchi. Touch target >= 44px; font mobile 16px anti-zoom intatto.
           */}
-          {!isAllDay && (
-            /* Smartphone: i due campi nativi type="time" sono impilati su una
-               colonna — un campo per riga non puo mai sovrapporsi; da sm
-               (640px) in su tornano affiancati su due colonne. min-w-0 su
-               celle e input come difesa strutturale; touch target >= 44px. */
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="grid grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)] gap-3">
+            {!isAllDay && (
               <div className="min-w-0">
                 <label className="block font-semibold text-stone-700 mb-1">Ora Inizio</label>
                 <input
@@ -282,7 +285,20 @@ export const EventModal: React.FC<EventModalProps> = ({
                   className="w-full min-w-0 p-2 min-h-[44px] border border-stone-300 rounded-lg text-xs"
                 />
               </div>
+            )}
 
+            <div className="min-w-0">
+              <label className="block font-semibold text-stone-700 mb-1">Classe Interessata</label>
+              <input
+                type="text"
+                value={className}
+                onChange={(e) => setClassName(e.target.value.toUpperCase())}
+                placeholder="es. 2E o Tutte"
+                className="w-full min-w-0 p-2 min-h-[44px] border border-stone-300 rounded-lg text-xs"
+              />
+            </div>
+
+            {!isAllDay && (
               <div className="min-w-0">
                 <label className="block font-semibold text-stone-700 mb-1">Ora Fine</label>
                 <input
@@ -292,30 +308,16 @@ export const EventModal: React.FC<EventModalProps> = ({
                   className="w-full min-w-0 p-2 min-h-[44px] border border-stone-300 rounded-lg text-xs"
                 />
               </div>
-            </div>
-          )}
+            )}
 
-          {/* Class & Subject */}
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block font-semibold text-stone-700 mb-1">Classe Interessata</label>
-              <input
-                type="text"
-                value={className}
-                onChange={(e) => setClassName(e.target.value.toUpperCase())}
-                placeholder="es. 2E o Tutte"
-                className="w-full p-2 border border-stone-300 rounded-lg text-xs"
-              />
-            </div>
-
-            <div>
+            <div className="min-w-0">
               <label className="block font-semibold text-stone-700 mb-1">Materia</label>
               <input
                 type="text"
                 value={subject}
                 onChange={(e) => setSubject(e.target.value)}
                 placeholder="es. Scienze motorie"
-                className="w-full p-2 border border-stone-300 rounded-lg text-xs"
+                className="w-full min-w-0 p-2 min-h-[44px] border border-stone-300 rounded-lg text-xs"
               />
             </div>
           </div>
