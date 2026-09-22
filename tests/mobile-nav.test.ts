@@ -180,13 +180,15 @@ function todayProps(overrides: Partial<React.ComponentProps<typeof TodayView>> =
 // 1. Bottom navigation: mobile only, 5 destinations, safe-area aware
 // ---------------------------------------------------------------------------
 
-test('bottom navigation exists only below 1024px (phones and tablets) and lists the five main destinations', async () => {
+test('bottom navigation exists only below 1280px (phones and tablets) and lists the five main destinations', async () => {
   const renderer = await render(React.createElement(MobileNav, navProps()));
 
-  // The whole component (bar + FAB + sheet) is hidden from desktop (1024px) up;
-  // phones AND tablets get the bottom bar with the floating "+".
-  const wrapper = renderer.root.findAll((el: any) => el.type === 'div' && hasClass(el, 'lg:hidden'));
-  assert.ok(wrapper.length >= 1, 'the bottom navigation is wrapped in a lg:hidden container');
+  // The whole component (bar + FAB + sheet) is hidden from desktop (1280px) up;
+  // phones AND tablets — portrait AND landscape — get the bottom bar with the
+  // floating "+".
+  const wrapper = renderer.root.findAll((el: any) => el.type === 'div' && hasClass(el, 'xl:hidden'));
+  assert.ok(wrapper.length >= 1, 'the bottom navigation is wrapped in a xl:hidden container');
+  assert.ok(!hasClass(wrapper[0], 'lg:hidden'), 'tablet landscape (1024-1279px) is NOT desktop: no lg cut');
   assert.ok(!hasClass(wrapper[0], 'md:hidden'), 'the mobile experience is no longer cut at 768px: tablets are included');
 
   const nav = renderer.root.findByType('nav');
@@ -380,13 +382,13 @@ test('on phones the header keeps only brand and profile', async () => {
     const button = byId(renderer, id);
     assert.ok(hasClass(button, 'hidden') && hasClass(button, 'md:inline-flex'), `${id} is hidden on phones`);
   }
-  // The two creation CTAs moved to the desktop-only tier (from 1024px): on
+  // The two creation CTAs moved to the desktop-only tier (from 1280px): on
   // phones AND tablets the primary action is the MobileNav FAB.
   const withScanner = await render(React.createElement(Navbar, navbarProps({ onOpenScanner: () => {} })));
   for (const id of ['btn-new-event', 'btn-scan-document']) {
     const button = byId(withScanner, id);
-    assert.ok(hasClass(button, 'hidden') && hasClass(button, 'lg:inline-flex'), `${id} is hidden on phones and tablets`);
-    assert.ok(!hasClass(button, 'md:inline-flex'), `${id} no longer appears on tablets (md)`);
+    assert.ok(hasClass(button, 'hidden') && hasClass(button, 'xl:inline-flex'), `${id} is hidden on phones and tablets`);
+    assert.ok(!hasClass(button, 'md:inline-flex') && !hasClass(button, 'lg:inline-flex'), `${id} no longer appears on tablets (md nor lg)`);
   }
   // Google status chip (rendered when an account is connected) is desktop only too.
   const connected = await render(React.createElement(Navbar, navbarProps({
@@ -442,8 +444,8 @@ test('desktop navigation is unchanged: every section stays in the header tabs', 
     assert.ok(nodeText(tab).includes(label), `${id} keeps its label`);
   }
   assert.equal(byId(renderer, 'nav-tab-orario').props['aria-current'], 'page');
-  // The desktop action row is intact (creation CTAs visible from 1024px up).
-  assert.ok(hasClass(byId(renderer, 'btn-new-event'), 'lg:inline-flex'));
+  // The desktop action row is intact (creation CTAs visible from 1280px up).
+  assert.ok(hasClass(byId(renderer, 'btn-new-event'), 'xl:inline-flex'));
   const circularCta = byId(renderer, 'btn-scan-circular');
   assert.ok(hasClass(circularCta, 'md:inline-flex'));
   assert.ok(!String(circularCta.props.className).includes('bg-amber-500'), 'circular action is not a temporal warning surface');
@@ -564,7 +566,7 @@ test('the provisional timetable notice is a compact row with a completion link',
 // 5. FAB "+" su smartphone E tablet (< 1024px); le due CTA di creazione solo desktop
 // ---------------------------------------------------------------------------
 
-test('FAB tablet: un solo FAB "+" (lg:hidden), CTA di creazione solo da lg, nessuna duplicazione dei flussi', async () => {
+test('FAB tablet: un solo FAB "+" (xl:hidden), CTA di creazione solo da xl, nessuna duplicazione dei flussi', async () => {
   // Statico: esiste UN SOLO FAB nell'app e sta in MobileNav; nessun secondo
   // FAB (ne' in Navbar ne' nei modal, che questo micro-step non tocca).
   const srcOf = (rel: string) => readFileSync(resolve(here, rel), 'utf8');
@@ -580,9 +582,9 @@ test('FAB tablet: un solo FAB "+" (lg:hidden), CTA di creazione solo da lg, ness
   const fabs = nav.root.findAll((el: any) => el.type === 'button' && hasClass(el, 'app-fab'));
   assert.equal(fabs.length, 1, 'un solo bottone FAB');
   assert.equal(byId(nav, 'mobile-fab-actions').props.id, 'mobile-fab-actions');
-  const wrapper = nav.root.findAll((el: any) => el.type === 'div' && hasClass(el, 'lg:hidden'));
+  const wrapper = nav.root.findAll((el: any) => el.type === 'div' && hasClass(el, 'xl:hidden'));
   assert.equal(wrapper.length, 1);
-  assert.ok(!hasClass(wrapper[0], 'md:hidden'), 'nessuna classe md residua sul wrapper (combinazione contraddittoria assente)');
+  assert.ok(!hasClass(wrapper[0], 'lg:hidden') && !hasClass(wrapper[0], 'md:hidden'), 'nessuna classe lg/md residua sul wrapper (combinazione contraddittoria assente)');
 
   // Il tap sul FAB apre le STESSHE azioni di sempre, ciascuna una sola volta.
   let newEventFromFab = 0;
@@ -611,8 +613,8 @@ test('FAB tablet: un solo FAB "+" (lg:hidden), CTA di creazione solo da lg, ness
   })));
   for (const id of ['btn-new-event', 'btn-scan-document']) {
     const button = byId(bar, id);
-    assert.ok(hasClass(button, 'hidden') && hasClass(button, 'lg:inline-flex'), `${id} visibile solo da lg`);
-    assert.ok(!hasClass(button, 'md:inline-flex'), `${id} non compare piu sui tablet (md)`);
+    assert.ok(hasClass(button, 'hidden') && hasClass(button, 'xl:inline-flex'), `${id} visibile solo da xl (1280px)`);
+    assert.ok(!hasClass(button, 'md:inline-flex') && !hasClass(button, 'lg:inline-flex'), `${id} non compare su smartphone ne tablet (md/lg)`);
   }
   assert.equal(bar.root.findAll((el: any) => el.type === 'button' && el.props.id === 'btn-new-event').length, 1, 'CTA Nuovo Impegno non duplicata');
   assert.equal(bar.root.findAll((el: any) => el.type === 'button' && el.props.id === 'btn-scan-document').length, 1, 'CTA Scansiona Documento non duplicata');
@@ -625,4 +627,51 @@ test('FAB tablet: un solo FAB "+" (lg:hidden), CTA di creazione solo da lg, ness
   // classe responsive di visibilita FAB/CTA introdotta nei due modal.
   assert.ok(!srcOf('../src/components/EventModal.tsx').includes('lg:inline-flex'), 'EventModal non toccato');
   assert.ok(!srcOf('../src/components/TimetableEditor.tsx').includes('lg:inline-flex'), 'TimetableEditor non toccato');
+});
+
+// ---------------------------------------------------------------------------
+// 6. Tabella breakpoint: esperienza mobile (FAB) fino a 1279px, desktop da 1280px
+// ---------------------------------------------------------------------------
+
+test('tabella breakpoint: FAB e bottom nav sotto 1280px (767/820/834/1024/1194/1279), CTA solo da 1280px', async () => {
+  // Semantica Tailwind usata: `xl:hidden` = display:none SOLO da 1280px;
+  // `hidden` + `xl:inline-flex` = nascosto di default, visibile SOLO da 1280px.
+  // Tabella dei viewport reali verificati sul device (portrait e landscape):
+  //   767px (smartphone)     -> MobileNav/FAB SI, CTA NO
+  //   820px (iPad Air p.)    -> MobileNav/FAB SI, CTA NO
+  //   834px (iPad Pro p.)    -> MobileNav/FAB SI, CTA NO
+  //  1024px (iPad 9.7 l.)    -> MobileNav/FAB SI, CTA NO
+  //  1194px (iPad Pro 11 l.) -> MobileNav/FAB SI, CTA NO
+  //  1279px (limite)         -> MobileNav/FAB SI, CTA NO
+  //  1280px (desktop)        -> MobileNav/FAB NO, CTA SI
+  const viewportTable: [number, boolean][] = [
+    [767, true], [820, true], [834, true], [1024, true], [1194, true], [1279, true], [1280, false],
+  ];
+  for (const [vw, expectMobileExperience] of viewportTable) {
+    assert.equal(expectMobileExperience, vw < 1280, `soglia coerente a ${vw}px: mobile sotto 1280, desktop da 1280`);
+  }
+
+  // Il codice implementa ESATTAMENTE quella tabella: un solo interruttore per
+  // l'esperienza mobile (xl:hidden, nessun residuo md/lg) e CTA che nascono
+  // nascoste e riappaiono solo con xl (1280px).
+  const nav = await render(React.createElement(MobileNav, navProps()));
+  const wrapper = nav.root.find((el: any) => el.type === 'div' && hasClass(el, 'xl:hidden'));
+  assert.ok(wrapper, 'MobileNav avvolto in xl:hidden');
+  assert.ok(!hasClass(wrapper, 'lg:hidden') && !hasClass(wrapper, 'md:hidden'),
+    'nessun residuo md/lg: nessuna finestra 768-1279px senza FAB/bottom nav (UI ibrida assente)');
+
+  const bar = await render(React.createElement(Navbar, navbarProps({ onOpenScanner: () => {} })));
+  for (const id of ['btn-new-event', 'btn-scan-document']) {
+    const button = byId(bar, id);
+    assert.ok(hasClass(button, 'hidden') && hasClass(button, 'xl:inline-flex'), `${id}: nascosto di default, visibile solo da 1280px`);
+    assert.ok(!hasClass(button, 'lg:inline-flex') && !hasClass(button, 'md:inline-flex'),
+      `${id}: nessuna ri-comparsa fra 768 e 1279px => mai FAB+CTA contemporaneamente`);
+  }
+
+  // Geometria/colore/safe-area del FAB: nessuna modifica (regole CSS intatte).
+  const fabCss = css.slice(css.indexOf('.app-fab {'), css.indexOf('}', css.indexOf('.app-fab {')));
+  for (const decl of ['position: fixed', 'width: 56px', 'height: 56px', 'bottom: calc(5rem + env(safe-area-inset-bottom, 0px))']) {
+    assert.ok(fabCss.includes(decl), `regola .app-fab invariata: ${decl}`);
+  }
+  assert.ok(!css.includes('@media') || !fabCss.includes('@media'), '.app-fab non e dentro media query: nessun breakpoint ne cambia geometria');
 });

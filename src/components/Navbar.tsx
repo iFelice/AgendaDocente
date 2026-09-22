@@ -124,9 +124,10 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           {/*
             Quick actions. The two creation CTAs (Nuovo Impegno, Scansiona
-            Documento) are desktop-only (lg): on phones AND tablets the primary
-            action is the floating "+" of MobileNav. PWA install, circolare AI
-            and Google account stay visible from md (768px) as before.
+            Documento) are desktop-only (xl, from 1280px): on phones AND
+            tablets (portrait and landscape) the primary action is the
+            floating "+" of MobileNav. PWA install, circolare AI and Google
+            account stay visible from md (768px) as before.
           */}
           <div className="flex items-center gap-1 sm:gap-2 shrink-0">
             <span className="hidden md:inline-flex">
@@ -148,19 +149,19 @@ export const Navbar: React.FC<NavbarProps> = ({
               <button
                 id="btn-scan-document"
                 onClick={onOpenScanner}
-                className="hidden lg:inline-flex items-center justify-center gap-1.5 px-2.5 sm:px-3.5 min-h-[44px] min-w-[44px] rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 transition-colors shadow-xs"
+                className="hidden xl:inline-flex items-center justify-center gap-1.5 px-2.5 sm:px-3.5 min-h-[44px] min-w-[44px] rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 transition-colors shadow-xs"
                 title="Scansiona documento (circolare, orari, registro) con fotocamera o file"
                 aria-label="Scansiona documento"
               >
                 <ScanLine className="w-4 h-4 text-sky-600" />
-                <span className="hidden lg:inline">Scansiona Documento</span>
+                <span className="hidden xl:inline">Scansiona Documento</span>
               </button>
             )}
 
             <button
               id="btn-new-event"
               onClick={onOpenNewEventModal}
-              className="hidden lg:inline-flex items-center justify-center gap-1 px-3 sm:px-3.5 min-h-[44px] rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 transition-colors shadow-xs"
+              className="hidden xl:inline-flex items-center justify-center gap-1 px-3 sm:px-3.5 min-h-[44px] rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 transition-colors shadow-xs"
             >
               <Plus className="w-4 h-4 text-sky-600" />
               <span className="hidden sm:inline">Nuovo Impegno</span>
