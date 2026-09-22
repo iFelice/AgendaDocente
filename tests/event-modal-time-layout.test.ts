@@ -16,13 +16,12 @@ const css = readFileSync(resolve(here, '../src/index.css'), 'utf8');
 
 /*
  * Layout dei campi "Ora Inizio" / "Ora Fine" nel form Nuovo/Modifica Impegno:
- *  - DUE COLONNE a ogni larghezza (iPhone incluso): container grid-cols-2 con
- *    classe scoped event-time-duo;
- *  - sotto 768px una regola CSS dedicata applica appearance:none ai soli
- *    input type="time" del pair: il controllo nativo iOS disegna la propria
- *    larghezza intrinseca (~160-170px a 16px) e con min-w-0 da solo sfora la
- *    colonna; appearance:none lo rende dimensionabile mentre il picker nativo
- *    resta (su iOS arriva dal focus, non dall'appearance);
+ *  - smartphone: impilati su una colonna a tutta larghezza (un campo per riga
+ *    non puo mai sovrapporsi); da sm (640px) in su affiancati su due colonne;
+ *  - la classe scoped event-time-duo e la relativa regola appearance:none sono
+ *    state RIMOSSE (tentativo superato): il layout a 4 campi (Ora Inizio,
+ *    Aula/Spazio, Ora Fine, Plesso/Sede) vive nel modal slot-edit del
+ *    TimetableEditor come griglia unica 2 righe x 2 colonne;
  *  - il font mobile 16px anti auto-zoom NON viene toccato;
  *  - gli input mantengono type="time", w-full, min-w-0 e touch target >= 44px;
  *  - creazione, modifica e all-day continuano a comportarsi come prima.
@@ -61,18 +60,19 @@ function assertTimeLabels(renderer: any) {
 }
 
 /**
- * Verifica strutturale del layout: DUE COLONNE a ogni larghezza (iPhone
- * incluso) con classe scoped event-time-duo; la regola CSS mobile (index.css)
- * con appearance:none rende il controllo nativo dimensionabile così che i due
- * campi affiancati non si sovrappongano più. min-w-0/w-full come difesa
- * strutturale, touch target >= 44px, etichette leggibili.
+ * Verifica strutturale del layout: UNA COLONNA su smartphone (i campi sono
+ * impilati: nessuna sovrapposizione possibile fra i controlli nativi type=time
+ * di iOS) e DUE COLONNE da sm (640px) in su. Nessuna classe scoped residua
+ * (event-time-duo rimosso). min-w-0/w-full come difesa strutturale, touch
+ * target >= 44px, etichette leggibili.
  */
 function assertResponsiveTimeLayout(renderer: any) {
   const { inputs, cells, grid } = timeFields(renderer);
   const tokens = classTokens(grid);
-  assert.ok(tokens.includes('grid-cols-2'), 'due colonne affiancate a ogni larghezza, iPhone incluso');
-  assert.ok(!tokens.includes('grid-cols-1'), 'niente fallback mobile impilato (grid-cols-1 assente)');
-  assert.ok(tokens.includes('event-time-duo'), 'classe scoped event-time-duo presente sul container');
+  assert.ok(tokens.includes('grid-cols-1'), 'smartphone: una colonna (campi impilati, mai sovrapposti)');
+  assert.ok(tokens.includes('sm:grid-cols-2'), 'da sm (640px) in su: due colonne affiancate');
+  assert.ok(!tokens.includes('grid-cols-2'), 'nessuna griglia a due colonne fissa a tutti i breakpoint');
+  assert.ok(!tokens.includes('event-time-duo'), 'classe sperimentale event-time-duo rimossa');
   assert.ok(tokens.includes('gap-3'), 'gap adeguato fra le colonne');
   for (const cell of cells) {
     assert.ok(classTokens(cell).includes('min-w-0'), 'cella della grid può restringersi (min-width: 0)');
@@ -107,7 +107,7 @@ async function submitForm(renderer: any) {
   await act(async () => { await form.props.onSubmit({ preventDefault: () => {} }); });
 }
 
-test('1. creazione: Ora Inizio e Ora Fine affiancati su due colonne anche su mobile e salvano i loro valori', async () => {
+test('1. creazione: i campi orari sono impilati su mobile, affiancati da sm, e salvano i loro valori', async () => {
   const { renderer, saved } = await renderModal();
   assertResponsiveTimeLayout(renderer);
   assertTimeLabels(renderer);
@@ -160,16 +160,13 @@ test('3. con "Intera giornata" i campi orari non si mostrano (comportamento pree
   await act(async () => { renderer.unmount(); });
 });
 
-test('4. regola CSS scoped in index.css: appearance none sotto 768px solo sul pair, font mobile 16px invariato', () => {
-  const sel = css.indexOf('.event-time-duo input[type="time"]');
-  assert.ok(sel > -1, 'selettore scoped .event-time-duo input[type="time"] presente in index.css');
-  const mediaStart = css.lastIndexOf('@media (max-width: 767.98px)', sel);
-  assert.ok(mediaStart > -1, 'la regola vive dentro il media query mobile (max-width: 767.98px)');
-  const block = css.slice(mediaStart, css.indexOf('}', sel) + 1);
-  for (const decl of ['-webkit-appearance: none', 'appearance: none', 'width: 100%', 'min-width: 0', 'text-align: center']) {
-    assert.ok(block.includes(decl), `dichiarazione richiesta nel blocco scoped: ${decl}`);
-  }
-  assert.ok(!block.includes('font-size'), 'il fix non tocca il font: resta la regola 16px anti auto-zoom');
+test('4. event-time-duo e la regola appearance:none sono rimasti indietro; il font mobile 16px resta invariato', () => {
+  const componentSource = readFileSync(resolve(here, '../src/components/EventModal.tsx'), 'utf8');
+  assert.ok(!css.includes('event-time-duo'), 'nessun residuo CSS di event-time-duo in index.css');
+  assert.ok(!css.includes('.event-time-duo input[type="time"]'), 'il selettore scoped è stato rimosso');
+  assert.ok(!css.includes('-webkit-appearance'), 'nessuna regola -webkit-appearance residua in index.css');
+  assert.ok(!css.includes('appearance: none'), 'nessuna regola appearance:none residua in index.css');
+  assert.ok(!componentSource.includes('event-time-duo'), 'nessun residuo della classe nel componente');
   const fontIdx = css.indexOf('font-size: 16px');
   assert.ok(fontIdx > -1, 'la regola globale del font mobile 16px è ancora presente');
   const fontMedia = css.lastIndexOf('@media (max-width: 767.98px)', fontIdx);

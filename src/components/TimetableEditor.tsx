@@ -1478,9 +1478,18 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                 )}
               </div>
 
-              {/* Start Time & End Time */}
-              <div className="grid grid-cols-2 gap-3 pt-1">
-                <div>
+              {/* Ora / Aula / Plesso: UNA SOLA griglia 2 righe x 2 colonne anche
+                  su smartphone — RIGA 1: Ora Inizio | Aula-Spazio, RIGA 2:
+                  Ora Fine | Plesso-Sede — cosi il blocco occupa ESATTAMENTE
+                  2 righe su iPhone (mai 3 campi impilati, mai campi
+                  sovrapposti). Ordine DOM richiesto: Ora Inizio, Aula/Spazio,
+                  Ora Fine, Plesso/Sede (la grid riempie riga per riga).
+                  Colonne minmax(0,...): entrambe realmente restringibili; quella
+                  degli orari leggermente piu larga (1.15fr vs 0.85fr) perche il
+                  controllo nativo type="time" e piu largo di un input testuale.
+                  value/onChange/logica invariati; touch target >= 44px. */}
+              <div className="grid grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)] gap-3 pt-1">
+                <div className="min-w-0">
                   <label className="block font-medium text-stone-700 mb-1">
                     Ora Inizio
                   </label>
@@ -1491,29 +1500,11 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                     onChange={(e) =>
                       setEditingSlot({ ...editingSlot, startTime: e.target.value })
                     }
-                    className="w-full p-2 border border-stone-300 rounded-lg text-xs font-mono min-h-[42px]"
+                    className="w-full min-w-0 p-2 border border-stone-300 rounded-lg text-xs font-mono min-h-[44px]"
                   />
                 </div>
 
-                <div>
-                  <label className="block font-medium text-stone-700 mb-1">
-                    Ora Fine
-                  </label>
-                  <input
-                    type="time"
-                    required
-                    value={editingSlot.endTime}
-                    onChange={(e) =>
-                      setEditingSlot({ ...editingSlot, endTime: e.target.value })
-                    }
-                    className="w-full p-2 border border-stone-300 rounded-lg text-xs font-mono min-h-[42px]"
-                  />
-                </div>
-              </div>
-
-              {/* Classroom & Campus */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
+                <div className="min-w-0">
                   <label className="block font-medium text-stone-700 mb-1">
                     Aula / Spazio
                   </label>
@@ -1524,11 +1515,26 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                       setEditingSlot({ ...editingSlot, classroom: e.target.value })
                     }
                     placeholder="es. Palestra A, Aula 12"
-                    className="w-full p-2.5 border border-stone-300 rounded-lg text-xs min-h-[42px]"
+                    className="w-full min-w-0 p-2.5 border border-stone-300 rounded-lg text-xs min-h-[44px]"
                   />
                 </div>
 
-                <div>
+                <div className="min-w-0">
+                  <label className="block font-medium text-stone-700 mb-1">
+                    Ora Fine
+                  </label>
+                  <input
+                    type="time"
+                    required
+                    value={editingSlot.endTime}
+                    onChange={(e) =>
+                      setEditingSlot({ ...editingSlot, endTime: e.target.value })
+                    }
+                    className="w-full min-w-0 p-2 border border-stone-300 rounded-lg text-xs font-mono min-h-[44px]"
+                  />
+                </div>
+
+                <div className="min-w-0">
                   <label className="block font-medium text-stone-700 mb-1">
                     Plesso / Sede
                   </label>
@@ -1539,7 +1545,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                       setEditingSlot({ ...editingSlot, campus: e.target.value })
                     }
                     placeholder="es. Centrale, Succursale"
-                    className="w-full p-2.5 border border-stone-300 rounded-lg text-xs min-h-[42px]"
+                    className="w-full min-w-0 p-2.5 border border-stone-300 rounded-lg text-xs min-h-[44px]"
                   />
                 </div>
               </div>
