@@ -84,6 +84,24 @@ button {
   }
 }
 
+/* EventModal "Ora Inizio"/"Ora Fine" side by side on iPhone: the native iOS
+ * type="time" control paints at its intrinsic width (~160-170px at 16px) and
+ * overflows its grid column even with min-width:0 (which fixes the box, not
+ * the WebKit painting — verified on a real device). Scoped ONLY to the
+ * .event-time-duo pair and ONLY below 768px: appearance:none makes the control
+ * size like a regular input (width/centering apply) while the native wheel
+ * picker stays (on iOS it comes from focus, not from appearance). The 16px
+ * anti-zoom font rule above is untouched. */
+@media (max-width: 767.98px) {
+  .event-time-duo input[type="time"] {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    min-width: 0;
+    text-align: center;
+  }
+}
+
 /* Thin, unobtrusive scrollbars for horizontal tab strips. */
 .no-scrollbar {
   scrollbar-width: none;

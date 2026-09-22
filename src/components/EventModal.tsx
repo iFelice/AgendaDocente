@@ -268,13 +268,15 @@ export const EventModal: React.FC<EventModalProps> = ({
             grid non può restringersi (accavallamento/overflow).
           */}
           {!isAllDay && (
-            /* Smartphone: i due campi nativi type="time" di iOS sono IMPILATI su
-               una colonna — qualunque sia la larghezza non possono mai
-               sovrapporsi (verificato su iPhone reale: grid-cols-2 + min-w-0 NON
-               basta ai controlli time di iOS). Da sm (640px) in su: due colonne.
-               min-w-0 resta su celle e input come difesa strutturale; touch
-               target >= 44px. */
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            /* DUE COLONNE a ogni larghezza, iPhone incluso. La classe scoped
+               event-time-duo (regola in index.css sotto 768px) applica
+               appearance:none ai soli input type="time" del pair: il controllo
+               nativo iOS disegna una larghezza intrinseca (~160-170px a 16px)
+               e con min-w-0 da solo sfora la colonna; appearance:none lo rende
+               dimensionabile come un input normale mentre il picker nativo
+               resta (su iOS arriva dal focus, non dall'appearance). Touch
+               target >= 44px; font mobile 16px anti-zoom intatto. */
+            <div className="grid grid-cols-2 gap-3 event-time-duo">
               <div className="min-w-0">
                 <label className="block font-semibold text-stone-700 mb-1">Ora Inizio</label>
                 <input
