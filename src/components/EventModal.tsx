@@ -3,7 +3,7 @@ import { isGoogleSyncEnabled } from "../services/googleCalendarService";
 import { eventDateError } from "../utils/dates";
 import { localDateISO } from "../utils/dates";
 import React, { useState, useEffect } from "react";
-import { Clock, MapPin, X, Calendar, BookOpen, AlertCircle, Trash2 } from "lucide-react";
+import { Clock, MapPin, X, Calendar, BookOpen, AlertCircle, Trash2, ChevronRight } from "lucide-react";
 import { CalendarEvent, EventCategory, TeacherProfile } from "../types";
 
 interface EventModalProps {
@@ -260,33 +260,63 @@ export const EventModal: React.FC<EventModalProps> = ({
             <p className="text-xs text-stone-600">Sincronizzazione disattivata: la copia su Google resta disponibile e non verrà aggiornata o eliminata da questa agenda.</p>
           )}
           {/*
-            Orari + Classe/Materia — UNA SOLA griglia 2 righe x 2 colonne anche
-            su smartphone, stesso principio robusto del modal slot-edit:
-              RIGA 1: Ora Inizio | Classe Interessata
-              RIGA 2: Ora Fine   | Materia
-            Mai due input type="time" sulla stessa riga: il controllo nativo
-            iOS ha una larghezza intrinseca rilevante (a 16px ~160-170px).
-            Ordine DOM: Ora Inizio, Classe, Ora Fine, Materia (la grid riempie
-            riga per riga). Colonne minmax(0,...): entrambe realmente
-            restringibili; quella degli orari leggermente piu larga (1.15fr vs
-            0.85fr, ~199px @390px) perche il controllo time richiede piu spazio
-            di un input testuale. Con "Intera giornata" le due celle orarie
-            spariscono e la griglia mostra Classe | Materia su una riga, senza
-            buchi. Touch target >= 44px; font mobile 16px anti-zoom intatto.
+            Orari — DUE RIGHE COMPATTE tappabili (label a sinistra, valore
+            HH:MM e chevron a destra), non grandi box time. Dal test reale
+            iPhone il controllo nativo type="time" deborda dalla propria
+            colonna anche a ~199px: non si tenta piu di comprimerlo.
+            Il VERO input type="time" resta l unico target del tap: absolute
+            inset-0 sopra l intera riga, opacity-0, a piena dimensione — cosi
+            il picker nativo iOS si apre direttamente sul controllo (nessuna
+            invocazione programmatica, nessun picker custom, niente
+            display:none / visibility:hidden / pointer-events:none) e il
+            rendering WebKit del
+            controllo non puo piu influire sul layout. Il valore visibile e un
+            span aria-hidden (il valore accessibile resta quello dell input,
+            collegato alla label via htmlFor); focus-within evidenzia la riga
+            quando l input riceve il focus da tastiera. Presentazione unica a
+            ogni larghezza: stessi startTime/endTime e stessi onChange come
+            unica source of truth, nessuna duplicazione di stato.
           */}
-          <div className="grid grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)] gap-3">
-            {!isAllDay && (
-              <div className="min-w-0">
-                <label className="block font-semibold text-stone-700 mb-1">Ora Inizio</label>
+          {!isAllDay && (
+            <div className="space-y-2">
+              <div className="relative min-h-[44px] flex items-center justify-between gap-3 px-3 py-2 bg-white border border-stone-300 rounded-lg cursor-pointer transition-colors focus-within:border-emerald-600 focus-within:ring-2 focus-within:ring-emerald-600/30">
+                <label htmlFor="event-start-time" className="text-xs font-semibold text-stone-700">
+                  Ora Inizio
+                </label>
+                <span aria-hidden="true" className="flex items-center gap-1 text-xs font-mono text-stone-900">
+                  {startTime || "--:--"}
+                  <ChevronRight className="w-4 h-4 text-stone-400" />
+                </span>
                 <input
+                  id="event-start-time"
                   type="time"
                   value={startTime}
                   onChange={(e) => setStartTime(e.target.value)}
-                  className="w-full min-w-0 p-2 min-h-[44px] border border-stone-300 rounded-lg text-xs"
+                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                 />
               </div>
-            )}
 
+              <div className="relative min-h-[44px] flex items-center justify-between gap-3 px-3 py-2 bg-white border border-stone-300 rounded-lg cursor-pointer transition-colors focus-within:border-emerald-600 focus-within:ring-2 focus-within:ring-emerald-600/30">
+                <label htmlFor="event-end-time" className="text-xs font-semibold text-stone-700">
+                  Ora Fine
+                </label>
+                <span aria-hidden="true" className="flex items-center gap-1 text-xs font-mono text-stone-900">
+                  {endTime || "--:--"}
+                  <ChevronRight className="w-4 h-4 text-stone-400" />
+                </span>
+                <input
+                  id="event-end-time"
+                  type="time"
+                  value={endTime}
+                  onChange={(e) => setEndTime(e.target.value)}
+                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Class & Subject */}
+          <div className="grid grid-cols-2 gap-3">
             <div className="min-w-0">
               <label className="block font-semibold text-stone-700 mb-1">Classe Interessata</label>
               <input
@@ -297,18 +327,6 @@ export const EventModal: React.FC<EventModalProps> = ({
                 className="w-full min-w-0 p-2 min-h-[44px] border border-stone-300 rounded-lg text-xs"
               />
             </div>
-
-            {!isAllDay && (
-              <div className="min-w-0">
-                <label className="block font-semibold text-stone-700 mb-1">Ora Fine</label>
-                <input
-                  type="time"
-                  value={endTime}
-                  onChange={(e) => setEndTime(e.target.value)}
-                  className="w-full min-w-0 p-2 min-h-[44px] border border-stone-300 rounded-lg text-xs"
-                />
-              </div>
-            )}
 
             <div className="min-w-0">
               <label className="block font-semibold text-stone-700 mb-1">Materia</label>

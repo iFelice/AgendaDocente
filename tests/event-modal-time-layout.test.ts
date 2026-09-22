@@ -13,24 +13,28 @@ import type { CalendarEvent, TeacherProfile } from '../src/types';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const css = readFileSync(resolve(here, '../src/index.css'), 'utf8');
+const componentSource = readFileSync(resolve(here, '../src/components/EventModal.tsx'), 'utf8');
 
 /*
- * Layout compatto del form Nuovo/Modifica Impegno su smartphone (dal test
- * reale su iPhone): UNA SOLA griglia 2 righe x 2 colonne per i quattro campi
+ * Orari del form Nuovo/Modifica Impegno su smartphone (dal test reale su
+ * iPhone: il controllo nativo type="time" deborda dalla propria colonna
+ * anche a ~199px, quindi NON si tenta piu di comprimerlo visivamente).
  *
- *   RIGA 1: Ora Inizio | Classe Interessata
- *   RIGA 2: Ora Fine   | Materia
+ * Presentazione: DUE RIGHE COMPATTE tappabili — label a sinistra, valore
+ * HH:MM e chevron a destra, altezza minima 44px. Il VERO input
+ * type="time" e l unico target del tap: absolute inset-0 sopra l intera
+ * riga con opacity-0 (MAI display:none / visibility:hidden /
+ * pointer-events:none, MAI showPicker, MAI picker custom): il picker
+ * nativo iOS si apre direttamente sul controllo e il rendering WebKit non
+ * puo piu influire sul layout.
  *
- * con Luogo/Modalita e Note sempre a tutta larghezza fuori dalla griglia.
- * Vincolo fondamentale: MAI due input type="time" sulla stessa riga (il
- * controllo nativo iOS ha una larghezza intrinseca rilevante); l'ordine DOM
- * Ora Inizio, Classe, Ora Fine, Materia con la grid che riempie riga per riga
- * lo garantisce strutturalmente. Colonne minmax(0,1.15fr)/minmax(0,0.85fr):
- * entrambe realmente restringibili, piu spazio al controllo time. Con
- * "Intera giornata" le due celle orarie spariscono e la griglia mostra
- * Classe | Materia su una riga, senza buchi. Nessun workaround
- * event-time-duo/appearance:none; il font mobile 16px anti auto-zoom resta
- * invariato. Creazione, modifica, validazione e salvataggio invariati.
+ * Il resto del form: Classe | Materia affiancati in grid grid-cols-2 gap-3
+ * (celle min-w-0, controlli w-full/min-w-0/min-h-[44px]); Luogo/Modalita e
+ * Note a tutta larghezza. Con "Intera giornata" le due righe orario
+ * spariscono senza buchi. Valori, onChange, validazione, create/edit,
+ * all-day e salvataggio restano identici: gli input nativi sono l unica
+ * source of truth (il valore visibile e un aria-hidden span di sola
+ * lettura; il nome accessibile arriva dalla label via htmlFor).
  */
 
 const profile: TeacherProfile = {
@@ -39,15 +43,7 @@ const profile: TeacherProfile = {
   classes: ['2E'], campuses: ['Sede Centrale'], roles: [], isSupportTeacher: true,
 };
 
-const QUAD = 'grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]';
-
 const classTokens = (node: any): string[] => String(node?.props?.className ?? '').split(/\s+/).filter(Boolean);
-
-const text = (node: any): string => {
-  if (!node) return '';
-  if (typeof node === 'string' || typeof node === 'number') return String(node);
-  return (node.children ?? []).map(text).join(' ');
-};
 
 function nodeText(node: any): string {
   const parts: string[] = [];
@@ -62,80 +58,100 @@ function nodeText(node: any): string {
 }
 const flatText = (node: any) => nodeText(node).replace(/\s+/g, ' ').trim();
 
-/** La griglia quad e le sue celle dirette, senza vincolo sul numero (serve
- * anche in modalita all-day, quando le celle orarie sono nascoste). */
-function findQuad(renderer: any) {
-  const grids = renderer.root.findAll((n: any) => n.type === 'div' && classTokens(n).includes(QUAD));
-  assert.equal(grids.length, 1, 'una sola griglia quad nel form');
-  const cells = grids[0].findAll((n: any) => n.type === 'div' && n.parent === grids[0]);
-  return { quad: grids[0], cells };
-}
+/**
+ * Le due righe orario compatte: per ciascuna verifica struttura (wrapper
+ * >= 44px, input nativo trasparente sovrapposto a tutta riga), assenza di
+ * qualunque trucco di occultamento, label associata e valore visibile
+ * coerente. Ritorna righe e input nell'ordine (inizio, fine).
+ */
+function assertTimeRows(renderer: any) {
+  const inputs = renderer.root.findAll((n: any) => n.type === 'input' && n.props.type === 'time');
+  assert.equal(inputs.length, 2, 'esattamente due veri input type="time"');
+  const rows = [inputs[0].parent, inputs[1].parent];
+  assert.ok(rows[0] !== rows[1], 'i due orari stanno in due righe distinte');
+  assert.ok(rows[0].parent === rows[1].parent, 'le due righe sono sorelle (lista compatta)');
 
-/** La griglia quad 2x2 completa e le sue 4 celle dirette nell'ordine DOM. */
-function quadOf(renderer: any) {
-  const { quad, cells } = findQuad(renderer);
-  assert.equal(cells.length, 4, 'esattamente 4 celle dirette nella quad');
-  return { quad, cells };
-}
+  const expectedIds = ['event-start-time', 'event-end-time'];
+  const expectedLabels = ['Ora Inizio', 'Ora Fine'];
+  for (let i = 0; i < 2; i++) {
+    const input = inputs[i];
+    const row = rows[i];
 
-function cellLabel(cell: any): string {
-  const label = cell.children.find((n: any) => n.type === 'label');
-  return flatText(label);
-}
-
-function assertQuadLayout(renderer: any) {
-  const { quad, cells } = quadOf(renderer);
-  const tokens = classTokens(quad);
-  assert.ok(tokens.includes('gap-3'), 'gap adeguato fra le colonne');
-  assert.ok(!tokens.includes('grid-cols-1'), 'nessuna variante mobile impilata sulla quad');
-  assert.ok(!tokens.includes('grid-cols-2'), 'nessuna grid-cols-2 fissa sulla quad');
-
-  // Ordine esatto: riga 1 = Ora Inizio | Classe, riga 2 = Ora Fine | Materia.
-  assert.deepEqual(
-    cells.map(cellLabel),
-    ['Ora Inizio', 'Classe Interessata', 'Ora Fine', 'Materia'],
-    'ordine DOM: Ora Inizio, Classe Interessata, Ora Fine, Materia (2 righe esatte)',
-  );
-
-  // MAI due input time sulla stessa riga: le celle dei due orari non sono
-  // adiacenti (0 e 2: separate dalla cella Classe) e l'unica griglia che li
-  // contiene entrambi e la quad.
-  const inputs = cells.map((c: any) => c.findAll((n: any) => n.type === 'input'));
-  assert.deepEqual(
-    inputs.map((pair: any[]) => pair.map((i: any) => i.props.type)),
-    [['time'], ['text'], ['time'], ['text']],
-    'tipi per cella: time, text, time, text',
-  );
-  const gridsWithBothTimes = renderer.root.findAll((n: any) =>
-    n.type === 'div' &&
-    n.findAll((i: any) => i.type === 'input' && i.props.type === 'time' && i.parent.parent === n).length === 2);
-  assert.equal(gridsWithBothTimes.length, 1, 'una sola griglia contiene i due input time');
-  assert.ok(gridsWithBothTimes[0] === quad, 'quella griglia e la quad');
-
-  // Celle tutte min-w-0; controlli tutti w-full + min-w-0 + min-h-[44px].
-  for (const cell of cells) {
-    assert.ok(classTokens(cell).includes('min-w-0'), 'cella della grid min-w-0');
-  }
-  const allInputs = quad.findAll((n: any) => n.type === 'input');
-  assert.equal(allInputs.length, 4, 'la quad contiene tutti e 4 i campi');
-  for (const input of allInputs) {
+    // Input = target trasparente a tutta riga, senza occultamenti.
     const it = classTokens(input);
-    assert.ok(it.includes('w-full'), 'input w-full');
-    assert.ok(it.includes('min-w-0'), 'input min-w-0');
-    assert.ok(it.includes('min-h-[44px]'), 'touch target >= 44px');
+    for (const tok of ['absolute', 'inset-0', 'w-full', 'h-full', 'opacity-0', 'cursor-pointer']) {
+      assert.ok(it.includes(tok), `input ${expectedLabels[i]}: token "${tok}" presente`);
+    }
+    for (const bad of ['hidden', 'invisible', 'pointer-events-none']) {
+      assert.ok(!it.includes(bad), `input ${expectedLabels[i]}: niente "${bad}"`);
+    }
+    const style = input.props.style ?? {};
+    assert.ok(!style.display && !style.visibility && !style.pointerEvents,
+      `${expectedLabels[i]}: nessun occultamento via style inline`);
+
+    // Wrapper = riga compatta >= 44px, label a sinistra, valore a destra.
+    const rt = classTokens(row);
+    for (const tok of ['relative', 'min-h-[44px]', 'flex', 'items-center', 'cursor-pointer']) {
+      assert.ok(rt.includes(tok), `riga ${expectedLabels[i]}: token "${tok}" presente`);
+    }
+    assert.equal(row.findAll((n: any) => n.type === 'input').length, 1,
+      `${expectedLabels[i]}: la riga contiene un solo input (quello nativo)`);
+
+    // Label associata all'input (nome accessibile senza duplicazioni).
+    const label = row.children.find((n: any) => n.type === 'label');
+    assert.ok(label, `${expectedLabels[i]}: label presente nella riga`);
+    assert.equal(label.props.htmlFor, expectedIds[i], `${expectedLabels[i]}: label collegata via htmlFor`);
+    assert.equal(input.props.id, expectedIds[i], `${expectedLabels[i]}: id dell'input corretto`);
+    assert.equal(flatText(label), expectedLabels[i], `${expectedLabels[i]}: etichetta visibile`);
+
+    // Valore visibile (aria-hidden) = valore dell'input, in HH:MM.
+    const spans = row.children.filter((n: any) => n.type === 'span');
+    assert.equal(spans.length, 1, `${expectedLabels[i]}: uno span di valore`);
+    assert.equal(spans[0].props['aria-hidden'], 'true', `${expectedLabels[i]}: span aria-hidden (niente valore duplicato all'accessibilita)`);
+    assert.ok(/^\d{2}:\d{2}/.test(flatText(spans[0])), `${expectedLabels[i]}: valore visibile in formato HH:MM`);
+    assert.ok(flatText(spans[0]).startsWith(String(input.props.value)),
+      `${expectedLabels[i]}: il valore visibile riflette startTime/endTime`);
+    assert.ok(classTokens(spans[0]).includes('font-mono'), `${expectedLabels[i]}: valore in font mono`);
   }
-  return { quad, cells, inputs: allInputs };
+  return { rows, inputs };
+}
+
+/** La griglia Classe | Materia: unica grid-cols-2 del form, due celle. */
+function assertClassesGrid(renderer: any) {
+  const grids = renderer.root.findAll((n: any) => n.type === 'div' && classTokens(n).includes('grid-cols-2'));
+  assert.equal(grids.length, 1, 'una sola griglia grid-cols-2 nel form (Classe | Materia)');
+  const grid = grids[0];
+  assert.ok(classTokens(grid).includes('gap-3'), 'gap adeguato fra le colonne');
+  const cells = grid.findAll((n: any) => n.type === 'div' && n.parent === grid);
+  assert.equal(cells.length, 2, 'esattamente due celle');
+  const labels = cells.map((c: any) => flatText(c.children.find((n: any) => n.type === 'label')));
+  assert.deepEqual(labels, ['Classe Interessata', 'Materia'], 'ordine: Classe Interessata | Materia');
+  for (const cell of cells) {
+    assert.ok(classTokens(cell).includes('min-w-0'), 'cella min-w-0');
+  }
+  const inputs = grid.findAll((n: any) => n.type === 'input');
+  assert.equal(inputs.length, 2, 'due input testuali');
+  for (const input of inputs) {
+    const it = classTokens(input);
+    for (const tok of ['w-full', 'min-w-0', 'min-h-[44px]']) {
+      assert.ok(it.includes(tok), `input Classe/Materia: token "${tok}" presente`);
+    }
+  }
+  // Le righe orario NON stanno nella griglia: sono un blocco separato sopra
+  // (la griglia contiene solo i due input testuali verificati sopra).
+  return grid;
 }
 
 function assertLuogoENoteFullWidth(renderer: any) {
-  const { quad } = findQuad(renderer);
+  const grids = renderer.root.findAll((n: any) => n.type === 'div' && classTokens(n).includes('grid-cols-2'));
+  const grid = grids[0];
   const luogo = renderer.root.findAll((n: any) => n.type === 'input' && String(n.props.placeholder ?? '').includes('Aula Magna'));
   assert.equal(luogo.length, 1, 'il campo Luogo / Modalita esiste');
-  assert.ok(!quad.findAll((n: any) => n === luogo[0]).length, 'Luogo / Modalita e fuori dalla quad');
+  assert.ok(!grid.findAll((n: any) => n === luogo[0]).length, 'Luogo / Modalita fuori dalla griglia');
   assert.ok(classTokens(luogo[0]).includes('w-full'), 'Luogo / Modalita a tutta larghezza');
   const notes = renderer.root.findAll((n: any) => n.type === 'textarea');
   assert.equal(notes.length, 1, 'il campo Note esiste');
-  assert.ok(!quad.findAll((n: any) => n === notes[0]).length, 'Note e fuori dalla quad');
+  assert.ok(!grid.findAll((n: any) => n === notes[0]).length, 'Note fuori dalla griglia');
   assert.ok(classTokens(notes[0]).includes('w-full'), 'Note a tutta larghezza');
 }
 
@@ -160,32 +176,42 @@ async function submitForm(renderer: any) {
   await act(async () => { await form.props.onSubmit({ preventDefault: () => {} }); });
 }
 
-test('1. creazione: griglia 2x2 (Ora Inizio|Classe, Ora Fine|Materia) e salvataggio con i valori di default', async () => {
+function classesInputsOf(renderer: any) {
+  const grid = assertClassesGrid(renderer);
+  const [classe, materia] = grid.findAll((n: any) => n.type === 'input');
+  return { classe, materia };
+}
+
+test('1. creazione: due righe compatte con i valori di default, Classe|Materia affiancate, salvataggio invariato', async () => {
   const { renderer, saved } = await renderModal();
-  const { inputs } = assertQuadLayout(renderer);
+  const { inputs } = assertTimeRows(renderer);
   assertLuogoENoteFullWidth(renderer);
   const defaults = getEventModalTimeFields(null);
-  const [inizio, classe, fine, materia] = inputs;
-  assert.equal(inizio.props.value, defaults.startTime, 'default ora inizio per un nuovo impegno');
-  assert.equal(fine.props.value, defaults.endTime, 'default ora fine per un nuovo impegno');
-  // Precompilazione pre-esistente su evento nuovo: prima classe e prima materia del profilo.
-  assert.equal(classe.props.value, '2E', 'classe precompilata con profile.classes[0]');
-  assert.equal(materia.props.value, 'Matematica', 'materia precompilata con profile.primarySubjects[0]');
-  // Titolo + submit: i quattro campi finiscono nel salvataggio com'era prima.
+  assert.equal(inputs[0].props.value, defaults.startTime, 'default ora inizio per un nuovo impegno');
+  assert.equal(inputs[1].props.value, defaults.endTime, 'default ora fine per un nuovo impegno');
+
+  // onChange dello stesso input aggiorna valore nativo E valore visibile.
+  await act(async () => { inputs[0].props.onChange({ target: { value: '09:15' } }); });
+  const after = assertTimeRows(renderer);
+  assert.equal(after.inputs[0].props.value, '09:15', 'il valore nativo riflette onChange');
+  const span = after.rows[0].children.find((n: any) => n.type === 'span');
+  assert.ok(flatText(span).startsWith('09:15'), 'il valore visibile riflette il nuovo orario');
+
+  const { classe, materia } = classesInputsOf(renderer);
+  assert.equal(classe.props.value, '2E', 'precompilazione classe invariata');
+  assert.equal(materia.props.value, 'Matematica', 'precompilazione materia invariata');
   const title = renderer.root.findAll((n: any) => n.type === 'input' && n.props.type === 'text' && n.props.required)[0];
   await act(async () => { title.props.onChange({ target: { value: 'Consiglio 2E' } }); });
-  await act(async () => { classe.props.onChange({ target: { value: '2e' } }); });
-  await act(async () => { materia.props.onChange({ target: { value: 'Matematica' } }); });
   await submitForm(renderer);
   assert.equal(saved.length, 1, 'l impegno viene salvato');
-  assert.equal(saved[0].startTime, defaults.startTime, 'il campo ora inizio finisce nel salvataggio');
-  assert.equal(saved[0].endTime, defaults.endTime, 'il campo ora fine finisce nel salvataggio');
-  assert.equal(saved[0].className, '2E', 'la classe finisce nel salvataggio (normalizzazione invariata)');
-  assert.equal(saved[0].subject, 'Matematica', 'la materia finisce nel salvataggio');
+  assert.equal(saved[0].startTime, '09:15', 'ora inizio salvata');
+  assert.equal(saved[0].endTime, defaults.endTime, 'ora fine salvata');
+  assert.equal(saved[0].className, '2E', 'classe salvata');
+  assert.equal(saved[0].subject, 'Matematica', 'materia salvata');
   await act(async () => { renderer.unmount(); });
 });
 
-test('2. modifica: stessi campi, stessi valori iniziali, layout identico e salvataggio coerente', async () => {
+test('2. modifica: stessi campi, valori esistenti, layout identico e salvataggio coerente', async () => {
   const existing: CalendarEvent = {
     id: 'ev-1', title: 'Dipartimento', category: 'dipartimento', date: '2026-09-25',
     startTime: '08:30', endTime: '10:15', isAllDay: false,
@@ -193,17 +219,13 @@ test('2. modifica: stessi campi, stessi valori iniziali, layout identico e salva
     sourceType: 'manuale', completed: false,
   };
   const { renderer, saved } = await renderModal({ eventToEdit: existing });
-  const { inputs } = assertQuadLayout(renderer);
+  const { inputs } = assertTimeRows(renderer);
   assertLuogoENoteFullWidth(renderer);
-  const [inizio, classe, fine, materia] = inputs;
-  assert.equal(inizio.props.value, '08:30', 'modifica: valore esistente di ora inizio');
-  assert.equal(fine.props.value, '10:15', 'modifica: valore esistente di ora fine');
-  assert.equal(classe.props.value, '2E', 'modifica: classe esistente');
-  assert.equal(materia.props.value, 'Matematica', 'modifica: materia esistente');
-  // Cambio l ora inizio tramite lo stesso campo: il form lo riflette e lo salva.
-  await act(async () => { inizio.props.onChange({ target: { value: '09:00' } }); });
-  const after = assertQuadLayout(renderer).inputs;
-  assert.equal(after[0].props.value, '09:00', 'il campo aggiornato riflette il nuovo valore');
+  assert.equal(inputs[0].props.value, '08:30', 'modifica: valore esistente di ora inizio');
+  assert.equal(inputs[1].props.value, '10:15', 'modifica: valore esistente di ora fine');
+  await act(async () => { inputs[0].props.onChange({ target: { value: '09:00' } }); });
+  const after = assertTimeRows(renderer);
+  assert.equal(after.inputs[0].props.value, '09:00', 'il campo aggiornato riflette il nuovo valore');
   await submitForm(renderer);
   assert.equal(saved.length, 1, 'la modifica viene salvata');
   assert.equal(saved[0].id, 'ev-1', 'stesso impegno');
@@ -212,39 +234,36 @@ test('2. modifica: stessi campi, stessi valori iniziali, layout identico e salva
   await act(async () => { renderer.unmount(); });
 });
 
-test('3. con "Intera giornata" le celle orarie spariscono senza buchi: la griglia mostra Classe | Materia su una riga', async () => {
+test('3. con "Intera giornata" le due righe orario spariscono senza buchi; Classe|Materia restano affiancate', async () => {
   const { renderer } = await renderModal();
   const checkbox = renderer.root.find((n: any) => n.type === 'input' && n.props.type === 'checkbox' && n.props.checked === false && n.props.className?.includes('text-emerald-700'));
   assert.ok(checkbox, 'il checkbox "Intera giornata" esiste');
-  assert.equal(quadOf(renderer).cells.length, 4, 'prima: griglia 2x2 completa');
+  assertTimeRows(renderer);
+  assertClassesGrid(renderer);
   assertLuogoENoteFullWidth(renderer);
   await act(async () => { checkbox.props.onChange({ target: { checked: true } }); });
-  const { cells } = findQuad(renderer);
-  assert.equal(cells.length, 2, 'dopo: esattamente 2 celle, nessun buco vuoto nella griglia');
-  assert.deepEqual(
-    cells.map(cellLabel),
-    ['Classe Interessata', 'Materia'],
-    'dopo: solo Classe | Materia, una sola riga, nessun buco vuoto',
-  );
-  const none = renderer.root.findAll((n: any) => n.type === 'input' && n.props.type === 'time');
-  assert.equal(none.length, 0, 'dopo: nessun campo orario');
+  const times = renderer.root.findAll((n: any) => n.type === 'input' && n.props.type === 'time');
+  assert.equal(times.length, 0, 'dopo: nessuna riga orario, nessun buco');
+  const grid = assertClassesGrid(renderer);
+  const labels = grid.findAll((n: any) => n.type === 'div' && n.parent === grid)
+    .map((c: any) => flatText(c.children.find((n: any) => n.type === 'label')));
+  assert.deepEqual(labels, ['Classe Interessata', 'Materia'], 'Classe | Materia restano affiancate');
   assertLuogoENoteFullWidth(renderer);
-  // Disattivando di nuovo la griglia torna 2x2 (UX inversa preservata).
+  // Riattivando gli orari le due righe tornano identiche (UX inversa).
   await act(async () => { checkbox.props.onChange({ target: { checked: false } }); });
-  assert.deepEqual(
-    quadOf(renderer).cells.map(cellLabel),
-    ['Ora Inizio', 'Classe Interessata', 'Ora Fine', 'Materia'],
-    'riattivando gli orari la griglia 2x2 torna identica',
-  );
+  const again = assertTimeRows(renderer);
+  assert.equal(again.inputs[0].props.value, '15:00', 'riattivando: ora inizio al default');
+  assert.equal(again.inputs[1].props.value, '16:30', 'riattivando: ora fine al default');
   await act(async () => { renderer.unmount(); });
 });
 
-test('4. nessun workaround event-time-duo/appearance reintrodotto; il font mobile 16px resta invariato', () => {
-  const componentSource = readFileSync(resolve(here, '../src/components/EventModal.tsx'), 'utf8');
-  assert.ok(!css.includes('event-time-duo'), 'nessun residuo CSS di event-time-duo in index.css');
-  assert.ok(!css.includes('-webkit-appearance'), 'nessuna regola -webkit-appearance residua in index.css');
-  assert.ok(!css.includes('appearance: none'), 'nessuna regola appearance:none residua in index.css');
-  assert.ok(!componentSource.includes('event-time-duo'), 'nessun residuo della classe nel componente');
+test('4. nessun trucco: niente showPicker, niente picker custom, niente event-time-duo; font mobile 16px invariato', () => {
+  assert.ok(!componentSource.includes('showPicker'), 'niente showPicker nel componente');
+  assert.ok(!componentSource.includes('event-time-duo'), 'niente event-time-duo nel componente');
+  assert.ok(!css.includes('event-time-duo'), 'nessun residuo CSS di event-time-duo');
+  assert.ok(!css.includes('appearance: none') && !css.includes('-webkit-appearance'), 'nessuna regola appearance residua in index.css');
+  assert.ok(!componentSource.includes("type=\"text\"\n                  value={startTime}"), 'gli orari non sono input testuali');
+  // Il font mobile 16px anti auto-zoom resta invariato.
   const fontIdx = css.indexOf('font-size: 16px');
   assert.ok(fontIdx > -1, 'la regola globale del font mobile 16px è ancora presente');
   const fontMedia = css.lastIndexOf('@media (max-width: 767.98px)', fontIdx);
