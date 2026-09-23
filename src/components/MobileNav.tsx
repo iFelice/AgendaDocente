@@ -25,17 +25,18 @@ type IconType = React.ComponentType<{ className?: string }>;
 /**
  * Mobile-first bottom navigation.
  *
- * Below 768px the main destinations live here instead of the header tab strip:
- * a fixed, thumb-reachable, safe-area aware bar with at most five entries
- * (Oggi, Settimana, Mese, Scadenze, Altro). Every entry is icon + short label,
- * >= 44px tall, with an unmistakable active state (filled emerald pill).
+ * On phones AND tablets (below 1280px) the main destinations live here instead
+ * of the header tab strip: a fixed, thumb-reachable, safe-area aware bar with
+ * at most five entries (Oggi, Settimana, Mese, Scadenze, Altro). Every entry is
+ * icon + short label, >= 44px tall, with an unmistakable active state (filled
+ * emerald pill).
  *
  * Everything else (Orario, Classi, Circolari, Profilo, Google, circolare AI,
- * installa app, guida) is one tap away inside the "Altro" sheet, so the phone
- * header can stay minimal (brand + profile only).
+ * installa app, guida) is one tap away inside the "Altro" sheet, so the header
+ * stays minimal (brand + profile only).
  *
- * Desktop and tablets (>= 768px) keep the full top navigation: the whole
- * component is wrapped in `md:hidden`.
+ * Desktop (>= 1280px) keeps the full top navigation: the whole component is
+ * wrapped in `xl:hidden`.
  */
 
 export const MOBILE_NAV_ITEMS: { id: ViewMode | "altro"; label: string; icon: IconType }[] = [
@@ -123,7 +124,7 @@ export const MobileNav: React.FC<MobileNavProps> = ({
   const isMoreActive = moreViewIds.includes(currentView);
 
   return (
-    <div className="md:hidden">
+    <div className="xl:hidden">
       {/* Primary action: always one thumb away, above the bar (never a sixth nav item).
           The "+" opens the quick-actions sheet: new commitment OR scan a document. */}
       <button

@@ -17,13 +17,13 @@ import {
   type DocumentFileMeta,
 } from "../utils/documentScanner";
 import {
-  isSupportTeacherProfile,
   periodTimesForIndex,
   previewReconstruction,
   reconstructedToTimetableSlots,
   slotsInReplacementScope,
   type TimetableMergeMode,
 } from "../utils/reconstructTimetable";
+import { isSupportTeacherOf } from "../utils/teacherType";
 import { AnalysisProgressBar } from "./AnalysisProgressBar";
 import { RECON_NOTES, crossrefTimetables, reconSignal, type ReconstructedSlot } from "../utils/timetableCrossref";
 import {
@@ -358,7 +358,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     setPreviewUrl(url);
   };
 
-  const support = isSupportTeacherProfile(profile);
+  const support = isSupportTeacherOf(profile);
   /** Etichetta dell'ambito sostituito: "sostegno" per i docenti di sostegno. */
   const natureLabel = support ? "sostegno" : "materia";
   const schools = useMemo(() => normalizeTeacherProfile(profile).schools ?? [], [profile]);

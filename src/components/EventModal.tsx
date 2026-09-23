@@ -3,7 +3,7 @@ import { isGoogleSyncEnabled } from "../services/googleCalendarService";
 import { eventDateError } from "../utils/dates";
 import { localDateISO } from "../utils/dates";
 import React, { useState, useEffect } from "react";
-import { Clock, MapPin, X, Calendar, BookOpen, AlertCircle, Trash2 } from "lucide-react";
+import { Clock, MapPin, X, Calendar, BookOpen, AlertCircle, Trash2, ChevronRight } from "lucide-react";
 import { CalendarEvent, EventCategory, TeacherProfile } from "../types";
 
 interface EventModalProps {
@@ -25,7 +25,6 @@ export const EVENT_CATEGORIES: { id: EventCategory; label: string }[] = [
   { id: "dipartimento_sostegno", label: "Dipartimento Sostegno / Inclusione" },
   { id: "consiglio_classe", label: "Consiglio di Classe" },
   { id: "collegio_docenti", label: "Collegio Docenti" },
-  { id: "dipartimento", label: "Dipartimento Disciplinare" },
   { id: "ricevimento_genitori", label: "Ricevimento Genitori / Terapisti" },
   { id: "scadenza", label: "Scadenza Istituzionale" },
   { id: "promemoria", label: "Promemoria Didattico" },
@@ -34,6 +33,19 @@ export const EVENT_CATEGORIES: { id: EventCategory; label: string }[] = [
   { id: "riunione", label: "Altra Riunione" },
   { id: "personale", label: "Personale" },
 ];
+
+/**
+ * Categoria LEGACY "Dipartimento disciplinare": non è più fra le opzioni
+ * normali (EVENT_CATEGORIES) per i nuovi eventi, ma resta selezionabile SOLO
+ * mentre si modifica un evento che la possiede già, così una scelta storica
+ * non viene mai persa o convertita in silenzio. L'identificatore "dipartimento"
+ * resta valido nei tipi e nei formatter/parser (dati salvati e estratti da
+ * circolari continuano a caricarsi, vedersi ed esportarsi).
+ */
+export const LEGACY_DIPARTIMENTO_CATEGORY: { id: EventCategory; label: string } = {
+  id: "dipartimento",
+  label: "Dipartimento Disciplinare (legacy)",
+};
 
 /** Defaults are only suggestions for a new manual event, never replacements for source data. */
 export function getEventModalTimeFields(source?: Partial<CalendarEvent> | null) {
@@ -69,6 +81,13 @@ export const EventModal: React.FC<EventModalProps> = ({
   const [notes, setNotes] = useState("");
   const [syncWithGoogle, setSyncWithGoogle] = useState(false);
   const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
+  // L'evento in modifica (o precompilato dallo scanner) possiede gia' la
+  // categoria legacy? Allora l'opzione resta disponibile per tutta la sessione
+  // di modifica: si puo' anche tornare indietro dopo un cambio di idea. Per un
+  // evento nuovo senza quella categoria, l'opzione non esiste.
+  const editingLegacyDipartimento =
+    eventToEdit?.category === "dipartimento" ||
+    initialEventData?.category === "dipartimento";
 
   useEffect(() => {
     const timeFields = getEventModalTimeFields(eventToEdit ?? initialEventData);
@@ -180,7 +199,7 @@ export const EventModal: React.FC<EventModalProps> = ({
           <div>
             <label className="block font-semibold text-stone-700 mb-1.5">Tipologia Impegno</label>
             <div className="flex flex-wrap gap-1.5">
-              {EVENT_CATEGORIES.map((cat) => (
+              {(editingLegacyDipartimento ? [...EVENT_CATEGORIES, LEGACY_DIPARTIMENTO_CATEGORY] : EVENT_CATEGORIES).map((cat) => (
                 <button
                   key={cat.id}
                   type="button"
@@ -240,26 +259,57 @@ export const EventModal: React.FC<EventModalProps> = ({
           {eventToEdit?.googleEventId && !syncWithGoogle && (
             <p className="text-xs text-stone-600">Sincronizzazione disattivata: la copia su Google resta disponibile e non verrà aggiornata o eliminata da questa agenda.</p>
           )}
-          {/* Times */}
+          {/*
+            Orari — DUE RIGHE COMPATTE tappabili (label a sinistra, valore
+            HH:MM e chevron a destra), non grandi box time. Dal test reale
+            iPhone il controllo nativo type="time" deborda dalla propria
+            colonna anche a ~199px: non si tenta piu di comprimerlo.
+            Il VERO input type="time" resta l unico target del tap: absolute
+            inset-0 sopra l intera riga, opacity-0, a piena dimensione — cosi
+            il picker nativo iOS si apre direttamente sul controllo (nessuna
+            invocazione programmatica, nessun picker custom, niente
+            display:none / visibility:hidden / pointer-events:none) e il
+            rendering WebKit del
+            controllo non puo piu influire sul layout. Il valore visibile e un
+            span aria-hidden (il valore accessibile resta quello dell input,
+            collegato alla label via htmlFor); focus-within evidenzia la riga
+            quando l input riceve il focus da tastiera. Presentazione unica a
+            ogni larghezza: stessi startTime/endTime e stessi onChange come
+            unica source of truth, nessuna duplicazione di stato.
+          */}
           {!isAllDay && (
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block font-semibold text-stone-700 mb-1">Ora Inizio</label>
+            <div className="space-y-2">
+              <div className="relative min-h-[44px] flex items-center justify-between gap-3 px-3 py-2 bg-white border border-stone-300 rounded-lg cursor-pointer transition-colors focus-within:border-emerald-600 focus-within:ring-2 focus-within:ring-emerald-600/30">
+                <label htmlFor="event-start-time" className="text-xs font-semibold text-stone-700">
+                  Ora Inizio
+                </label>
+                <span aria-hidden="true" className="flex items-center gap-1 text-xs font-mono text-stone-900">
+                  {startTime || "--:--"}
+                  <ChevronRight className="w-4 h-4 text-stone-400" />
+                </span>
                 <input
+                  id="event-start-time"
                   type="time"
                   value={startTime}
                   onChange={(e) => setStartTime(e.target.value)}
-                  className="w-full p-2 border border-stone-300 rounded-lg text-xs"
+                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                 />
               </div>
 
-              <div>
-                <label className="block font-semibold text-stone-700 mb-1">Ora Fine</label>
+              <div className="relative min-h-[44px] flex items-center justify-between gap-3 px-3 py-2 bg-white border border-stone-300 rounded-lg cursor-pointer transition-colors focus-within:border-emerald-600 focus-within:ring-2 focus-within:ring-emerald-600/30">
+                <label htmlFor="event-end-time" className="text-xs font-semibold text-stone-700">
+                  Ora Fine
+                </label>
+                <span aria-hidden="true" className="flex items-center gap-1 text-xs font-mono text-stone-900">
+                  {endTime || "--:--"}
+                  <ChevronRight className="w-4 h-4 text-stone-400" />
+                </span>
                 <input
+                  id="event-end-time"
                   type="time"
                   value={endTime}
                   onChange={(e) => setEndTime(e.target.value)}
-                  className="w-full p-2 border border-stone-300 rounded-lg text-xs"
+                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                 />
               </div>
             </div>
@@ -267,25 +317,25 @@ export const EventModal: React.FC<EventModalProps> = ({
 
           {/* Class & Subject */}
           <div className="grid grid-cols-2 gap-3">
-            <div>
+            <div className="min-w-0">
               <label className="block font-semibold text-stone-700 mb-1">Classe Interessata</label>
               <input
                 type="text"
                 value={className}
                 onChange={(e) => setClassName(e.target.value.toUpperCase())}
                 placeholder="es. 2E o Tutte"
-                className="w-full p-2 border border-stone-300 rounded-lg text-xs"
+                className="w-full min-w-0 p-2 min-h-[44px] border border-stone-300 rounded-lg text-xs"
               />
             </div>
 
-            <div>
+            <div className="min-w-0">
               <label className="block font-semibold text-stone-700 mb-1">Materia</label>
               <input
                 type="text"
                 value={subject}
                 onChange={(e) => setSubject(e.target.value)}
                 placeholder="es. Scienze motorie"
-                className="w-full p-2 border border-stone-300 rounded-lg text-xs"
+                className="w-full min-w-0 p-2 min-h-[44px] border border-stone-300 rounded-lg text-xs"
               />
             </div>
           </div>

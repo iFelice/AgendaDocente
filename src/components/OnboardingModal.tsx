@@ -21,6 +21,7 @@ import { SchoolLevel, TeacherProfile, TeacherRole, TEACHER_ROLE_KINDS } from "..
 import { getCurrentSchoolYear, getSuggestedSchoolYears } from "../utils/schoolYear";
 import { signInWithGoogle, isUserCancellationError } from "../services/googleAuth";
 import { buildRolesFromChoices, ONBOARDING_ADDITIONAL_ROLES, ROLE_LABELS, roleDisplayName, type OnboardingRoleChoice } from "../utils/teacherRoles";
+import { isSupportTeacherOf } from "../utils/teacherType";
 import { formatPersonDisplayName, isPlaceholderFullName } from "../utils/names";
 import { CLASS_BOUND_ROLE_KINDS } from "../types";
 
@@ -75,7 +76,10 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
     return currentCalculatedSchoolYear;
   });
 
-  const [isSupportTeacher, setIsSupportTeacher] = useState(initialProfile.isSupportTeacher ?? false);
+  // Helper canonico: per i profili legacy senza flag l'euristica "sostegno"
+  // su primarySubjects determina la card pre-selezionata (coerenza con il resto
+  // dell'app); un valore esplicito resta comunque quello che l'utente può cambiare.
+  const [isSupportTeacher, setIsSupportTeacher] = useState(isSupportTeacherOf(initialProfile));
   // Additional roles come ONLY from explicit user choice; the support/curricular type never
   // auto-assigns anything (no implicit GLI, no automatic coordinatore).
   const [additionalRoles, setAdditionalRoles] = useState<OnboardingRoleChoice[]>(() =>

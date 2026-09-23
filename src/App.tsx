@@ -5,7 +5,7 @@ import { isStudentActive } from "./utils/studentMatcher";
 import { deriveScheduledAssessmentCalendarItems } from "./utils/scheduledAssessmentCalendar";
 import { database, type LocalData } from "./services/db";
 import { localDateISO } from "./utils/dates";
-import React, { useState, useEffect, useRef, lazy, Suspense } from "react";
+import React, { useState, useEffect, useRef, lazy, Suspense, useCallback } from "react";
 import {
   CalendarEvent,
   CircularDocument,
@@ -23,6 +23,24 @@ import {
 } from "./types";
 import { storage } from "./services/storage";
 import { applyReconstruction, type TimetableMergeMode } from "./utils/reconstructTimetable";
+import {
+  backFromRegister,
+  clearRegisterStudent,
+  initialRegisterNavigation,
+  isRegisterOpenForStudent,
+  openRegisterForStudent,
+  type RegisterNavigation,
+  type RegisterSection,
+} from "./utils/registerNavigation";
+import {
+  backFromSlotEdit,
+  clearSlotEdit,
+  initialSlotEditNavigation,
+  isSlotEditOpen,
+  openSlotForEdit,
+  type SlotEditNavigation,
+  type SlotEditOriginView,
+} from "./utils/timetableEditNavigation";
 import { Navbar } from "./components/Navbar";
 import { MobileNav } from "./components/MobileNav";
 import { TodayView } from "./components/TodayView";
@@ -91,8 +109,15 @@ export default function App({ initialData }: { initialData: LocalData }) {
   const isDefinitiveCompiled = activeTimetableInfo.isDefinitiveCompiled;
 
   const [currentView, setCurrentView] = useState<ViewMode>("oggi");
-  const [registerStudentId, setRegisterStudentId] = useState<string | null>(null);
-  const [registerSection, setRegisterSection] = useState<"assessments" | "scheduled">("assessments");
+  // Navigazione del Registro: studente aperto, sezione e ORIGINE della
+  // navigazione (vista di provenienza per il pulsante "Indietro"). Stato
+  // dedicato: non si deduce mai da altri stati.
+  const [registerNav, setRegisterNav] = useState<RegisterNavigation>(initialRegisterNavigation);
+  // Navigazione della MODIFICA LEZIONE aperta dal Planning (stesso pattern del
+  // Registro, logica in timetableEditNavigation.ts): quale lezione è in
+  // modifica, in quale orario, da quale vista di Planning e con quale
+  // data/settimana tornare. Mai dedotta da altri stati.
+  const [slotEditNav, setSlotEditNav] = useState<SlotEditNavigation>(initialSlotEditNavigation);
   const [isCircularModalOpen, setIsCircularModalOpen] = useState(false);
   const [isScannerOpen, setIsScannerOpen] = useState(false);
   // File pre-scansionato dal flusso unificato, da alimentare alla pipeline circolare esistente.
@@ -104,6 +129,18 @@ export default function App({ initialData }: { initialData: LocalData }) {
   const [editingEvent, setEditingEvent] = useState<CalendarEvent | null>(null);
   const [targetDateForNewEvent, setTargetDateForNewEvent] = useState<string | undefined>();
   const [planningTargetDate, setPlanningTargetDate] = useState<string | undefined>();
+  // Data da EVIDENZIARE in Settimana ("SELEZIONATO"): è la navigazione
+  // INTENZIONALE verso una data precisa (es. "Visualizza la Settimana" da Oggi,
+  // tap su un giorno in Mese, circolari). La data usata SOLO come anchor per
+  // ripristinare la settimana (ritorno dalla modifica di una lezione) NON viene
+  // evidenziata: al ritorno dal Planning non resta nessun giorno marcato.
+  const [planningHighlightDate, setPlanningHighlightDate] = useState<string | undefined>();
+  // Data civile selezionata nella vista Oggi. Settimana/Mese preservano il
+  // contesto tramite planningTargetDate; Oggi porta la data dentro se stesso,
+  // quindi la conserviamo qui per riaprirla sullo stesso giorno (es. dopo
+  // essersi fermati al Registro) invece che riportare arbitrariamente a oggi.
+  const [oggiTargetDate, setOggiTargetDate] = useState<string | undefined>();
+  const handleTodaySelectedDate = useCallback((iso: string) => { setOggiTargetDate(iso); }, []);
   const [prefilledEventData, setPrefilledEventData] = useState<Partial<CalendarEvent> | null>(null);
 
   // Google Workspace / Institutional Account State
@@ -270,6 +307,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
     view: "oggi" | "settimana" | "mese" = "settimana"
   ) => {
     setPlanningTargetDate(dateIso);
+    setPlanningHighlightDate(dateIso);
     setCurrentView(view);
   };
 
@@ -579,13 +617,74 @@ export default function App({ initialData }: { initialData: LocalData }) {
 
   const handleViewChange = (view: ViewMode) => {
     setCurrentView(view);
-    if (view !== "registro") setRegisterStudentId(null);
+    if (view !== "registro") setRegisterNav((nav) => clearRegisterStudent(nav));
+    // Uscita volontaria dal flusso di modifica lezione (o arrivo manuale in
+    // Orario dalla navigazione principale): la sessione si chiude qui, così un
+    // vecchio initialSlot non può più essere ri-consumato da un futuro remount
+    // dell'editor. Il flusso di modifica usa setCurrentView diretto (come il
+    // Registro) e non passa da qui.
+    setSlotEditNav((nav) => clearSlotEdit(nav));
   };
-  const handleOpenRegister = (studentId: string, section: "assessments" | "scheduled" = "assessments") => {
-    setRegisterStudentId(studentId);
-    setRegisterSection(section);
+  const handleOpenRegister = (studentId: string, section: RegisterSection = "assessments") => {
+    // L'origine è la vista in cui l'utente si trova al momento dell'apertura:
+    // le uniche viste che aprono il Registro per uno studente sono le viste di
+    // planning (prova programmata: Oggi/Settimana/Mese) e Classi (scheda alunno).
+    // "Indietro" tornerà lì, preservando i contesti temporali già in memoria
+    // (planningTargetDate per Settimana/Mese, oggiTargetDate per Oggi).
+    setRegisterNav(openRegisterForStudent(studentId, section, currentView));
     setCurrentView("registro");
   };
+
+  // Tap su una lezione del Planning (Oggi/Settimana): apre la modifica diretta
+  // della lezione toccata nell'orario ATTIVO (type = activeType, mai il flag
+  // dello slot). La data registrata è quella della vista di provenienza
+  // (selectedIso di Oggi / day.iso della Settimana): è il contesto da
+  // ripristinare al ritorno. setCurrentView diretto (come per il Registro):
+  // non passa da handleViewChange, che chiuderebbe la sessione.
+  const openSlotEditSession = useCallback((slot: TimetableSlot, type: TimetableType, dateIso: string, origin: SlotEditOriginView) => {
+    setSlotEditNav(openSlotForEdit(slot, type, origin, dateIso));
+    if (origin === "oggi") {
+      setOggiTargetDate(dateIso);
+    } else {
+      // Anchor per RIPRISTINARE la settimana al ritorno: senza evidenza
+      // "SELEZIONATO" (non è una navigazione intenzionale verso quel giorno).
+      setPlanningTargetDate(dateIso);
+      setPlanningHighlightDate(undefined);
+    }
+    setCurrentView("orario");
+  }, []);
+
+  // Oggi: wrapper sottile, firma e comportamento IDENTICI a prima della
+  // generalizzazione (nessun impatto su TodayView e sui suoi test).
+  const handleOpenTimetableSlotForEdit = useCallback((slot: TimetableSlot, type: TimetableType, selectedIso: string) => {
+    openSlotEditSession(slot, type, selectedIso, "oggi");
+  }, [openSlotEditSession]);
+
+  // Settimana: stessa logica centralizzata, origine "settimana" e contesto =
+  // planningTargetDate (riutilizzato da WeekView via targetDateIso).
+  const handleOpenTimetableSlotFromWeek = useCallback((slot: TimetableSlot, type: TimetableType, dayIso: string) => {
+    openSlotEditSession(slot, type, dayIso, "settimana");
+  }, [openSlotEditSession]);
+
+  // "Torna al Planning" nell'editor: vista e data di ritorno sono quelle
+  // REGISTRATE all'apertura (mai dedotte dagli altri stati); la sessione si
+  // chiude con `next` restituito dall'helper.
+  const handleBackFromSlotEdit = useCallback(() => {
+    const { targetView, targetDateIso, next } = backFromSlotEdit(slotEditNav);
+    setSlotEditNav(next);
+    if (targetView === "oggi") {
+      if (targetDateIso) setOggiTargetDate(targetDateIso);
+      setCurrentView("oggi");
+    } else if (targetView === "settimana") {
+      // La settimana da riaprire è quella REGISTRATA (il day.iso della lezione
+      // toccata), non la "settimana corrente" dell'app: WeekView la
+      // sincronizza al mount tramite targetDateIso (planningTargetDate). La
+      // data resta un ANCHOR: nessun giorno evidenziato come "SELEZIONATO".
+      if (targetDateIso) setPlanningTargetDate(targetDateIso);
+      setPlanningHighlightDate(undefined);
+      setCurrentView("settimana");
+    }
+  }, [slotEditNav]);
 
   // Stats for badges
   const todayIso = localDateISO();
@@ -648,8 +747,12 @@ export default function App({ initialData }: { initialData: LocalData }) {
             events={events}
             scheduledAssessments={calendarScheduledAssessments}
             onOpenScheduledAssessment={(studentId) => handleOpenRegister(studentId, "scheduled")}
+            initialDateIso={oggiTargetDate}
+            onSelectedDateChange={handleTodaySelectedDate}
             isProvisionalTimetable={isProvisionalActive}
             isDefinitiveCompiled={isDefinitiveCompiled}
+            timetableType={activeTimetableInfo.activeType}
+            onOpenTimetableSlotForEdit={handleOpenTimetableSlotForEdit}
             onOpenNewEvent={handleOpenNewEvent}
             onOpenCircularModal={() => setIsCircularModalOpen(true)}
             onEditEvent={handleEditEvent}
@@ -672,6 +775,9 @@ export default function App({ initialData }: { initialData: LocalData }) {
             onEditEvent={handleEditEvent}
             onDeleteEvent={handleDeleteEvent}
             targetDateIso={planningTargetDate}
+            highlightDateIso={planningHighlightDate}
+            timetableType={activeTimetableInfo.activeType}
+            onOpenTimetableSlotForEdit={handleOpenTimetableSlotFromWeek}
           />
         )}
 
@@ -721,9 +827,18 @@ export default function App({ initialData }: { initialData: LocalData }) {
             students={students}
             assessments={assessments}
             scheduledAssessments={scheduledAssessments}
-            initialStudentId={registerStudentId}
-            initialSection={registerSection}
-            onBackToOrigin={registerStudentId ? () => { setRegisterStudentId(null); setCurrentView("classi"); } : undefined}
+            initialStudentId={registerNav.studentId}
+            initialSection={registerNav.section}
+            onBackToOrigin={isRegisterOpenForStudent(registerNav)
+              ? () => {
+                  // Torna alla vista di ORIGINE reale (Oggi/Settimana/Mese/Classi),
+                  // non arbitrariamente a Classi. I contesti temporali
+                  // (planningTargetDate / oggiTargetDate) restano in memoria.
+                  const { targetView, next } = backFromRegister(registerNav);
+                  setRegisterNav(next);
+                  setCurrentView(targetView);
+                }
+              : undefined}
             onSaveAssessment={handleSaveAssessment}
             onDeleteAssessment={handleDeleteAssessment}
             onSaveScheduledAssessment={handleSaveScheduledAssessment}
@@ -748,6 +863,9 @@ export default function App({ initialData }: { initialData: LocalData }) {
             onClearTimetable={handleClearTimetable}
             onSaveProfile={handleSaveProfile}
             onSaveTimeSlotConfig={handleSaveTimeSlotConfig}
+            initialSlot={isSlotEditOpen(slotEditNav) ? slotEditNav.slot : null}
+            initialSlotType={isSlotEditOpen(slotEditNav) ? slotEditNav.type : null}
+            onBackToOrigin={isSlotEditOpen(slotEditNav) ? handleBackFromSlotEdit : undefined}
           />
         )}
 

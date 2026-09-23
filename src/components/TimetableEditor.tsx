@@ -34,33 +34,34 @@ import {
 } from "../utils/timeSlots";
 import { MultiChipInput } from "./MultiChipInput";
 import { collectKnownTeacherNames, coTeachingSummary, coTeachingSubjectsOf, pruneCoTeachingFields } from "../utils/coTeaching";
+import { isSupportTeacherOf } from "../utils/teacherType";
 import { DEFAULT_SUBJECTS, mergeSubjectSuggestions, normalizeSubjectName } from "../utils/subjects";
+import {
+  DAY_SWIPE_HORIZONTAL_RATIO,
+  DAY_SWIPE_INTERACTIVE_SELECTOR,
+  DAY_SWIPE_MIN_DISTANCE_PX,
+  daySwipeDirection,
+  isInteractiveSwipeTarget as isInteractiveSwipeControl,
+  type DaySwipeDirection,
+} from "../utils/daySwipe";
 
 // ---------------------------------------------------------------------------
 // Swipe fra i giorni dell'orario (scorciatoia mobile: i chip restano il controllo
-// principale, accessibile anche da tastiera)
+// principale, accessibile anche da tastiera). Le regole del gesto (soglia,
+// prevalenza orizzontale, esclusione dei controlli) vivono in `../utils/daySwipe`
+// e sono condivise con la vista Oggi, così lo swipe si comporta uguale in tutta
+// l'app.
 // ---------------------------------------------------------------------------
 
-/**
- * Spostamento orizzontale minimo perché il gesto sia considerato uno swipe (px
- * CSS). Sotto questa soglia restano tocchi, micro-movimenti e scroll: nessun
- * cambio di giorno.
- */
-export const DAY_SWIPE_MIN_DISTANCE_PX = 48;
-
-/**
- * Quanto il gesto deve essere orizzontale: lo spostamento orizzontale deve
- * essere almeno questo multiplo di quello verticale. Con 1.5 una diagonale a 45°
- * e un normale scroll verticale non cambiano mai il giorno.
- */
-export const DAY_SWIPE_HORIZONTAL_RATIO = 1.5;
-
-/**
- * Controlli da cui uno swipe NON deve mai partire: chip dei giorni, pulsanti di
- * navigazione, campi dei modali, link. Il gesto resta riservato alle superfici
- * non interattive dell'area del giorno.
- */
-export const DAY_SWIPE_INTERACTIVE_SELECTOR = 'button, input, select, textarea, a, label, [role="button"]';
+// Ri-esportati per compatibilità: i consumatori esistenti (e i test) importano
+// le regole dello swipe da questo file; l'unica fonte è `../utils/daySwipe`.
+export {
+  DAY_SWIPE_HORIZONTAL_RATIO,
+  DAY_SWIPE_INTERACTIVE_SELECTOR,
+  DAY_SWIPE_MIN_DISTANCE_PX,
+  daySwipeDirection,
+  type DaySwipeDirection,
+};
 
 /**
  * Marcatore SEMANTICO della cella libera della griglia (il "+" che aggiunge
@@ -69,25 +70,6 @@ export const DAY_SWIPE_INTERACTIVE_SELECTOR = 'button, input, select, textarea, 
  * questo attributo, non il testo o l'icona del pulsante.
  */
 export const DAY_SWIPE_CELL_SELECTOR = '[data-slot-cell="empty"]';
-
-/** Direzione di uno swipe fra i giorni: `null` = il gesto non è uno swipe. */
-export type DaySwipeDirection = "next" | "previous" | null;
-
-/**
- * Decide se lo spostamento di un gesto è uno swipe fra i giorni e in che
- * direzione: sinistra = giorno successivo, destra = giorno precedente.
- *
- * Regole (nessuna ambiguità con lo scroll verticale):
- *  - almeno `DAY_SWIPE_MIN_DISTANCE_PX` px di spostamento orizzontale;
- *  - spostamento orizzontale >= `DAY_SWIPE_HORIZONTAL_RATIO` x quello verticale.
- */
-export function daySwipeDirection(deltaX: number, deltaY: number): DaySwipeDirection {
-  const horizontal = Math.abs(deltaX);
-  const vertical = Math.abs(deltaY);
-  if (horizontal < DAY_SWIPE_MIN_DISTANCE_PX) return null;
-  if (horizontal < vertical * DAY_SWIPE_HORIZONTAL_RATIO) return null;
-  return deltaX < 0 ? "next" : "previous";
-}
 
 /**
  * Giorno raggiunto da uno swipe, senza MAI uscire dalla settimana mostrata:
@@ -118,10 +100,8 @@ export function swipeTargetDay(
  * restano esclusi.
  */
 export function isInteractiveSwipeTarget(target: unknown): boolean {
-  const element = target as Element | null | undefined;
-  if (!element || typeof element.closest !== "function") return false;
-  const control = element.closest(DAY_SWIPE_INTERACTIVE_SELECTOR);
-  if (!control) return false;
+  if (!isInteractiveSwipeControl(target)) return false;
+  const control = (target as Element).closest(DAY_SWIPE_INTERACTIVE_SELECTOR);
   // Cella libera: il controllo coincide col marcatore semantico della cella.
   if (typeof control.closest === "function" && control.closest(DAY_SWIPE_CELL_SELECTOR) === control) return false;
   return true;
@@ -155,6 +135,29 @@ interface TimetableEditorProps {
   onSaveTimeSlotConfig?: (
     config: TimeSlotConfig
   ) => void | false | Promise<void | false>;
+  /**
+   * Lezione da aprire DIRETTAMENTE in modifica (tap su una lezione del
+   * Planning: Oggi/Settimana). È solo l'handle della richiesta: la validazione
+   * vera avviene cercando lo slot PER ID nell'orario dichiarato da
+   * `initialSlotType` (vedi l'effetto one-shot più sotto).
+   */
+  initialSlot?: TimetableSlot | null;
+  /**
+   * Orario a cui la lezione da aprire appartiene. Fonte AUTOREVOLE del tab di
+   * destinazione: non ci si può fidare di `initialSlot.isProvisional`.
+   */
+  initialSlotType?: TimetableType | null;
+  /**
+   * Presente SOLO quando l'editor è stato aperto dal Planning (sessione di
+   * navigazione in corso): ogni chiusura del modale — Salvataggio riuscito,
+   * Eliminazione riuscita, Annulla o X — torna AUTOMATICAMENTE al Planning di
+   * origine chiamando questo callback (che l'App implementa con
+   * backFromSlotEdit). In caso di errore di salvataggio/eliminazione NON viene
+   * chiamato: si resta nell'editor con il messaggio di errore. Editor
+   * standalone (aperto dalla navigazione "Orario"): prop assente, ogni
+   * chiusura resta nell'editor come sempre.
+   */
+  onBackToOrigin?: () => void;
 }
 
 export const TimetableEditor: React.FC<TimetableEditorProps> = ({
@@ -173,6 +176,9 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   onClearTimetable,
   onSaveProfile,
   onSaveTimeSlotConfig,
+  initialSlot = null,
+  initialSlotType = null,
+  onBackToOrigin,
 }) => {
   const save = usePersistenceAction();
   const slotConfigSave = usePersistenceAction();
@@ -186,6 +192,21 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   const [editingSlot, setEditingSlot] = useState<TimetableSlot | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+
+  // Avviso (una tantum) quando la richiesta di apertura diretta non trova più
+  // la lezione nell'orario dichiarato: niente modale, niente fallback, niente
+  // scritture — solo un messaggio chiaro e chiudibile.
+  const [slotEditNotice, setSlotEditNotice] = useState<string | null>(null);
+
+  // Richiesta ONE-SHOT di apertura diretta (tap su una lezione del Planning):
+  // catturata al primo render e consumata una sola volta per mount. La fonte
+  // autorevole del tipo è `initialSlotType`, NON il flag dello slot; lo slot
+  // verrà cercato PER ID nell'array di quell'orario al momento dell'apertura.
+  const initialEditRequestRef = useRef<{ slotId: string; type: TimetableType } | null>(
+    initialSlot && initialSlotType
+      ? { slotId: initialSlot.id, type: initialSlotType }
+      : null
+  );
 
   // Class selection state in slot modal
   const [isAddingNewClass, setIsAddingNewClass] = useState(false);
@@ -224,7 +245,9 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   // Co-teaching (compresenza): suggestions come from the predefined subject list, the
   // teacher's profile and the subjects/names already used in the timetables. A future
   // school directory can replace these sources without migrations.
-  const isSupportTeacher = profile?.isSupportTeacher === true;
+  // Tipo docente canonico (sostegno vs curricolare): fonte unica, con fallback
+  // legacy sui profili senza flag. Decide la UI della compresenza e la materia.
+  const isSupportTeacher = isSupportTeacherOf(profile);
   const usedSubjects = useMemo(() => {
     const used: string[] = [];
     for (const timetable of [definitiveTimetable, provisionalTimetable]) {
@@ -246,6 +269,16 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
 
   const currentSlots =
     activeTab === "provvisorio" ? provisionalTimetable : definitiveTimetable;
+
+  // Il modale sta modificando una lezione ESISTENTE dell'orario mostrato
+  // (stesso criterio di titolo ed "Elimina ora" del modale). Mentre è aperta,
+  // cambiare tab cambierebbe la destinazione di Salva/Elimina: i tab restano
+  // quindi DISABILITATI. Non bloccano: modale chiuso, e creazione di una nuova
+  // ora (baseline assente, id nuovo non presente nell'orario).
+  const isEditingExistingSlot =
+    isModalOpen &&
+    editingSlot !== null &&
+    currentSlots.some((s) => s.id === editingSlot.id);
 
   // Effective period slots calculated from config
   const periods = useMemo(
@@ -373,6 +406,48 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
     setIsModalOpen(true);
   };
 
+  // Apertura diretta di una lezione arrivata dal Planning (Oggi/Settimana):
+  // seleziona il tab dell'orario DICHIARATO e apre il normale modale di
+  // modifica con lo stesso percorso del tap sulla griglia (handleEditSlot), così
+  // editBaseline — il terzo argomento CAS di onSaveSlot — è lo slot REALMENTE
+  // presente nell'array al momento dell'apertura, non una copia inventata.
+  // Guard-rail: lo slot viene cercato PER ID SOLO nell'array dell'orario
+  // dichiarato; se non c'è (slot cancellato nel frattempo, tipo sbagliato,
+  // stato stale) NON si apre nulla, NON si crea nulla e NON si cerca
+  // nell'altro orario: resta un avviso esplicito. Consumo one-shot: dopo
+  // Salva/Elimina/Annulla la richiesta non riesiste e l'effetto (mount-only)
+  // non può produrre loop né riaperture.
+  useEffect(() => {
+    const request = initialEditRequestRef.current;
+    if (!request) return;
+    initialEditRequestRef.current = null;
+    const source =
+      request.type === "provvisorio" ? provisionalTimetable : definitiveTimetable;
+    const liveSlot = source.find((s) => s.id === request.slotId);
+    if (!liveSlot) {
+      setSlotEditNotice(
+        "La lezione non è più disponibile nell'orario selezionato."
+      );
+      return;
+    }
+    setActiveTab(request.type);
+    handleEditSlot(liveSlot);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Chiusura del modale di modifica. Con sessione dal Planning (onBackToOrigin
+  // presente) OGNI chiusura torna al Planning di origine: il callback dell'App
+  // consuma backFromSlotEdit e naviga (editor smontato). Standalone: solo
+  // chiusura, comportamento storico invariato. Chiamare SOLO dopo un esito
+  // definitivo: su errore di salvataggio/eliminazione si resta nell'editor.
+  const closeSlotModal = () => {
+    if (onBackToOrigin) {
+      onBackToOrigin();
+      return;
+    }
+    setIsModalOpen(false);
+  };
+
   // When changing period number in modal, automatically update start & end times
   const handlePeriodChange = (newPeriodNum: number) => {
     if (!editingSlot) return;
@@ -447,9 +522,11 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
     }
     // Co-teaching fields are optional: drop the empty ones so saved slots stay clean.
     const slot = pruneCoTeachingFields(editingSlot);
+    // Su fallimento (CAS/persistenza) si resta nell'editor con l'errore mostrato:
+    // nessun ritorno automatico al Planning.
     if (!await save.run(() => onSaveSlot(slot, activeTab, editBaseline.current))) return;
-    setIsModalOpen(false);
     setEditingSlot(null);
+    closeSlotModal();
   };
 
   // Open config drawer and sync draft state
@@ -637,7 +714,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
           <div className="bg-emerald-50/70 rounded-xl p-4 border border-emerald-200 space-y-2">
             <div className="flex items-center justify-between">
               <span className="font-bold text-xs text-emerald-950">
-                Anteprima scansione oraria ({initialPreviewSlots.length} ore):
+                Anteprima scansione oraria ({initialPreviewSlots.length} {initialPreviewSlots.length === 1 ? "ora" : "ore"}):
               </span>
               <span className="text-[11px] font-medium text-emerald-800">
                 Calcolata automaticamente
@@ -679,10 +756,32 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   // =========================================================================
   return (
     <div className="space-y-6 pb-12 max-w-full overflow-x-hidden">
-      {save.error && (
+      {/* Aperto dal Planning: il ritorno è AUTOMATICO a ogni chiusura del
+          modale (Salva/Elimina riusciti, Annulla, X) tramite onBackToOrigin —
+          nessun bottone dedicato, nessuna UI morta. */}{save.error && (
         <p role="alert" className="p-3 text-sm text-rose-700 bg-rose-50 rounded-xl border border-rose-200">
           {save.error}
         </p>
+      )}
+      {slotEditNotice && (
+        <div
+          id="slot-edit-notice"
+          role="alert"
+          className="p-3 text-sm text-amber-900 bg-amber-50 rounded-xl border border-amber-200 flex items-start justify-between gap-3"
+        >
+          <span className="flex items-start gap-2 min-w-0">
+            <AlertCircle className="w-4 h-4 mt-0.5 shrink-0 text-amber-700" />
+            <span>{slotEditNotice}</span>
+          </span>
+          <button
+            type="button"
+            onClick={() => setSlotEditNotice(null)}
+            aria-label="Chiudi avviso"
+            className="p-1.5 rounded-lg text-amber-700 hover:bg-amber-100 transition-colors shrink-0"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
       )}
 
       {/* Header with Title, Slot Config trigger & Mode Selector */}
@@ -764,11 +863,14 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
         <button
           type="button"
           onClick={() => setActiveTab("provvisorio")}
+          disabled={isEditingExistingSlot}
+          aria-disabled={isEditingExistingSlot || undefined}
+          title={isEditingExistingSlot ? "Chiudi la modifica della lezione prima di cambiare orario" : undefined}
           className={`p-4 rounded-xl border text-left transition-all ${
             activeTab === "provvisorio"
               ? "bg-amber-50/70 border-amber-400 ring-2 ring-amber-300 shadow-sm"
               : "bg-white border-stone-200 hover:border-stone-300 shadow-2xs"
-          }`}
+          } ${isEditingExistingSlot ? "opacity-60 cursor-not-allowed" : ""}`}
         >
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-2">
@@ -786,7 +888,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
             )}
           </div>
           <p className="text-xs text-stone-600 mt-1.5">
-            Primi giorni di scuola • <strong>{provisionalTimetable.length} ore</strong>
+            Primi giorni di scuola • <strong>{provisionalTimetable.length} {provisionalTimetable.length === 1 ? "ora" : "ore"}</strong>
           </p>
           {!isDefinitiveCompiled && (
             <p className="text-[11px] text-amber-800 font-medium mt-1">
@@ -799,11 +901,14 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
         <button
           type="button"
           onClick={() => setActiveTab("definitivo")}
+          disabled={isEditingExistingSlot}
+          aria-disabled={isEditingExistingSlot || undefined}
+          title={isEditingExistingSlot ? "Chiudi la modifica della lezione prima di cambiare orario" : undefined}
           className={`p-4 rounded-xl border text-left transition-all ${
             activeTab === "definitivo"
               ? "bg-emerald-50/70 border-emerald-500 ring-2 ring-emerald-300 shadow-sm"
               : "bg-white border-stone-200 hover:border-stone-300 shadow-2xs"
-          }`}
+          } ${isEditingExistingSlot ? "opacity-60 cursor-not-allowed" : ""}`}
         >
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-2">
@@ -821,7 +926,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                 </span>
               ) : (
                 <span className="px-2 py-0.5 rounded-full text-[10px] sm:text-[11px] font-semibold bg-stone-100 text-stone-700 border border-stone-200">
-                  {definitiveTimetable.length} ore
+                  {definitiveTimetable.length} {definitiveTimetable.length === 1 ? "ora" : "ore"}
                 </span>
               )
             ) : (
@@ -832,7 +937,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
           </div>
           <p className="text-xs text-stone-600 mt-1.5">
             Orario di cattedra a regime •{" "}
-            <strong>{definitiveTimetable.length} ore</strong>
+            <strong>{definitiveTimetable.length} {definitiveTimetable.length === 1 ? "ora" : "ore"}</strong>
           </p>
           {!isDefinitiveCompiled && (
             <p className="text-[11px] text-rose-700 font-medium mt-1">
@@ -874,7 +979,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
             {activeTab === "provvisorio" ? "Griglia Provvisorio" : "Griglia Definitivo"}
           </span>
           <span className="text-xs font-semibold px-2 py-0.5 bg-stone-100 text-stone-700 rounded-full">
-            {currentSlots.length} ore
+            {currentSlots.length} {currentSlots.length === 1 ? "ora" : "ore"}
           </span>
         </div>
 
@@ -1113,7 +1218,8 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
               </div>
               <button
                 type="button"
-                onClick={() => setIsModalOpen(false)}
+                onClick={closeSlotModal}
+                aria-label="Chiudi"
                 className="p-1.5 rounded-lg text-stone-400 hover:text-stone-700 hover:bg-stone-100"
               >
                 <X className="w-5 h-5" />
@@ -1372,9 +1478,18 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                 )}
               </div>
 
-              {/* Start Time & End Time */}
-              <div className="grid grid-cols-2 gap-3 pt-1">
-                <div>
+              {/* Ora / Aula / Plesso: UNA SOLA griglia 2 righe x 2 colonne anche
+                  su smartphone — RIGA 1: Ora Inizio | Aula-Spazio, RIGA 2:
+                  Ora Fine | Plesso-Sede — cosi il blocco occupa ESATTAMENTE
+                  2 righe su iPhone (mai 3 campi impilati, mai campi
+                  sovrapposti). Ordine DOM richiesto: Ora Inizio, Aula/Spazio,
+                  Ora Fine, Plesso/Sede (la grid riempie riga per riga).
+                  Colonne minmax(0,...): entrambe realmente restringibili; quella
+                  degli orari leggermente piu larga (1.15fr vs 0.85fr) perche il
+                  controllo nativo type="time" e piu largo di un input testuale.
+                  value/onChange/logica invariati; touch target >= 44px. */}
+              <div className="grid grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)] gap-3 pt-1">
+                <div className="min-w-0">
                   <label className="block font-medium text-stone-700 mb-1">
                     Ora Inizio
                   </label>
@@ -1385,29 +1500,11 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                     onChange={(e) =>
                       setEditingSlot({ ...editingSlot, startTime: e.target.value })
                     }
-                    className="w-full p-2 border border-stone-300 rounded-lg text-xs font-mono min-h-[42px]"
+                    className="w-full min-w-0 p-2 border border-stone-300 rounded-lg text-xs font-mono min-h-[44px]"
                   />
                 </div>
 
-                <div>
-                  <label className="block font-medium text-stone-700 mb-1">
-                    Ora Fine
-                  </label>
-                  <input
-                    type="time"
-                    required
-                    value={editingSlot.endTime}
-                    onChange={(e) =>
-                      setEditingSlot({ ...editingSlot, endTime: e.target.value })
-                    }
-                    className="w-full p-2 border border-stone-300 rounded-lg text-xs font-mono min-h-[42px]"
-                  />
-                </div>
-              </div>
-
-              {/* Classroom & Campus */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
+                <div className="min-w-0">
                   <label className="block font-medium text-stone-700 mb-1">
                     Aula / Spazio
                   </label>
@@ -1418,11 +1515,26 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                       setEditingSlot({ ...editingSlot, classroom: e.target.value })
                     }
                     placeholder="es. Palestra A, Aula 12"
-                    className="w-full p-2.5 border border-stone-300 rounded-lg text-xs min-h-[42px]"
+                    className="w-full min-w-0 p-2.5 border border-stone-300 rounded-lg text-xs min-h-[44px]"
                   />
                 </div>
 
-                <div>
+                <div className="min-w-0">
+                  <label className="block font-medium text-stone-700 mb-1">
+                    Ora Fine
+                  </label>
+                  <input
+                    type="time"
+                    required
+                    value={editingSlot.endTime}
+                    onChange={(e) =>
+                      setEditingSlot({ ...editingSlot, endTime: e.target.value })
+                    }
+                    className="w-full min-w-0 p-2 border border-stone-300 rounded-lg text-xs font-mono min-h-[44px]"
+                  />
+                </div>
+
+                <div className="min-w-0">
                   <label className="block font-medium text-stone-700 mb-1">
                     Plesso / Sede
                   </label>
@@ -1433,7 +1545,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                       setEditingSlot({ ...editingSlot, campus: e.target.value })
                     }
                     placeholder="es. Centrale, Succursale"
-                    className="w-full p-2.5 border border-stone-300 rounded-lg text-xs min-h-[42px]"
+                    className="w-full min-w-0 p-2.5 border border-stone-300 rounded-lg text-xs min-h-[44px]"
                   />
                 </div>
               </div>
@@ -1444,13 +1556,14 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                   <button
                     type="button"
                     onClick={async () => {
+                      // Su fallimento si resta nell'editor con l'errore mostrato.
                       if (
                         !await save.run(() =>
                           onDeleteSlot(editingSlot.id, activeTab)
                         )
                       )
                         return;
-                      setIsModalOpen(false);
+                      closeSlotModal();
                     }}
                     className="text-rose-600 hover:text-rose-800 text-xs font-semibold flex items-center p-2 rounded-lg hover:bg-rose-50 transition-colors"
                   >
@@ -1464,7 +1577,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                 <div className="flex space-x-2">
                   <button
                     type="button"
-                    onClick={() => setIsModalOpen(false)}
+                    onClick={closeSlotModal}
                     className="px-3 py-2 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-lg min-h-[42px]"
                   >
                     Annulla
@@ -1697,7 +1810,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
               {/* Preview of Effective Slots */}
               <div className="bg-emerald-50/50 rounded-xl p-3 border border-emerald-200 text-xs">
                 <span className="font-bold text-emerald-950 block mb-1">
-                  Anteprima scansione oraria ({customSlotsDraft.length} ore):
+                  Anteprima scansione oraria ({customSlotsDraft.length} {customSlotsDraft.length === 1 ? "ora" : "ore"}):
                 </span>
                 <div className="flex flex-wrap gap-1.5">
                   {customSlotsDraft.map((s) => (

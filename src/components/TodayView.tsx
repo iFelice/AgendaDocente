@@ -1,4 +1,4 @@
-import { addDaysISO, civilDayOfWeek, civilTimetableDay, formatCivilDateIt, localDateISO, parseCivilDate } from "../utils/dates";
+import { addDaysISO, civilDayOfWeek, civilTimetableDay, formatCivilDateIt, isValidDate, localDateISO, parseCivilDate } from "../utils/dates";
 import React from "react";
 import {
   BookOpen,
@@ -10,18 +10,26 @@ import {
   Circle,
   Clock,
   MapPin,
-  Plus,
   Sparkles,
   Users,
   AlertCircle,
   Pencil,
   Trash2,
 } from "lucide-react";
-import { CalendarEvent, TeacherProfile, TimetableSlot } from "../types";
+import { CalendarEvent, TeacherProfile, TimetableSlot, TimetableType } from "../types";
 import type { ScheduledAssessmentCalendarItem } from "../utils/scheduledAssessmentCalendar";
 import { scheduledAssessmentTypeLabel } from "../utils/scheduledAssessmentCalendar";
 import { readDailyCollapse, writeDailyCollapse, type CollapseGroup } from "../utils/collapsePreferences";
 import { coTeachingSummary } from "../utils/coTeaching";
+import { daySwipeDirection, isInteractiveSwipeTarget, DAY_SWIPE_INTERACTIVE_SELECTOR } from "../utils/daySwipe";
+
+/**
+ * Marcatore SEMANTICO della card lezione tappabile in Oggi. La card è un
+ * `<button>` (apre la modifica diretta della lezione), ma è anche superficie
+ * del giorno: lo swipe che inizia su di essa cambia data, e solo un tap la
+ * apre. Il riconoscimento usa questo attributo, non il testo o la struttura.
+ */
+export const TODAY_LESSON_CELL_SELECTOR = '[data-slot-cell="lesson"]';
 
 /**
  * Pure day selector for the "Oggi" view: everything is computed from the *selected civil
@@ -73,6 +81,27 @@ interface TodayViewProps {
   onToggleComplete: (id: string) => void;
   onNavigateToPlanning?: (dateIso: string, view?: "oggi" | "settimana" | "mese") => void;
   onNavigateToTimetable?: () => void;
+  /**
+   * Apre la modifica DIRETTA di una lezione dell'orario (tap sulla card).
+   * Il tipo orario NON è dedotto da `slot.isProvisional`: la fonte autorevole
+   * arriva da App (`activeType` dell'orario visualizzato), passata qui tramite
+   * `timetableType` e inoltrata esplicitamente al callback.
+   */
+  onOpenTimetableSlotForEdit?: (slot: TimetableSlot, type: TimetableType, selectedIso: string) => void;
+  /**
+   * Orario a cui appartiene l'array `timetable` (da App: activeType). La card
+   * lezione lo usa come tipo della richiesta di modifica.
+   */
+  timetableType?: TimetableType;
+  /**
+   * Data civile da mostrare al primo montaggio (default: il reale oggi). Usata
+   * per preservare il contesto quando si torna alla vista (es. dal Registro):
+   * la vista si riapre sullo stesso giorno che l'utente stava guardando.
+   * Solo l'inizializzazione: successivamente lo stato segue le interazioni.
+   */
+  initialDateIso?: string;
+  /** Comunica al parent la data civile selezionata (per conservarne il contesto). */
+  onSelectedDateChange?: (iso: string) => void;
 }
 
 export const TodayView: React.FC<TodayViewProps> = ({
@@ -82,23 +111,104 @@ export const TodayView: React.FC<TodayViewProps> = ({
   onOpenScheduledAssessment,
   isProvisionalTimetable,
   isDefinitiveCompiled,
-  onOpenNewEvent,
+  // NB: onOpenNewEvent resta nel contratto (l'app lo passa ancora), ma la vista
+  // Oggi non lo usa più: l'aggiunta rapida è delegata al FAB (mobile) e al
+  // pulsante globale "Nuovo Impegno" (desktop).
   onOpenCircularModal,
   onEditEvent,
   onDeleteEvent,
   onToggleComplete,
   onNavigateToPlanning,
   onNavigateToTimetable,
+  onOpenTimetableSlotForEdit,
+  timetableType,
+  initialDateIso,
+  onSelectedDateChange,
 }) => {
   const [confirmingDeleteEventId, setConfirmingDeleteEventId] = React.useState<string | null>(null);
-  // Selected civil date (defaults to the real today). Navigation is day-by-day and must
-  // survive month/year/weekend crossings because it works on local Date parts, never UTC.
-  const [selectedIso, setSelectedIso] = React.useState<string>(() => localDateISO());
+  // Selected civil date (defaults to the real today, or to initialDateIso when
+  // the parent restores a previously viewed context). Navigation is day-by-day
+  // and must survive month/year/weekend crossings because it works on local
+  // Date parts, never UTC.
+  const [selectedIso, setSelectedIso] = React.useState<string>(() =>
+    initialDateIso && isValidDate(initialDateIso) ? initialDateIso : localDateISO()
+  );
+  // Report the selected civil date to the parent so its context survives a
+  // remount (e.g. round-trip through the Registro). Presentation-only.
+  React.useEffect(() => {
+    onSelectedDateChange?.(selectedIso);
+  }, [selectedIso, onSelectedDateChange]);
   const datePickerRef = React.useRef<HTMLInputElement>(null);
   const todayIso = localDateISO();
   const [collapsed, setCollapsed] = React.useState(() => readDailyCollapse(localDateISO()));
   React.useEffect(() => { setCollapsed(readDailyCollapse(selectedIso)); }, [selectedIso]);
   const toggleCollapse = (group: CollapseGroup) => setCollapsed(previous => { const next = { ...previous, [group]: !previous[group] }; writeDailyCollapse(selectedIso, next); return next; });
+  /**
+    Swipe orizzontale fra i giorni (scorciatoia mobile sulle superfici non
+    interattive della vista; le frecce restano il controllo principale).
+    Stessa logica di cambio data delle frecce: esattamente ±1 giorno con
+    addDaysISO, quindi attraversa fine settimana, mese e anno senza casi
+    speciali. Solo tocco/penna: il mouse non è una gesture e il desktop resta
+    invariato. Nessun preventDefault e touch-action: pan-y sulla radice: lo
+    scroll verticale resta nativo; se il browser prende lo scroll arriva
+    pointercancel e il gesto viene scartato.
+  */
+  const todaySwipeStartRef = React.useRef<{ pointerId: number; x: number; y: number } | null>(null);
+  /**
+   * Uno swipe riconosciuto non è un tap: il click che alcuni browser fanno
+   * comunque arrivare al rilascio NON deve aprire la lezione toccata (stessa
+   * soppressione esplicita delle celle dell'editor, senza preventDefault né
+   * timer, così lo scroll verticale resta nativo).
+   */
+  const suppressLessonClickRef = React.useRef(false);
+  /** Consuma l'eventuale soppressione lasciata da uno swipe appena concluso. */
+  const consumeLessonSwipeClick = (): boolean => {
+    if (!suppressLessonClickRef.current) return false;
+    suppressLessonClickRef.current = false;
+    return true;
+  };
+  // Tipo orario della richiesta di modifica: fonte autorevole da App
+  // (timetableType = activeType dell'orario visualizzato). Per i chiamanti
+  // legacy che passano solo il flag storico, quel flag arriva comunque da App
+  // e descrive lo stesso array; mai `slot.isProvisional`.
+  const lessonType: TimetableType =
+    timetableType ?? (isProvisionalTimetable ? "provvisorio" : "definitivo");
+  const handleTodaySwipeStart = (event: React.PointerEvent<HTMLDivElement>) => {
+    // Ogni gesto riparte pulito: la soppressione vale solo per il gesto appena concluso.
+    suppressLessonClickRef.current = false;
+    if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
+    // Frecce, badge "Oggi", date picker, card di sezione, pulsanti: il gesto
+    // non parte mai da un controllo interattivo, così tap/click restano intatti.
+    if (isInteractiveSwipeTarget(event.target)) {
+      // Unica eccezione: la CARD LEZIONE (button) è anche superficie del
+      // giorno, come le celle "+" dell'editor. Il controllo interattivo
+      // raggiunto dal target deve essere la card marcata; ogni altro controllo
+      // resta escluso dallo swipe.
+      const control = typeof (event.target as Element | null)?.closest === "function"
+        ? (event.target as Element).closest(DAY_SWIPE_INTERACTIVE_SELECTOR)
+        : null;
+      if (
+        !control ||
+        typeof control.closest !== "function" ||
+        control.closest(TODAY_LESSON_CELL_SELECTOR) !== control
+      ) return;
+    }
+    todaySwipeStartRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+  };
+  const handleTodaySwipeEnd = (event: React.PointerEvent<HTMLDivElement>) => {
+    const start = todaySwipeStartRef.current;
+    todaySwipeStartRef.current = null;
+    if (!start || start.pointerId !== event.pointerId) return;
+    const direction = daySwipeDirection(event.clientX - start.x, event.clientY - start.y);
+    if (!direction) return;
+    // Era uno swipe, non un tap: nessuna apertura di lezione al rilascio.
+    suppressLessonClickRef.current = true;
+    // Identica alle frecce: sinistra = giorno successivo, destra = precedente.
+    setSelectedIso((iso) => addDaysISO(iso, direction === "next" ? 1 : -1));
+  };
+  const handleTodaySwipeCancel = () => {
+    todaySwipeStartRef.current = null;
+  };
   const dayScheduled = scheduledAssessments.filter(item => item.date === selectedIso);
   const nextScheduled = scheduledAssessments.filter(item => item.date > selectedIso && item.date <= new Date(new Date(`${selectedIso}T12:00:00`).getTime() + 7 * 86400000).toISOString().slice(0, 10)).sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
 
@@ -179,7 +289,16 @@ export const TodayView: React.FC<TodayViewProps> = ({
   };
 
   return (
-    <div className="space-y-4 sm:space-y-6">
+    <div
+      id="today-view"
+      className="space-y-4 sm:space-y-6"
+      // Solo lo scroll verticale resta al browser; i gesti orizzontali arrivano
+      // ai pointer event qui sotto. Nessun effetto sul desktop.
+      style={{ touchAction: "pan-y" }}
+      onPointerDown={handleTodaySwipeStart}
+      onPointerUp={handleTodaySwipeEnd}
+      onPointerCancel={handleTodaySwipeCancel}
+    >
       {/*
         Day overview: deliberately compact on phones (date + day navigation + one-line
         summary) so the lesson list is above the fold almost immediately. The duplicate
@@ -211,7 +330,9 @@ export const TodayView: React.FC<TodayViewProps> = ({
               <h1 className="text-base sm:text-2xl font-bold text-stone-900 mt-0.5 break-words leading-snug">{displayDate}</h1>
               <p className="text-xs sm:text-sm text-stone-500 mt-0.5 truncate">
                 {todayLessons.length > 0
-                  ? `${todayLessons.length} ore di lezione in programma`
+                  ? todayLessons.length === 1
+                    ? "1 ora di lezione in programma"
+                    : `${todayLessons.length} ore di lezione in programma`
                   : "Nessuna lezione curricolare prevista"}
                 {todayEvents.length > 0 && ` • ${todayEvents.length} impegni/riunioni`}
               </p>
@@ -290,16 +411,11 @@ export const TodayView: React.FC<TodayViewProps> = ({
           </div>
         </div>
 
-        {/* Quick actions: desktop/tablet only (on phones: floating "+" and "Altro"). */}
+        {/* Quick actions: desktop/tablet only (on phones: floating "+" and "Altro").
+            The inline "Aggiungi" is intentionally absent: adding an event is the
+            FAB's job on phones, and on desktop the global "Nuovo Impegno" in the
+            navbar covers it. Only the circular-import shortcut stays here. */}
         <div className="hidden md:flex items-center justify-end gap-2 mt-3">
-          <button
-            id="today-quick-add"
-            onClick={() => onOpenNewEvent(selectedIso)}
-            className="inline-flex items-center px-3 py-2 text-sm font-medium rounded-lg text-emerald-800 bg-emerald-50 hover:bg-emerald-100 transition-colors border border-emerald-200 min-h-[44px]"
-          >
-            <Plus className="w-4 h-4 mr-1.5" />
-            Aggiungi{isToday ? " per oggi" : ""}
-          </button>
           <button
             id="today-quick-scan"
             onClick={onOpenCircularModal}
@@ -371,11 +487,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
                 <div className="space-y-2.5">
                   {todayLessons.map((slot) => {
                     const summary = coTeachingSummary(slot);
-                    return (
-                      <div
-                        key={slot.id}
-                        className="p-3 rounded-xl border border-stone-200 hover:border-emerald-300 active:border-emerald-400 transition-colors bg-white"
-                      >
+                    const lessonBody = (
                         <div className="flex items-start gap-3">
                           {/* Ora & periodo: blocco verticale compatto */}
                           <div
@@ -394,9 +506,9 @@ export const TodayView: React.FC<TodayViewProps> = ({
                           {/* Materia + classe, aula/plesso e compresenza */}
                           <div className="min-w-0 flex-1">
                             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                              <h3 className="text-sm font-bold text-stone-900 leading-snug break-words">
+                              <span className="block text-sm font-bold text-stone-900 leading-snug break-words">
                                 {slot.subject}
-                              </h3>
+                              </span>
                               <span className="text-[11px] font-semibold px-1.5 py-0.5 rounded-md bg-stone-100 text-stone-700 border border-stone-200 whitespace-nowrap">
                                 {slot.className}
                               </span>
@@ -424,6 +536,38 @@ export const TodayView: React.FC<TodayViewProps> = ({
                             )}
                           </div>
                         </div>
+                    );
+                    // Con il callback di modifica la card diventa semanticamente
+                    // interattiva: un button a larghezza piena, touch target
+                    // comodo, focus visibile, nessuna nuova estetica. Il marker
+                    // `data-slot-cell` lo abilita come unica eccezione swipe
+                    // (tap = apre; swipe = cambia giorno senza aprire).
+                    if (onOpenTimetableSlotForEdit) {
+                      return (
+                        <button
+                          key={slot.id}
+                          type="button"
+                          data-slot-cell="lesson"
+                          aria-label={`Modifica la lezione: ${slot.subject}, classe ${slot.className}, ${slot.periodNumber}ª ora (${slot.startTime}–${slot.endTime})`}
+                          onClick={() => {
+                            // Uno swipe riconosciuto può lasciare un click residuo
+                            // al rilascio: non deve aprire la lezione (sotto
+                            // soglia nessuna soppressione → tap normale).
+                            if (consumeLessonSwipeClick()) return;
+                            onOpenTimetableSlotForEdit(slot, lessonType, selectedIso);
+                          }}
+                          className="block w-full min-h-[44px] text-left p-3 rounded-xl border border-stone-200 hover:border-emerald-300 active:border-emerald-400 focus-visible:outline-2 focus-visible:outline-emerald-600 focus-visible:outline-offset-2 transition-colors bg-white"
+                        >
+                          {lessonBody}
+                        </button>
+                      );
+                    }
+                    return (
+                      <div
+                        key={slot.id}
+                        className="p-3 rounded-xl border border-stone-200 hover:border-emerald-300 active:border-emerald-400 transition-colors bg-white"
+                      >
+                        {lessonBody}
                       </div>
                     );
                   })}
@@ -461,43 +605,25 @@ export const TodayView: React.FC<TodayViewProps> = ({
 
           <section className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-hidden"><button type="button" aria-expanded={!collapsed.scheduledAssessments} onClick={() => toggleCollapse("scheduledAssessments")} className="flex min-h-[52px] w-full items-center justify-between gap-2 px-3 py-3 text-left"><span className="text-sm font-bold text-stone-900">Prove degli alunni ({dayScheduled.length})</span><span className="text-stone-500">{collapsed.scheduledAssessments ? "›" : "⌄"}</span></button>{!collapsed.scheduledAssessments && <div className="border-t border-stone-100 p-3 space-y-3">{dayScheduled.concat(nextScheduled).length === 0 ? <p className="text-sm text-stone-500">Nessuna prova programmata in questa finestra.</p> : <>{dayScheduled.length > 0 && <h3 className="text-xs font-bold uppercase tracking-wide text-emerald-900">Oggi</h3>}{dayScheduled.map(item => <button type="button" key={`today-${item.id}`} data-testid="scheduled-assessment-today" onClick={() => onOpenScheduledAssessment?.(item.studentId)} className="block w-full min-h-[72px] rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-left"><span className="block font-bold text-stone-900">{item.studentName}{item.className ? ` · ${item.className}` : ""} </span><span className="block text-xs text-stone-700">{item.subject || "Materia non indicata"} · {scheduledAssessmentTypeLabel[item.assessmentType]}</span>{item.topic && <span className="mt-1 block text-sm font-semibold text-stone-900">{item.topic}</span>}</button>)}{nextScheduled.length > 0 && <h3 className="pt-1 text-xs font-bold uppercase tracking-wide text-amber-900">Prossime prove</h3>}{nextScheduled.map(item => <button type="button" key={`next-${item.id}`} data-testid="scheduled-assessment-future" onClick={() => onOpenScheduledAssessment?.(item.studentId)} className="block w-full min-h-[64px] rounded-lg border border-amber-300 bg-amber-50 p-3 text-left"><span className="block text-xs font-bold text-amber-900">{formatCivilDateIt(item.date)}</span><span className="block font-semibold text-stone-900">{item.studentName}</span><span className="block text-xs text-stone-700">{item.subject || "Materia non indicata"} · {scheduledAssessmentTypeLabel[item.assessmentType]}</span>{item.topic && <span className="block truncate text-xs font-semibold">{item.topic}</span>}</button>)}</>}</div>}</section>
 
-          {/* Section 2: Meetings & Events. With no data the section collapses to a
-              single compact row ("Nessun impegno oggi · + Aggiungi") instead of a big
-              empty card, and expands only when real items exist. */}
-          {todayEvents.length === 0 ? (
-            <div className="bg-white rounded-xl border border-stone-200 shadow-xs px-3 py-2.5 flex items-center justify-between gap-2">
-              <p className="text-xs text-stone-500 min-w-0 truncate">
-                Nessun impegno {isToday ? "oggi" : "in questa data"}
-                <span className="text-stone-400"> · i consigli di classe appariranno qui</span>
-              </p>
-              <button
-                type="button"
-                id="today-empty-add-event"
-                onClick={() => onOpenNewEvent(selectedIso)}
-                className="shrink-0 inline-flex items-center gap-1 min-h-[40px] px-3 rounded-lg text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                Aggiungi
-              </button>
-            </div>
-          ) : (
+          {/* Section 2: Meetings & Events. The header always shows the count of the
+              SELECTED day ("Impegni & Riunioni (N)"); adding an event is the FAB's
+              job (the only quick-add point in this view), so this section carries no
+              inline add actions. With no data the body is a single compact row. */}
           <div className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-hidden">
             <div role="button" tabIndex={0} aria-expanded={!collapsed.commitments} onClick={() => toggleCollapse("commitments")} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggleCollapse("commitments"); } }} className="p-3 sm:p-4 border-b border-stone-100 flex items-center justify-between bg-stone-50/70 min-h-[56px] cursor-pointer">
               <div className="flex items-center space-x-2 min-w-0">
                 <Calendar className="w-5 h-5 text-purple-700 shrink-0" />
-                <h2 className="text-sm sm:text-base font-semibold text-stone-900 truncate">Impegni & Riunioni{isToday ? "" : " del giorno selezionato"}</h2>
+                <h2 className="text-sm sm:text-base font-semibold text-stone-900 truncate">Impegni & Riunioni{isToday ? "" : " del giorno selezionato"} ({todayEvents.length})</h2>
               </div>
-              <button
-                onClick={(event) => { event.stopPropagation(); onOpenNewEvent(selectedIso); }}
-                className="text-xs font-semibold text-emerald-700 hover:text-emerald-800 flex items-center min-h-[36px] px-2 shrink-0"
-              >
-                <Plus className="w-3.5 h-3.5 mr-1" />
-                Aggiungi
-              </button>
               {collapsed.commitments ? <ChevronRight className="h-4 w-4 text-stone-500" /> : <ChevronDown className="h-4 w-4 text-stone-500" />}
             </div>
 
-            {!collapsed.commitments && <div className="p-3 sm:p-4">
+            {!collapsed.commitments && (todayEvents.length === 0 ? <div className="p-3 sm:p-4">
+              <p className="text-xs text-stone-500 min-w-0 truncate">
+                Nessun impegno {isToday ? "oggi" : "in questa data"}
+                <span className="text-stone-400"> · i consigli di classe appariranno qui</span>
+              </p>
+            </div> : <div className="p-3 sm:p-4">
                 <div className="space-y-3">
                   {todayEvents.map((ev) => (
                     <div
@@ -585,9 +711,8 @@ export const TodayView: React.FC<TodayViewProps> = ({
                     </div>
                   ))}
                 </div>
-            </div>}
+            </div>)}
           </div>
-          )}
         </div>
 
         {/* Right Col: Deadlines & Quick Reference */}
@@ -595,19 +720,10 @@ export const TodayView: React.FC<TodayViewProps> = ({
           {/* Deadlines of the selected day, then the nearest upcoming ones. With no
               data at all the section is a single compact row, not a big empty card. */}
           {dayDeadlines.length === 0 && nextDeadlines.length === 0 ? (
-            <div className="bg-white rounded-xl border border-stone-200 shadow-xs px-3 py-2.5 flex items-center justify-between gap-2">
+            <div className="bg-white rounded-xl border border-stone-200 shadow-xs px-3 py-2.5">
               <p className="text-xs text-stone-500 min-w-0 truncate">
                 Nessuna scadenza {isToday ? "oggi" : "in questa data"}
               </p>
-              <button
-                type="button"
-                id="today-empty-add-deadline"
-                onClick={() => onOpenNewEvent(selectedIso)}
-                className="shrink-0 inline-flex items-center gap-1 min-h-[40px] px-3 rounded-lg text-xs font-semibold text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                Aggiungi
-              </button>
             </div>
           ) : (
           <div className="bg-white rounded-xl border border-stone-200 shadow-xs overflow-hidden">
