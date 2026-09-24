@@ -103,7 +103,7 @@ test('school level and reserved roles restrict even matching classes',()=>{
 });
 test('PDF offline is a failed analysis, not successful empty extraction',async()=>{
   const previous=globalThis.fetch;globalThis.fetch=async()=>{throw new Error('offline')};
-  try { const result=await analyzeCircular({imageBase64:'test',mimeType:'application/pdf',profile});assert.equal(result.success,false);assert.match(result.error!,/online/); }
+  try { const result=await analyzeCircular({imageBase64:'test',mimeType:'application/pdf',profile});assert.equal(result.success,false);assert.match(result.error!,/connessione/);assert.doesNotMatch(result.error!,/online/); }
   finally{globalThis.fetch=previous;}
 });
 test('text remains usable offline',async()=>{

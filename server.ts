@@ -391,6 +391,7 @@ app.post("/api/analyze-circular", ...circularAnalysisGuards(), async (req, res) 
   const deadline = setTimeout(() => controller.abort(), CIRCULAR_ANALYSIS_TIMEOUT_MS);
   const abort = () => controller.abort();
   res.once("close", abort);
+  const handlerStartedAt = Date.now();
   try {
     const { text, imageBase64, mimeType, profile, defaultLocation } = req.body;
 
@@ -398,11 +399,24 @@ app.post("/api/analyze-circular", ...circularAnalysisGuards(), async (req, res) 
 
     const effectiveCampus = defaultLocation || undefined;
 
+    /**
+     * Diagnostica minima privacy-safe: endpoint, provider, categoria, mimeType,
+     * dimensione binaria approssimativa, durata e flag timeout. Mai contenuto
+     * del documento (base64, testo, OCR), prompt o chiavi.
+     */
+    const logBinaryFailure = (category: string, timedOut: boolean): void => {
+      const bytes = imageBase64 ? Math.floor(String(imageBase64).length * 3 / 4) : 0;
+      console.warn(`[analyze-circular] fallimento provider=gemini categoria=${category} mimeType=${mimeType ?? "-"} dimensioneBytes=${bytes} durataMs=${Date.now() - handlerStartedAt} timeout=${timedOut ? "si" : "no"}`);
+    };
+
     const ai = getGeminiClient();
 
     // If Gemini client is not configured, execute smart rule-based fallback
     if (!ai) {
-      if (imageBase64 || !text?.trim()) return res.status(503).json({ success: false, items: [], error: "Analisi di foto/PDF non disponibile. Incolla il testo oppure riprova più tardi." });
+      if (imageBase64 || !text?.trim()) {
+        logBinaryFailure("non-configurato", false);
+        return res.status(503).json({ success: false, items: [], error: "Analisi di foto/PDF non disponibile. Incolla il testo oppure riprova più tardi.", errorCode: "AI_UNAVAILABLE" });
+      }
       const fallbackItems = parseCircularText(text || "", teacherProfile, effectiveCampus);
       return res.json({
         success: true,
@@ -485,7 +499,13 @@ Restituisci soltanto l'array JSON richiesto.`;
 
     // Modelli occupati o risposta non interpretabile: parser euristico locale.
     if (!run.ok || !decoded.ok) {
-      if (imageBase64 || !text?.trim()) return res.status(503).json({ success: false, items: [], error: "Il documento non è stato elaborato. Riprova più tardi." });
+      if (imageBase64 || !text?.trim()) {
+        const timedOut = run.category === "deadline" || run.category === "budget-esaurito";
+        logBinaryFailure(run.ok ? "json-non-valido" : run.category, timedOut);
+        // Categorie sicure e stabili: il messaggio resta generico, il codice è diagnostico.
+        const errorCode = timedOut ? "AI_TIMEOUT" : "AI_UNAVAILABLE";
+        return res.status(503).json({ success: false, items: [], error: "Il documento non è stato elaborato. Riprova più tardi.", errorCode });
+      }
       console.warn("[AI Circolari] Servizio cloud non disponibile: attivazione automatica motore di estrazione euristico locale.");
       parsed = parseCircularText(text || "", teacherProfile, effectiveCampus);
       source = "local-heuristic";
@@ -505,7 +525,7 @@ Restituisci soltanto l'array JSON richiesto.`;
     });
   } catch (error: any) {
     console.warn("Analisi circolare non riuscita.");
-    return res.status(500).json({ success: false, items: [], error: "Analisi non riuscita. Riprova o incolla il testo del documento." });
+    return res.status(500).json({ success: false, items: [], error: "Analisi non riuscita. Riprova o incolla il testo del documento.", errorCode: "SERVER_ERROR" });
   } finally {
     clearTimeout(deadline);
     res.off("close", abort);

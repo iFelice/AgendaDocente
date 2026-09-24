@@ -171,7 +171,8 @@ test('analyze-timetable: profilo con chiave sconosciuta -> ancora 400 generico (
     });
     assert.equal(res.status, 400);
     const body = await res.text();
-    assert.equal(body, '{"success":false,"error":"Richiesta di analisi non valida."}');
+    // errorCode è un codice applicativo stabile (diagnostica), non contenuto del documento.
+    assert.equal(body, '{"success":false,"error":"Richiesta di analisi non valida.","errorCode":"INVALID_INPUT"}');
   } finally {
     await new Promise<void>((resolve, reject) => local.close(e => (e ? reject(e) : resolve())));
   }

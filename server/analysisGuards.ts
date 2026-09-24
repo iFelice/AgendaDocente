@@ -136,12 +136,12 @@ export function createAnalysisGuards(validator: (body: unknown) => void, options
       }).flat().slice(0, 4).join(':') : address;
     let bucket = buckets.get(key);
     if (!bucket) {
-      if (buckets.size >= 1000) { res.setHeader('Retry-After', '60'); return res.status(429).json({ success: false, error: 'Troppe richieste. Riprova tra un minuto.' }); }
+      if (buckets.size >= 1000) { res.setHeader('Retry-After', '60'); return res.status(429).json({ success: false, error: 'Troppe richieste. Riprova tra un minuto.', errorCode: 'RATE_LIMITED' }); }
       bucket = { count: 0, expires: time + windowMs }; buckets.set(key, bucket);
     }
     bucket.count++; globalBucket.count++;
     if (bucket.count > (options.perIp ?? 10) || globalBucket.count > (options.global ?? 60) || active >= (options.concurrent ?? 4)) {
-      res.setHeader('Retry-After', '60'); return res.status(429).json({ success: false, error: 'Troppe richieste. Riprova tra un minuto.' });
+      res.setHeader('Retry-After', '60'); return res.status(429).json({ success: false, error: 'Troppe richieste. Riprova tra un minuto.', errorCode: 'RATE_LIMITED' });
     }
     active++;
     let released = false;
@@ -151,7 +151,7 @@ export function createAnalysisGuards(validator: (body: unknown) => void, options
   };
   const requireJson: RequestHandler = (req, res, next) => {
     res.setHeader('Cache-Control', 'no-store');
-    if (!req.is('application/json')) return res.status(415).json({ success: false, error: 'Invia una richiesta JSON.' });
+    if (!req.is('application/json')) return res.status(415).json({ success: false, error: 'Invia una richiesta JSON.', errorCode: 'UNSUPPORTED_MEDIA' });
     next();
   };
   const validate: RequestHandler = (req, res, next) => {
@@ -161,16 +161,28 @@ export function createAnalysisGuards(validator: (body: unknown) => void, options
   return [limit, requireJson, express.json({ limit: ANALYSIS_LIMITS.jsonBytes, inflate: false }), validate];
 }
 
+/** Codice applicativo stabile per una risposta di errore dei guard di analisi. */
+export function analysisErrorCode(status: number): string {
+  switch (status) {
+    case 413: return 'PAYLOAD_TOO_LARGE';
+    case 415: return 'UNSUPPORTED_MEDIA';
+    case 429: return 'RATE_LIMITED';
+    default: return 'INVALID_INPUT';
+  }
+}
+
 /**
  * Handler di errore generico: mai dettagli del parsing o del contenuto
  * (potrebbero contenere il documento). `withItems` mantiene la forma storica
- * { items: [] } usata dall'endpoint circolare.
+ * { items: [] } usata dall'endpoint circolare. `errorCode` è un codice
+ * applicativo stabile per la diagnostica client, non un dettaglio tecnico.
  */
 export function createAnalysisErrorHandler(withItems: boolean): ErrorRequestHandler {
   return (error, _req, res, _next) => {
     const status = error instanceof AnalysisInputError ? error.status : error?.type === 'entity.too.large' ? 413 : error?.status === 415 ? 415 : 400;
     const message = error instanceof AnalysisInputError ? error.message : status === 413 ? 'Richiesta troppo grande.' : 'Richiesta di analisi non valida.';
+    const errorCode = analysisErrorCode(status);
     res.setHeader('Cache-Control', 'no-store');
-    res.status(status).json(withItems ? { success: false, items: [], error: message } : { success: false, error: message });
+    res.status(status).json(withItems ? { success: false, items: [], error: message, errorCode } : { success: false, error: message, errorCode });
   };
 }
