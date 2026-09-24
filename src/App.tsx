@@ -120,8 +120,13 @@ export default function App({ initialData }: { initialData: LocalData }) {
   const [slotEditNav, setSlotEditNav] = useState<SlotEditNavigation>(initialSlotEditNavigation);
   const [isCircularModalOpen, setIsCircularModalOpen] = useState(false);
   const [isScannerOpen, setIsScannerOpen] = useState(false);
-  // File pre-scansionato dal flusso unificato, da alimentare alla pipeline circolare esistente.
-  const [scannerCircularFile, setScannerCircularFile] = useState<{ base64: string; mimeType: string; fileName: string } | null>(null);
+  // File pre-scansionato dal flusso unificato, da alimentare alla pipeline circolare esistente con auto-start.
+  const [scannerCircularFile, setScannerCircularFile] = useState<{
+    base64: string;
+    mimeType: string;
+    fileName: string;
+    autoStartToken?: string;
+  } | null>(null);
   const [isEventModalOpen, setIsEventModalOpen] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [isOnboardingOpen, setIsOnboardingOpen] = useState<boolean>(() => !initialData.onboardingCompleted);
@@ -554,8 +559,13 @@ export default function App({ initialData }: { initialData: LocalData }) {
     showToast("Circolare rimossa dall'archivio.");
   });
 
-  // Scansiona documento: la circolare pre-scansionata alimenta la pipeline esistente.
-  const handleScanDocumentToCircular = (info: { base64: string; mimeType: string; fileName: string }) => {
+  // Scansiona documento: la circolare pre-scansionata alimenta la pipeline esistente con auto-start.
+  const handleScanDocumentToCircular = (info: {
+    base64: string;
+    mimeType: string;
+    fileName: string;
+    autoStartToken?: string;
+  }) => {
     setScannerCircularFile(info);
     setIsScannerOpen(false);
     setIsCircularModalOpen(true);

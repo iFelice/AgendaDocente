@@ -41,9 +41,13 @@ interface CircularAnalyzerModalProps {
   /**
    * File già scansionato dal flusso unificato "Scansiona documento":
    * lo si alimenta nel passo di input senza duplicare la pipeline.
+   * Se contiene `autoStartToken`, avvia automaticamente l'analisi una sola volta.
    */
-  initialFile?: { base64: string; mimeType: string; fileName: string } | null;
+  initialFile?: { base64: string; mimeType: string; fileName: string; autoStartToken?: string } | null;
 }
+
+/** Token di auto-start monouso già consumati per prevenire doppie analisi anche in StrictMode. */
+const consumedAutoStartTokens = new Set<string>();
 
 export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   isOpen,
@@ -71,19 +75,112 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   const [selectionWarning, setSelectionWarning] = useState<string | null>(null);
 
   const inputRevision = useRef(0);
+  const handledAutoTokenRef = useRef<string | null>(null);
   const [isReadingFile, setIsReadingFile] = useState(false);
-  useEffect(() => {
+
+  const handleModalClose = () => {
     inputRevision.current++;
-    setStep('input'); setCircularText(''); setDefaultLocation('');
-    setFileBase64(undefined); setFileMimeType(undefined); setExtractedItems([]);
-    setAnalysisError(null); setSelectionWarning(null); setIsAnalyzing(false); setIsReadingFile(false);
-    // Alimentazione dal flusso unificato: il file già scansionato parte dal passo input.
+    onClose();
+  };
+
+  // Esegue l'analisi: supporta parametri espliciti per l'auto-start o i valori correnti dello stato.
+  const executeAnalysis = async (params?: { text?: string; base64?: string; mimeType?: string }) => {
+    const textToAnalyze = params ? (params.text ?? "") : circularText;
+    const base64ToAnalyze = params ? params.base64 : fileBase64;
+    const mimeTypeToAnalyze = params ? params.mimeType : fileMimeType;
+
+    if (!textToAnalyze.trim() && !base64ToAnalyze) {
+      setAnalysisError("Inserisci il testo della circolare oppure carica un file.");
+      return;
+    }
+
+    const revision = ++inputRevision.current;
+    setIsAnalyzing(true);
+    setAnalysisError(null);
+
+    try {
+      const result = await analyzeCircular({
+        text: textToAnalyze,
+        imageBase64: base64ToAnalyze,
+        mimeType: mimeTypeToAnalyze,
+        profile,
+        defaultLocation: defaultLocation.trim() || undefined,
+      });
+
+      if (revision !== inputRevision.current) return;
+      if (!result.success && (!result.items || result.items.length === 0)) {
+        throw new Error(result.error || "Impossibile analizzare il documento.");
+      }
+
+      setExtractedItems(result.items);
+      setAnalysisSource(result.source);
+      setStep("results");
+    } catch (err: any) {
+      console.warn("Avviso analisi circolare:", err?.message || err);
+      if (revision !== inputRevision.current) return;
+      setAnalysisError(err.message || "Errore durante l'analisi della circolare.");
+    } finally {
+      if (revision === inputRevision.current) setIsAnalyzing(false);
+    }
+  };
+
+  const handleRunAnalysis = () => {
+    void executeAnalysis();
+  };
+
+  useEffect(() => {
+    if (!isOpen) {
+      inputRevision.current++;
+      handledAutoTokenRef.current = null;
+      return;
+    }
+
+    const autoToken = initialFile?.autoStartToken;
+
+    // Se questo handoff con autoStartToken è già stato avviato da questa istanza, non resettare lo stato
+    if (autoToken && handledAutoTokenRef.current === autoToken) {
+      return;
+    }
+
+    const shouldAutoStart = Boolean(autoToken && !consumedAutoStartTokens.has(autoToken));
+
+    if (autoToken) {
+      handledAutoTokenRef.current = autoToken;
+      if (shouldAutoStart) {
+        consumedAutoStartTokens.add(autoToken);
+      }
+    } else {
+      handledAutoTokenRef.current = null;
+    }
+
+    inputRevision.current++;
+    setStep("input");
+    setCircularText("");
+    setDefaultLocation("");
+    setExtractedItems([]);
+    setAnalysisError(null);
+    setSelectionWarning(null);
+    setIsReadingFile(false);
+
     if (initialFile) {
       setFileName(initialFile.fileName);
       setFileBase64(initialFile.base64);
       setFileMimeType(initialFile.mimeType);
+
+      if (shouldAutoStart) {
+        void executeAnalysis({
+          text: "",
+          base64: initialFile.base64,
+          mimeType: initialFile.mimeType,
+        });
+      } else {
+        setIsAnalyzing(false);
+      }
     } else {
-      setFileName('');
+      setFileName("");
+      setFileBase64(undefined);
+      setFileMimeType(undefined);
+      setIsAnalyzing(false);
     }
   }, [isOpen, initialFile]);
 
@@ -127,42 +224,6 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     }
   };
 
-  // Run the analysis
-  const handleRunAnalysis = async () => {
-    if (!circularText.trim() && !fileBase64) {
-      setAnalysisError("Inserisci il testo della circolare oppure carica un file.");
-      return;
-    }
-
-    const revision = ++inputRevision.current;
-    setIsAnalyzing(true);
-    setAnalysisError(null);
-
-    try {
-      const result = await analyzeCircular({
-        text: circularText,
-        imageBase64: fileBase64,
-        mimeType: fileMimeType,
-        profile,
-        defaultLocation: defaultLocation.trim() || undefined,
-      });
-
-      if (revision !== inputRevision.current) return;
-      if (!result.success && (!result.items || result.items.length === 0)) {
-        throw new Error(result.error || "Impossibile analizzare il documento.");
-      }
-
-      setExtractedItems(result.items);
-      setAnalysisSource(result.source);
-      setStep("results");
-    } catch (err: any) {
-      console.warn("Avviso analisi circolare:", err?.message || err);
-      if (revision !== inputRevision.current) return;
-      setAnalysisError(err.message || "Errore durante l'analisi della circolare.");
-    } finally {
-      if (revision === inputRevision.current) setIsAnalyzing(false);
-    }
-  };
 
   // Toggle selection of an extracted item
   const toggleItemSelection = (tempId: string) => {
@@ -278,7 +339,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
           </div>
 
           <button
-            onClick={onClose}
+            onClick={handleModalClose}
             className="p-2 rounded-lg text-stone-400 hover:text-stone-700 hover:bg-stone-200 transition-colors"
           >
             <X className="w-5 h-5" />

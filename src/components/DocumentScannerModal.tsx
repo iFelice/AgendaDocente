@@ -90,10 +90,11 @@ type Step =
   | "review-student"
   | "reconstruct";
 
-interface CircularFileInfo {
+export interface CircularFileInfo {
   base64: string;
   mimeType: string;
   fileName: string;
+  autoStartToken?: string;
 }
 
 interface ReconEditSlot extends ReconstructedSlot {
@@ -579,14 +580,22 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
   const isOffline = !isOnline();
 
   /** "Analizza documento" dalla preview: per le circolari alimenta il flusso
-   *  esistente; per gli altri tipi passa al consenso cloud (o blocca offline). */
+   *  esistente con auto-start cloud; per gli altri tipi passa al consenso cloud (o blocca offline). */
   const handleAnalyzeFromPreview = () => {
     if (isReading) return;
     if (!file) return;
     if (captureFor === "circolare") {
-      // Pipeline circolare esistente: la nuova UI solo la alimenta con il file.
+      // Pipeline circolare esistente: la nuova UI alimenta l'analizzatore con token auto-start monouso.
       if (!fileBase64 || !file.type) return;
-      onOpenCircularWithFile({ base64: fileBase64, mimeType: file.type, fileName: file.name });
+      const autoStartToken = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? `circ-auto-${crypto.randomUUID()}`
+        : `circ-auto-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+      onOpenCircularWithFile({
+        base64: fileBase64,
+        mimeType: file.type,
+        fileName: file.name,
+        autoStartToken,
+      });
       return;
     }
     if (isOffline) {
@@ -1125,7 +1134,11 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                   className="min-h-[44px] px-5 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white text-sm font-bold shadow-xs flex items-center gap-2"
                 >
                   <ImagePlus className="w-4 h-4" />
-                  {isReading ? "Lettura file…" : "Analizza documento"}
+                  {isReading
+                    ? "Lettura file…"
+                    : captureFor === "circolare"
+                    ? "Analizza nel cloud"
+                    : "Analizza documento"}
                 </button>
               </div>
             </div>
