@@ -162,14 +162,30 @@ export function createAnalysisGuards(validator: (body: unknown) => void, options
 }
 
 /**
+ * Stato e messaggio pubblico di un errore di input. Mai lo stack, mai il body:
+ * il messaggio di AnalysisInputError è già una frase fissa, gli altri casi
+ * usano solo frasi fisse.
+ */
+export function analysisFailure(error: unknown): { status: number; message: string } {
+  const candidate = error as { status?: unknown; type?: unknown } | null;
+  const status = error instanceof AnalysisInputError ? error.status
+    : candidate?.type === 'entity.too.large' ? 413
+    : candidate?.status === 415 ? 415
+    : 400;
+  const message = error instanceof AnalysisInputError ? error.message
+    : status === 413 ? 'Richiesta troppo grande.'
+    : 'Richiesta di analisi non valida.';
+  return { status, message };
+}
+
+/**
  * Handler di errore generico: mai dettagli del parsing o del contenuto
  * (potrebbero contenere il documento). `withItems` mantiene la forma storica
  * { items: [] } usata dall'endpoint circolare.
  */
 export function createAnalysisErrorHandler(withItems: boolean): ErrorRequestHandler {
   return (error, _req, res, _next) => {
-    const status = error instanceof AnalysisInputError ? error.status : error?.type === 'entity.too.large' ? 413 : error?.status === 415 ? 415 : 400;
-    const message = error instanceof AnalysisInputError ? error.message : status === 413 ? 'Richiesta troppo grande.' : 'Richiesta di analisi non valida.';
+    const { status, message } = analysisFailure(error);
     res.setHeader('Cache-Control', 'no-store');
     res.status(status).json(withItems ? { success: false, items: [], error: message } : { success: false, error: message });
   };

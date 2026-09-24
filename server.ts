@@ -1,4 +1,15 @@
-import { circularAnalysisGuards, analysisErrorHandler } from "./server/circularAnalysisGuard";
+import {
+  circularAnalysisGuards,
+  analysisErrorHandler,
+  circularCloudFailure,
+  circularFailureBody,
+  CIRCULAR_AI_NOT_CONFIGURED,
+  CIRCULAR_SERVER_ERROR_MESSAGE,
+  emitCircularDiagnostic,
+  summarizeCircularPayload,
+  summarizeGeminiAttempts,
+  type CircularDiagnosticFields,
+} from "./server/circularAnalysisGuard";
 import { createAnalysisErrorHandler, createAnalysisGuards } from "./server/analysisGuards";
 import { groqConfigured, groqFallbackDecision, runGroqJson } from "./server/groqAnalysis";
 import {
@@ -390,7 +401,20 @@ app.post("/api/analyze-circular", ...circularAnalysisGuards(), async (req, res) 
   const controller = new AbortController();
   const deadline = setTimeout(() => controller.abort(), CIRCULAR_ANALYSIS_TIMEOUT_MS);
   const abort = () => controller.abort();
+  const startedAt = Date.now();
   res.once("close", abort);
+  const logOutcome = (fields: CircularDiagnosticFields) => {
+    const summary = summarizeCircularPayload(req.body);
+    emitCircularDiagnostic({
+      provider: "gemini",
+      timeout: controller.signal.aborted ? "si" : "no",
+      durataMs: Date.now() - startedAt,
+      mime: summary.mime,
+      bytes: summary.bytes,
+      textChars: summary.textChars,
+      ...fields,
+    }, fields.esito === "ok" ? "log" : "warn");
+  };
   try {
     const { text, imageBase64, mimeType, profile, defaultLocation } = req.body;
 
@@ -402,7 +426,11 @@ app.post("/api/analyze-circular", ...circularAnalysisGuards(), async (req, res) 
 
     // If Gemini client is not configured, execute smart rule-based fallback
     if (!ai) {
-      if (imageBase64 || !text?.trim()) return res.status(503).json({ success: false, items: [], error: "Analisi di foto/PDF non disponibile. Incolla il testo oppure riprova più tardi." });
+      if (imageBase64 || !text?.trim()) {
+        logOutcome({ esito: "fallito", errorCode: "AI_UNAVAILABLE", categoria: "non-configurato", status: 503 });
+        return res.status(503).json(circularFailureBody("AI_UNAVAILABLE", CIRCULAR_AI_NOT_CONFIGURED));
+      }
+      logOutcome({ esito: "fallback-locale", errorCode: "AI_UNAVAILABLE", categoria: "non-configurato", status: 200, sorgente: "local-heuristic" });
       const fallbackItems = parseCircularText(text || "", teacherProfile, effectiveCampus);
       return res.json({
         success: true,
@@ -483,10 +511,16 @@ Restituisci soltanto l'array JSON richiesto.`;
     let parsed: any[] = [];
     let source = run.source;
 
-    // Modelli occupati o risposta non interpretabile: parser euristico locale.
+    // Modelli occupati o risposta non interpretabile: parser euristico locale solo sul testo.
     if (!run.ok || !decoded.ok) {
-      if (imageBase64 || !text?.trim()) return res.status(503).json({ success: false, items: [], error: "Il documento non è stato elaborato. Riprova più tardi." });
-      console.warn("[AI Circolari] Servizio cloud non disponibile: attivazione automatica motore di estrazione euristico locale.");
+      const categoria = !run.ok ? run.category : "json-non-valido";
+      const failure = circularCloudFailure(categoria);
+      const tentativi = summarizeGeminiAttempts(run.attempts);
+      if (imageBase64 || !text?.trim()) {
+        logOutcome({ esito: "fallito", errorCode: failure.errorCode, categoria, tentativi, status: failure.status });
+        return res.status(failure.status).json(circularFailureBody(failure.errorCode, failure.error));
+      }
+      logOutcome({ esito: "fallback-locale", errorCode: failure.errorCode, categoria, tentativi, status: 200, sorgente: "local-heuristic" });
       parsed = parseCircularText(text || "", teacherProfile, effectiveCampus);
       source = "local-heuristic";
     } else {
@@ -494,6 +528,7 @@ Restituisci soltanto l'array JSON richiesto.`;
     }
 
     const items = normalizeExtractedItems(parsed, teacherProfile, effectiveCampus);
+    if (source !== "local-heuristic") logOutcome({ esito: "ok", categoria: "ok", sorgente: source, status: 200 });
 
     return res.json({
       success: true,
@@ -503,9 +538,10 @@ Restituisci soltanto l'array JSON richiesto.`;
         ? "Elaborazione completata con motore di parsing locale (cloud AI temporaneamente congestionato)."
         : undefined,
     });
-  } catch (error: any) {
-    console.warn("Analisi circolare non riuscita.");
-    return res.status(500).json({ success: false, items: [], error: "Analisi non riuscita. Riprova o incolla il testo del documento." });
+  } catch (error: unknown) {
+    const tipo = error instanceof Error && /^[A-Za-z]+$/.test(error.name) ? error.name : "UnknownError";
+    logOutcome({ esito: "fallito", errorCode: "SERVER_ERROR", categoria: "eccezione", tipo, status: 500 });
+    return res.status(500).json(circularFailureBody("SERVER_ERROR", CIRCULAR_SERVER_ERROR_MESSAGE));
   } finally {
     clearTimeout(deadline);
     res.off("close", abort);
