@@ -97,6 +97,19 @@ function isValidPeriodSlot(v: unknown): boolean {
   );
 }
 
+/**
+ * SchoolProfile.dayPeriods: struttura della giornata scolastica dell'istituto.
+ * Additivo e opzionale — un profilo remoto scritto prima di questo campo resta valido.
+ */
+function isValidSchoolDayPeriods(v: unknown): boolean {
+  return (
+    isRecord(v) &&
+    optional(v.ordinaryPeriodsPerDay, n => intWithin(n, 1, 12)) &&
+    optional(v.extraPeriodsByDay, map =>
+      isRecord(map) && Object.entries(map).every(([day, extra]) => /^[1-6]$/.test(day) && intWithin(extra, 0, 11)))
+  );
+}
+
 function isValidTimeSlotConfig(v: unknown): boolean {
   return (
     isRecord(v) &&
@@ -141,7 +154,7 @@ export function isValidProfilePayload(v: unknown): boolean {
     optional(v.email, text) &&
     optional(v.googleCalendarAccount, text) &&
     optional(v.schoolLevel, l => ["infanzia", "primaria", "ssig", "ssiig"].includes(l as string)) &&
-    optional(v.schools, schools => Array.isArray(schools) && schools.every(s => isRecord(s) && requiredText(s.id) && text(s.name) && optional(s.institutionalEmail, text) && optional(s.campuses, strings) && optional(s.schoolLevel, l => ["infanzia", "primaria", "ssig", "ssiig"].includes(l as string)) && optional(s.weeklyHours, n => typeof n === "number" && Number.isFinite(n)) && optional(s.isPrimary, bool) && optional(s.active, bool)))
+    optional(v.schools, schools => Array.isArray(schools) && schools.every(s => isRecord(s) && requiredText(s.id) && text(s.name) && optional(s.institutionalEmail, text) && optional(s.campuses, strings) && optional(s.schoolLevel, l => ["infanzia", "primaria", "ssig", "ssiig"].includes(l as string)) && optional(s.weeklyHours, n => typeof n === "number" && Number.isFinite(n)) && optional(s.isPrimary, bool) && optional(s.active, bool) && optional(s.dayPeriods, isValidSchoolDayPeriods)))
   );
 }
 
