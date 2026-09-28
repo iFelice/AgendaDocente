@@ -4,6 +4,7 @@ import {
   circularCloudFailure,
   circularFailureBody,
   CIRCULAR_AI_NOT_CONFIGURED,
+  CIRCULAR_AI_UNAVAILABLE_MESSAGE,
   CIRCULAR_SERVER_ERROR_MESSAGE,
   emitCircularDiagnostic,
   summarizeCircularPayload,
@@ -108,15 +109,15 @@ const GEMINI_BACKOFF_BASE_MS = 1_000;
 const GEMINI_BACKOFF_MAX_MS = 8_000;
 const GEMINI_MODEL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{1,63}$/;
 
-export type CircularDiagnosticVariant = "A" | "B" | "C" | "D";
+export type CircularDiagnosticVariant = "A" | "B" | "C" | "D" | "G";
 
 /**
  * Variante diagnostica temporanea per isolare sperimentalmente su Render
- * il comportamento di Gemini A/B/C/D. Letta SOLO da variabile ambiente server.
+ * il comportamento di Gemini A/B/C/D e Groq G. Letta SOLO da variabile ambiente server.
  */
 export function getCircularDiagnosticVariant(env: NodeJS.ProcessEnv = process.env): CircularDiagnosticVariant {
   const val = (env.GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT ?? "").trim().toUpperCase();
-  if (val === "A" || val === "B" || val === "C") return val;
+  if (val === "A" || val === "B" || val === "C" || val === "G") return val;
   return "D";
 }
 
@@ -485,6 +486,147 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
 Restituisci soltanto l'array JSON richiesto.`;
 
     const variant = getCircularDiagnosticVariant();
+    const summary = summarizeCircularPayload(req.body);
+
+    // Variante diagnostica G: esecuzione isolata tramite Groq Vision (qwen/qwen3.8-27b)
+    if (variant === "G") {
+      const groqModel = "qwen/qwen3.8-27b";
+      const groqApiKey = (process.env.GROQ_API_KEY ?? "").trim();
+      if (!groqApiKey) {
+        console.log(`[AI Circolari Diagnostic] variant=G provider=groq model=${groqModel} call=failed status=503 durationMs=0 parse=not_attempted mime=${summary.mime} bytes=${summary.bytes}`);
+        logOutcome({ esito: "fallito", errorCode: "AI_UNAVAILABLE", categoria: "non-configurato", status: 503 });
+        return res.status(503).json(circularFailureBody("AI_UNAVAILABLE", CIRCULAR_AI_UNAVAILABLE_MESSAGE));
+      }
+
+      const GROQ_IMAGE_MIMES = ["image/jpeg", "image/png", "image/webp"];
+      if (imageBase64 && mimeType && !GROQ_IMAGE_MIMES.includes(mimeType.toLowerCase())) {
+        console.log(`[AI Circolari Diagnostic] variant=G provider=groq model=${groqModel} call=failed status=400 durationMs=0 parse=not_attempted mime=${summary.mime} bytes=${summary.bytes}`);
+        logOutcome({ esito: "rifiutato", errorCode: "INVALID_INPUT", categoria: "mime-non-supportato", status: 400 });
+        return res.status(400).json(circularFailureBody("INVALID_INPUT", "La variante diagnostica Groq supporta solo immagini (JPEG, PNG, WEBP)."));
+      }
+
+      const defaultPrompt = "Analizza il documento allegato, incluse tabelle e note.";
+      const promptText = text ? `Testo della circolare:\n${text}` : defaultPrompt;
+      const groqSystemPrompt = `${systemInstruction}\nRestituisci la risposta ESCLUSIVAMENTE come JSON valido conforme allo schema degli impegni (array di oggetti o oggetto con proprietà "items").`;
+      const groqUserContent: any[] = [{ type: "text", text: promptText }];
+      if (imageBase64 && mimeType) {
+        groqUserContent.push({
+          type: "image_url",
+          image_url: { url: `data:${mimeType};base64,${imageBase64}` },
+        });
+      }
+
+      const groqStart = Date.now();
+      let groqRes: Response | null = null;
+      let groqCallSuccess = false;
+      let groqHttpStatus = 503;
+      let groqRawText = "";
+      try {
+        groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${groqApiKey}`,
+          },
+          body: JSON.stringify({
+            model: groqModel,
+            messages: [
+              { role: "system", content: groqSystemPrompt },
+              { role: "user", content: groqUserContent },
+            ],
+            temperature: 0,
+            response_format: { type: "json_object" },
+            reasoning_effort: "none",
+            reasoning_format: "hidden",
+          }),
+          signal: controller.signal,
+        });
+        groqHttpStatus = groqRes.status;
+        if (groqRes.ok) {
+          const jsonBody: any = await groqRes.json().catch(() => null);
+          groqRawText = String(jsonBody?.choices?.[0]?.message?.content ?? "").trim();
+          groqCallSuccess = !!groqRawText;
+        }
+      } catch (err: any) {
+        if (controller.signal.aborted) {
+          groqHttpStatus = 504;
+        } else {
+          groqHttpStatus = 503;
+        }
+      }
+      const groqDurationMs = Date.now() - groqStart;
+
+      let groqDecoded: { ok: true; value: unknown } | { ok: false } = { ok: false };
+      if (groqCallSuccess && groqRawText) {
+        groqDecoded = parseGeminiJson(groqRawText, "AI Circolari Groq");
+      }
+      let groqParsed: any[] = [];
+      let parseStatus: "success" | "failed" | "not_attempted" = "not_attempted";
+      if (groqCallSuccess) {
+        if (groqDecoded.ok) {
+          if (Array.isArray(groqDecoded.value)) {
+            groqParsed = groqDecoded.value;
+            parseStatus = "success";
+          } else if (typeof groqDecoded.value === "object" && groqDecoded.value !== null && Array.isArray((groqDecoded.value as any).items)) {
+            groqParsed = (groqDecoded.value as any).items;
+            parseStatus = "success";
+          } else if (typeof groqDecoded.value === "object" && groqDecoded.value !== null && Array.isArray((groqDecoded.value as any).events)) {
+            groqParsed = (groqDecoded.value as any).events;
+            parseStatus = "success";
+          } else {
+            parseStatus = "failed";
+          }
+        } else {
+          parseStatus = "failed";
+        }
+      }
+
+      console.log(`[AI Circolari Diagnostic] variant=G provider=groq model=${groqModel} call=${groqCallSuccess ? "success" : "failed"} status=${groqHttpStatus} durationMs=${groqDurationMs} parse=${parseStatus} mime=${summary.mime} bytes=${summary.bytes}`);
+
+      if (!groqCallSuccess || parseStatus !== "success") {
+        const outStatus = groqHttpStatus === 429 ? 429 : 503;
+        const errorCode = groqHttpStatus === 429 ? "RATE_LIMITED" : "AI_UNAVAILABLE";
+        const errorMsg = groqHttpStatus === 429 ? "Servizio AI temporaneamente occupato. Riprova tra poco." : CIRCULAR_AI_UNAVAILABLE_MESSAGE;
+        if (imageBase64 || !text?.trim()) {
+          logOutcome({ esito: "fallito", errorCode, categoria: groqHttpStatus === 429 ? "quota" : "sovraccarico", status: outStatus });
+          return res.status(outStatus).json(circularFailureBody(errorCode, errorMsg));
+        }
+        logOutcome({ esito: "fallback-locale", errorCode, categoria: "sovraccarico", status: 200, sorgente: "local-heuristic" });
+        const items = parseCircularText(text || "", teacherProfile, effectiveCampus);
+        return res.json({
+          success: true,
+          source: "local-heuristic",
+          items,
+          notice: "Elaborazione completata con motore di parsing locale (cloud AI temporaneamente congestionato).",
+        });
+      }
+
+      let items: any[] = [];
+      try {
+        items = normalizeExtractedItems(groqParsed, teacherProfile, effectiveCampus);
+      } catch {
+        if (imageBase64 || !text?.trim()) {
+          logOutcome({ esito: "fallito", errorCode: "AI_UNAVAILABLE", categoria: "json-non-valido", status: 503 });
+          return res.status(503).json(circularFailureBody("AI_UNAVAILABLE", CIRCULAR_AI_UNAVAILABLE_MESSAGE));
+        }
+        logOutcome({ esito: "fallback-locale", errorCode: "AI_UNAVAILABLE", categoria: "json-non-valido", status: 200, sorgente: "local-heuristic" });
+        items = parseCircularText(text || "", teacherProfile, effectiveCampus);
+        return res.json({
+          success: true,
+          source: "local-heuristic",
+          items,
+          notice: "Elaborazione completata con motore di parsing locale (cloud AI temporaneamente congestionato).",
+        });
+      }
+
+      logOutcome({ esito: "ok", categoria: "ok", sorgente: groqModel, status: 200 });
+      return res.json({
+        success: true,
+        source: groqModel,
+        items,
+      });
+    }
+
     const contents: any[] = [];
 
     // If an image or PDF base64 is provided, pass it as inlineData
@@ -552,7 +694,6 @@ Restituisci soltanto l'array JSON richiesto.`;
       models: effectiveModels,
     });
     const decoded = run.ok ? parseGeminiJson(run.text, "AI Circolari") : { ok: false as const };
-    const summary = summarizeCircularPayload(req.body);
     const lastAttempt = run.attempts[run.attempts.length - 1];
     const usedModel = lastAttempt?.model || effectiveModels[0];
     const durationMs = Date.now() - startedAt;
