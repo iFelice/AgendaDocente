@@ -136,6 +136,7 @@ export interface CircularDiagnosticFields {
   durataMs?: number;
   tentativi?: string;
   provider?: string;
+  fallbackFrom?: string;
   status?: number;
   tipo?: string;
   sorgente?: string;
@@ -166,8 +167,11 @@ export function formatCircularDiagnostic(fields: CircularDiagnosticFields): stri
   const parts = [
     'endpoint=/api/analyze-circular',
     `provider=${fields.provider && /^[a-z-]{1,20}$/.test(fields.provider) ? fields.provider : 'gemini'}`,
-    `esito=${/^[a-z-]{1,32}$/.test(fields.esito) ? fields.esito : 'sconosciuto'}`,
   ];
+  if (fields.fallbackFrom && /^[a-z-]{1,20}$/.test(fields.fallbackFrom)) {
+    parts.push(`fallbackFrom=${fields.fallbackFrom}`);
+  }
+  parts.push(`esito=${/^[a-z-]{1,32}$/.test(fields.esito) ? fields.esito : 'sconosciuto'}`);
   if (fields.errorCode && /^[A-Z_]{1,32}$/.test(fields.errorCode)) parts.push(`errorCode=${fields.errorCode}`);
   if (fields.categoria && CATEGORY_RE.test(fields.categoria)) parts.push(`categoria=${fields.categoria}`);
   parts.push(`mime=${mime}`);

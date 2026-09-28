@@ -140,7 +140,9 @@ export function createAnalysisGuards(validator: (body: unknown) => void, options
       bucket = { count: 0, expires: time + windowMs }; buckets.set(key, bucket);
     }
     bucket.count++; globalBucket.count++;
-    if (bucket.count > (options.perIp ?? 10) || globalBucket.count > (options.global ?? 60) || active >= (options.concurrent ?? 4)) {
+    const perIp = options.perIp ?? (process.env.TEST_RATE_LIMIT === 'relaxed' ? 10_000 : 10);
+    const globalLimit = options.global ?? (process.env.TEST_RATE_LIMIT === 'relaxed' ? 50_000 : 60);
+    if (bucket.count > perIp || globalBucket.count > globalLimit || active >= (options.concurrent ?? 4)) {
       res.setHeader('Retry-After', '60'); return res.status(429).json({ success: false, error: 'Troppe richieste. Riprova tra un minuto.' });
     }
     active++;

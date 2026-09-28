@@ -323,7 +323,7 @@ test('endpoint senza chiave: JPEG rifiutato con codice, log privacy-safe, frase 
     assert.equal(body.errorCode, 'AI_UNAVAILABLE');
     assert.match(body.error, /non disponibile/);
     assert.doesNotMatch(JSON.stringify(body), new RegExp(`${SENTINEL}|${imageBase64.slice(0, 20)}`));
-    const line = logs.find(entry => entry.includes('endpoint=/api/analyze-circular') && entry.includes('categoria=non-configurato'));
+    const line = logs.find(entry => entry.includes('endpoint=/api/analyze-circular') && entry.includes('categoria=non-configurato') && entry.includes('provider=gemini'));
     assert.ok(line, `manca il log diagnostico: ${logs.join(' | ')}`);
     assert.match(line!, /mime=image\/jpeg/);
     assert.match(line!, /errorCode=AI_UNAVAILABLE/);
