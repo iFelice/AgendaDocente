@@ -87,6 +87,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   const inputRevision = useRef(0);
   const handledAutoTokenRef = useRef<string | null>(null);
   const [isReadingFile, setIsReadingFile] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
 
   const handleModalClose = () => {
     inputRevision.current++;
@@ -197,22 +198,32 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
 
   if (!isOpen) return null;
 
-  // Handle file upload
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
+  // Handle file processing for both file input and drag & drop
+  const processCircularFile = (file: File) => {
     const revision = ++inputRevision.current;
-    setCircularText(''); setFileBase64(undefined); setFileMimeType(undefined);
+    setCircularText("");
+    setFileBase64(undefined);
+    setFileMimeType(undefined);
     const fileError = circularUploadError(file);
-    if (fileError) { setIsReadingFile(false); setAnalysisError(fileError); return; }
+    if (fileError) {
+      setIsReadingFile(false);
+      setAnalysisError(fileError);
+      return;
+    }
     setIsReadingFile(true);
     setFileName(file.name);
     setAnalysisError(null);
 
     const reader = new FileReader();
-    reader.onerror = () => { if (revision === inputRevision.current) { setIsReadingFile(false); setAnalysisError('Impossibile leggere il file.'); } };
-    reader.onloadend = () => { if (revision === inputRevision.current) setIsReadingFile(false); };
+    reader.onerror = () => {
+      if (revision === inputRevision.current) {
+        setIsReadingFile(false);
+        setAnalysisError("Impossibile leggere il file.");
+      }
+    };
+    reader.onloadend = () => {
+      if (revision === inputRevision.current) setIsReadingFile(false);
+    };
     if (file.type.startsWith("image/") || file.type === "application/pdf") {
       reader.onload = () => {
         if (revision !== inputRevision.current) return;
@@ -228,11 +239,41 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       reader.onload = () => {
         if (revision !== inputRevision.current) return;
         const text = reader.result as string;
-        if (text.length > 100_000) { setAnalysisError('Testo troppo lungo: massimo 100.000 caratteri.'); return; }
+        if (text.length > 100_000) {
+          setAnalysisError("Testo troppo lungo: massimo 100.000 caratteri.");
+          return;
+        }
         setCircularText(text);
       };
       reader.readAsText(file);
     }
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    processCircularFile(file);
+  };
+
+  const handleDragOver = (e: React.DragEvent<HTMLElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!isDragging) setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent<HTMLElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent<HTMLElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    const file = e.dataTransfer.files?.[0];
+    if (!file) return;
+    processCircularFile(file);
   };
 
 
@@ -520,9 +561,16 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                 <div className="space-y-4">
                   <label
                     htmlFor="circular-file-input"
-                    className="border-2 border-dashed border-stone-300 hover:border-amber-500 rounded-2xl p-8 flex flex-col items-center justify-center text-center cursor-pointer transition-all bg-stone-50/50 hover:bg-amber-50/20"
+                    onDragOver={handleDragOver}
+                    onDragLeave={handleDragLeave}
+                    onDrop={handleDrop}
+                    className={`border-2 border-dashed rounded-2xl p-8 flex flex-col items-center justify-center text-center cursor-pointer transition-all ${
+                      isDragging
+                        ? "border-amber-500 bg-amber-50/60 ring-2 ring-amber-400/50"
+                        : "border-stone-300 hover:border-amber-500 bg-stone-50/50 hover:bg-amber-50/20"
+                    }`}
                   >
-                    <FileUp className="w-10 h-10 text-stone-400 mb-2" />
+                    <FileUp className={`w-10 h-10 mb-2 transition-colors ${isDragging ? "text-amber-600" : "text-stone-400"}`} />
                     <span className="text-sm font-semibold text-stone-800">
                       Trascina o seleziona il PDF o la foto della circolare
                     </span>
