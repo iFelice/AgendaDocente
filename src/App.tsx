@@ -120,8 +120,14 @@ export default function App({ initialData }: { initialData: LocalData }) {
   const [slotEditNav, setSlotEditNav] = useState<SlotEditNavigation>(initialSlotEditNavigation);
   const [isCircularModalOpen, setIsCircularModalOpen] = useState(false);
   const [isScannerOpen, setIsScannerOpen] = useState(false);
-  // File pre-scansionato dal flusso unificato, da alimentare alla pipeline circolare esistente.
-  const [scannerCircularFile, setScannerCircularFile] = useState<{ base64: string; mimeType: string; fileName: string } | null>(null);
+  // File o modalità scansionata dal flusso unificato, da alimentare alla pipeline circolare esistente.
+  const [scannerCircularFile, setScannerCircularFile] = useState<{
+    mode?: "file" | "text";
+    base64?: string;
+    mimeType?: string;
+    fileName?: string;
+    autoStartToken?: string;
+  } | null>(null);
   const [isEventModalOpen, setIsEventModalOpen] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [isOnboardingOpen, setIsOnboardingOpen] = useState<boolean>(() => !initialData.onboardingCompleted);
@@ -536,15 +542,21 @@ export default function App({ initialData }: { initialData: LocalData }) {
   // Circular Import Confirmation
   const handleImportCircularEvents = withPersistenceFeedback(async (
     newEvents: CalendarEvent[],
-    docMeta: CircularDocument
+    docMeta: CircularDocument,
+    updatedEvents: CalendarEvent[] = []
   ) => {
-    const addedCount = await database.atomic(async () => {
-      const added = await storage.bulkAddEvents(newEvents);
+    const result = await database.atomic(async () => {
+      const counts = await storage.importCircularEvents(newEvents, updatedEvents);
       await storage.saveCircular(docMeta);
-      return added;
+      return counts;
     });
 
-    showToast(`Perfetto! ${addedCount} impegni pertinenti aggiunti all'agenda.`);
+    const msg = result.updated > 0 && result.added > 0
+      ? `Perfetto! ${result.added} impegni aggiunti e ${result.updated} aggiornati.`
+      : result.updated > 0
+      ? `Perfetto! ${result.updated} impegni aggiornati.`
+      : `Perfetto! ${result.added} impegni pertinenti aggiunti all'agenda.`;
+    showToast(msg);
     setCurrentView("oggi");
   });
 
@@ -554,8 +566,14 @@ export default function App({ initialData }: { initialData: LocalData }) {
     showToast("Circolare rimossa dall'archivio.");
   });
 
-  // Scansiona documento: la circolare pre-scansionata alimenta la pipeline esistente.
-  const handleScanDocumentToCircular = (info: { base64: string; mimeType: string; fileName: string }) => {
+  // Scansiona documento: la circolare (file con auto-start o handoff testo) alimenta la pipeline esistente.
+  const handleScanDocumentToCircular = (info: {
+    mode?: "file" | "text";
+    base64?: string;
+    mimeType?: string;
+    fileName?: string;
+    autoStartToken?: string;
+  }) => {
     setScannerCircularFile(info);
     setIsScannerOpen(false);
     setIsCircularModalOpen(true);
@@ -929,8 +947,10 @@ export default function App({ initialData }: { initialData: LocalData }) {
           setScannerCircularFile(null);
         }}
         profile={profile}
+        existingEvents={events}
         onImportEvents={handleImportCircularEvents}
         initialFile={scannerCircularFile}
+        initialInputMode={scannerCircularFile?.mode ?? "file"}
       />
       )}
 

@@ -32,25 +32,46 @@ import {
   TeacherProfile,
 } from "../types";
 import { analyzeCircular } from "../services/aiService";
+import { findPossibleEventUpdate, getEventFieldDiff } from "../utils/eventMatching";
+
+export type UpdateChoice = "update" | "create" | "ignore";
 
 interface CircularAnalyzerModalProps {
   isOpen: boolean;
   onClose: () => void;
   profile: TeacherProfile;
-  onImportEvents: (events: CalendarEvent[], docMeta: CircularDocument) => void | false | Promise<void | false>;
+  existingEvents?: CalendarEvent[];
+  onImportEvents: (
+    events: CalendarEvent[],
+    docMeta: CircularDocument,
+    updatedEvents?: CalendarEvent[]
+  ) => void | false | Promise<void | false>;
   /**
    * File già scansionato dal flusso unificato "Scansiona documento":
    * lo si alimenta nel passo di input senza duplicare la pipeline.
+   * Se contiene `autoStartToken`, avvia automaticamente l'analisi una sola volta.
    */
-  initialFile?: { base64: string; mimeType: string; fileName: string } | null;
+  initialFile?: {
+    mode?: "file" | "text";
+    base64?: string;
+    mimeType?: string;
+    fileName?: string;
+    autoStartToken?: string;
+  } | null;
+  initialInputMode?: "file" | "text";
 }
+
+/** Token di auto-start monouso già consumati per prevenire doppie analisi anche in StrictMode. */
+const consumedAutoStartTokens = new Set<string>();
 
 export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   isOpen,
   onClose,
   profile,
+  existingEvents,
   onImportEvents,
   initialFile,
+  initialInputMode,
 }) => {
   const save = usePersistenceAction();
   const [step, setStep] = useState<"input" | "results">("input");
@@ -69,67 +90,25 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   );
   const [showRawSnippets, setShowRawSnippets] = useState<boolean>(false);
   const [selectionWarning, setSelectionWarning] = useState<string | null>(null);
+  const [updateChoices, setUpdateChoices] = useState<Record<string, UpdateChoice>>({});
 
   const inputRevision = useRef(0);
+  const handledAutoTokenRef = useRef<string | null>(null);
   const [isReadingFile, setIsReadingFile] = useState(false);
-  useEffect(() => {
+  const [isDragging, setIsDragging] = useState(false);
+
+  const handleModalClose = () => {
     inputRevision.current++;
-    setStep('input'); setCircularText(''); setDefaultLocation('');
-    setFileBase64(undefined); setFileMimeType(undefined); setExtractedItems([]);
-    setAnalysisError(null); setSelectionWarning(null); setIsAnalyzing(false); setIsReadingFile(false);
-    // Alimentazione dal flusso unificato: il file già scansionato parte dal passo input.
-    if (initialFile) {
-      setFileName(initialFile.fileName);
-      setFileBase64(initialFile.base64);
-      setFileMimeType(initialFile.mimeType);
-    } else {
-      setFileName('');
-    }
-  }, [isOpen, initialFile]);
-
-  if (!isOpen) return null;
-
-  // Handle file upload
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const revision = ++inputRevision.current;
-    setCircularText(''); setFileBase64(undefined); setFileMimeType(undefined);
-    const fileError = circularUploadError(file);
-    if (fileError) { setIsReadingFile(false); setAnalysisError(fileError); return; }
-    setIsReadingFile(true);
-    setFileName(file.name);
-    setAnalysisError(null);
-
-    const reader = new FileReader();
-    reader.onerror = () => { if (revision === inputRevision.current) { setIsReadingFile(false); setAnalysisError('Impossibile leggere il file.'); } };
-    reader.onloadend = () => { if (revision === inputRevision.current) setIsReadingFile(false); };
-    if (file.type.startsWith("image/") || file.type === "application/pdf") {
-      reader.onload = () => {
-        if (revision !== inputRevision.current) return;
-        const resultStr = reader.result as string;
-        // Strip data:url prefix for raw base64
-        const base64Data = resultStr.split(",")[1];
-        setFileBase64(base64Data);
-        setFileMimeType(file.type);
-      };
-      reader.readAsDataURL(file);
-    } else {
-      // Text file
-      reader.onload = () => {
-        if (revision !== inputRevision.current) return;
-        const text = reader.result as string;
-        if (text.length > 100_000) { setAnalysisError('Testo troppo lungo: massimo 100.000 caratteri.'); return; }
-        setCircularText(text);
-      };
-      reader.readAsText(file);
-    }
+    onClose();
   };
 
-  // Run the analysis
-  const handleRunAnalysis = async () => {
-    if (!circularText.trim() && !fileBase64) {
+  // Esegue l'analisi: supporta parametri espliciti per l'auto-start o i valori correnti dello stato.
+  const executeAnalysis = async (params?: { text?: string; base64?: string; mimeType?: string }) => {
+    const textToAnalyze = params ? (params.text ?? "") : circularText;
+    const base64ToAnalyze = params ? params.base64 : fileBase64;
+    const mimeTypeToAnalyze = params ? params.mimeType : fileMimeType;
+
+    if (!textToAnalyze.trim() && !base64ToAnalyze) {
       setAnalysisError("Inserisci il testo della circolare oppure carica un file.");
       return;
     }
@@ -140,9 +119,9 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
 
     try {
       const result = await analyzeCircular({
-        text: circularText,
-        imageBase64: fileBase64,
-        mimeType: fileMimeType,
+        text: textToAnalyze,
+        imageBase64: base64ToAnalyze,
+        mimeType: mimeTypeToAnalyze,
         profile,
         defaultLocation: defaultLocation.trim() || undefined,
       });
@@ -163,6 +142,150 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       if (revision === inputRevision.current) setIsAnalyzing(false);
     }
   };
+
+  const handleRunAnalysis = () => {
+    void executeAnalysis();
+  };
+
+  useEffect(() => {
+    if (!isOpen) {
+      inputRevision.current++;
+      handledAutoTokenRef.current = null;
+      return;
+    }
+
+    const autoToken = initialFile?.autoStartToken;
+
+    // Se questo handoff con autoStartToken è già stato avviato da questa istanza, non resettare lo stato
+    if (autoToken && handledAutoTokenRef.current === autoToken) {
+      return;
+    }
+
+    const shouldAutoStart = Boolean(autoToken && !consumedAutoStartTokens.has(autoToken));
+
+    if (autoToken) {
+      handledAutoTokenRef.current = autoToken;
+      if (shouldAutoStart) {
+        consumedAutoStartTokens.add(autoToken);
+      }
+    } else {
+      handledAutoTokenRef.current = null;
+    }
+
+    inputRevision.current++;
+    setStep("input");
+    const effectiveMode = initialFile?.mode ?? initialInputMode ?? "file";
+    setInputMode(effectiveMode);
+    setCircularText("");
+    setDefaultLocation("");
+    setExtractedItems([]);
+    setAnalysisError(null);
+    setSelectionWarning(null);
+    setUpdateChoices({});
+    setIsReadingFile(false);
+
+    if (initialFile && initialFile.base64 && initialFile.mimeType) {
+      setFileName(initialFile.fileName || "");
+      setFileBase64(initialFile.base64);
+      setFileMimeType(initialFile.mimeType);
+
+      if (shouldAutoStart) {
+        void executeAnalysis({
+          text: "",
+          base64: initialFile.base64,
+          mimeType: initialFile.mimeType,
+        });
+      } else {
+        setIsAnalyzing(false);
+      }
+    } else {
+      setFileName("");
+      setFileBase64(undefined);
+      setFileMimeType(undefined);
+      setIsAnalyzing(false);
+    }
+  }, [isOpen, initialFile, initialInputMode]);
+
+  if (!isOpen) return null;
+
+  // Handle file processing for both file input and drag & drop
+  const processCircularFile = (file: File) => {
+    const revision = ++inputRevision.current;
+    setCircularText("");
+    setFileBase64(undefined);
+    setFileMimeType(undefined);
+    const fileError = circularUploadError(file);
+    if (fileError) {
+      setIsReadingFile(false);
+      setAnalysisError(fileError);
+      return;
+    }
+    setIsReadingFile(true);
+    setFileName(file.name);
+    setAnalysisError(null);
+
+    const reader = new FileReader();
+    reader.onerror = () => {
+      if (revision === inputRevision.current) {
+        setIsReadingFile(false);
+        setAnalysisError("Impossibile leggere il file.");
+      }
+    };
+    reader.onloadend = () => {
+      if (revision === inputRevision.current) setIsReadingFile(false);
+    };
+    if (file.type.startsWith("image/") || file.type === "application/pdf") {
+      reader.onload = () => {
+        if (revision !== inputRevision.current) return;
+        const resultStr = reader.result as string;
+        // Strip data:url prefix for raw base64
+        const base64Data = resultStr.split(",")[1];
+        setFileBase64(base64Data);
+        setFileMimeType(file.type);
+      };
+      reader.readAsDataURL(file);
+    } else {
+      // Text file
+      reader.onload = () => {
+        if (revision !== inputRevision.current) return;
+        const text = reader.result as string;
+        if (text.length > 100_000) {
+          setAnalysisError("Testo troppo lungo: massimo 100.000 caratteri.");
+          return;
+        }
+        setCircularText(text);
+      };
+      reader.readAsText(file);
+    }
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    processCircularFile(file);
+  };
+
+  const handleDragOver = (e: React.DragEvent<HTMLElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!isDragging) setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent<HTMLElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent<HTMLElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    const file = e.dataTransfer.files?.[0];
+    if (!file) return;
+    processCircularFile(file);
+  };
+
 
   // Toggle selection of an extracted item
   const toggleItemSelection = (tempId: string) => {
@@ -196,7 +319,27 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   };
 
   const visibleItems = getFilteredItems();
-  const selectedCount = extractedItems.filter((i) => i.selectedForImport).length;
+  const selectedItems = extractedItems.filter((i) => i.selectedForImport);
+  const selectedCount = selectedItems.length;
+
+  const toCreateCount = selectedItems.filter((it) => {
+    const match = findPossibleEventUpdate(it, existingEvents);
+    return !match || updateChoices[it.tempId] === "create";
+  }).length;
+
+  const toUpdateCount = selectedItems.filter((it) => {
+    const match = findPossibleEventUpdate(it, existingEvents);
+    return !!match && updateChoices[it.tempId] === "update";
+  }).length;
+
+  const isAllIgnored =
+    selectedCount > 0 &&
+    toCreateCount === 0 &&
+    toUpdateCount === 0 &&
+    selectedItems.every((it) => {
+      const match = findPossibleEventUpdate(it, existingEvents);
+      return match && updateChoices[it.tempId] === "ignore";
+    });
 
   const countVerde = extractedItems.filter((i) => i.relevance === "VERDE").length;
   const countGiallo = extractedItems.filter((i) => i.relevance === "GIALLO").length;
@@ -227,7 +370,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     setExtractedItems((prev) => prev.filter((i) => i.tempId !== tempId));
   };
 
-  // Final confirmation: convert selected ExtractedItems to CalendarEvent
+  // Final confirmation: convert selected ExtractedItems to CalendarEvent or updated existing events
   const handleConfirmImport = async () => {
     const selected = extractedItems.filter((i) => i.selectedForImport);
     if (selected.length === 0) {
@@ -236,10 +379,69 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     }
     setSelectionWarning(null);
 
-    const invalid = selected.find(it => extractedItemError(it));
-    if (invalid) { setSelectionWarning(`${invalid.title}: ${extractedItemError(invalid)}`); return; }
+    // Verifica che per tutti gli impegni con possibile aggiornamento sia stata fatta una scelta esplicita
+    for (const it of selected) {
+      const match = findPossibleEventUpdate(it, existingEvents);
+      if (match && !updateChoices[it.tempId]) {
+        setSelectionWarning(`Effettua una scelta per l'impegno "${it.title}" (Possibile aggiornamento di un impegno esistente).`);
+        return;
+      }
+    }
+
+    const toImportOrUpdate = selected.filter((it) => {
+      const match = findPossibleEventUpdate(it, existingEvents);
+      const choice = match ? updateChoices[it.tempId] : undefined;
+      return !(match && choice === "ignore");
+    });
+    const invalid = toImportOrUpdate.find((it) => extractedItemError(it));
+    if (invalid) {
+      setSelectionWarning(`${invalid.title}: ${extractedItemError(invalid)}`);
+      return;
+    }
+
     const circularId = `circ-${crypto.randomUUID()}`;
-    const newEvents = selected.map(it => convertExtractedItemToEvent(it, fileName || 'Circolare importata', circularId));
+    const newEvents: CalendarEvent[] = [];
+    const updatedEvents: CalendarEvent[] = [];
+
+    for (const it of selected) {
+      const match = findPossibleEventUpdate(it, existingEvents);
+      const choice = match ? updateChoices[it.tempId] : undefined;
+
+      if (match && choice === "update") {
+        // Aggiorna l'evento esistente preservando ID e metadati tecnici
+        const updatedEvent: CalendarEvent = {
+          ...match,
+          title: it.title,
+          category: it.category,
+          date: it.date,
+          startTime: it.startTime || undefined,
+          endTime: it.endTime || undefined,
+          isAllDay: !!it.isDeadline && !it.startTime,
+          className: it.className || match.className,
+          subject: it.subject || match.subject,
+          location: it.location || match.location,
+          notes: it.notes || match.notes,
+          sourceCircularId: match.sourceCircularId || circularId,
+          sourceCircularTitle: match.sourceCircularTitle || fileName || "Circolare importata",
+          sourceItemId: match.sourceItemId || it.tempId,
+          sourceType: match.sourceType || "circolare",
+          updatedAt: new Date().toISOString(),
+        };
+        updatedEvents.push(updatedEvent);
+      } else if (match && choice === "ignore") {
+        // Ignorato: non crea né aggiorna nulla
+        continue;
+      } else {
+        // Nuovo impegno da aggiungere (senza match oppure con scelta esplicita "create")
+        newEvents.push(convertExtractedItemToEvent(it, fileName || "Circolare importata", circularId));
+      }
+    }
+
+    // CASO A: Tutti gli elementi selezionati sono stati ignorati (nessuna modifica da salvare)
+    if (newEvents.length === 0 && updatedEvents.length === 0) {
+      handleModalClose();
+      return;
+    }
 
     const docMeta: CircularDocument = {
       id: circularId,
@@ -253,7 +455,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       extractedItems: extractedItems,
     };
 
-    if (!await save.run(() => onImportEvents(newEvents, docMeta))) return;
+    if (!await save.run(() => onImportEvents(newEvents, docMeta, updatedEvents))) return;
     onClose();
   };
 
@@ -278,7 +480,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
           </div>
 
           <button
-            onClick={onClose}
+            onClick={handleModalClose}
             className="p-2 rounded-lg text-stone-400 hover:text-stone-700 hover:bg-stone-200 transition-colors"
           >
             <X className="w-5 h-5" />
@@ -398,9 +600,16 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                 <div className="space-y-4">
                   <label
                     htmlFor="circular-file-input"
-                    className="border-2 border-dashed border-stone-300 hover:border-amber-500 rounded-2xl p-8 flex flex-col items-center justify-center text-center cursor-pointer transition-all bg-stone-50/50 hover:bg-amber-50/20"
+                    onDragOver={handleDragOver}
+                    onDragLeave={handleDragLeave}
+                    onDrop={handleDrop}
+                    className={`border-2 border-dashed rounded-2xl p-8 flex flex-col items-center justify-center text-center cursor-pointer transition-all ${
+                      isDragging
+                        ? "border-amber-500 bg-amber-50/60 ring-2 ring-amber-400/50"
+                        : "border-stone-300 hover:border-amber-500 bg-stone-50/50 hover:bg-amber-50/20"
+                    }`}
                   >
-                    <FileUp className="w-10 h-10 text-stone-400 mb-2" />
+                    <FileUp className={`w-10 h-10 mb-2 transition-colors ${isDragging ? "text-amber-600" : "text-stone-400"}`} />
                     <span className="text-sm font-semibold text-stone-800">
                       Trascina o seleziona il PDF o la foto della circolare
                     </span>
@@ -612,6 +821,9 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                     const isVerde = item.relevance === "VERDE";
                     const isGiallo = item.relevance === "GIALLO";
                     const isRosso = item.relevance === "ROSSO";
+                    const match = findPossibleEventUpdate(item, existingEvents);
+                    const diff = match ? getEventFieldDiff(match, item) : null;
+                    const choice = updateChoices[item.tempId];
 
                     return (
                       <div
@@ -725,6 +937,111 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                                   "{item.rawSnippet}"
                                 </div>
                               )}
+
+                              {/* Possibile aggiornamento di un impegno esistente */}
+                              {match && diff && (
+                                <div className="mt-3 p-3 rounded-xl border border-amber-300 bg-amber-50/70 space-y-3">
+                                  <div className="flex items-center gap-1.5 text-xs font-bold text-amber-900">
+                                    <RefreshCw className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                                    <span>Possibile aggiornamento di un impegno esistente</span>
+                                  </div>
+
+                                  {/* Confronto compatto mobile-first */}
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                                    {/* Esistente */}
+                                    <div className="bg-white border border-stone-200 rounded-lg p-2.5 space-y-1">
+                                      <span className="text-[10px] uppercase font-bold text-stone-500 tracking-wider block">
+                                        Esistente in agenda
+                                      </span>
+                                      <div className="font-semibold text-stone-800">{match.title}</div>
+                                      <div className="text-stone-600">
+                                        <span>{match.date}</span>
+                                        {(match.startTime || match.endTime) && (
+                                          <span className="ml-1.5 font-mono">
+                                            {match.startTime || "--:--"}{match.endTime ? ` - ${match.endTime}` : ""}
+                                          </span>
+                                        )}
+                                      </div>
+                                      {match.location && <div className="text-stone-500">📍 {match.location}</div>}
+                                      {match.notes && <div className="text-stone-500 italic text-[11px]">{match.notes}</div>}
+                                      <div className="text-[11px] text-stone-400 capitalize">
+                                        Categoria: {match.category.replace("_", " ")}
+                                      </div>
+                                    </div>
+
+                                    {/* Dalla nuova circolare */}
+                                    <div className="bg-white border border-amber-300 rounded-lg p-2.5 space-y-1">
+                                      <span className="text-[10px] uppercase font-bold text-amber-700 tracking-wider block">
+                                        Dalla nuova circolare
+                                      </span>
+                                      <div className={`font-semibold ${diff.title ? "text-amber-900 font-bold bg-amber-100/70 px-1 rounded inline-block" : "text-stone-800"}`}>
+                                        {item.title}
+                                      </div>
+                                      <div className="text-stone-600">
+                                        <span className={diff.date ? "bg-amber-100 font-semibold px-1 rounded text-amber-900" : ""}>{item.date}</span>
+                                        {(item.startTime || item.endTime) && (
+                                          <span className={`ml-1.5 font-mono ${diff.startTime || diff.endTime ? "bg-amber-100 font-bold px-1 rounded text-amber-900" : ""}`}>
+                                            {item.startTime || "--:--"}{item.endTime ? ` - ${item.endTime}` : ""}
+                                          </span>
+                                        )}
+                                      </div>
+                                      {item.location && (
+                                        <div className={`text-stone-600 ${diff.location ? "bg-amber-100 font-semibold px-1 rounded text-amber-900 inline-block" : ""}`}>
+                                          📍 {item.location}
+                                        </div>
+                                      )}
+                                      {item.notes && (
+                                        <div className={`text-[11px] italic ${diff.notes ? "bg-amber-100 text-amber-900 px-1 rounded block" : "text-stone-500"}`}>
+                                          {item.notes}
+                                        </div>
+                                      )}
+                                      <div className={`text-[11px] capitalize ${diff.category ? "bg-amber-100 font-semibold px-1 rounded text-amber-900 inline-block" : "text-stone-400"}`}>
+                                        Categoria: {item.category.replace("_", " ")}
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  {/* Selezione esplicita */}
+                                  <div className="pt-1">
+                                    <span className="text-[11px] font-semibold text-stone-700 block mb-1.5">Scegli come procedere:</span>
+                                    <div className="flex flex-wrap gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => setUpdateChoices((prev) => ({ ...prev, [item.tempId]: "update" }))}
+                                        className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
+                                          choice === "update"
+                                            ? "bg-emerald-700 border-emerald-800 text-white shadow-xs"
+                                            : "bg-white border-stone-300 text-stone-700 hover:bg-stone-50"
+                                        }`}
+                                      >
+                                        Aggiorna esistente
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setUpdateChoices((prev) => ({ ...prev, [item.tempId]: "create" }))}
+                                        className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
+                                          choice === "create"
+                                            ? "bg-amber-600 border-amber-700 text-white shadow-xs"
+                                            : "bg-white border-stone-300 text-stone-700 hover:bg-stone-50"
+                                        }`}
+                                      >
+                                        Aggiungi come nuovo
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setUpdateChoices((prev) => ({ ...prev, [item.tempId]: "ignore" }))}
+                                        className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
+                                          choice === "ignore"
+                                            ? "bg-stone-700 border-stone-800 text-white shadow-xs"
+                                            : "bg-white border-stone-300 text-stone-700 hover:bg-stone-50"
+                                        }`}
+                                      >
+                                        Ignora
+                                      </button>
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
                             </div>
                           </div>
 
@@ -766,10 +1083,18 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                 id="btn-confirm-circular-import"
                 onClick={handleConfirmImport}
                 disabled={selectedCount === 0}
-                className="px-5 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white text-xs font-bold shadow-xs transition-colors flex items-center space-x-1.5"
+                className={`px-5 py-2.5 rounded-xl text-white text-xs font-bold shadow-xs transition-colors flex items-center space-x-1.5 ${
+                  isAllIgnored
+                    ? "bg-stone-700 hover:bg-stone-800"
+                    : "bg-emerald-700 hover:bg-emerald-800"
+                } disabled:opacity-50`}
               >
                 <Check className="w-4 h-4" />
-                <span>Aggiungi {selectedCount} selezionati all'Agenda</span>
+                <span>
+                  {isAllIgnored
+                    ? "Chiudi senza modifiche"
+                    : `Aggiungi ${selectedCount} selezionati all'Agenda`}
+                </span>
               </button>
             </div>
           </div>
