@@ -541,15 +541,21 @@ export default function App({ initialData }: { initialData: LocalData }) {
   // Circular Import Confirmation
   const handleImportCircularEvents = withPersistenceFeedback(async (
     newEvents: CalendarEvent[],
-    docMeta: CircularDocument
+    docMeta: CircularDocument,
+    updatedEvents: CalendarEvent[] = []
   ) => {
-    const addedCount = await database.atomic(async () => {
-      const added = await storage.bulkAddEvents(newEvents);
+    const result = await database.atomic(async () => {
+      const counts = await storage.importCircularEvents(newEvents, updatedEvents);
       await storage.saveCircular(docMeta);
-      return added;
+      return counts;
     });
 
-    showToast(`Perfetto! ${addedCount} impegni pertinenti aggiunti all'agenda.`);
+    const msg = result.updated > 0 && result.added > 0
+      ? `Perfetto! ${result.added} impegni aggiunti e ${result.updated} aggiornati.`
+      : result.updated > 0
+      ? `Perfetto! ${result.updated} impegni aggiornati.`
+      : `Perfetto! ${result.added} impegni pertinenti aggiunti all'agenda.`;
+    showToast(msg);
     setCurrentView("oggi");
   });
 
@@ -939,6 +945,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
           setScannerCircularFile(null);
         }}
         profile={profile}
+        existingEvents={events}
         onImportEvents={handleImportCircularEvents}
         initialFile={scannerCircularFile}
       />

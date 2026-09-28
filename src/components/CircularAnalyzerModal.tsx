@@ -32,12 +32,20 @@ import {
   TeacherProfile,
 } from "../types";
 import { analyzeCircular } from "../services/aiService";
+import { findPossibleEventUpdate, getEventFieldDiff } from "../utils/eventMatching";
+
+export type UpdateChoice = "update" | "create" | "ignore";
 
 interface CircularAnalyzerModalProps {
   isOpen: boolean;
   onClose: () => void;
   profile: TeacherProfile;
-  onImportEvents: (events: CalendarEvent[], docMeta: CircularDocument) => void | false | Promise<void | false>;
+  existingEvents?: CalendarEvent[];
+  onImportEvents: (
+    events: CalendarEvent[],
+    docMeta: CircularDocument,
+    updatedEvents?: CalendarEvent[]
+  ) => void | false | Promise<void | false>;
   /**
    * File già scansionato dal flusso unificato "Scansiona documento":
    * lo si alimenta nel passo di input senza duplicare la pipeline.
@@ -53,6 +61,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   isOpen,
   onClose,
   profile,
+  existingEvents,
   onImportEvents,
   initialFile,
 }) => {
@@ -73,6 +82,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   );
   const [showRawSnippets, setShowRawSnippets] = useState<boolean>(false);
   const [selectionWarning, setSelectionWarning] = useState<string | null>(null);
+  const [updateChoices, setUpdateChoices] = useState<Record<string, UpdateChoice>>({});
 
   const inputRevision = useRef(0);
   const handledAutoTokenRef = useRef<string | null>(null);
@@ -160,6 +170,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     setExtractedItems([]);
     setAnalysisError(null);
     setSelectionWarning(null);
+    setUpdateChoices({});
     setIsReadingFile(false);
 
     if (initialFile) {
@@ -288,7 +299,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     setExtractedItems((prev) => prev.filter((i) => i.tempId !== tempId));
   };
 
-  // Final confirmation: convert selected ExtractedItems to CalendarEvent
+  // Final confirmation: convert selected ExtractedItems to CalendarEvent or updated existing events
   const handleConfirmImport = async () => {
     const selected = extractedItems.filter((i) => i.selectedForImport);
     if (selected.length === 0) {
@@ -299,8 +310,58 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
 
     const invalid = selected.find(it => extractedItemError(it));
     if (invalid) { setSelectionWarning(`${invalid.title}: ${extractedItemError(invalid)}`); return; }
+
+    // Verifica che per tutti gli impegni con possibile aggiornamento sia stata fatta una scelta esplicita
+    for (const it of selected) {
+      const match = findPossibleEventUpdate(it, existingEvents);
+      if (match && !updateChoices[it.tempId]) {
+        setSelectionWarning(`Effettua una scelta per l'impegno "${it.title}" (Possibile aggiornamento di un impegno esistente).`);
+        return;
+      }
+    }
+
     const circularId = `circ-${crypto.randomUUID()}`;
-    const newEvents = selected.map(it => convertExtractedItemToEvent(it, fileName || 'Circolare importata', circularId));
+    const newEvents: CalendarEvent[] = [];
+    const updatedEvents: CalendarEvent[] = [];
+
+    for (const it of selected) {
+      const match = findPossibleEventUpdate(it, existingEvents);
+      const choice = match ? updateChoices[it.tempId] : undefined;
+
+      if (match && choice === "update") {
+        // Aggiorna l'evento esistente preservando ID e metadati tecnici
+        const updatedEvent: CalendarEvent = {
+          ...match,
+          title: it.title,
+          category: it.category,
+          date: it.date,
+          startTime: it.startTime || undefined,
+          endTime: it.endTime || undefined,
+          isAllDay: !!it.isDeadline && !it.startTime,
+          className: it.className || match.className,
+          subject: it.subject || match.subject,
+          location: it.location || match.location,
+          notes: it.notes || match.notes,
+          sourceCircularId: match.sourceCircularId || circularId,
+          sourceCircularTitle: match.sourceCircularTitle || fileName || "Circolare importata",
+          sourceItemId: match.sourceItemId || it.tempId,
+          sourceType: match.sourceType || "circolare",
+          updatedAt: new Date().toISOString(),
+        };
+        updatedEvents.push(updatedEvent);
+      } else if (match && choice === "ignore") {
+        // Ignorato: non crea né aggiorna nulla
+        continue;
+      } else {
+        // Nuovo impegno da aggiungere (senza match oppure con scelta esplicita "create")
+        newEvents.push(convertExtractedItemToEvent(it, fileName || "Circolare importata", circularId));
+      }
+    }
+
+    if (newEvents.length === 0 && updatedEvents.length === 0) {
+      setSelectionWarning("Tutti gli impegni selezionati sono stati impostati su 'Ignora'. Nessuna modifica da salvare.");
+      return;
+    }
 
     const docMeta: CircularDocument = {
       id: circularId,
@@ -314,7 +375,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       extractedItems: extractedItems,
     };
 
-    if (!await save.run(() => onImportEvents(newEvents, docMeta))) return;
+    if (!await save.run(() => onImportEvents(newEvents, docMeta, updatedEvents))) return;
     onClose();
   };
 
@@ -673,6 +734,9 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                     const isVerde = item.relevance === "VERDE";
                     const isGiallo = item.relevance === "GIALLO";
                     const isRosso = item.relevance === "ROSSO";
+                    const match = findPossibleEventUpdate(item, existingEvents);
+                    const diff = match ? getEventFieldDiff(match, item) : null;
+                    const choice = updateChoices[item.tempId];
 
                     return (
                       <div
@@ -784,6 +848,111 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                               {showRawSnippets && item.rawSnippet && (
                                 <div className="text-[11px] font-mono text-stone-500 bg-stone-100 p-2 rounded-md">
                                   "{item.rawSnippet}"
+                                </div>
+                              )}
+
+                              {/* Possibile aggiornamento di un impegno esistente */}
+                              {match && diff && (
+                                <div className="mt-3 p-3 rounded-xl border border-amber-300 bg-amber-50/70 space-y-3">
+                                  <div className="flex items-center gap-1.5 text-xs font-bold text-amber-900">
+                                    <RefreshCw className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                                    <span>Possibile aggiornamento di un impegno esistente</span>
+                                  </div>
+
+                                  {/* Confronto compatto mobile-first */}
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                                    {/* Esistente */}
+                                    <div className="bg-white border border-stone-200 rounded-lg p-2.5 space-y-1">
+                                      <span className="text-[10px] uppercase font-bold text-stone-500 tracking-wider block">
+                                        Esistente in agenda
+                                      </span>
+                                      <div className="font-semibold text-stone-800">{match.title}</div>
+                                      <div className="text-stone-600">
+                                        <span>{match.date}</span>
+                                        {(match.startTime || match.endTime) && (
+                                          <span className="ml-1.5 font-mono">
+                                            {match.startTime || "--:--"}{match.endTime ? ` - ${match.endTime}` : ""}
+                                          </span>
+                                        )}
+                                      </div>
+                                      {match.location && <div className="text-stone-500">📍 {match.location}</div>}
+                                      {match.notes && <div className="text-stone-500 italic text-[11px]">{match.notes}</div>}
+                                      <div className="text-[11px] text-stone-400 capitalize">
+                                        Categoria: {match.category.replace("_", " ")}
+                                      </div>
+                                    </div>
+
+                                    {/* Dalla nuova circolare */}
+                                    <div className="bg-white border border-amber-300 rounded-lg p-2.5 space-y-1">
+                                      <span className="text-[10px] uppercase font-bold text-amber-700 tracking-wider block">
+                                        Dalla nuova circolare
+                                      </span>
+                                      <div className={`font-semibold ${diff.title ? "text-amber-900 font-bold bg-amber-100/70 px-1 rounded inline-block" : "text-stone-800"}`}>
+                                        {item.title}
+                                      </div>
+                                      <div className="text-stone-600">
+                                        <span className={diff.date ? "bg-amber-100 font-semibold px-1 rounded text-amber-900" : ""}>{item.date}</span>
+                                        {(item.startTime || item.endTime) && (
+                                          <span className={`ml-1.5 font-mono ${diff.startTime || diff.endTime ? "bg-amber-100 font-bold px-1 rounded text-amber-900" : ""}`}>
+                                            {item.startTime || "--:--"}{item.endTime ? ` - ${item.endTime}` : ""}
+                                          </span>
+                                        )}
+                                      </div>
+                                      {item.location && (
+                                        <div className={`text-stone-600 ${diff.location ? "bg-amber-100 font-semibold px-1 rounded text-amber-900 inline-block" : ""}`}>
+                                          📍 {item.location}
+                                        </div>
+                                      )}
+                                      {item.notes && (
+                                        <div className={`text-[11px] italic ${diff.notes ? "bg-amber-100 text-amber-900 px-1 rounded block" : "text-stone-500"}`}>
+                                          {item.notes}
+                                        </div>
+                                      )}
+                                      <div className={`text-[11px] capitalize ${diff.category ? "bg-amber-100 font-semibold px-1 rounded text-amber-900 inline-block" : "text-stone-400"}`}>
+                                        Categoria: {item.category.replace("_", " ")}
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  {/* Selezione esplicita */}
+                                  <div className="pt-1">
+                                    <span className="text-[11px] font-semibold text-stone-700 block mb-1.5">Scegli come procedere:</span>
+                                    <div className="flex flex-wrap gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => setUpdateChoices((prev) => ({ ...prev, [item.tempId]: "update" }))}
+                                        className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
+                                          choice === "update"
+                                            ? "bg-emerald-700 border-emerald-800 text-white shadow-xs"
+                                            : "bg-white border-stone-300 text-stone-700 hover:bg-stone-50"
+                                        }`}
+                                      >
+                                        Aggiorna esistente
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setUpdateChoices((prev) => ({ ...prev, [item.tempId]: "create" }))}
+                                        className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
+                                          choice === "create"
+                                            ? "bg-amber-600 border-amber-700 text-white shadow-xs"
+                                            : "bg-white border-stone-300 text-stone-700 hover:bg-stone-50"
+                                        }`}
+                                      >
+                                        Aggiungi come nuovo
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setUpdateChoices((prev) => ({ ...prev, [item.tempId]: "ignore" }))}
+                                        className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
+                                          choice === "ignore"
+                                            ? "bg-stone-700 border-stone-800 text-white shadow-xs"
+                                            : "bg-white border-stone-300 text-stone-700 hover:bg-stone-50"
+                                        }`}
+                                      >
+                                        Ignora
+                                      </button>
+                                    </div>
+                                  </div>
                                 </div>
                               )}
                             </div>

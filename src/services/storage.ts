@@ -995,6 +995,40 @@ export const storage = {
       return addedCount;
     });
   },
+  async importCircularEvents(
+    newEvents: CalendarEvent[],
+    updatedEvents: CalendarEvent[] = []
+  ): Promise<{ added: number; updated: number }> {
+    return database.atomic(async () => {
+      const list = (await this.getEvents());
+      let updated = 0;
+      let added = 0;
+
+      // Applica aggiornamenti approvati agli eventi esistenti (mantenendo l'ID originale)
+      for (const upd of updatedEvents) {
+        const index = list.findIndex(e => e.id === upd.id);
+        if (index >= 0) {
+          list[index] = { ...upd, updatedAt: new Date().toISOString() };
+          updated++;
+        }
+      }
+
+      // Aggiunge i nuovi eventi evitando duplicati esatti
+      for (const ev of newEvents) {
+        const duplicate = list.find((existing) => existing.id === ev.id ||
+          (ev.sourceCircularId && existing.sourceCircularId === ev.sourceCircularId && existing.sourceItemId === ev.sourceItemId) ||
+          (!ev.sourceCircularId && !existing.sourceCircularId && existing.sourceType === ev.sourceType &&
+            existing.title === ev.title && existing.date === ev.date && existing.startTime === ev.startTime && existing.className === ev.className));
+        if (!duplicate) {
+          list.push({ ...ev, updatedAt: ev.updatedAt || new Date().toISOString() });
+          added++;
+        }
+      }
+
+      await this.saveEvents(list);
+      return { added, updated };
+    });
+  },
   // CIRCULARS
   async getCirculars(): Promise<CircularDocument[]> { return database.read("circulars"); },
   async saveCircular(doc: CircularDocument): Promise<void> {
