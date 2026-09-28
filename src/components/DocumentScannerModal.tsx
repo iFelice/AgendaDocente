@@ -57,6 +57,7 @@ import {
   ClipboardCheck,
   CloudUpload,
   FileImage,
+  FileText,
   FolderOpen,
   HeartHandshake,
   ImagePlus,
@@ -91,9 +92,10 @@ type Step =
   | "reconstruct";
 
 export interface CircularFileInfo {
-  base64: string;
-  mimeType: string;
-  fileName: string;
+  mode?: "file" | "text";
+  base64?: string;
+  mimeType?: string;
+  fileName?: string;
   autoStartToken?: string;
 }
 
@@ -577,6 +579,14 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     setAnalysisError(null);
   };
 
+  /** Handoff diretto per circolari: apre l'analizzatore in modalità testo senza passare da foto/file. */
+  const handlePasteTextCircular = () => {
+    resetCapture();
+    onOpenCircularWithFile({
+      mode: "text",
+    });
+  };
+
   const isOffline = !isOnline();
 
   /** "Analizza documento" dalla preview: per le circolari alimenta il flusso
@@ -591,6 +601,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
         ? `circ-auto-${crypto.randomUUID()}`
         : `circ-auto-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
       onOpenCircularWithFile({
+        mode: "file",
         base64: fileBase64,
         mimeType: file.type,
         fileName: file.name,
@@ -1048,7 +1059,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
             </div>
           )}
 
-          {/* STEP: sorgente (scatta foto / scegli foto o file) */}
+          {/* STEP: sorgente (scatta foto / scegli foto o file / incolla testo per circolari) */}
           {step === "source" && (
             <div className="space-y-3">
               <h3 className="text-xs font-bold uppercase tracking-wide text-stone-500">Sorgente</h3>
@@ -1080,6 +1091,22 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                   <span className="block text-[11px] text-stone-500">Foto da galleria o PDF</span>
                 </span>
               </button>
+              {captureFor === "circolare" && (
+                <button
+                  type="button"
+                  id="scan-source-text"
+                  onClick={handlePasteTextCircular}
+                  className="w-full rounded-xl border-2 border-dashed border-stone-300 hover:border-amber-500 p-5 flex items-center gap-3 text-left bg-stone-50/60"
+                >
+                  <span className="w-11 h-11 rounded-xl bg-amber-100 text-amber-800 flex items-center justify-center shrink-0">
+                    <FileText className="w-6 h-6" />
+                  </span>
+                  <span>
+                    <span className="block text-sm font-bold text-stone-900">Incolla testo</span>
+                    <span className="block text-[11px] text-stone-500">Testo copiato da circolare o bacheca</span>
+                  </span>
+                </button>
+              )}
               {isOffline && (
                 <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2">
                   Scatto e selezione funzionano offline: per l'analisi serve una connessione Internet.

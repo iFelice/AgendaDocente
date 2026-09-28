@@ -51,7 +51,14 @@ interface CircularAnalyzerModalProps {
    * lo si alimenta nel passo di input senza duplicare la pipeline.
    * Se contiene `autoStartToken`, avvia automaticamente l'analisi una sola volta.
    */
-  initialFile?: { base64: string; mimeType: string; fileName: string; autoStartToken?: string } | null;
+  initialFile?: {
+    mode?: "file" | "text";
+    base64?: string;
+    mimeType?: string;
+    fileName?: string;
+    autoStartToken?: string;
+  } | null;
+  initialInputMode?: "file" | "text";
 }
 
 /** Token di auto-start monouso già consumati per prevenire doppie analisi anche in StrictMode. */
@@ -64,6 +71,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   existingEvents,
   onImportEvents,
   initialFile,
+  initialInputMode,
 }) => {
   const save = usePersistenceAction();
   const [step, setStep] = useState<"input" | "results">("input");
@@ -166,6 +174,8 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
 
     inputRevision.current++;
     setStep("input");
+    const effectiveMode = initialFile?.mode ?? initialInputMode ?? "file";
+    setInputMode(effectiveMode);
     setCircularText("");
     setDefaultLocation("");
     setExtractedItems([]);
@@ -174,8 +184,8 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     setUpdateChoices({});
     setIsReadingFile(false);
 
-    if (initialFile) {
-      setFileName(initialFile.fileName);
+    if (initialFile && initialFile.base64 && initialFile.mimeType) {
+      setFileName(initialFile.fileName || "");
       setFileBase64(initialFile.base64);
       setFileMimeType(initialFile.mimeType);
 
@@ -194,7 +204,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       setFileMimeType(undefined);
       setIsAnalyzing(false);
     }
-  }, [isOpen, initialFile]);
+  }, [isOpen, initialFile, initialInputMode]);
 
   if (!isOpen) return null;
 
