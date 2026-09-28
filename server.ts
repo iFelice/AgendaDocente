@@ -108,6 +108,18 @@ const GEMINI_BACKOFF_BASE_MS = 1_000;
 const GEMINI_BACKOFF_MAX_MS = 8_000;
 const GEMINI_MODEL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{1,63}$/;
 
+export type CircularDiagnosticVariant = "A" | "B" | "C" | "D";
+
+/**
+ * Variante diagnostica temporanea per isolare sperimentalmente su Render
+ * il comportamento di Gemini A/B/C/D. Letta SOLO da variabile ambiente server.
+ */
+export function getCircularDiagnosticVariant(env: NodeJS.ProcessEnv = process.env): CircularDiagnosticVariant {
+  const val = (env.GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT ?? "").trim().toUpperCase();
+  if (val === "A" || val === "B" || val === "C") return val;
+  return "D";
+}
+
 /**
  * Modelli effettivamente chiamati. `GEMINI_CANDIDATE_MODELS` (variabile
  * d'ambiente, solo server) permette di verificarne la disponibilità reale con
@@ -228,9 +240,10 @@ interface GeminiClientLike {
 }
 
 export interface RunGeminiJsonOptions {
-  systemInstruction: string;
+  systemInstruction?: string;
   contents: unknown[];
-  responseSchema: unknown;
+  responseSchema?: unknown;
+  responseMimeType?: string | null;
   signal: AbortSignal;
   label: string;
   /** Deadline complessivo concesso all'analisi (allineato a quello dell'endpoint). */
@@ -270,10 +283,10 @@ async function attemptGeminiGeneration(
         // Il timeout coincide con il budget rimasto: mai più corto del tempo che
         // l'analisi richiede davvero, mai così lungo da impedire la risposta.
         httpOptions: { timeout: timeoutMs },
-        systemInstruction: opts.systemInstruction,
+        ...(opts.systemInstruction ? { systemInstruction: opts.systemInstruction } : {}),
         temperature: 0.1,
-        responseMimeType: "application/json",
-        responseSchema: opts.responseSchema as any,
+        ...(opts.responseMimeType === null ? {} : { responseMimeType: opts.responseMimeType ?? "application/json" }),
+        ...(opts.responseSchema ? { responseSchema: opts.responseSchema as any } : {}),
         ...(withThinking ? { thinkingConfig: { thinkingLevel: "low" as const } } : {}),
       },
     });
@@ -471,6 +484,7 @@ Le attività annullate non sono nuovi eventi. Non trasformare una data di pubbli
 Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e dal docente.
 Restituisci soltanto l'array JSON richiesto.`;
 
+    const variant = getCircularDiagnosticVariant();
     const contents: any[] = [];
 
     // If an image or PDF base64 is provided, pass it as inlineData
@@ -483,7 +497,10 @@ Restituisci soltanto l'array JSON richiesto.`;
       });
     }
 
-    const promptText = text ? `Testo della circolare:\n${text}` : "Analizza il documento allegato, incluse tabelle e note.";
+    const defaultPrompt = "Analizza il documento allegato, incluse tabelle e note.";
+    const promptText = variant === "A"
+      ? "Estrai gli eventi principali da questo documento."
+      : (text ? `Testo della circolare:\n${text}` : defaultPrompt);
 
     contents.push({ text: promptText });
 
@@ -517,16 +534,34 @@ Restituisci soltanto l'array JSON richiesto.`;
       },
     };
 
+    const effectiveSystemInstruction = variant === "A" ? undefined : systemInstruction;
+    const effectiveSchema = (variant === "A" || variant === "B") ? undefined : responseSchema;
+    const effectiveMimeType = variant === "A" ? null : "application/json";
+    const effectiveThinking = variant === "C" ? undefined : "low";
+    const effectiveModels = variant === "D" ? geminiCandidateModels() : ["gemini-3.8-flash"];
+
     const run = await runGeminiJson({
-      systemInstruction,
+      systemInstruction: effectiveSystemInstruction,
       contents,
-      responseSchema,
+      responseSchema: effectiveSchema,
+      responseMimeType: effectiveMimeType,
       signal: controller.signal,
       label: "AI Circolari",
       budgetMs: CIRCULAR_ANALYSIS_TIMEOUT_MS,
-      thinkingLevel: "low",
+      thinkingLevel: effectiveThinking,
+      models: effectiveModels,
     });
     const decoded = run.ok ? parseGeminiJson(run.text, "AI Circolari") : { ok: false as const };
+    const summary = summarizeCircularPayload(req.body);
+    const lastAttempt = run.attempts[run.attempts.length - 1];
+    const usedModel = lastAttempt?.model || effectiveModels[0];
+    const durationMs = Date.now() - startedAt;
+    const geminiCall = run.ok ? "success" : "failed";
+    const parseStatus = run.ok ? (decoded.ok && Array.isArray(decoded.value) ? "success" : "failed") : "not_attempted";
+    const callStatus = run.ok ? 200 : (lastAttempt?.status ?? 503);
+
+    console.log(`[AI Circolari Diagnostic] variant=${variant} model=${usedModel} geminiCall=${geminiCall} status=${callStatus} durationMs=${durationMs} parse=${parseStatus} mime=${summary.mime} bytes=${summary.bytes}`);
+
     let parsed: any[] = [];
     let source = run.source;
 
