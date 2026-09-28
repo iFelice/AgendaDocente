@@ -19,6 +19,8 @@ import {
   RotateCcw,
 } from "lucide-react";
 import {
+  PeriodSlot,
+  SchoolWeekday,
   TeacherProfile,
   TimeSlotConfig,
   TimetableMode,
@@ -36,6 +38,8 @@ import { MultiChipInput } from "./MultiChipInput";
 import { collectKnownTeacherNames, coTeachingSummary, coTeachingSubjectsOf, pruneCoTeachingFields } from "../utils/coTeaching";
 import { isSupportTeacherOf } from "../utils/teacherType";
 import { DEFAULT_SUBJECTS, mergeSubjectSuggestions, normalizeSubjectName } from "../utils/subjects";
+import { getPrimarySchool } from "../utils/multiSchool";
+import { MAX_PERIODS_PER_DAY, maxPeriodsInWeek } from "../utils/schoolDayPeriods";
 import {
   DAY_SWIPE_HORIZONTAL_RATIO,
   DAY_SWIPE_INTERACTIVE_SELECTOR,
@@ -44,6 +48,43 @@ import {
   isInteractiveSwipeTarget as isInteractiveSwipeControl,
   type DaySwipeDirection,
 } from "../utils/daySwipe";
+
+/**
+ * Porta una lista di fasce ORARIE al numero richiesto, restando nel draft locale.
+ *
+ * Estensione: ogni nuova fascia parte dall'`endTime` di quella precedente e dura
+ * `durationMinutes` — la STESSA regola dell'azione "Aggiungi ulteriore ora", così
+ * una scansione personalizzata (con intervalli, ore da 55 minuti, ecc.) viene
+ * continuata e non ricalcolata da zero. Per questo NON si usa
+ * `periodTimesForIndex`: quella funzione rigenera una scala automatica dalla prima
+ * ora e, su fasce personalizzate, produrrebbe orari inventati.
+ *
+ * Riduzione: si tronca in coda, senza rinumerare le fasce superstiti.
+ * Funzione pura: nessuna persistenza, il salvataggio resta il bottone "Salva".
+ */
+export function resizePeriodSlotsDraft(
+  slots: PeriodSlot[],
+  targetCount: number,
+  durationMinutes: number
+): PeriodSlot[] {
+  const target = Math.max(1, Math.min(MAX_PERIODS_PER_DAY, Math.floor(targetCount) || 1));
+  if (slots.length === target) return slots;
+  if (slots.length > target) return slots.slice(0, target);
+
+  const extended = [...slots];
+  while (extended.length < target) {
+    const last = extended[extended.length - 1];
+    const startTime = last ? last.endTime : "08:00";
+    const periodNumber = extended.length + 1;
+    extended.push({
+      periodNumber,
+      label: `${periodNumber}ª Ora`,
+      startTime,
+      endTime: generateDefaultPeriodSlots(startTime, 1, durationMinutes)[0].endTime,
+    });
+  }
+  return extended;
+}
 
 // ---------------------------------------------------------------------------
 // Swipe fra i giorni dell'orario (scorciatoia mobile: i chip restano il controllo
@@ -234,6 +275,14 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   );
   const [isCustomMode, setIsCustomMode] = useState(false);
   const [showAdvancedSlots, setShowAdvancedSlots] = useState(false);
+  /**
+   * Quante fasce erano CONFERMATE quando il drawer è stato aperto. Le fasce oltre
+   * questa soglia sono bozze aggiunte in questa sessione e vanno marcate "Da
+   * verificare": è una soglia di sola UI, non viene mai salvata nel PeriodSlot.
+   */
+  const [confirmedSlotCount, setConfirmedSlotCount] = useState(0);
+  /** Fasce pre-proposte in modalità automatica all'apertura del drawer (solo avviso). */
+  const [autoProposedSlots, setAutoProposedSlots] = useState(0);
 
   // Mobile selected day filter for compact view
   const [mobileSelectedDay, setMobileSelectedDay] = useState<number | "all">("all");
@@ -296,6 +345,24 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
       ? [{ day: 6 as const, label: "Sabato", short: "Sab" }]
       : []),
   ];
+
+  /**
+   * FABBISOGNO DI FASCE della settimana scolastica.
+   *
+   * Quante fasce servono perché il giorno più lungo dell'istituto sia coprribile:
+   * con 6 ore ordinarie e il giovedì a 7, servono 7 fasce. Il conto passa dalle
+   * utility di schoolDayPeriods (nessuna somma locale) e usa i giorni STABILI
+   * della settimana scolastica — mai `mobileSelectedDay`, che è solo un filtro di
+   * visualizzazione e non può cambiare quante fasce servono.
+   *
+   * Configurazione presa dalla SchoolProfile PRIMARIA: la griglia oggi non è
+   * multi-istituto (non legge `schoolId`) e questo passo non la rende tale.
+   */
+  const schoolWeekDays = days.map(d => d.day) as SchoolWeekday[];
+  const primarySchool = useMemo(() => getPrimarySchool(profile), [profile]);
+  const requiredPeriods = maxPeriodsInWeek(schoolWeekDays, primarySchool, timeSlotConfig);
+  /** Fasce ancora da aggiungere al draft del drawer per coprire il fabbisogno. */
+  const missingSlotCount = Math.max(0, requiredPeriods - customSlotsDraft.length);
 
   // On phones the timetable matrix opens on the current weekday by default (one day per
   // screen, no horizontal scrolling); the day chips let the teacher switch day or see the
@@ -542,11 +609,44 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
     );
 
     setFirstHourTime(start);
-    setPeriodsCount(count);
     setPeriodDuration(duration);
-    setCustomSlotsDraft(effective);
     setIsCustomMode(hasCustomSlots);
+    setConfirmedSlotCount(effective.length);
+
+    // AUTO: le fasce mancanti sono PRE-PROPOSTE subito, continuando la scansione
+    // automatica con la durata standard (comportamento prevedibile, nessun orario
+    // inventato). CUSTOM: non si tocca nulla, l'utente riceve solo l'avviso e
+    // decide lui. In entrambi i casi si scrive SOLO il draft locale: la
+    // persistenza resta il bottone "Salva".
+    const proposed = !hasCustomSlots && requiredPeriods > effective.length ? requiredPeriods : 0;
+    if (proposed) {
+      setPeriodsCount(proposed);
+      setCustomSlotsDraft(generateDefaultPeriodSlots(start, proposed, duration));
+      setAutoProposedSlots(proposed - effective.length);
+    } else {
+      setPeriodsCount(count);
+      setCustomSlotsDraft(effective);
+      setAutoProposedSlots(0);
+    }
     setIsSlotConfigOpen(true);
+  };
+
+  /**
+   * Completa le fasce mancanti nel DRAFT locale, senza salvare.
+   * In modalità personalizzata continua dall'ultima fascia reale (vedi
+   * `resizePeriodSlotsDraft`); in automatica rigenera la scansione col numero
+   * richiesto. Le nuove fasce restano modificabili fino a "Salva".
+   */
+  const handleCompleteMissingSlots = () => {
+    setPeriodsCount(requiredPeriods);
+    // Le bozze devono essere subito visibili e modificabili, non nascoste
+    // dietro il pannello avanzato richiuso.
+    if (isCustomMode) setShowAdvancedSlots(true);
+    setCustomSlotsDraft(prev =>
+      isCustomMode
+        ? resizePeriodSlotsDraft(prev, requiredPeriods, periodDuration)
+        : generateDefaultPeriodSlots(firstHourTime, requiredPeriods, periodDuration)
+    );
   };
 
   // Automatically regenerate slots when base parameters change (if in auto mode)
@@ -559,12 +659,18 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   };
 
   const handlePeriodsCountChange = (newCount: number) => {
-    const safeCount = Math.max(1, Math.min(12, newCount || 1));
+    const safeCount = Math.max(1, Math.min(MAX_PERIODS_PER_DAY, newCount || 1));
     setPeriodsCount(safeCount);
     if (!isCustomMode) {
       const generated = generateDefaultPeriodSlots(firstHourTime, safeCount, periodDuration);
       setCustomSlotsDraft(generated);
+      return;
     }
+    // In modalità personalizzata il campo era INERTE: il valore cambiava a schermo
+    // ma il draft restava com'era, quindi "Salva" riscriveva il vecchio numero di
+    // fasce. Ora il draft viene davvero esteso (continuando dall'ultima fascia) o
+    // troncato; la persistenza resta comunque legata a "Salva".
+    setCustomSlotsDraft(prev => resizePeriodSlotsDraft(prev, safeCount, periodDuration));
   };
 
   const handleDurationChange = (newDuration: number) => {
@@ -656,7 +762,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                 Configura la scansione oraria della tua scuola
               </h1>
               <p className="text-xs sm:text-sm text-stone-600 mt-1">
-                Imposta l'ora di inizio della prima ora, il numero di ore al giorno e la durata standard. Le fasce generate verranno applicate alla griglia dell'orario.
+                Imposta l'ora di inizio della prima ora, quante fasce orarie prevede la scansione della tua scuola e la durata standard. Le fasce generate verranno applicate alla griglia dell'orario.
               </p>
             </div>
           </div>
@@ -682,16 +788,19 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
 
             <div>
               <label className="block font-bold text-stone-800 text-xs mb-1.5">
-                Nº Ore Giornaliere
+                Nº fasce orarie
               </label>
               <input
                 type="number"
                 min="1"
-                max="10"
+                max={MAX_PERIODS_PER_DAY}
                 value={initPeriodsCount}
-                onChange={(e) => setInitPeriodsCount(Math.max(1, Math.min(10, Number(e.target.value) || 1)))}
+                onChange={(e) => setInitPeriodsCount(Math.max(1, Math.min(MAX_PERIODS_PER_DAY, Number(e.target.value) || 1)))}
                 className="w-full p-2.5 border border-stone-300 rounded-lg text-xs bg-white text-stone-900 min-h-[42px]"
               />
+              <p className="text-[10px] text-stone-500 mt-1 leading-relaxed">
+                Quante fasce orarie prevede la scansione della tua scuola. Se alcuni giorni hanno un'ora in più, lo imposti nel Profilo dell'istituto.
+              </p>
             </div>
 
             <div>
@@ -1631,6 +1740,36 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                 Modifica i parametri base per rigenerare all'istante le fasce delle lezioni, oppure personalizza singolarmente gli orari.
               </p>
 
+              {/* Fabbisogno dell'istituto non ancora coperto dalle fasce configurate.
+                  L'avviso non salva nulla da solo: propone, l'utente conferma con Salva. */}
+              {missingSlotCount > 0 && (
+                <div role="status" className="p-3 rounded-xl border border-amber-300 bg-amber-50 space-y-2">
+                  <p className="text-[11px] text-amber-900 leading-relaxed">
+                    La tua scuola prevede {requiredPeriods} ore in almeno un giorno:{" "}
+                    {missingSlotCount === 1 ? "manca 1 fascia oraria" : `mancano ${missingSlotCount} fasce orarie`}.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleCompleteMissingSlots}
+                    className="px-3 py-2 min-h-[42px] bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-bold rounded-lg inline-flex items-center space-x-1.5"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>
+                      {missingSlotCount === 1 ? "Completa la fascia mancante" : "Completa le fasce mancanti"}
+                    </span>
+                  </button>
+                </div>
+              )}
+
+              {autoProposedSlots > 0 && missingSlotCount === 0 && (
+                <p role="status" className="p-3 text-[11px] text-amber-900 bg-amber-50 rounded-xl border border-amber-300 leading-relaxed">
+                  {autoProposedSlots === 1
+                    ? "Abbiamo proposto 1 fascia in più"
+                    : `Abbiamo proposto ${autoProposedSlots} fasce in più`}{" "}
+                  per coprire le {requiredPeriods} ore previste dalla tua scuola: controlla gli orari e premi Salva per confermarli.
+                </p>
+              )}
+
               {/* Generator Parameters */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-3.5 bg-stone-50 rounded-xl border border-stone-200">
                 <div>
@@ -1647,12 +1786,12 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
 
                 <div>
                   <label className="block font-medium text-stone-700 mb-1">
-                    Nº Ore Giornaliere
+                    Nº fasce orarie
                   </label>
                   <input
                     type="number"
                     min="1"
-                    max="10"
+                    max={MAX_PERIODS_PER_DAY}
                     value={periodsCount}
                     onChange={(e) => handlePeriodsCountChange(Number(e.target.value))}
                     className="w-full p-2 border border-stone-300 rounded-lg text-xs bg-white text-stone-900"
@@ -1728,10 +1867,19 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                     {customSlotsDraft.map((slot, index) => (
                       <div
                         key={slot.periodNumber}
-                        className="flex items-center gap-2 p-2 bg-stone-50 rounded-lg border border-stone-200"
+                        className={`flex items-center gap-2 p-2 rounded-lg border ${
+                          isCustomMode && index >= confirmedSlotCount
+                            ? "bg-amber-50 border-amber-300"
+                            : "bg-stone-50 border-stone-200"
+                        }`}
                       >
                         <span className="w-16 font-bold text-stone-700 shrink-0">
                           {slot.periodNumber}ª Ora
+                          {isCustomMode && index >= confirmedSlotCount && (
+                            <span className="block text-[9px] font-bold text-amber-700 uppercase tracking-wide">
+                              Da verificare
+                            </span>
+                          )}
                         </span>
                         <input
                           type="time"
