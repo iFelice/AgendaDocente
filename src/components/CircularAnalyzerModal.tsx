@@ -319,7 +319,27 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   };
 
   const visibleItems = getFilteredItems();
-  const selectedCount = extractedItems.filter((i) => i.selectedForImport).length;
+  const selectedItems = extractedItems.filter((i) => i.selectedForImport);
+  const selectedCount = selectedItems.length;
+
+  const toCreateCount = selectedItems.filter((it) => {
+    const match = findPossibleEventUpdate(it, existingEvents);
+    return !match || updateChoices[it.tempId] === "create";
+  }).length;
+
+  const toUpdateCount = selectedItems.filter((it) => {
+    const match = findPossibleEventUpdate(it, existingEvents);
+    return !!match && updateChoices[it.tempId] === "update";
+  }).length;
+
+  const isAllIgnored =
+    selectedCount > 0 &&
+    toCreateCount === 0 &&
+    toUpdateCount === 0 &&
+    selectedItems.every((it) => {
+      const match = findPossibleEventUpdate(it, existingEvents);
+      return match && updateChoices[it.tempId] === "ignore";
+    });
 
   const countVerde = extractedItems.filter((i) => i.relevance === "VERDE").length;
   const countGiallo = extractedItems.filter((i) => i.relevance === "GIALLO").length;
@@ -359,9 +379,6 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     }
     setSelectionWarning(null);
 
-    const invalid = selected.find(it => extractedItemError(it));
-    if (invalid) { setSelectionWarning(`${invalid.title}: ${extractedItemError(invalid)}`); return; }
-
     // Verifica che per tutti gli impegni con possibile aggiornamento sia stata fatta una scelta esplicita
     for (const it of selected) {
       const match = findPossibleEventUpdate(it, existingEvents);
@@ -369,6 +386,17 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
         setSelectionWarning(`Effettua una scelta per l'impegno "${it.title}" (Possibile aggiornamento di un impegno esistente).`);
         return;
       }
+    }
+
+    const toImportOrUpdate = selected.filter((it) => {
+      const match = findPossibleEventUpdate(it, existingEvents);
+      const choice = match ? updateChoices[it.tempId] : undefined;
+      return !(match && choice === "ignore");
+    });
+    const invalid = toImportOrUpdate.find((it) => extractedItemError(it));
+    if (invalid) {
+      setSelectionWarning(`${invalid.title}: ${extractedItemError(invalid)}`);
+      return;
     }
 
     const circularId = `circ-${crypto.randomUUID()}`;
@@ -409,8 +437,9 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       }
     }
 
+    // CASO A: Tutti gli elementi selezionati sono stati ignorati (nessuna modifica da salvare)
     if (newEvents.length === 0 && updatedEvents.length === 0) {
-      setSelectionWarning("Tutti gli impegni selezionati sono stati impostati su 'Ignora'. Nessuna modifica da salvare.");
+      handleModalClose();
       return;
     }
 
@@ -1054,10 +1083,18 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                 id="btn-confirm-circular-import"
                 onClick={handleConfirmImport}
                 disabled={selectedCount === 0}
-                className="px-5 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white text-xs font-bold shadow-xs transition-colors flex items-center space-x-1.5"
+                className={`px-5 py-2.5 rounded-xl text-white text-xs font-bold shadow-xs transition-colors flex items-center space-x-1.5 ${
+                  isAllIgnored
+                    ? "bg-stone-700 hover:bg-stone-800"
+                    : "bg-emerald-700 hover:bg-emerald-800"
+                } disabled:opacity-50`}
               >
                 <Check className="w-4 h-4" />
-                <span>Aggiungi {selectedCount} selezionati all'Agenda</span>
+                <span>
+                  {isAllIgnored
+                    ? "Chiudi senza modifiche"
+                    : `Aggiungi ${selectedCount} selezionati all'Agenda`}
+                </span>
               </button>
             </div>
           </div>

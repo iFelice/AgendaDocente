@@ -591,18 +591,22 @@ test('12. "Aggiungi come nuovo": crea un secondo evento distinto', async () => {
   }
 });
 
-test('13. "Ignora": non crea né aggiorna nulla', async () => {
+test('13. "Ignora": non crea né aggiorna nulla, chiude modale con testo "Chiudi senza modifiche", nessun warning', async () => {
   const existingEvent: CalendarEvent = {
     id: 'ev-exist-1',
     title: 'Collegio Docenti',
     category: 'collegio_docenti',
     date: '2026-10-15',
+    startTime: '17:00',
+    endTime: '18:00',
     isAllDay: false,
     sourceType: 'circolare',
   };
 
   let importedNew: CalendarEvent[] = [];
   let importedUpdated: CalendarEvent[] = [];
+  let importCalled = false;
+  let closeCalled = false;
   let renderer: any;
 
   const originalFetch = globalThis.fetch;
@@ -615,7 +619,10 @@ test('13. "Ignora": non crea né aggiorna nulla', async () => {
           title: 'Collegio Docenti',
           category: 'collegio_docenti',
           date: '2026-10-15',
+          startTime: '15:00',
+          endTime: '16:30',
           relevance: 'VERDE',
+          selectedForImport: true,
         },
       ],
     }), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -626,10 +633,11 @@ test('13. "Ignora": non crea né aggiorna nulla', async () => {
       renderer = create(
         React.createElement(CircularAnalyzerModal, {
           isOpen: true,
-          onClose: () => {},
+          onClose: () => { closeCalled = true; },
           profile,
           existingEvents: [existingEvent],
           onImportEvents: (newEvents, _docMeta, updatedEvents) => {
+            importCalled = true;
             importedNew = newEvents;
             importedUpdated = updatedEvents || [];
           },
@@ -642,7 +650,7 @@ test('13. "Ignora": non crea né aggiorna nulla', async () => {
     await act(async () => { textTabBtn.props.onClick(); });
 
     const textarea = renderer.root.findByType('textarea');
-    await act(async () => { textarea.props.onChange({ target: { value: '15/10/2026 Collegio' } }); });
+    await act(async () => { textarea.props.onChange({ target: { value: '15/10/2026 Collegio 15:00-16:30' } }); });
 
     const runBtn = renderer.root.findByProps({ id: 'btn-run-analysis' });
     await act(async () => {
@@ -655,13 +663,22 @@ test('13. "Ignora": non crea né aggiorna nulla', async () => {
     assert.ok(ignoreBtn, 'Pulsante Ignora presente');
     await act(async () => { ignoreBtn.props.onClick(); });
 
-    // Conferma importazione
-    const confirmBtn = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el).includes("all'Agenda"))[0];
+    // Verifica che il testo del pulsante sia "Chiudi senza modifiche"
+    const confirmBtn = renderer.root.findByProps({ id: 'btn-confirm-circular-import' });
+    assert.ok(confirmBtn, 'Pulsante conferma importazione presente');
+    assert.equal(flatText(confirmBtn), 'Chiudi senza modifiche');
+
+    // Clicca conferma
     await act(async () => { confirmBtn.props.onClick(); });
 
-    // Nessun evento importato o aggiornato
+    // Nessun evento importato o aggiornato, onImportEvents non chiamato, modale chiusa
+    assert.equal(importCalled, false, 'onImportEvents NON deve essere chiamato');
     assert.equal(importedNew.length, 0);
     assert.equal(importedUpdated.length, 0);
+    assert.equal(closeCalled, true, 'onClose deve essere chiamato');
+
+    const warningText = flatText(renderer.root);
+    assert.ok(!warningText.includes('Nessuna modifica da salvare'), 'Nessun messaggio di warning bloccante');
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -737,4 +754,130 @@ test('15. Import misto: nuovo + aggiornato + ignorato persistiti correttamente i
 
   const consiglio = allEvents.find(e => e.id === 'ev-brand-new')!;
   assert.equal(consiglio.className, '3D');
+});
+
+test('16. Circolare multi-impegno: update + create + ignore -> salva gli altri due, salta ignore e chiude', async () => {
+  const existingCollegio: CalendarEvent = {
+    id: 'ev-collegio-old',
+    title: 'Collegio Docenti',
+    category: 'collegio_docenti',
+    date: '2026-10-15',
+    startTime: '17:00',
+    endTime: '18:00',
+    isAllDay: false,
+    sourceType: 'circolare',
+  };
+
+  const existingConsiglio: CalendarEvent = {
+    id: 'ev-consiglio-old',
+    title: 'Consiglio di Classe 1A',
+    category: 'consiglio_classe',
+    className: '1A',
+    date: '2026-10-20',
+    startTime: '16:00',
+    endTime: '17:00',
+    isAllDay: false,
+    sourceType: 'circolare',
+  };
+
+  let importedNew: CalendarEvent[] = [];
+  let importedUpdated: CalendarEvent[] = [];
+  let closeCalled = false;
+  let renderer: any;
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    return new Response(JSON.stringify({
+      success: true,
+      source: 'server',
+      items: [
+        {
+          title: 'Collegio Docenti',
+          category: 'collegio_docenti',
+          date: '2026-10-15',
+          startTime: '15:00',
+          endTime: '16:30',
+          relevance: 'VERDE',
+        },
+        {
+          title: 'Formazione Docenti Privacy',
+          category: 'formazione',
+          date: '2026-10-18',
+          startTime: '16:00',
+          endTime: '18:00',
+          relevance: 'VERDE',
+        },
+        {
+          title: 'Consiglio di Classe 1A',
+          category: 'consiglio_classe',
+          className: '1A',
+          date: '2026-10-20',
+          startTime: '16:00',
+          endTime: '17:00',
+          relevance: 'VERDE',
+        },
+      ],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }) as typeof fetch;
+
+  try {
+    await act(async () => {
+      renderer = create(
+        React.createElement(CircularAnalyzerModal, {
+          isOpen: true,
+          onClose: () => { closeCalled = true; },
+          profile,
+          existingEvents: [existingCollegio, existingConsiglio],
+          onImportEvents: (newEvents, _docMeta, updatedEvents) => {
+            importedNew = newEvents;
+            importedUpdated = updatedEvents || [];
+          },
+          initialFile: null,
+        })
+      );
+    });
+
+    const textTabBtn = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el).toLowerCase().includes('incolla testo'))[0];
+    await act(async () => { textTabBtn.props.onClick(); });
+
+    const textarea = renderer.root.findByType('textarea');
+    await act(async () => { textarea.props.onChange({ target: { value: '15/10 Collegio, 18/10 Formazione, 20/10 Consiglio 1A' } }); });
+
+    const runBtn = renderer.root.findByProps({ id: 'btn-run-analysis' });
+    await act(async () => {
+      runBtn.props.onClick();
+      await new Promise(r => setTimeout(r, 100));
+    });
+
+    // 1. Collegio -> scegli "Aggiorna esistente"
+    const updateBtns = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Aggiorna esistente');
+    assert.ok(updateBtns.length >= 1, 'Pulsante Aggiorna presente per Collegio');
+    await act(async () => { updateBtns[0].props.onClick(); });
+
+    // 2. Consiglio 1A (secondo match) -> scegli "Ignora"
+    const ignoreBtns = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Ignora');
+    assert.ok(ignoreBtns.length >= 2, 'Pulsanti Ignora presenti');
+    await act(async () => { ignoreBtns[1].props.onClick(); });
+
+    // Seleziona tutti per includere anche Formazione
+    const selectAllBtn = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Tutti')[0];
+    await act(async () => { selectAllBtn.props.onClick(); });
+
+    const confirmBtn = renderer.root.findByProps({ id: 'btn-confirm-circular-import' });
+    assert.equal(flatText(confirmBtn), "Aggiungi 3 selezionati all'Agenda");
+
+    // Conferma importazione
+    await act(async () => { confirmBtn.props.onClick(); });
+
+    assert.equal(importedUpdated.length, 1, '1 evento aggiornato (Collegio)');
+    assert.equal(importedUpdated[0].id, 'ev-collegio-old');
+    assert.equal(importedUpdated[0].startTime, '15:00');
+
+    assert.equal(importedNew.length, 1, '1 nuovo evento creato (Formazione)');
+    assert.equal(importedNew[0].title, 'Formazione Docenti Privacy');
+
+    assert.equal(closeCalled, true, 'Modale chiusa con successo');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
