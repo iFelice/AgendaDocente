@@ -85,7 +85,7 @@ function getGeminiClient(): GoogleGenAI | null {
  * devono superare il deadline dell'endpoint, altrimenti la risposta non viene
  * mai scritta.
  */
-export const GEMINI_CANDIDATE_MODELS_DEFAULT = ["gemini-3.1-flash-lite", "gemini-3.8-flash"];
+export const GEMINI_CANDIDATE_MODELS_DEFAULT = ["gemini-3.8-flash", "gemini-3.7-flash"];
 /** Margine riservato alla scrittura della risposta dopo l'ultimo tentativo. */
 export const GEMINI_RESPONSE_RESERVE_MS = 2_000;
 /** Sotto questa soglia un tentativo cloud non può concludersi: si risponde 503. */
@@ -117,12 +117,12 @@ const GEMINI_MODEL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{1,63}$/;
 export function geminiCandidateModels(env: NodeJS.ProcessEnv = process.env): string[] {
   const raw = (env.GEMINI_CANDIDATE_MODELS ?? "").trim();
   if (!raw) return [...GEMINI_CANDIDATE_MODELS_DEFAULT];
-  const models = raw.split(",").map((model) => model.trim()).filter(Boolean);
-  if (models.length === 0 || models.length > 5 || models.some((model) => !GEMINI_MODEL_NAME_RE.test(model))) {
+  const list = raw.split(",").map((model) => model.trim()).filter(Boolean);
+  if (list.length === 0 || list.length > 5 || list.some((model) => !GEMINI_MODEL_NAME_RE.test(model))) {
     console.warn("[AI] GEMINI_CANDIDATE_MODELS non valida: uso i modelli predefiniti.");
     return [...GEMINI_CANDIDATE_MODELS_DEFAULT];
   }
-  return models;
+  return Array.from(new Set(list));
 }
 
 /** Categoria di un esito Gemini: sola classificazione, nessun contenuto. */
@@ -363,11 +363,22 @@ export async function runGeminiJson(opts: RunGeminiJsonOptions): Promise<GeminiJ
         degradeRetry = true;
         continue;
       }
-      if (!isTransientGeminiCategory(category)) break; // modello assente/chiave/schema: passa al modello successivo
-      if (attempt >= GEMINI_MAX_ATTEMPTS_PER_MODEL) break; // nessun tentativo residuo: inutile bruciare budget in un'attesa
+      if (category === "chiave-o-permessi" || category === "richiesta-non-valida" || category === "non-configurato") {
+        // Errore applicativo o di configurazione non retryable: nessun fallback
+        return failed(category);
+      }
+      if (!isTransientGeminiCategory(category)) {
+        // Errori specifici del modello (es. modello-non-trovato, output-troncato):
+        // non ritentare lo stesso modello ma passa al modello successivo se disponibile.
+        break;
+      }
+      if (attempt >= GEMINI_MAX_ATTEMPTS_PER_MODEL) break; // tentativi transitori esauriti: passa al successivo se disponibile
       const waitMs = Math.min(backoffMs, Math.max(0, Math.min(geminiAttemptTimeoutMs(opts.budgetMs - (now() - startedAt)), modelBudgetMs - (now() - modelStartedAt)) - GEMINI_MIN_ATTEMPT_MS));
       backoffMs = Math.min(backoffMs * 2, GEMINI_BACKOFF_MAX_MS);
-      if (waitMs > 0) await sleep(waitMs);
+      if (waitMs > 0) {
+        log(`[${opts.label}] modello=${model} tentativo=${attempt} backoffMs=${waitMs}`);
+        await sleep(waitMs);
+      }
     }
   }
   return failed(lastCategory);
@@ -506,7 +517,15 @@ Restituisci soltanto l'array JSON richiesto.`;
       },
     };
 
-    const run = await runGeminiJson({ systemInstruction, contents, responseSchema, signal: controller.signal, label: "AI Circolari", budgetMs: CIRCULAR_ANALYSIS_TIMEOUT_MS });
+    const run = await runGeminiJson({
+      systemInstruction,
+      contents,
+      responseSchema,
+      signal: controller.signal,
+      label: "AI Circolari",
+      budgetMs: CIRCULAR_ANALYSIS_TIMEOUT_MS,
+      thinkingLevel: "low",
+    });
     const decoded = run.ok ? parseGeminiJson(run.text, "AI Circolari") : { ok: false as const };
     let parsed: any[] = [];
     let source = run.source;
