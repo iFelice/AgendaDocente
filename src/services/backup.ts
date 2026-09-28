@@ -31,13 +31,22 @@ function timetable(v: unknown): boolean {
 /**
  * Struttura della giornata scolastica dell'istituto (SchoolProfile.dayPeriods).
  * Campo opzionale e additivo: un backup legacy che non lo contiene resta valido.
- * Le ore aggiuntive sono indicizzate per giorno 1..6 e non possono essere negative.
+ *
+ * I limiti sono gli STESSI della validazione remota (src/services/sync/remoteSchema.ts):
+ * ordinario 1..12, ore aggiuntive 0..11 sui soli giorni 1..6, cioe il tetto di 12 ore
+ * al giorno gia in vigore nell'app. Un contratto piu permissivo qui farebbe passare in
+ * un backup un profilo che la sincronizzazione poi rifiuta, lasciando dati importabili
+ * ma non sincronizzabili. I due validatori restano duplicati e indipendenti di proposito
+ * (nessuna dipendenza fra il servizio backup e quello di sync): a tenerli allineati sono
+ * i test, che esercitano le stesse soglie su entrambi.
  */
+const dayPeriodsInt = (v: unknown, min: number, max: number): boolean =>
+  Number.isInteger(v) && (v as number) >= min && (v as number) <= max;
 function dayPeriodsValidator(v: unknown): boolean {
   if (!record(v)) return false;
-  return optional(v.ordinaryPeriodsPerDay, n => Number.isInteger(n) && (n as number) >= 1)
+  return optional(v.ordinaryPeriodsPerDay, n => dayPeriodsInt(n, 1, 12))
     && optional(v.extraPeriodsByDay, map => record(map) && Object.entries(map).every(([day, extra]) =>
-      /^[1-6]$/.test(day) && Number.isInteger(extra) && (extra as number) >= 0));
+      /^[1-6]$/.test(day) && dayPeriodsInt(extra, 0, 11)));
 }
 function periodSlotValidator(v: unknown): boolean {
   return record(v) && Number.isInteger(v.periodNumber) && v.periodNumber > 0

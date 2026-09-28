@@ -244,33 +244,74 @@ test('round-trip JSON (backup/cloud): dayPeriods sopravvive alla serializzazione
   assert.deepEqual(periodsByDay(WEEK, restored.schools?.[0]), [6, 6, 8, 7, 6]);
 });
 
-test('validazione backup: dayPeriods valido passa, sporco viene rifiutato', () => {
-  const backup = (dayPeriods?: unknown) => ({
-    version: 3,
-    profile: {
-      ...baseProfile,
-      schools: [{ id: 'a', name: 'IC Da Vinci', isPrimary: true, active: true, ...(dayPeriods === undefined ? {} : { dayPeriods }) }],
-    },
-    events: [], circulars: [], students: [], definitiveTimetable: [], provisionalTimetable: [],
-    timetableMode: 'auto', onboardingCompleted: true,
-  });
-  assert.doesNotThrow(() => validateBackup(backup()));
-  assert.doesNotThrow(() => validateBackup(backup({ ordinaryPeriodsPerDay: 6, extraPeriodsByDay: { 4: 1 } })));
-  assert.throws(() => validateBackup(backup({ extraPeriodsByDay: { 4: -1 } })));
-  assert.throws(() => validateBackup(backup({ ordinaryPeriodsPerDay: 'sei' })));
-});
 
-test('validazione profilo remoto: dayPeriods valido accettato, sporco rifiutato, assente accettato', () => {
-  const withSchools = (dayPeriods: unknown) => ({
-    ...baseProfile,
-    schools: [{ id: 'a', name: 'IC Da Vinci', isPrimary: true, active: true, ...(dayPeriods === undefined ? {} : { dayPeriods }) }],
+/*
+ * PARITA DEI CONTRATTI: backup e sincronizzazione devono accettare e rifiutare
+ * ESATTAMENTE gli stessi dayPeriods.
+ *
+ * Erano divergenti: il backup non aveva alcun massimo, quindi un profilo con
+ * ordinaryPeriodsPerDay: 40 passava l'import e veniva poi rifiutato dal remote
+ * schema (1..12) — dato importabile ma non sincronizzabile. Le utility clampano
+ * comunque a 12, ma il clamp non e un contratto di validazione: i due validatori
+ * restano indipendenti e sono questi casi a tenerli allineati.
+ */
+
+const schoolWith = (dayPeriods?: unknown) => ({
+  id: 'a', name: 'IC Da Vinci', isPrimary: true, active: true,
+  ...(dayPeriods === undefined ? {} : { dayPeriods }),
+});
+const profileWith = (dayPeriods?: unknown) => ({ ...baseProfile, schools: [schoolWith(dayPeriods)] });
+const backupWith = (dayPeriods?: unknown) => ({
+  version: 3,
+  profile: profileWith(dayPeriods),
+  events: [], circulars: [], students: [], definitiveTimetable: [], provisionalTimetable: [],
+  timetableMode: 'auto', onboardingCompleted: true,
+});
+const backupAccepts = (dayPeriods?: unknown): boolean => {
+  try { validateBackup(backupWith(dayPeriods)); return true; } catch { return false; }
+};
+const remoteAccepts = (dayPeriods?: unknown): boolean => isValidProfilePayload(profileWith(dayPeriods));
+
+/** Casi esercitati sui DUE validatori: stesso input, stesso verdetto atteso. */
+const DAY_PERIODS_CONTRACT: Array<{ label: string; value: unknown; valid: boolean }> = [
+  { label: 'dayPeriods assente (legacy)', value: undefined, valid: true },
+  { label: 'dayPeriods vuoto', value: {}, valid: true },
+  { label: 'configurazione reale: ordinary 6 + giovedi +1', value: { ordinaryPeriodsPerDay: 6, extraPeriodsByDay: { 4: 1 } }, valid: true },
+  { label: 'ordinary 1 (minimo)', value: { ordinaryPeriodsPerDay: 1 }, valid: true },
+  { label: 'ordinary 12 (massimo)', value: { ordinaryPeriodsPerDay: 12 }, valid: true },
+  { label: 'ordinary 13 (oltre il tetto)', value: { ordinaryPeriodsPerDay: 13 }, valid: false },
+  { label: 'ordinary 40 (oltre il tetto)', value: { ordinaryPeriodsPerDay: 40 }, valid: false },
+  { label: 'ordinary 0', value: { ordinaryPeriodsPerDay: 0 }, valid: false },
+  { label: 'ordinary negativo', value: { ordinaryPeriodsPerDay: -6 }, valid: false },
+  { label: 'ordinary decimale', value: { ordinaryPeriodsPerDay: 6.5 }, valid: false },
+  { label: 'ordinary stringa', value: { ordinaryPeriodsPerDay: 'sei' }, valid: false },
+  { label: 'extra 0 (minimo)', value: { extraPeriodsByDay: { 4: 0 } }, valid: true },
+  { label: 'extra 11 (massimo)', value: { extraPeriodsByDay: { 4: 11 } }, valid: true },
+  { label: 'extra 12 (oltre il massimo)', value: { extraPeriodsByDay: { 4: 12 } }, valid: false },
+  { label: 'extra negativo', value: { extraPeriodsByDay: { 4: -1 } }, valid: false },
+  { label: 'extra decimale', value: { extraPeriodsByDay: { 4: 1.5 } }, valid: false },
+  { label: 'giorni 1..6 tutti configurati', value: { extraPeriodsByDay: { 1: 0, 2: 1, 3: 2, 4: 1, 5: 0, 6: 3 } }, valid: true },
+  { label: 'giorno 0 (fuori scala)', value: { extraPeriodsByDay: { 0: 1 } }, valid: false },
+  { label: 'giorno 7 (fuori scala)', value: { extraPeriodsByDay: { 7: 1 } }, valid: false },
+  { label: 'giorno 9 (fuori scala)', value: { extraPeriodsByDay: { 9: 1 } }, valid: false },
+  { label: 'dayPeriods non oggetto', value: '6', valid: false },
+  { label: 'extraPeriodsByDay non oggetto', value: { extraPeriodsByDay: 1 }, valid: false },
+];
+
+for (const { label, value, valid } of DAY_PERIODS_CONTRACT) {
+  test(`contratto dayPeriods coerente backup/remote — ${label}`, () => {
+    assert.equal(backupAccepts(value), valid, `backup su: ${label}`);
+    assert.equal(remoteAccepts(value), valid, `remote su: ${label}`);
+    assert.equal(backupAccepts(value), remoteAccepts(value), `backup e remote divergono su: ${label}`);
   });
-  assert.equal(isValidProfilePayload(withSchools(undefined)), true);
-  assert.equal(isValidProfilePayload(withSchools({ ordinaryPeriodsPerDay: 6, extraPeriodsByDay: { 4: 1 } })), true);
-  assert.equal(isValidProfilePayload(withSchools({})), true);
-  assert.equal(isValidProfilePayload(withSchools({ ordinaryPeriodsPerDay: 0 })), false);
-  assert.equal(isValidProfilePayload(withSchools({ ordinaryPeriodsPerDay: 6.5 })), false);
-  assert.equal(isValidProfilePayload(withSchools({ extraPeriodsByDay: { 9: 1 } })), false);
-  assert.equal(isValidProfilePayload(withSchools({ extraPeriodsByDay: { 4: -1 } })), false);
-  assert.equal(isValidProfilePayload(withSchools('6')), false);
+}
+
+test('il tetto dei validatori coincide con il clamp delle utility', () => {
+  // 12 e accettato dai validatori ed e anche il massimo che le utility possono produrre.
+  assert.equal(remoteAccepts({ ordinaryPeriodsPerDay: MAX_PERIODS_PER_DAY }), true);
+  assert.equal(backupAccepts({ ordinaryPeriodsPerDay: MAX_PERIODS_PER_DAY }), true);
+  assert.equal(remoteAccepts({ ordinaryPeriodsPerDay: MAX_PERIODS_PER_DAY + 1 }), false);
+  assert.equal(backupAccepts({ ordinaryPeriodsPerDay: MAX_PERIODS_PER_DAY + 1 }), false);
+  // Massimo raggiungibile da una configurazione valida: 12 ordinarie, oppure 1 + 11 extra.
+  assert.equal(periodsForDay(4, { dayPeriods: { ordinaryPeriodsPerDay: 1, extraPeriodsByDay: { 4: 11 } } }), MAX_PERIODS_PER_DAY);
 });
