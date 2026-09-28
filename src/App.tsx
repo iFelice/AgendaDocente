@@ -977,6 +977,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
         isOpen={isProfileModalOpen}
         onClose={() => setIsProfileModalOpen(false)}
         profile={profile}
+        timeSlotConfig={timeSlotConfig}
         onSaveProfile={handleSaveProfile}
         onDataImported={refreshAllData}
         onOpenTutorial={() => setIsOnboardingOpen(true)}
