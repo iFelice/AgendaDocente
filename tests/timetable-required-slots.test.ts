@@ -343,11 +343,22 @@ test('senza dayPeriods non c e alcun fabbisogno extra: nessun avviso, nessuna pr
   }
 });
 
-test('la griglia non viene toccata da C1: le righe restano quelle delle fasce configurate', async () => {
-  // Il fabbisogno e 7, ma finche non si salva la 7ª fascia la griglia mostra 6 righe
-  // esattamente come prima: il rendering variabile e il micro-passo C2.
+test('fasce insufficienti: la riga in eccesso esiste ma non puo ricevere lezioni', async () => {
+  // Aggiornato in C2: la griglia mostra ora anche la riga prevista dalla scuola
+  // ma priva di fascia oraria (7 righe con 6 fasce). L'invariante di C1 che qui
+  // conta resta intatta: senza una fascia REALE quella riga non e utilizzabile,
+  // nessun orario viene inventato e nulla viene persistito.
   const m = await mountEditor(profileWithThursdayExtra, autoConfig6);
   const rows = m.renderer.root.findAll(n => n.type === 'tr');
-  assert.equal(rows.length - 1, 6, 'intestazione esclusa: 6 righe come la configurazione oraria');
+  assert.equal(rows.length - 1, 7, 'intestazione esclusa: 7 righe, quante ne prevede la scuola');
+
+  const lastRow = rows[rows.length - 1];
+  assert.match(textOf(lastRow), /Orario da configurare/);
+  assert.equal(
+    lastRow.findAll(n => n.props && n.props['data-slot-cell'] === 'empty').length,
+    0,
+    'nessuna cella della riga senza fascia e aggiungibile'
+  );
+  assert.equal(m.savedConfigs.length, 0, 'nessuna persistenza automatica');
   m.renderer.unmount();
 });

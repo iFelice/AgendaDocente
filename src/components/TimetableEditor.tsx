@@ -39,7 +39,7 @@ import { collectKnownTeacherNames, coTeachingSummary, coTeachingSubjectsOf, prun
 import { isSupportTeacherOf } from "../utils/teacherType";
 import { DEFAULT_SUBJECTS, mergeSubjectSuggestions, normalizeSubjectName } from "../utils/subjects";
 import { getPrimarySchool } from "../utils/multiSchool";
-import { MAX_PERIODS_PER_DAY, maxPeriodsInWeek } from "../utils/schoolDayPeriods";
+import { MAX_PERIODS_PER_DAY, maxPeriodsInWeek, periodsForDay } from "../utils/schoolDayPeriods";
 import {
   DAY_SWIPE_HORIZONTAL_RATIO,
   DAY_SWIPE_INTERACTIVE_SELECTOR,
@@ -238,6 +238,12 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   // la lezione nell'orario dichiarato: niente modale, niente fallback, niente
   // scritture — solo un messaggio chiaro e chiudibile.
   const [slotEditNotice, setSlotEditNotice] = useState<string | null>(null);
+  /**
+   * Avviso inline del modale quando il cambio giorno ha dovuto riportare la
+   * lezione a un'ora ammessa dal nuovo giorno. Solo UI: sparisce appena la
+   * situazione non è più pertinente (altro cambio valido, chiusura del modale).
+   */
+  const [periodClampNotice, setPeriodClampNotice] = useState<string | null>(null);
 
   // Richiesta ONE-SHOT di apertura diretta (tap su una lezione del Planning):
   // catturata al primo render e consumata una sola volta per mount. La fonte
@@ -364,6 +370,78 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   /** Fasce ancora da aggiungere al draft del drawer per coprire il fabbisogno. */
   const missingSlotCount = Math.max(0, requiredPeriods - customSlotsDraft.length);
 
+  /**
+   * RIGHE DELLA GRIGLIA.
+   *
+   * Le fasce (`periods`) restano l'unica fonte degli ORARI REALI, ma non sono
+   * più da sole il numero di righe. Il conto è il massimo fra tre esigenze:
+   *
+   *  - `requiredPeriods`: quante ore prevede il giorno più lungo dell'istituto
+   *    (6/6/6/7/6 → 7). Serve a mostrare la riga del giovedì anche quando le
+   *    fasce configurate sono ancora 6.
+   *  - `periods.length`: le fasce realmente configurate. Se sono PIÙ del
+   *    fabbisogno (configurazioni custom preesistenti) devono restare tutte
+   *    visibili: nessuna regressione rispetto a prima.
+   *  - `legacyRowCount`: il periodo più alto fra le lezioni GIÀ SALVATE. Una
+   *    lezione esistente non può sparire dalla UI solo perché la configurazione
+   *    della scuola è cambiata: resta visibile, modificabile ed eliminabile.
+   *
+   * Tutto è calcolato sui giorni STABILI della settimana: il filtro giorno del
+   * mobile non può cambiare quante righe ha la griglia.
+   */
+  const legacyRowCount = useMemo(
+    () => currentSlots.reduce((max, s) => (s.periodNumber > max ? s.periodNumber : max), 0),
+    [currentSlots]
+  );
+  const rowCount = Math.max(requiredPeriods, periods.length, legacyRowCount);
+
+  /**
+   * Righe VIRTUALI: `slot` è la fascia reale quando esiste, `undefined` quando
+   * la riga è prevista ma la fascia oraria non è ancora stata configurata.
+   * Nessun PeriodSlot finto viene creato qui e nulla finisce in `customSlots`:
+   * gli orari mancanti si aggiungono solo dal drawer delle fasce.
+   */
+  const gridRows = useMemo(
+    () =>
+      Array.from({ length: rowCount }, (_, index) => {
+        const periodNumber = index + 1;
+        return { periodNumber, slot: periods.find(p => p.periodNumber === periodNumber) };
+      }),
+    [rowCount, periods]
+  );
+
+  /**
+   * Ore ammesse da ciascun giorno secondo l'istituto PRIMARIO. La griglia non è
+   * multi-istituto (non filtra per `schoolId`) e questo passo non la rende tale.
+   */
+  const allowedPeriodsByDay = useMemo(() => {
+    const map = new Map<number, number>();
+    for (const day of schoolWeekDays) {
+      map.set(day, periodsForDay(day, primarySchool, timeSlotConfig));
+    }
+    return map;
+  }, [schoolWeekDays.join(","), primarySchool, timeSlotConfig]);
+
+  const allowedPeriodsFor = (day: number): number =>
+    allowedPeriodsByDay.get(day) ?? periodsForDay(day as SchoolWeekday, primarySchool, timeSlotConfig);
+
+  /**
+   * Ore selezionabili nel modale: dipendono dal GIORNO scelto, non dall'intera
+   * configurazione. Solo fasce realmente configurate — nessun periodo virtuale.
+   * L'ora attualmente selezionata resta comunque nell'elenco anche se il giorno
+   * non la prevede più (lezione legacy fuori configurazione): toglierla
+   * lascerebbe il select senza opzione corrispondente al proprio valore.
+   */
+  const modalAvailablePeriods = useMemo(() => {
+    if (!editingSlot) return periods;
+    const allowed = allowedPeriodsFor(editingSlot.dayOfWeek);
+    const available = periods.filter(p => p.periodNumber <= allowed);
+    if (available.some(p => p.periodNumber === editingSlot.periodNumber)) return available;
+    const current = periods.find(p => p.periodNumber === editingSlot.periodNumber);
+    return current ? [...available, current] : available;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingSlot?.dayOfWeek, editingSlot?.periodNumber, periods, allowedPeriodsByDay]);
+
   // On phones the timetable matrix opens on the current weekday by default (one day per
   // screen, no horizontal scrolling); the day chips let the teacher switch day or see the
   // full week ("Tutti i giorni"), where the horizontal scroll is genuinely useful.
@@ -442,6 +520,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
       endTime: "08:50",
     };
     editBaseline.current = undefined;
+    setPeriodClampNotice(null);
     setIsAddingNewClass(false);
     setNewClassNameInput("");
     setClassAddError(null);
@@ -466,6 +545,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
 
   const handleEditSlot = (slot: TimetableSlot) => {
     editBaseline.current = slot;
+    setPeriodClampNotice(null);
     setIsAddingNewClass(false);
     setNewClassNameInput("");
     setClassAddError(null);
@@ -515,8 +595,48 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
     setIsModalOpen(false);
   };
 
+  /**
+   * Cambio GIORNO nel modale.
+   *
+   * Il cambio giorno non viene mai bloccato. Se però il nuovo giorno prevede
+   * meno ore di quella attualmente selezionata, lasciare l'ora com'è
+   * produrrebbe una lezione fuori configurazione creata di nascosto: l'ora
+   * viene quindi riportata all'ULTIMA ammessa dal nuovo giorno, con gli orari
+   * riallineati dalla stessa logica di `handlePeriodChange`, e l'utente ne è
+   * informato da un avviso inline esplicito. Se l'ora corrente è già valida
+   * cambia solo il giorno, senza avvisi.
+   */
+  const handleDayOfWeekChange = (newDay: number) => {
+    if (!editingSlot) return;
+    const dayInfo = days.find((d) => d.day === newDay);
+    const allowed = allowedPeriodsFor(newDay);
+    // Si può retrocedere solo su una fascia REALMENTE configurata: mai inventare
+    // orari. Se la fascia ammessa non esiste ancora si resta sull'ultima reale.
+    const reachable = periods.filter((p) => p.periodNumber <= allowed);
+    const fallback = reachable[reachable.length - 1];
+
+    if (editingSlot.periodNumber <= allowed || !fallback || fallback.periodNumber >= editingSlot.periodNumber) {
+      setPeriodClampNotice(null);
+      setEditingSlot({ ...editingSlot, dayOfWeek: newDay as 1 | 2 | 3 | 4 | 5 | 6 });
+      return;
+    }
+
+    setEditingSlot({
+      ...editingSlot,
+      dayOfWeek: newDay as 1 | 2 | 3 | 4 | 5 | 6,
+      periodNumber: fallback.periodNumber,
+      startTime: fallback.startTime,
+      endTime: fallback.endTime,
+    });
+    setPeriodClampNotice(
+      `Il ${(dayInfo?.label ?? "giorno").toLowerCase()} prevede ${allowed} ore: la lezione è stata spostata alla ${fallback.periodNumber}ª.`
+    );
+  };
+
   // When changing period number in modal, automatically update start & end times
   const handlePeriodChange = (newPeriodNum: number) => {
+    // Scelta esplicita dell'utente: l'avviso di clamp non è più pertinente.
+    setPeriodClampNotice(null);
     if (!editingSlot) return;
     const periodConf = periods.find((p) => p.periodNumber === newPeriodNum);
     if (periodConf) {
@@ -1209,13 +1329,33 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
             </tr>
           </thead>
           <tbody className="divide-y divide-stone-100 text-xs">
-            {periods.map((p) => (
-              <tr key={p.periodNumber} className="hover:bg-stone-50/50 transition-colors">
+            {gridRows.map((row) => (
+              <tr key={row.periodNumber} className="hover:bg-stone-50/50 transition-colors">
                 <td className="p-2 sm:p-3 text-center border-r border-stone-200 bg-stone-50/80 sticky left-0 z-10 shadow-2xs">
-                  <div className="font-bold text-stone-900">{p.label || `${p.periodNumber}ª Ora`}</div>
-                  <div className="text-[10px] text-stone-500 mt-0.5 font-mono">
-                    {p.startTime} – {p.endTime}
+                  <div className="font-bold text-stone-900">
+                    {row.slot?.label || `${row.periodNumber}ª Ora`}
                   </div>
+                  {row.slot ? (
+                    <div className="text-[10px] text-stone-500 mt-0.5 font-mono">
+                      {row.slot.startTime} – {row.slot.endTime}
+                    </div>
+                  ) : (
+                    /* Riga prevista dalla scuola ma senza fascia oraria: nessun
+                       orario viene inventato, si offre solo la strada per
+                       configurarlo nel drawer delle fasce. */
+                    <div className="mt-0.5 space-y-1">
+                      <div className="text-[10px] font-semibold text-amber-700 leading-tight">
+                        Orario da configurare
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleOpenSlotConfig}
+                        className="text-[10px] font-semibold text-emerald-700 underline underline-offset-2 hover:text-emerald-800"
+                      >
+                        {`Configura ${row.periodNumber}ª ora`}
+                      </button>
+                    </div>
+                  )}
                 </td>
 
                 {days
@@ -1224,8 +1364,15 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                     const slot = currentSlots.find(
                       (s) =>
                         s.dayOfWeek === d.day &&
-                        s.periodNumber === p.periodNumber
+                        s.periodNumber === row.periodNumber
                     );
+                    const allowed = allowedPeriodsFor(d.day);
+                    // Fuori configurazione: il giorno non prevede quest'ora.
+                    const outOfConfig = row.periodNumber > allowed;
+                    // Si aggiunge SOLO dove il giorno lo prevede E la fascia
+                    // oraria reale esiste già: fuori configurazione si conserva
+                    // ciò che c'è, non si crea niente di nuovo.
+                    const canAdd = !outOfConfig && Boolean(row.slot);
 
                     return (
                       <td
@@ -1238,8 +1385,15 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                               if (consumeSwipeClickSuppression()) return;
                               handleEditSlot(slot);
                             }}
+                            title={
+                              outOfConfig
+                                ? "Ora non prevista dalla configurazione della scuola"
+                                : undefined
+                            }
                             className={`h-full w-full p-2 rounded-lg border cursor-pointer transition-all flex flex-col justify-between shadow-2xs hover:shadow-xs ${
-                              activeTab === "provvisorio"
+                              outOfConfig
+                                ? "border-amber-400 border-dashed bg-amber-50/70 hover:bg-amber-100"
+                                : activeTab === "provvisorio"
                                 ? "border-amber-300 bg-amber-50/80 hover:bg-amber-100"
                                 : "border-emerald-200 bg-emerald-50/70 hover:bg-emerald-100"
                             }`}
@@ -1278,19 +1432,35 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                               </span>
                             </div>
                           </div>
-                        ) : (
+                        ) : canAdd ? (
                           <button
                             type="button"
                             data-slot-cell="empty"
                             onClick={() => {
                               if (consumeSwipeClickSuppression()) return;
-                              handleOpenAdd(d.day, p.periodNumber);
+                              handleOpenAdd(d.day, row.periodNumber);
                             }}
                             className="w-full h-full min-h-[44px] rounded-lg border border-dashed border-stone-200 hover:border-emerald-400 hover:bg-emerald-50/40 text-stone-400 hover:text-emerald-700 transition-colors flex items-center justify-center text-xs"
-                            title={`Aggiungi lezione ${d.label} ${p.label || `${p.periodNumber}ª ora`}`}
+                            title={`Aggiungi lezione ${d.label} ${row.slot?.label || `${row.periodNumber}ª ora`}`}
                           >
                             <Plus className="w-4 h-4 opacity-40 group-hover:opacity-100 transition-opacity" />
                           </button>
+                        ) : (
+                          /* Cella non aggiungibile: giorno che non prevede
+                             quest'ora, oppure fascia oraria non ancora
+                             configurata. Nessun "+", nessun handler e
+                             soprattutto NESSUN data-slot-cell="empty": quel
+                             marcatore è la superficie di swipe delle celle
+                             libere e qui non c'è nulla da aggiungere. */
+                          <div
+                            aria-disabled="true"
+                            title={
+                              outOfConfig
+                                ? `Questo giorno prevede ${allowed} ore`
+                                : `Fascia oraria della ${row.periodNumber}ª ora da configurare`
+                            }
+                            className="w-full h-full min-h-[44px] rounded-lg bg-stone-50/60 border border-stone-100"
+                          />
                         )}
                       </td>
                     );
@@ -1350,12 +1520,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                   </label>
                   <select
                     value={editingSlot.dayOfWeek}
-                    onChange={(e) =>
-                      setEditingSlot({
-                        ...editingSlot,
-                        dayOfWeek: Number(e.target.value) as any,
-                      })
-                    }
+                    onChange={(e) => handleDayOfWeekChange(Number(e.target.value))}
                     className="w-full p-2.5 border border-stone-300 rounded-lg text-xs bg-white text-stone-900 min-h-[42px]"
                   >
                     {days.map((d) => (
@@ -1375,7 +1540,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                     onChange={(e) => handlePeriodChange(Number(e.target.value))}
                     className="w-full p-2.5 border border-stone-300 rounded-lg text-xs bg-white text-stone-900 min-h-[42px]"
                   >
-                    {periods.map((p) => (
+                    {modalAvailablePeriods.map((p) => (
                       <option key={p.periodNumber} value={p.periodNumber}>
                         {p.label || `${p.periodNumber}ª Ora`} ({p.startTime} – {p.endTime})
                       </option>
@@ -1383,6 +1548,15 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                   </select>
                 </div>
               </div>
+
+              {periodClampNotice && (
+                <p
+                  role="status"
+                  className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2"
+                >
+                  {periodClampNotice}
+                </p>
+              )}
 
               {/* Class Selection via Dropdown (with + Aggiungi classe) */}
               <div className="space-y-2">
