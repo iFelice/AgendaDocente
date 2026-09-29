@@ -154,7 +154,7 @@ export function isValidProfilePayload(v: unknown): boolean {
     optional(v.email, text) &&
     optional(v.googleCalendarAccount, text) &&
     optional(v.schoolLevel, l => ["infanzia", "primaria", "ssig", "ssiig"].includes(l as string)) &&
-    optional(v.schools, schools => Array.isArray(schools) && schools.every(s => isRecord(s) && requiredText(s.id) && text(s.name) && optional(s.institutionalEmail, text) && optional(s.campuses, strings) && optional(s.schoolLevel, l => ["infanzia", "primaria", "ssig", "ssiig"].includes(l as string)) && optional(s.weeklyHours, n => typeof n === "number" && Number.isFinite(n)) && optional(s.isPrimary, bool) && optional(s.active, bool) && optional(s.dayPeriods, isValidSchoolDayPeriods)))
+    optional(v.schools, schools => Array.isArray(schools) && schools.every(s => isRecord(s) && requiredText(s.id) && text(s.name) && optional(s.institutionalEmail, text) && optional(s.campuses, strings) && optional(s.schoolLevel, l => ["infanzia", "primaria", "ssig", "ssiig"].includes(l as string)) && optional(s.weeklyHours, n => typeof n === "number" && Number.isFinite(n)) && optional(s.isPrimary, bool) && optional(s.active, bool) && optional(s.dayPeriods, isValidSchoolDayPeriods) && optional(s.timeSlotConfig, isValidTimeSlotConfig)))
   );
 }
 

@@ -56,6 +56,17 @@ export interface SchoolProfile {
   active?: boolean;
   /** Struttura della giornata scolastica dell'istituto (opzionale, retrocompatibile). */
   dayPeriods?: SchoolDayPeriodsConfig;
+  /**
+   * Fasce orarie (le "campane") di QUESTO istituto: a che ora inizia e finisce
+   * ogni ora di lezione. È l'altra metà di `dayPeriods`, che dice invece
+   * QUANTE ore ha ogni giorno.
+   *
+   * Opzionale e retrocompatibile: quando manca vale la configurazione globale
+   * del docente, che resta il default finché l'istituto non viene
+   * personalizzato. Nessun dato viene migrato e nessuna config viene creata
+   * automaticamente.
+   */
+  timeSlotConfig?: TimeSlotConfig;
 }
 
 /** Future-proof class directory record; current ClassesView still uses className strings. */

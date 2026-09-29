@@ -1,4 +1,4 @@
-import type { PeriodSlot, TimeSlotConfig } from "../types";
+import type { PeriodSlot, SchoolProfile, TimeSlotConfig } from "../types";
 
 /**
  * Normalizes a class name by trimming whitespace and converting to uppercase.
@@ -54,6 +54,32 @@ export function generateDefaultPeriodSlots(
 }
 
 export const DEFAULT_PERIOD_SLOTS: PeriodSlot[] = generateDefaultPeriodSlots("07:50", 6, 60);
+
+/**
+ * FASCE ORARIE DA USARE PER UN ISTITUTO.
+ *
+ * Un istituto può avere le proprie campane (`school.timeSlotConfig`); finché
+ * non le ha, valgono quelle globali del docente — che restano il default e
+ * NON vengono copiate dentro la scuola. Nessuna migrazione, nessuna scrittura:
+ * la regola si applica in lettura.
+ *
+ * La config della scuola vince INTERAMENTE: è un `TimeSlotConfig` completo,
+ * non un insieme di override da fondere campo per campo con la globale. Una
+ * fusione produrrebbe orari che non appartengono a nessuna delle due.
+ *
+ * Confine deliberato: qui NON si risolve l'identità della scuola (lo fanno
+ * `schoolByIdOrPrimary`, `effectiveSchoolForSlot`, `getPrimarySchool`) e NON si
+ * inventa un default — se entrambe mancano il risultato è `undefined`, che
+ * `getEffectivePeriodSlots` traduce già nel comportamento storico dell'app.
+ * Restituire qui un default farebbe sparire silenziosamente la configurazione
+ * dell'utente al primo `undefined` di troppo.
+ */
+export function timeSlotConfigForSchool(
+  school: Pick<SchoolProfile, "timeSlotConfig"> | undefined,
+  globalConfig: TimeSlotConfig | undefined
+): TimeSlotConfig | undefined {
+  return school?.timeSlotConfig ?? globalConfig;
+}
 
 export const DEFAULT_TIME_SLOT_CONFIG: TimeSlotConfig = {
   firstHourStartTime: "07:50",
