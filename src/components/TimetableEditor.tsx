@@ -43,7 +43,7 @@ import { isSupportTeacherOf } from "../utils/teacherType";
 import { DEFAULT_SUBJECTS, mergeSubjectSuggestions, normalizeSubjectName } from "../utils/subjects";
 import { effectiveSchoolForSlot, getPrimarySchool, normalizeTeacherProfile } from "../utils/multiSchool";
 import { slotSchoolKey } from "../utils/reconstructTimetable";
-import { MAX_PERIODS_PER_DAY, maxPeriodsInWeek, periodsForDay } from "../utils/schoolDayPeriods";
+import { MAX_PERIODS_PER_DAY, maxPeriodsInWeek, periodsForDay, reassignTimetableSlotSchool } from "../utils/schoolDayPeriods";
 import {
   DAY_SWIPE_HORIZONTAL_RATIO,
   DAY_SWIPE_INTERACTIVE_SELECTOR,
@@ -829,6 +829,37 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
     );
   };
 
+  /**
+   * Cambio ISTITUTO della lezione in modifica.
+   *
+   * La nuova scuola porta con sé le proprie regole: quante ore ha quel giorno
+   * e a che ora suonano. Il draft viene quindi riadattato subito — ora e
+   * orari cambiano sotto gli occhi dell'utente, che vede l'effetto prima di
+   * salvare — e l'eventuale arretramento è spiegato con lo stesso avviso
+   * inline del cambio giorno, non con un nuovo sistema di messaggi.
+   *
+   * La configurazione è quella della scuola SCELTA, non di quella mostrata
+   * dalla griglia: le due possono differire se la lezione è stata aperta da
+   * Oggi/Settimana.
+   */
+  const handleSlotSchoolChange = (nextSchoolId: string) => {
+    if (!editingSlot) return;
+    const nextSchool = schools.find((school) => school.id === nextSchoolId);
+    if (!nextSchool) return;
+
+    const outcome = reassignTimetableSlotSchool(
+      editingSlot,
+      nextSchool,
+      timeSlotConfigForSchool(nextSchool, timeSlotConfig)
+    );
+    setEditingSlot(outcome.slot);
+    setPeriodClampNotice(
+      outcome.wasClamped
+        ? `${outcome.previousPeriod}ª ora non prevista da ${nextSchool.name} in questo giorno (${outcome.allowed} ore): la lezione è stata spostata alla ${outcome.nextPeriod}ª.`
+        : null
+    );
+  };
+
   // When changing period number in modal, automatically update start & end times
   const handlePeriodChange = (newPeriodNum: number) => {
     // Scelta esplicita dell'utente: l'avviso di clamp non è più pertinente.
@@ -908,6 +939,12 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
     // Su fallimento (CAS/persistenza) si resta nell'editor con l'errore mostrato:
     // nessun ritorno automatico al Planning.
     if (!await save.run(() => onSaveSlot(slot, activeTab, editBaseline.current))) return;
+    // Lezione spostata in un altro istituto: la griglia lo segue, altrimenti
+    // l'utente resterebbe davanti alla scuola di partenza convinto che la
+    // lezione sia sparita.
+    if (slot.schoolId && slot.schoolId !== activeSchoolId && schools.some((school) => school.id === slot.schoolId)) {
+      setActiveSchoolId(slot.schoolId);
+    }
     setEditingSlot(null);
     closeSlotModal();
   };
@@ -1844,6 +1881,29 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                 </p>
               )}
 
+              {/* Istituto della lezione. Solo in MODIFICA e solo con più
+                  scuole: in creazione la sede è già quella della griglia da
+                  cui si è premuto "+" (F3), e chiederla di nuovo sarebbe una
+                  domanda a cui l'utente ha già risposto. */}
+              {isMultiSchool && currentSlots.some((s) => s.id === editingSlot.id) && (
+                <div>
+                  <label htmlFor="slot-school" className="block font-medium text-stone-700 mb-1">
+                    Istituto
+                  </label>
+                  <select
+                    id="slot-school"
+                    aria-label="Istituto della lezione"
+                    value={editingSchool?.id ?? ""}
+                    onChange={(e) => handleSlotSchoolChange(e.target.value)}
+                    className="w-full p-2.5 border border-stone-300 rounded-lg text-xs bg-white text-stone-900 min-h-[42px]"
+                  >
+                    {schools.map((school) => (
+                      <option key={school.id} value={school.id}>{school.name}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
               {/* Day & Period Selection (Primary Mental Model) */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
@@ -1851,6 +1911,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                     Giorno della settimana
                   </label>
                   <select
+                    id="slot-day"
                     value={editingSlot.dayOfWeek}
                     onChange={(e) => handleDayOfWeekChange(Number(e.target.value))}
                     className="w-full p-2.5 border border-stone-300 rounded-lg text-xs bg-white text-stone-900 min-h-[42px]"
@@ -1868,6 +1929,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                     Numero dell'ora
                   </label>
                   <select
+                    id="slot-period"
                     value={editingSlot.periodNumber}
                     onChange={(e) => handlePeriodChange(Number(e.target.value))}
                     className="w-full p-2.5 border border-stone-300 rounded-lg text-xs bg-white text-stone-900 min-h-[42px]"

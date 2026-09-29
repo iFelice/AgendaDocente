@@ -15,7 +15,7 @@
  * Funzioni pure, nessuno stato, nessun accesso a storage.
  */
 
-import type { SchoolProfile, SchoolWeekday, TimeSlotConfig } from "../types";
+import type { SchoolProfile, SchoolWeekday, TimetableSlot, TimeSlotConfig } from "../types";
 import { getEffectivePeriodSlots } from "./timeSlots";
 
 /**
@@ -161,4 +161,72 @@ export function isSlotOutOfConfiguredDay(
   timeSlotConfig?: TimeSlotConfig
 ): boolean {
   return slot.periodNumber > periodsForDay(slot.dayOfWeek as SchoolWeekday, school, timeSlotConfig);
+}
+
+/**
+ * Esito dello spostamento di una lezione in un ALTRO istituto.
+ *
+ * `wasClamped` distingue i due casi che l'utente deve poter capire: l'ora è
+ * rimasta la sua e sono cambiati solo gli orari, oppure la nuova scuola quella
+ * ora non ce l'ha e la lezione è stata riportata indietro.
+ */
+export interface TimetableSlotSchoolReassignment {
+  slot: TimetableSlot;
+  wasClamped: boolean;
+  previousPeriod: number;
+  nextPeriod: number;
+  /** Ore che il nuovo istituto prevede per quel giorno. */
+  allowed: number;
+}
+
+/**
+ * Sposta una lezione in un altro istituto, adattandola alle SUE regole.
+ *
+ * Cambiare scuola non è come cambiare un'etichetta: l'ora di lezione è definita
+ * dalla campanella di quell'istituto. Quindi qui si fanno tre cose, e solo
+ * queste tre:
+ *
+ *  1. `schoolId` diventa quello della nuova scuola;
+ *  2. il `periodNumber` viene riportato all'ultima ora REALE che la nuova
+ *     scuola prevede quel giorno, se la sua non esiste (clamp);
+ *  3. `startTime`/`endTime` seguono la fascia corrispondente della nuova
+ *     configurazione.
+ *
+ * Il limite è il minimo fra quante ore prevede il giorno (`dayPeriods`) e
+ * quante fasce sono davvero configurate: non si producono ore senza orario. È
+ * la stessa regola del cambio giorno, applicata all'altro asse.
+ *
+ * Il GIORNO non viene mai toccato: è il periodo ad adattarsi.
+ *
+ * Gli orari eventualmente inseriti a mano vengono sostituiti: spostare la
+ * lezione in un'altra scuola è già una scelta esplicita sul suo contesto
+ * orario, e lasciare la vecchia campanella produrrebbe un dato incoerente.
+ * Tutto il resto della lezione (materia, classe, aula, plesso, compresenze,
+ * archivio provvisorio/definitivo) resta intatto.
+ *
+ * Funzione pura: non muta lo slot in ingresso.
+ */
+export function reassignTimetableSlotSchool(
+  slot: TimetableSlot,
+  nextSchool: Pick<SchoolProfile, "id" | "dayPeriods"> | undefined,
+  nextConfig?: TimeSlotConfig
+): TimetableSlotSchoolReassignment {
+  const allowed = periodsForDay(slot.dayOfWeek as SchoolWeekday, nextSchool, nextConfig);
+  const reachable = getEffectivePeriodSlots(nextConfig).filter(p => p.periodNumber <= allowed);
+  const target =
+    reachable.find(p => p.periodNumber === slot.periodNumber) ?? reachable[reachable.length - 1];
+
+  const base: TimetableSlot = nextSchool?.id ? { ...slot, schoolId: nextSchool.id } : { ...slot };
+  if (!target) {
+    // Nessuna fascia utilizzabile: si cambia istituto senza inventare orari.
+    return { slot: base, wasClamped: false, previousPeriod: slot.periodNumber, nextPeriod: slot.periodNumber, allowed };
+  }
+
+  return {
+    slot: { ...base, periodNumber: target.periodNumber, startTime: target.startTime, endTime: target.endTime },
+    wasClamped: target.periodNumber !== slot.periodNumber,
+    previousPeriod: slot.periodNumber,
+    nextPeriod: target.periodNumber,
+    allowed,
+  };
 }

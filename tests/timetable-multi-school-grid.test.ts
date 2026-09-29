@@ -159,12 +159,10 @@ function formOf(renderer: any) {
 
 /** Il <select> "Numero dell'ora" del modale, con le sue opzioni. */
 function periodOptions(renderer: any): number[] {
-  const selects = formOf(renderer).findAllByType('select');
-  // 0 = giorno, 1 = numero dell'ora (stesso ordine del JSX).
-  return selects[1].props.children.map((opt: any) => Number(opt.props.value));
+  return byId(renderer, 'slot-period').props.children.map((opt: any) => Number(opt.props.value));
 }
-const daySelect = (renderer: any) => formOf(renderer).findAllByType('select')[0];
-const periodSelect = (renderer: any) => formOf(renderer).findAllByType('select')[1];
+const daySelect = (renderer: any) => byId(renderer, 'slot-day');
+const periodSelect = (renderer: any) => byId(renderer, 'slot-period');
 
 /** Le celle "fuori configurazione" hanno il bordo ambrato tratteggiato di C2. */
 const outOfConfigCells = (renderer: any) =>

@@ -167,8 +167,8 @@ function formOf(renderer: any) {
   assert.equal(forms.length, 1, 'il modale della lezione è aperto');
   return forms[0];
 }
-const daySelect = (renderer: any) => formOf(renderer).findAllByType('select')[0];
-const periodSelect = (renderer: any) => formOf(renderer).findAllByType('select')[1];
+const daySelect = (renderer: any) => byId(renderer, 'slot-day');
+const periodSelect = (renderer: any) => byId(renderer, 'slot-period');
 const timeInputs = (renderer: any) => formOf(renderer).findAll((el: any) => el.props?.type === 'time');
 
 // ---------------------------------------------------------------------------
