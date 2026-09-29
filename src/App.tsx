@@ -72,6 +72,7 @@ import {
   isGoogleSyncEnabled,
   syncOptedInGoogleEvents,
 } from "./services/googleCalendarService";
+import { normalizeTeacherProfile } from "./utils/multiSchool";
 import { accountSync } from "./services/sync/accountSync";
 import type { SyncStatus } from "./services/sync/types";
 import { usePWAUpdates } from "./hooks/usePWAUpdates";
@@ -365,6 +366,38 @@ export default function App({ initialData }: { initialData: LocalData }) {
 
   const handleSaveTimeSlotConfig = withPersistenceFeedback(async (config: TimeSlotConfig) => {
     await storage.saveTimeSlotConfig(config);
+    showToast("Fasce orarie aggiornate.");
+  });
+
+  /**
+   * Fasce orarie di UN istituto.
+   *
+   * Scrive SOLO `schools[i].timeSlotConfig` della scuola indicata: gli altri
+   * istituti e la configurazione globale (che resta il default di chi non si è
+   * ancora personalizzato) non vengono toccati. Il profilo si aggiorna per
+   * spread, così nessun campo dell'istituto va perso.
+   *
+   * Si parte dal profilo NORMALIZZATO perché è lì che un profilo legacy espone
+   * la sua primaria: senza normalizzare, `schools` potrebbe non contenere
+   * ancora la scuola che l'utente sta configurando.
+   */
+  const handleSaveSchoolTimeSlotConfig = withPersistenceFeedback(async (
+    schoolId: string,
+    config: TimeSlotConfig
+  ) => {
+    const normalized = normalizeTeacherProfile(profile);
+    const schools = normalized.schools ?? [];
+    // Istituto inesistente: non si scrive nulla e non si mente all'utente con
+    // un messaggio di conferma.
+    if (!schools.some(school => school.id === schoolId)) {
+      throw new Error("Istituto non trovato nel profilo.");
+    }
+    await storage.saveProfile({
+      ...normalized,
+      schools: schools.map(school =>
+        school.id === schoolId ? { ...school, timeSlotConfig: config } : school
+      ),
+    });
     showToast("Fasce orarie aggiornate.");
   });
 
@@ -883,6 +916,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
             onClearTimetable={handleClearTimetable}
             onSaveProfile={handleSaveProfile}
             onSaveTimeSlotConfig={handleSaveTimeSlotConfig}
+            onSaveSchoolTimeSlotConfig={handleSaveSchoolTimeSlotConfig}
             initialSlot={isSlotEditOpen(slotEditNav) ? slotEditNav.slot : null}
             initialSlotType={isSlotEditOpen(slotEditNav) ? slotEditNav.type : null}
             onBackToOrigin={isSlotEditOpen(slotEditNav) ? handleBackFromSlotEdit : undefined}

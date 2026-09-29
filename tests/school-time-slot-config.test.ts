@@ -367,13 +367,14 @@ test('G1/18-19. la globale resta dov era: stessa API, stessa chiave, nessuna chi
   );
 });
 
-test('G1/20. nessun consumatore usa ancora school.timeSlotConfig', async () => {
+test('G1/20. fuori dall editor nessuno usa ancora school.timeSlotConfig', async () => {
   const { readFileSync } = await import('node:fs');
   const { join } = await import('node:path');
-  // G1 prepara il modello e basta: la lettura per istituto arriva in G2/G3.
-  // Finché non arriva, tutti continuano a leggere la configurazione globale.
+  // G1 ha introdotto il modello; G2 ne ha fatto il primo consumatore, il
+  // TimetableEditor. Tutto il resto — viste del Planning, scanner, D1, D3 —
+  // legge ancora la configurazione GLOBALE: è lo stato intermedio previsto dal
+  // piano, e arriva a G3. Il confine va tenuto esplicito.
   for (const file of [
-    ['components', 'TimetableEditor.tsx'],
     ['components', 'TodayView.tsx'],
     ['components', 'WeekView.tsx'],
     ['components', 'DocumentScannerModal.tsx'],
