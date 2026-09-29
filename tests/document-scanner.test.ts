@@ -725,9 +725,22 @@ test('incrocio: 1:1 con gli slot personali (non aggiunge slot nuovi)', () => {
 // 10. MODELLO ESISTENTE (TimetableSlot + coTeachingSubjects)
 // ---------------------------------------------------------------------------
 
+/**
+ * Profilo il cui istituto ha davvero id "school-x".
+ *
+ * La destinazione di un import è un istituto REALE del profilo: da F5 la
+ * geometria con cui si valida e lo `schoolId` scritto sugli slot sono la stessa
+ * scuola, quindi un id che non esiste nel profilo non viene più propagato ma
+ * ricade sulla primaria (come in griglia, Oggi e Settimana).
+ */
+const profileSchoolX: TeacherProfile = {
+  ...profile,
+  schools: [{ id: 'school-x', name: 'IC Da Vinci', isPrimary: true, active: true }],
+};
+
 test('modello: slot ricostruiti usano TimetableSlot, subject "Sostegno", materia in coTeachingSubjects', () => {
   const recon = crossrefTimetables(personal, curricular).map(s => ({ ...s, correctedClass: s.classLabel ?? '', correctedSubject: s.coTeachingSubjects.length === 1 ? s.coTeachingSubjects[0] : '' }));
-  const slots = reconstructedToTimetableSlots(recon, { profile, timeSlotConfig: undefined, schoolId: 'school-x' });
+  const slots = reconstructedToTimetableSlots(recon, { profile: profileSchoolX, timeSlotConfig: undefined, schoolId: 'school-x' });
   assert.equal(slots.length, 5, 'slot senza classe non salvati (mai inventata)');
   for (const slot of slots) {
     assert.equal(slot.subject, SUPPORT_TEACHER_SUBJECT, 'materia principale resta Sostegno');
@@ -782,7 +795,7 @@ test('conferma: orario esistente NON sovrascritto (default "solo mancanti")', ()
     id: 'r2', dayOfWeek: 1, periodIndex: 1, classLabel: '3E', coTeachingSubjects: [],
     status: 'none' as const, confidence: 'low' as const, selected: true, correctedClass: '3E', correctedSubject: '',
   }];
-  const incoming = reconstructedToTimetableSlots(recon, { profile, schoolId: 'school-x' });
+  const incoming = reconstructedToTimetableSlots(recon, { profile: profileSchoolX, schoolId: 'school-x' });
   const merged = applyReconstruction(existing, incoming, 'missing-only');
   assert.equal(merged.addedCount, 1, 'solo lo slot mancante è aggiunto');
   assert.equal(merged.replacedCount, 0, 'nessuna sostituzione in modalità missing-only');
@@ -797,8 +810,8 @@ test('conferma: "Sostituisci" è una sostituzione REALE nell’ambito della rico
     id: 'r1', dayOfWeek: 2, periodIndex: 1, classLabel: '3D', coTeachingSubjects: ['Matematica'],
     status: 'unique' as const, confidence: 'high' as const, selected: true, correctedClass: '3D', correctedSubject: 'Matematica',
   }];
-  const incoming = reconstructedToTimetableSlots(recon, { profile, schoolId: 'school-x' });
-  const merged = applyReconstruction(existing, incoming, 'replace-scope', { profile });
+  const incoming = reconstructedToTimetableSlots(recon, { profile: profileSchoolX, schoolId: 'school-x' });
+  const merged = applyReconstruction(existing, incoming, 'replace-scope', { profile: profileSchoolX });
   assert.equal(merged.replacedCount, 1);
   assert.equal(merged.addedCount, 0);
   const replaced = merged.slots.find(s => s.dayOfWeek === 2 && s.periodNumber === 1)!;
@@ -1128,7 +1141,7 @@ test('conferma: slot deselezionato non salvato; modifica manuale della materia r
     { id: 'r2', dayOfWeek: 1, periodIndex: 1, classLabel: '3E', coTeachingSubjects: [], status: 'none' as const, confidence: 'low' as const, selected: false, correctedClass: '3E', correctedSubject: '' },
     { id: 'r3', dayOfWeek: 3, periodIndex: 1, classLabel: undefined, coTeachingSubjects: [], status: 'none' as const, confidence: 'low' as const, selected: true, correctedClass: '', correctedSubject: '' },
   ];
-  const slots = reconstructedToTimetableSlots(recon, { profile, schoolId: 'school-x' });
+  const slots = reconstructedToTimetableSlots(recon, { profile: profileSchoolX, schoolId: 'school-x' });
   assert.equal(slots.length, 1, 'deselezionato + senza classe esclusi dal salvataggio');
   assert.equal(slots[0].className, '3D');
   assert.deepEqual(slots[0].coTeachingSubjects, ['Storia'], 'la correzione manuale dell\'utente vince sulla proposta');

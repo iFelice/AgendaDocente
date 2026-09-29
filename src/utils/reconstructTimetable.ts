@@ -20,7 +20,7 @@
  */
 
 import type { TeacherProfile, TimeSlotConfig, TimetableSlot } from "../types";
-import { getPrimarySchool, normalizeTeacherProfile } from "./multiSchool";
+import { getPrimarySchool, normalizeTeacherProfile, schoolByIdOrPrimary } from "./multiSchool";
 import { periodsForDay } from "./schoolDayPeriods";
 import type { SchoolWeekday } from "../types";
 import { getEffectivePeriodSlots, generateDefaultPeriodSlots } from "./timeSlots";
@@ -132,8 +132,20 @@ export function partitionReconstructedSlots(
   options: ReconstructedTimetableOptions
 ): PartitionedReconstructedSlots {
   const support = isSupportTeacherProfile(options.profile);
-  const schoolId = options.schoolId ?? normalizeTeacherProfile(options.profile).schools?.find(s => s.isPrimary)?.id;
-  const primarySchool = getPrimarySchool(options.profile);
+  /**
+   * ISTITUTO DI DESTINAZIONE dell'import: uno solo, e lo stesso sia per
+   * decidere quali ore il giorno prevede sia per marcare gli slot salvati.
+   *
+   * Prima la geometria veniva letta sempre dalla PRIMARIA mentre lo `schoolId`
+   * scritto era quello scelto: un orario della secondaria veniva così validato
+   * con le ore di un'altra scuola. `schoolId` assente o orfano ricade sulla
+   * primaria, come nel resto dell'app.
+   */
+  const destinationSchool = schoolByIdOrPrimary(
+    options.schoolId,
+    normalizeTeacherProfile(options.profile).schools
+  );
+  const schoolId = destinationSchool?.id ?? getPrimarySchool(options.profile)?.id;
   const effectivePeriods = getEffectivePeriodSlots(options.timeSlotConfig);
 
   const result: TimetableSlot[] = [];
@@ -145,7 +157,7 @@ export function partitionReconstructedSlots(
     if (!className) continue; // nessuna classe determinabile: mai inventata
 
     // 1. Il giorno prevede quell'ora?
-    const allowed = periodsForDay(slot.dayOfWeek as SchoolWeekday, primarySchool, options.timeSlotConfig);
+    const allowed = periodsForDay(slot.dayOfWeek as SchoolWeekday, destinationSchool, options.timeSlotConfig);
     if (slot.periodIndex > allowed) {
       rejected.push({ item: slot, reason: "day-not-allowed" });
       continue;

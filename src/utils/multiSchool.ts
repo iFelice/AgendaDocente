@@ -154,8 +154,30 @@ export function effectiveSchoolForSlot(
   slot: Pick<TimetableSlot, "schoolId">,
   schools: readonly SchoolProfile[] | undefined
 ): SchoolProfile | undefined {
+  return schoolByIdOrPrimary(slot.schoolId, schools);
+}
+
+/**
+ * Stessa risoluzione di `effectiveSchoolForSlot`, ma a partire da un ID nudo:
+ * serve quando l'istituto è già stato SCELTO e la lezione non esiste ancora —
+ * la scansione di un orario, che deve conoscere la scuola di destinazione
+ * prima di avere qualsiasi slot.
+ *
+ *  - id valido   -> quell'istituto;
+ *  - id assente  -> istituto principale;
+ *  - id ORFANO   -> istituto principale.
+ *
+ * Tenere una sola implementazione è il punto: geometria attesa, validazione e
+ * `schoolId` scritto sugli slot devono rispondere tutti alla stessa domanda
+ * nello stesso modo, altrimenti si importano lezioni convalidate con le ore di
+ * un istituto e salvate in un altro.
+ */
+export function schoolByIdOrPrimary(
+  schoolId: string | undefined,
+  schools: readonly SchoolProfile[] | undefined
+): SchoolProfile | undefined {
   const list = schools ?? [];
-  const key = (slot.schoolId ?? "").trim();
+  const key = (schoolId ?? "").trim();
   const match = key ? list.find(school => school.id === key) : undefined;
   return match ?? list.find(school => school.isPrimary) ?? list[0];
 }

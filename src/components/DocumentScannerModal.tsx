@@ -51,7 +51,7 @@ import {
 } from "../utils/timetableAnalysis";
 import { DAY_LABELS } from "../utils/timetableTokens";
 import { matchStudentName, studentMatchLabel } from "../utils/studentMatcher";
-import { getPrimarySchool, normalizeTeacherProfile } from "../utils/multiSchool";
+import { getPrimarySchool, normalizeTeacherProfile, schoolByIdOrPrimary } from "../utils/multiSchool";
 import { derivePersonalScannerPeriodsByDay } from "../utils/scannerWeekGeometry";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -334,6 +334,16 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
   const [curricular, setCurricular] = useState<{ rows: CurricularRawRow[]; slots: CurricularTimetableSlot[]; skipped: SkippedCell[]; droppedCount: number } | null>(null);
   const [studentCandidates, setStudentCandidates] = useState<StudentCommitmentCandidate[] | null>(null);
   const [reconSlots, setReconSlots] = useState<ReconEditSlot[] | null>(null);
+  /**
+   * ISTITUTO DELLA SCANSIONE, scelto PRIMA di analizzare il documento.
+   *
+   * Da lui dipende la struttura della settimana proposta, quindi la lunghezza
+   * attesa di ogni blocco giornaliero nel prompt: sceglierlo dopo l'analisi
+   * significherebbe aver già letto il documento con la geometria sbagliata.
+   * Una volta avviata la ricostruzione resta CONGELATO in `reconSchoolId`, così
+   * fra analisi e salvataggio la destinazione non può cambiare sotto silenzio.
+   */
+  const [scanSchoolId, setScanSchoolId] = useState<string | undefined>(undefined);
   const [reconSchoolId, setReconSchoolId] = useState<string | undefined>(undefined);
   /**
    * Archivio di destinazione. `null` = non ancora scelto: succede solo quando
@@ -379,13 +389,18 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
    * dichiara per ciascun giorno (6/6/6/7/6 se il Profilo ha un giovedì lungo),
    * o lo stesso numero per tutti i giorni se il Profilo non ha `dayPeriods`.
    *
-   * La derivazione è centralizzata in `derivePersonalScannerPeriodsByDay`: per
-   * D3 la scuola è la PRIMARIA, come in C1/C2/D1/D2. Quando lo scanner saprà
-   * scegliere l'istituto dell'import, cambierà solo l'argomento passato qui.
+   * La derivazione è centralizzata in `derivePersonalScannerPeriodsByDay`, che
+   * resta indifferente a profili e id: la scuola giusta la sceglie QUI il
+   * chiamante, ed è quella selezionata per la scansione (la primaria finché non
+   * se ne sceglie un'altra, o se l'id non corrisponde a nessun istituto).
    */
+  const scanSchool = useMemo(
+    () => schoolByIdOrPrimary(scanSchoolId, normalizeTeacherProfile(profile).schools),
+    [scanSchoolId, profile],
+  );
   const periodsByDayPrefill = useMemo(
-    () => derivePersonalScannerPeriodsByDay(getPrimarySchool(profile), timeSlotConfig),
-    [profile, timeSlotConfig],
+    () => derivePersonalScannerPeriodsByDay(scanSchool, timeSlotConfig),
+    [scanSchool, timeSlotConfig],
   );
 
   const periodsPerDayPrefill =
@@ -484,6 +499,28 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
   const natureLabel = support ? "sostegno" : "materia";
   const schools = useMemo(() => normalizeTeacherProfile(profile).schools ?? [], [profile]);
   const multiSchool = schools.length > 1;
+
+  /**
+   * Cambio dell'istituto prima della scansione.
+   *
+   * La struttura della settimana torna alla proposta della NUOVA scuola e la
+   * conferma si azzera: una conferma data sulla geometria di un istituto non
+   * può valere per un altro. Anche le eventuali modifiche manuali vengono
+   * scartate — sono state fatte per descrivere un'altra scuola, e tenerle
+   * mescolate al prefill del nuovo istituto darebbe una geometria che non
+   * appartiene a nessuno dei due.
+   *
+   * La geometria NON viene ricalcolata qui: si aggiorna solo l'istituto e la
+   * proposta arriva da `periodsByDayPrefill`, che resta l'unica derivazione.
+   */
+  const lastScanSchoolId = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (lastScanSchoolId.current === scanSchoolId) return;
+    lastScanSchoolId.current = scanSchoolId;
+    setPeriodsByDayInput(periodsByDayPrefill.map(String));
+    setWeekStructureEditing(false);
+    setPeriodsPerDayConfirmed(false);
+  }, [scanSchoolId, periodsByDayPrefill]);
   /** Archivio su cui si sta per scrivere: vuoto finché l'utente non lo sceglie. */
   const existingTarget = reconTarget === "provvisorio"
     ? provisionalTimetable
@@ -637,6 +674,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     setCurricular(null);
     setStudentCandidates(null);
     setReconSlots(null);
+    setScanSchoolId(undefined);
     setReconSchoolId(undefined);
     setReconTarget("provvisorio");
     setMergeMode("missing-only");
@@ -953,7 +991,10 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
       correctedSubject: slot.coTeachingSubjects.length === 1 ? slot.coTeachingSubjects[0] : "",
     }));
     setReconSlots(reconstruction);
-    const nextSchoolId = multiSchool ? schools.find(s => s.isPrimary)?.id : undefined;
+    // Istituto CONGELATO: è quello scelto prima dell'analisi, cioè lo stesso
+    // con cui è stata dichiarata la struttura della settimana e costruito il
+    // prompt. Da qui in poi non cambia più per questa ricostruzione.
+    const nextSchoolId = multiSchool ? scanSchool?.id : undefined;
     setReconSchoolId(nextSchoolId);
     // Archivio di destinazione: lo decide la posizione del vecchio orario
     // pertinente, non un default fisso. Gli slot in arrivo sono calcolati con la
@@ -1344,6 +1385,27 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                   cinque valori validi e confermati l'analisi non parte.
                   Non è la configurazione delle FASCE ORARIE (a che ora suona la
                   campana): quella si modifica dalla griglia dell'orario. */}
+              {/* Istituto della scansione. Sta PRIMA della struttura della
+                  settimana perché è lui a determinarla: le ore di ogni giorno
+                  sono quelle dichiarate da questa scuola. Compare solo con più
+                  istituti; con uno solo il percorso resta quello di D3. */}
+              {requiresWeekStructure && multiSchool && (
+                <label className="flex items-center gap-2 text-xs font-medium text-stone-700">
+                  <span className="shrink-0">Istituto</span>
+                  <select
+                    id="scan-school-select"
+                    aria-label="Istituto della scansione"
+                    value={scanSchool?.id ?? ""}
+                    onChange={e => setScanSchoolId(e.target.value)}
+                    className="flex-1 min-w-0 border border-stone-300 rounded-lg p-2 bg-white"
+                  >
+                    {schools.map(school => (
+                      <option key={school.id} value={school.id}>{school.name}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
+
               {requiresWeekStructure && (
                 <div className="p-3 rounded-xl border border-stone-200 bg-white space-y-2">
                   <div className="flex items-center justify-between gap-2">
@@ -1878,20 +1940,17 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                 </div>
               </div>
 
+              {/* Istituto: scelto prima della scansione e ormai congelato. Qui
+                  si LEGGE soltanto — cambiarlo adesso significherebbe aver
+                  letto il documento con la geometria di un'altra scuola e aver
+                  già scartato ore che quella nuova ammetterebbe. */}
               {multiSchool && (
-                <label className="flex items-center gap-2 text-xs font-medium text-stone-700">
-                  <span className="shrink-0">Istituto:</span>
-                  <select
-                    aria-label="Istituto"
-                    value={reconSchoolId ?? schools[0]?.id ?? ""}
-                    onChange={e => setReconSchoolId(e.target.value)}
-                    className="flex-1 min-w-0 border border-stone-300 rounded-lg p-2 bg-white"
-                  >
-                    {schools.map(school => (
-                      <option key={school.id} value={school.id}>{school.name}</option>
-                    ))}
-                  </select>
-                </label>
+                <p id="recon-school" className="text-xs font-medium text-stone-700">
+                  <span>Istituto: </span>
+                  <span className="font-semibold text-stone-900">
+                    {schoolByIdOrPrimary(reconSchoolId, schools)?.name ?? ""}
+                  </span>
+                </p>
               )}
 
               <label className="flex items-center gap-2 text-xs font-medium text-stone-700">

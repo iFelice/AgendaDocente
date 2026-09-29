@@ -381,13 +381,26 @@ test('D1 interpreta dayPeriods con la scuola PRIMARIA, come C1/C2', () => {
   assert.equal(slots[0].dayOfWeek, 4);
 });
 
-test('lo schoolId di destinazione non cambia la validazione (resta la primaria)', () => {
-  const withSchoolId = partitionReconstructedSlots(
+test('lo schoolId di destinazione DECIDE la validazione (F5)', () => {
+  // La secondaria ammette 10 ore il lunedì: destinando lì, Lun/7 è regolare.
+  // Prima di F5 veniva rifiutata con le ore della primaria pur essendo salvata
+  // con lo schoolId della secondaria: validata su una scuola, scritta in
+  // un'altra.
+  const toSecondary = partitionReconstructedSlots(
     [item(1, 7)],
     { profile: profileTwoSchools, timeSlotConfig: config7, schoolId: 's2' }
   );
-  assert.equal(withSchoolId.slots.length, 0, 'anche destinando a s2 vale la primaria');
-  assert.equal(withSchoolId.rejected[0].reason, 'day-not-allowed');
+  assert.equal(toSecondary.rejected.length, 0, 's2 ammette la 7ª del lunedì');
+  assert.equal(toSecondary.slots.length, 1);
+  assert.equal(toSecondary.slots[0].schoolId, 's2', 'validata e scritta sulla STESSA scuola');
+
+  // Stessa ora destinata alla primaria (6 ore il lunedì): rifiutata.
+  const toPrimary = partitionReconstructedSlots(
+    [item(1, 7)],
+    { profile: profileTwoSchools, timeSlotConfig: config7, schoolId: 's1' }
+  );
+  assert.equal(toPrimary.slots.length, 0);
+  assert.equal(toPrimary.rejected[0].reason, 'day-not-allowed');
 });
 
 test('gli slot validi conservano lo schoolId di destinazione', () => {

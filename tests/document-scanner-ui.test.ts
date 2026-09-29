@@ -338,8 +338,13 @@ async function waitForAnalysisSettled(renderer: any, timeoutMs = 4000) {
   }
 }
 
-async function analyzeWithConsent(renderer: any, periodsPerDay?: string) {
+async function analyzeWithConsent(renderer: any, periodsPerDay?: string, schoolId?: string) {
   await act(async () => { byId(renderer, 'scan-analyze-cta').props.onClick(); });
+  // Istituto della scansione: si sceglie PRIMA della struttura della settimana,
+  // perché è lui a determinarla (cambiarlo azzera la conferma).
+  if (schoolId !== undefined) {
+    await act(async () => { byId(renderer, 'scan-school-select').props.onChange({ target: { value: schoolId } }); });
+  }
   // Orario personale: le ore per giorno dichiarate (se il test le vuole diverse
   // dal prefill) prima dell'invio.
   if (periodsPerDay !== undefined) await setPeriodsPerDay(renderer, periodsPerDay);
@@ -374,14 +379,14 @@ async function confirmAndSettleAnalysis(renderer: any) {
  * d'istituto è sospesa, quindi non esiste più un secondo documento da acquisire:
  * la revisione si raggiunge direttamente dalla riga personale.
  */
-async function flowToReconstruction(renderer: any) {
+async function flowToReconstruction(renderer: any, schoolId?: string) {
   fetchCalls.length = 0; // contatore per-flusso (il test può eseguire più flussi)
   await goToSource(renderer, 'personal');
   fetchResponse = { status: 200, json: personalResponse as any };
   await chooseCameraAndPick(renderer, makeFile('orario-personale.jpg', 'image/jpeg', 20_000));
   // Preview: mai analisi automatica.
   assert.equal(fetchCalls.length, 0, 'nessun invio automatico: serve la CTA');
-  await analyzeWithConsent(renderer);
+  await analyzeWithConsent(renderer, undefined, schoolId);
   // Nessuna conferma della riga: il server l'ha già verificata col cognome del profilo.
   assert.ok(flatText(renderer.root).includes('Manganiello F.'), 'riga letta mostrata in revisione');
   assert.equal(renderer.root.findAll((el: any) => el.props?.name === 'scan-personal-row').length, 0, 'nessuna scelta della riga');
@@ -698,20 +703,31 @@ test('multi-istituto: con un solo istituto nessuna UI extra; con più istituti s
   // Mono istituto: nessun selettore.
   const mono = await renderModal();
   await flowToReconstruction(mono);
-  assert.equal(mono.root.findAll((el: any) => String(el.props?.['aria-label'] ?? '') === 'Istituto').length, 0, 'niente selettore istituto in mono-istituto');
+  assert.equal(mono.root.findAll((el: any) => String(el.props?.['aria-label'] ?? '').startsWith('Istituto')).length, 0, 'niente selettore istituto in mono-istituto');
 
-  // Multi istituto: selettore presente e la scelta arriva al salvataggio.
+  // Multi istituto: la sede si sceglie PRIMA dell'analisi e la scelta arriva
+  // fino agli slot salvati.
   const saved: SavedTimetable[] = [];
   const multi = await renderModal({
     profile: multiSchoolProfile,
     onSaveReconstructedTimetable: (slots, target, mode) => { saved.push({ slots, target, mode }); return true; },
   });
-  await flowToReconstruction(multi);
-  const schoolSelect = multi.root.findByProps({ 'aria-label': 'Istituto' });
+  await goToSource(multi, 'personal');
+  fetchResponse = { status: 200, json: personalResponse as any };
+  await chooseCameraAndPick(multi, makeFile('orario-personale.jpg', 'image/jpeg', 20_000));
+  await act(async () => { byId(multi, 'scan-analyze-cta').props.onClick(); });
+  const schoolSelect = byId(multi, 'scan-school-select');
   assert.ok(schoolSelect, 'selettore istituto presente con più sedi attive');
   assert.equal(schoolSelect.props.value, 'school-a', 'default: istituto principale');
-
   await act(async () => { schoolSelect.props.onChange({ target: { value: 'school-b' } }); });
+  await confirmPeriodsPerDay(multi);
+  await act(async () => { byId(multi, 'scan-cloud-consent').props.onChange({ target: { checked: true } }); });
+  await confirmAndSettleAnalysis(multi);
+  await act(async () => { byId(multi, 'scan-personal-continue').props.onClick(); });
+
+  // In preview l'istituto è CONGELATO: si legge, non si cambia.
+  assert.equal(multi.root.findAll((el: any) => el.props?.id === 'scan-school-select').length, 0, 'nessun selettore dopo l analisi');
+  assert.equal(flatText(byId(multi, 'recon-school')), 'Istituto: Liceo Fermi', 'la sede scelta è mostrata, non modificabile');
   await chooseMergeModeIfAsked(multi);
   await act(async () => { byId(multi, 'recon-confirm-save').props.onClick(); });
   assert.ok(saved[0].slots.every(s => s.schoolId === 'school-b'), 'gli slot salvati ricevono la schoolId scelta');
@@ -1754,15 +1770,26 @@ test('CASO C: vecchie ore di un altro istituto -> nessuna domanda, e compaiono s
     await flowToReconstruction(renderer);
     assert.equal(mergeRadiosOf(renderer).length, 0, 'le ore di un altro istituto non sono in ambito');
     assert.equal(saveDisabled(renderer), false);
-
-    // Se l'utente sceglie proprio quell'istituto, le sue ore diventano pertinenti.
-    const schoolSelect = renderer.root.findByProps({ 'aria-label': 'Istituto' });
-    await act(async () => { schoolSelect.props.onChange({ target: { value: 'school-b' } }); });
-    assert.equal(mergeRadiosOf(renderer).length, 2, 'la domanda compare solo per l istituto giusto');
-    assert.match(flatText(renderer.root), /Archivio: Provvisorio · 1 ora pertinente/);
-    assert.equal(saveDisabled(renderer), true);
   } finally {
     await act(async () => { renderer.unmount(); });
+  }
+
+  // Se l'utente sceglie PRIMA della scansione proprio quell'istituto, le sue
+  // ore diventano pertinenti. La scelta non è più rifacibile a posteriori: la
+  // geometria del documento è già stata letta con quella scuola.
+  const renderer2 = await renderModal({
+    profile: multiSchoolProfile,
+    provisionalTimetable: otherSchool,
+    definitiveTimetable: [],
+    onSaveReconstructedTimetable: (slots, target, mode) => { saved.push({ slots, target, mode }); return true; },
+  });
+  try {
+    await flowToReconstruction(renderer2, 'school-b');
+    assert.equal(mergeRadiosOf(renderer2).length, 2, 'la domanda compare solo per l istituto giusto');
+    assert.match(flatText(renderer2.root), /Archivio: Provvisorio · 1 ora pertinente/);
+    assert.equal(saveDisabled(renderer2), true);
+  } finally {
+    await act(async () => { renderer2.unmount(); });
   }
   assert.ok(saved.length === 0 && slotsInReplacementScope, 'nessun salvataggio in questo scenario');
 });
