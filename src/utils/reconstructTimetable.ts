@@ -224,6 +224,11 @@ export type TimetableMergeMode = "missing-only" | "replace-scope";
  * all'istituto principale del profilo (stessa regola di `normalizeTeacherProfile`),
  * così un orario esistente salvato prima del modello multi-istituto non resta
  * "invisibile" né alla sostituzione né al controllo dei duplicati.
+ *
+ * È l'IDENTITÀ CANONICA a runtime di uno slot rispetto all'istituto, e vale anche
+ * per la UI: la griglia dell'orario filtra con questa funzione, mai con
+ * `slot.schoolId` grezzo — quel confronto farebbe sparire gli slot legacy da ogni
+ * istituto. Nessun dato viene migrato: la regola si applica in lettura.
  */
 export function slotSchoolKey(slot: Pick<TimetableSlot, "schoolId">, profile?: TeacherProfile): string {
   const clean = (slot.schoolId ?? "").trim();

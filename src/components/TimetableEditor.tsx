@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import {
   PeriodSlot,
+  SchoolProfile,
   SchoolWeekday,
   TeacherProfile,
   TimeSlotConfig,
@@ -38,7 +39,8 @@ import { MultiChipInput } from "./MultiChipInput";
 import { collectKnownTeacherNames, coTeachingSummary, coTeachingSubjectsOf, pruneCoTeachingFields } from "../utils/coTeaching";
 import { isSupportTeacherOf } from "../utils/teacherType";
 import { DEFAULT_SUBJECTS, mergeSubjectSuggestions, normalizeSubjectName } from "../utils/subjects";
-import { getPrimarySchool } from "../utils/multiSchool";
+import { getPrimarySchool, normalizeTeacherProfile } from "../utils/multiSchool";
+import { slotSchoolKey } from "../utils/reconstructTimetable";
 import { MAX_PERIODS_PER_DAY, maxPeriodsInWeek, periodsForDay } from "../utils/schoolDayPeriods";
 import {
   DAY_SWIPE_HORIZONTAL_RATIO,
@@ -325,6 +327,79 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   const currentSlots =
     activeTab === "provvisorio" ? provisionalTimetable : definitiveTimetable;
 
+  /**
+   * ISTITUTI DEL DOCENTE.
+   *
+   * Sempre dal profilo NORMALIZZATO: un profilo legacy senza `schools[]` espone
+   * comunque la sua primaria, quindi l'elenco non è mai vuoto e la griglia non
+   * ha bisogno di una modalità "nessuna scuola".
+   */
+  const schools = useMemo(() => normalizeTeacherProfile(profile).schools ?? [], [profile]);
+  const primarySchool = useMemo(() => getPrimarySchool(profile), [profile]);
+  const isMultiSchool = schools.length > 1;
+
+  /**
+   * ISTITUTO MOSTRATO DALLA GRIGLIA.
+   *
+   * Stato EFFIMERO di sola visualizzazione: non è persistito e non finisce in
+   * nessuno slot. Default: la primaria (o la prima scuola normalizzata, che con
+   * `normalizeTeacherProfile` è comunque marcata primaria).
+   *
+   * È una dimensione INDIPENDENTE dal tab provvisorio/definitivo e dal filtro
+   * giorno del mobile: cambiare istituto non tocca né l'uno né l'altro.
+   */
+  const [activeSchoolId, setActiveSchoolId] = useState<string>(
+    () => getPrimarySchool(profile)?.id ?? normalizeTeacherProfile(profile).schools?.[0]?.id ?? ""
+  );
+
+  // Il profilo può cambiare mentre l'editor è montato (istituto rimosso o
+  // rinominato dal Profilo): se l'id selezionato non esiste più si torna a una
+  // scuola valida, così la griglia non resta senza istituto e nessuno slot
+  // diventa irraggiungibile.
+  useEffect(() => {
+    if (schools.some((school) => school.id === activeSchoolId)) return;
+    setActiveSchoolId(primarySchool?.id ?? schools[0]?.id ?? "");
+  }, [schools, activeSchoolId, primarySchool]);
+
+  const activeSchool = useMemo(
+    () => schools.find((school) => school.id === activeSchoolId) ?? primarySchool,
+    [schools, activeSchoolId, primarySchool]
+  );
+
+  /**
+   * GRIGLIA IN CUI COMPARE UNA LEZIONE.
+   *
+   * Parte dall'identità canonica `slotSchoolKey` — mai da `slot.schoolId`
+   * grezzo, che farebbe sparire gli slot legacy da ogni istituto — e aggiunge
+   * l'unica regola che la sola identità non può dare: se quell'istituto NON
+   * esiste (più) nel profilo, la lezione finisce nella primaria.
+   *
+   * Senza questa rete un `schoolId` orfano — backup di un profilo con un
+   * istituto poi rimosso, dato scritto da una versione precedente — renderebbe
+   * la lezione irraggiungibile da OGNI griglia: esattamente il difetto che
+   * questo passo deve eliminare, non introdurre. Nessun dato viene corretto o
+   * riscritto: la regola vale in sola lettura.
+   */
+  const gridSchoolIdOf = (slot: TimetableSlot): string => {
+    const key = slotSchoolKey(slot, profile);
+    if (schools.some((school) => school.id === key)) return key;
+    return primarySchool?.id ?? schools[0]?.id ?? key;
+  };
+
+  /**
+   * LEZIONI DELL'ISTITUTO MOSTRATO — unico array su cui lavora la griglia.
+   *
+   * È solo una VISTA: nessuna cancellazione, nessuna deduplica, nessun
+   * riordino, nessuna scrittura. Due lezioni sulla stessa coordinata ma di
+   * istituti diversi non si nascondono più a vicenda perché non si trovano
+   * mai nello stesso array.
+   */
+  const schoolSlots = useMemo(
+    () => currentSlots.filter((slot) => gridSchoolIdOf(slot) === activeSchoolId),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [currentSlots, profile, schools, primarySchool, activeSchoolId]
+  );
+
   // Il modale sta modificando una lezione ESISTENTE dell'orario mostrato
   // (stesso criterio di titolo ed "Elimina ora" del modale). Mentre è aperta,
   // cambiare tab cambierebbe la destinazione di Salva/Elimina: i tab restano
@@ -361,12 +436,16 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
    * della settimana scolastica — mai `mobileSelectedDay`, che è solo un filtro di
    * visualizzazione e non può cambiare quante fasce servono.
    *
-   * Configurazione presa dalla SchoolProfile PRIMARIA: la griglia oggi non è
-   * multi-istituto (non legge `schoolId`) e questo passo non la rende tale.
+   * Configurazione presa dall'istituto MOSTRATO dalla griglia: il fabbisogno di
+   * fasce è quello del suo giorno più lungo, quindi cambia col selettore.
+   *
+   * ATTENZIONE: `activeSchool` descrive QUANTE ore ha ogni giorno (`dayPeriods`),
+   * NON a che ora suonano le campane. Gli orari restano quelli di
+   * `timeSlotConfig`, che è unico per il docente: due istituti con giornate di
+   * lunghezza diversa condividono ancora la stessa scansione oraria.
    */
   const schoolWeekDays = days.map(d => d.day) as SchoolWeekday[];
-  const primarySchool = useMemo(() => getPrimarySchool(profile), [profile]);
-  const requiredPeriods = maxPeriodsInWeek(schoolWeekDays, primarySchool, timeSlotConfig);
+  const requiredPeriods = maxPeriodsInWeek(schoolWeekDays, activeSchool, timeSlotConfig);
   /** Fasce ancora da aggiungere al draft del drawer per coprire il fabbisogno. */
   const missingSlotCount = Math.max(0, requiredPeriods - customSlotsDraft.length);
 
@@ -382,7 +461,9 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
    *  - `periods.length`: le fasce realmente configurate. Se sono PIÙ del
    *    fabbisogno (configurazioni custom preesistenti) devono restare tutte
    *    visibili: nessuna regressione rispetto a prima.
-   *  - `legacyRowCount`: il periodo più alto fra le lezioni GIÀ SALVATE. Una
+   *  - `legacyRowCount`: il periodo più alto fra le lezioni GIÀ SALVATE
+   *    DELL'ISTITUTO MOSTRATO. Conta solo quelle: un'8ª ora della scuola B non
+   *    deve far comparire una riga 8 nella griglia della scuola A. Una
    *    lezione esistente non può sparire dalla UI solo perché la configurazione
    *    della scuola è cambiata: resta visibile, modificabile ed eliminabile.
    *
@@ -390,8 +471,8 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
    * mobile non può cambiare quante righe ha la griglia.
    */
   const legacyRowCount = useMemo(
-    () => currentSlots.reduce((max, s) => (s.periodNumber > max ? s.periodNumber : max), 0),
-    [currentSlots]
+    () => schoolSlots.reduce((max, s) => (s.periodNumber > max ? s.periodNumber : max), 0),
+    [schoolSlots]
   );
   const rowCount = Math.max(requiredPeriods, periods.length, legacyRowCount);
 
@@ -411,19 +492,43 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   );
 
   /**
-   * Ore ammesse da ciascun giorno secondo l'istituto PRIMARIO. La griglia non è
-   * multi-istituto (non filtra per `schoolId`) e questo passo non la rende tale.
+   * Ore ammesse da ciascun giorno secondo l'istituto MOSTRATO dalla griglia.
+   * Con la scuola A selezionata la 7ª è fuori configurazione, con la B — che
+   * arriva all'8ª — è una cella normale.
    */
   const allowedPeriodsByDay = useMemo(() => {
     const map = new Map<number, number>();
     for (const day of schoolWeekDays) {
-      map.set(day, periodsForDay(day, primarySchool, timeSlotConfig));
+      map.set(day, periodsForDay(day, activeSchool, timeSlotConfig));
     }
     return map;
-  }, [schoolWeekDays.join(","), primarySchool, timeSlotConfig]);
+  }, [schoolWeekDays.join(","), activeSchool, timeSlotConfig]);
 
-  const allowedPeriodsFor = (day: number): number =>
-    allowedPeriodsByDay.get(day) ?? periodsForDay(day as SchoolWeekday, primarySchool, timeSlotConfig);
+  /**
+   * Ore ammesse da un giorno. Senza `school` vale l'istituto MOSTRATO (è il caso
+   * della griglia); il modale passa invece l'istituto REALE della lezione che si
+   * sta modificando, che può differire se la si è aperta da Oggi/Settimana.
+   */
+  const allowedPeriodsFor = (day: number, school: SchoolProfile | undefined = activeSchool): number =>
+    school === activeSchool
+      ? allowedPeriodsByDay.get(day) ?? periodsForDay(day as SchoolWeekday, school, timeSlotConfig)
+      : periodsForDay(day as SchoolWeekday, school, timeSlotConfig);
+
+  /**
+   * ISTITUTO REALE DELLA LEZIONE APERTA NEL MODALE.
+   *
+   * Normalmente coincide con quello mostrato dalla griglia, ma non si dà per
+   * scontato: la stessa identità canonica degli slot (`slotSchoolKey`) risolve
+   * anche una lezione aperta da Oggi/Settimana, così le ore selezionabili e il
+   * clamp del cambio giorno seguono la SUA scuola e non quella visualizzata.
+   * Una nuova lezione non ha ancora un istituto: vale quello mostrato.
+   */
+  const editingSchool = useMemo(() => {
+    if (!editingSlot) return activeSchool;
+    const key = gridSchoolIdOf(editingSlot);
+    return schools.find((school) => school.id === key) ?? activeSchool;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingSlot?.id, editingSlot?.schoolId, profile, schools, activeSchool]);
 
   /**
    * Ore selezionabili nel modale: dipendono dal GIORNO scelto, non dall'intera
@@ -434,13 +539,13 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
    */
   const modalAvailablePeriods = useMemo(() => {
     if (!editingSlot) return periods;
-    const allowed = allowedPeriodsFor(editingSlot.dayOfWeek);
+    const allowed = allowedPeriodsFor(editingSlot.dayOfWeek, editingSchool);
     const available = periods.filter(p => p.periodNumber <= allowed);
     if (available.some(p => p.periodNumber === editingSlot.periodNumber)) return available;
     const current = periods.find(p => p.periodNumber === editingSlot.periodNumber);
     return current ? [...available, current] : available;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editingSlot?.dayOfWeek, editingSlot?.periodNumber, periods, allowedPeriodsByDay]);
+  }, [editingSlot?.dayOfWeek, editingSlot?.periodNumber, periods, allowedPeriodsByDay, editingSchool]);
 
   // On phones the timetable matrix opens on the current weekday by default (one day per
   // screen, no horizontal scrolling); the day chips let the teacher switch day or see the
@@ -577,7 +682,11 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
       );
       return;
     }
+    // Griglia e modale devono raccontare la stessa cosa: se la lezione arrivata
+    // dal Planning è di un altro istituto, la griglia passa al suo — altrimenti
+    // chiudendo il modale si tornerebbe a una griglia che non la contiene.
     setActiveTab(request.type);
+    setActiveSchoolId(gridSchoolIdOf(liveSlot));
     handleEditSlot(liveSlot);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -609,7 +718,9 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   const handleDayOfWeekChange = (newDay: number) => {
     if (!editingSlot) return;
     const dayInfo = days.find((d) => d.day === newDay);
-    const allowed = allowedPeriodsFor(newDay);
+    // Istituto della LEZIONE, non della griglia: una lezione della scuola B
+    // aperta da Oggi non deve essere riportata alle ore della primaria.
+    const allowed = allowedPeriodsFor(newDay, editingSchool);
     // Si può retrocedere solo su una fascia REALMENTE configurata: mai inventare
     // orari. Se la fascia ammessa non esiste ancora si resta sull'ultima reale.
     const reachable = periods.filter((p) => p.periodNumber <= allowed);
@@ -1203,13 +1314,36 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
 
       {/* Grid Action Toolbar */}
       <div className="bg-white rounded-xl p-4 border border-stone-200 shadow-xs flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-        <div className="flex items-center space-x-2">
-          <span className="font-bold text-sm text-stone-900">
-            {activeTab === "provvisorio" ? "Griglia Provvisorio" : "Griglia Definitivo"}
-          </span>
-          <span className="text-xs font-semibold px-2 py-0.5 bg-stone-100 text-stone-700 rounded-full">
-            {currentSlots.length} {currentSlots.length === 1 ? "ora" : "ore"}
-          </span>
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
+          <div className="flex items-center space-x-2">
+            <span className="font-bold text-sm text-stone-900">
+              {activeTab === "provvisorio" ? "Griglia Provvisorio" : "Griglia Definitivo"}
+            </span>
+            <span className="text-xs font-semibold px-2 py-0.5 bg-stone-100 text-stone-700 rounded-full">
+              {schoolSlots.length} {schoolSlots.length === 1 ? "ora" : "ore"}
+            </span>
+          </div>
+
+          {/* Istituto mostrato dalla griglia. Compare SOLO con più scuole: con
+              un istituto solo la barra resta identica a prima. Stessa forma del
+              selettore già usato nello scanner (etichetta + select nativa), che
+              su mobile apre il picker di sistema. */}
+          {isMultiSchool && (
+            <label className="flex items-center gap-2 text-xs font-medium text-stone-700">
+              <span className="shrink-0">Istituto</span>
+              <select
+                id="timetable-school-select"
+                aria-label="Istituto"
+                value={activeSchoolId}
+                onChange={(e) => setActiveSchoolId(e.target.value)}
+                className="min-w-0 border border-stone-300 rounded-lg p-1.5 bg-white text-xs font-semibold text-stone-800"
+              >
+                {schools.map((school) => (
+                  <option key={school.id} value={school.id}>{school.name}</option>
+                ))}
+              </select>
+            </label>
+          )}
         </div>
 
         <div className="flex items-center space-x-3 flex-wrap gap-2 justify-between sm:justify-end">
@@ -1341,7 +1475,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                * Il conto guarda TUTTA la riga (non la singola cella) e ignora
                * il filtro giorno del mobile.
                */
-              const rowHasLesson = currentSlots.some((s) => s.periodNumber === row.periodNumber);
+              const rowHasLesson = schoolSlots.some((s) => s.periodNumber === row.periodNumber);
               return (
               <tr key={row.periodNumber} className="hover:bg-stone-50/50 transition-colors">
                 <td className="p-2 sm:p-3 text-center border-r border-stone-200 bg-stone-50/80 sticky left-0 z-10 shadow-2xs">
@@ -1385,7 +1519,11 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                 {days
                   .filter((d) => mobileSelectedDay === "all" || mobileSelectedDay === d.day)
                   .map((d) => {
-                    const slot = currentSlots.find(
+                    // `schoolSlots` è già filtrato per istituto: qui basta la
+                    // coordinata, e il rendering resta quello di sempre. Il
+                    // lookup NON deve tornare sull'array aggregato, o due
+                    // lezioni di scuole diverse si nasconderebbero a vicenda.
+                    const slot = schoolSlots.find(
                       (s) =>
                         s.dayOfWeek === d.day &&
                         s.periodNumber === row.periodNumber
