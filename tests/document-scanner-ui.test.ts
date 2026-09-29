@@ -247,18 +247,57 @@ function personalTimetableResponse(values: Record<number, string> = { 6: '3D', 1
 /** 3D martedì 1ª, 3E mercoledì 1ª, sos giovedì 1ª (con 6 ore: indici 6, 12, 18). */
 const personalResponse = personalTimetableResponse();
 
-/** Imposta le ore per giorno dichiarate dall'utente nello schermo di consenso. */
+/** Esiste un elemento con questo id nell'albero renderizzato? */
+function hasId(renderer: any, id: string): boolean {
+  return renderer.root.findAll((el: any) => el.props?.id === id).length > 0;
+}
+
+/**
+ * Id della conferma di geometria attiva: l'orario personale chiede la STRUTTURA
+ * DELLA SETTIMANA (cinque giorni), il curricolare resta sul numero unico.
+ */
+function geometryConfirmId(renderer: any): string | null {
+  if (hasId(renderer, 'scan-week-structure-confirm')) return 'scan-week-structure-confirm';
+  if (hasId(renderer, 'scan-periods-per-day-confirm')) return 'scan-periods-per-day-confirm';
+  return null;
+}
+
+/** Apre i cinque campi della struttura della settimana, se non sono già aperti. */
+async function openWeekStructure(renderer: any) {
+  if (hasId(renderer, 'scan-week-periods-0')) return;
+  await act(async () => { byId(renderer, 'scan-week-structure-edit').props.onClick(); });
+}
+
+/** Imposta le ore di UN giorno (0 = lunedì) della struttura della settimana. */
+async function setDayPeriods(renderer: any, dayIndex: number, value: string) {
+  await openWeekStructure(renderer);
+  const input = byId(renderer, `scan-week-periods-${dayIndex}`);
+  await act(async () => { input.props.onChange({ target: { value } }); });
+}
+
+/**
+ * Imposta la geometria dichiarata dall'utente nello schermo di consenso: sui
+ * cinque giorni per l'orario personale (stesso valore ovunque: settimana
+ * rettangolare), sul campo unico per il curricolare.
+ */
 async function setPeriodsPerDay(renderer: any, value: string) {
+  if (hasId(renderer, 'scan-week-structure-confirm')) {
+    await openWeekStructure(renderer);
+    for (let day = 0; day < PERSONAL_SCHOOL_DAYS; day += 1) await setDayPeriods(renderer, day, value);
+    return;
+  }
   const input = byId(renderer, 'scan-periods-per-day');
   await act(async () => { input.props.onChange({ target: { value } }); });
 }
 
 /**
- * Conferma esplicita delle ore: senza questa spunta l'analisi personale non parte,
- * anche se il campo è già compilato dalla proposta.
+ * Conferma esplicita della geometria: senza questa spunta l'analisi non parte,
+ * anche se i campi sono già compilati dalla proposta.
  */
 async function confirmPeriodsPerDay(renderer: any, checked = true) {
-  const box = byId(renderer, 'scan-periods-per-day-confirm');
+  const id = geometryConfirmId(renderer);
+  assert.ok(id, 'nessuna conferma di geometria nello schermo di consenso');
+  const box = byId(renderer, id as string);
   await act(async () => { box.props.onChange({ target: { checked } }); });
 }
 
@@ -305,9 +344,9 @@ async function analyzeWithConsent(renderer: any, periodsPerDay?: string) {
   // dal prefill) prima dell'invio.
   if (periodsPerDay !== undefined) await setPeriodsPerDay(renderer, periodsPerDay);
   // Orario personale: la domanda sulle ore va confermata esplicitamente.
-  const periodsBox = renderer.root.findAll((el: any) => el.props?.id === 'scan-periods-per-day-confirm');
-  if (periodsBox.length > 0) {
-    assert.equal(periodsBox[0].props.checked, false, 'la conferma delle ore non è mai preselezionata');
+  const confirmId = geometryConfirmId(renderer);
+  if (confirmId) {
+    assert.equal(byId(renderer, confirmId).props.checked, false, 'la conferma della geometria non è mai preselezionata');
     await confirmPeriodsPerDay(renderer);
   }
   // Consenso richiesto (checkbox NON preselezionata).
@@ -1003,9 +1042,8 @@ async function withPendingAnalysis(run: (gate: { respond: (json: unknown, status
 /** Consenso + invio SENZA attendere l'esito: si è ancora nello step «working». */
 async function sendForAnalysis(renderer: any) {
   await act(async () => { byId(renderer, 'scan-analyze-cta').props.onClick(); });
-  // Orario personale: la domanda sulle ore va confermata esplicitamente.
-  const periodsBox = renderer.root.findAll((el: any) => el.props?.id === 'scan-periods-per-day-confirm');
-  if (periodsBox.length > 0) await confirmPeriodsPerDay(renderer);
+  // Orario personale: la geometria va confermata esplicitamente.
+  if (geometryConfirmId(renderer)) await confirmPeriodsPerDay(renderer);
   await act(async () => { byId(renderer, 'scan-cloud-consent').props.onChange({ target: { checked: true } }); });
   await act(async () => {
     byId(renderer, 'scan-consent-confirm').props.onClick();
@@ -1231,8 +1269,11 @@ test('orario personale: la domanda sulle ore blocca l analisi finché il valore 
     await act(async () => { byId(renderer, 'scan-analyze-cta').props.onClick(); });
 
     // Prefill dalla configurazione delle fasce orarie dell'utente.
-    assert.equal(byId(renderer, 'scan-periods-per-day').props.value, String(PERSONAL_PERIODS_PER_DAY), 'prefill da timeSlotConfig');
-    assert.match(flatText(renderer.root), /Quante ore ci sono in ogni giornata scolastica\?/);
+    await openWeekStructure(renderer);
+    for (let day = 0; day < PERSONAL_SCHOOL_DAYS; day += 1) {
+      assert.equal(byId(renderer, `scan-week-periods-${day}`).props.value, String(PERSONAL_PERIODS_PER_DAY), `prefill del giorno ${day}`);
+    }
+    assert.match(flatText(renderer.root), /Struttura della settimana/);
     assert.match(flatText(renderer.root), /30 posizioni/, 'la lunghezza attesa è mostrata prima dell invio');
 
     // Valore non valido: invio bloccato, nessuna richiesta.
@@ -1255,7 +1296,8 @@ test('orario personale: la domanda sulle ore blocca l analisi finché il valore 
     assert.equal(byId(renderer, 'scan-consent-confirm').props.disabled, false, 'consenso + ore confermate: si può inviare');
     await confirmAndSettleAnalysis(renderer);
     assert.equal(fetchCalls.length, 1, 'una sola chiamata');
-    assert.equal(fetchCalls[0].body.periodsPerDay, 5, 'le ore dichiarate viaggiano nella richiesta');
+    assert.deepEqual(fetchCalls[0].body.periodsByDay, [5, 5, 5, 5, 5], 'la struttura dichiarata viaggia nella richiesta');
+    assert.equal('periodsPerDay' in fetchCalls[0].body, false, 'nessuna geometria scalare residua nella request');
   } finally {
     await act(async () => { renderer.unmount(); });
   }
@@ -1272,13 +1314,14 @@ test('orario personale: cambiare il numero azzera la conferma (il valore conferm
     await confirmPeriodsPerDay(renderer);
     assert.equal(byId(renderer, 'scan-consent-confirm').props.disabled, false, 'confermato: si può inviare');
     // L'utente corregge il numero: la conferma precedente non vale più.
-    await setPeriodsPerDay(renderer, '4');
-    assert.equal(byId(renderer, 'scan-periods-per-day-confirm').props.checked, false, 'conferma azzerata');
+    // Basta cambiare UN giorno per invalidare la conferma precedente.
+    await setDayPeriods(renderer, 3, '4');
+    assert.equal(byId(renderer, 'scan-week-structure-confirm').props.checked, false, 'conferma azzerata');
     assert.equal(byId(renderer, 'scan-consent-confirm').props.disabled, true, 'invio bloccato dopo la modifica');
     assert.equal(fetchCalls.length, 0, 'nessuna analisi partita col valore vecchio');
     await confirmPeriodsPerDay(renderer);
     await confirmAndSettleAnalysis(renderer);
-    assert.equal(fetchCalls[0].body.periodsPerDay, 4, 'viene inviato il numero confermato adesso');
+    assert.deepEqual(fetchCalls[0].body.periodsByDay, [6, 6, 6, 4, 6], 'viene inviata la struttura confermata adesso: solo il giovedì è cambiato');
   } finally {
     await act(async () => { renderer.unmount(); });
   }
@@ -1291,10 +1334,11 @@ test('orario personale: le ore per giorno sono chieste e confermate (unico perco
   await chooseCameraAndPick(renderer, makeFile('orario-personale.jpg', 'image/jpeg', 20_000));
   await act(async () => { byId(renderer, 'scan-analyze-cta').props.onClick(); });
 
-  // La domanda è obbligatoria: 1..12 ore, 5 giorni, N x 5 posizioni.
-  assert.match(flatText(renderer.root), /Quante ore ci sono in ogni giornata scolastica\?/);
+  // La domanda è obbligatoria: ore di ogni giorno, 1..12, e il totale mostrato.
+  assert.match(flatText(renderer.root), /Struttura della settimana/);
   await setPeriodsPerDay(renderer, '5');
-  assert.match(flatText(byId(renderer, 'scan-periods-per-day-help')), /25 posizioni: 5 ore per 5 giorni/);
+  assert.match(flatText(byId(renderer, 'scan-week-structure-summary')), /Lun 5 · Mar 5 · Mer 5 · Gio 5 · Ven 5/);
+  assert.match(flatText(byId(renderer, 'scan-week-structure-help')), /25 posizioni/);
   // Conferma esplicita obbligatoria: senza, l'invio resta bloccato.
   await act(async () => { byId(renderer, 'scan-cloud-consent').props.onChange({ target: { checked: true } }); });
   assert.equal(byId(renderer, 'scan-consent-confirm').props.disabled, true, 'numero valido ma non confermato: invio bloccato');
@@ -1388,7 +1432,7 @@ test('orario personale con 5 ore: contratto 5x5=25 posizioni, vuoti nella loro p
     await act(async () => { byId(renderer, 'scan-cloud-consent').props.onChange({ target: { checked: true } }); });
     await confirmPeriodsPerDay(renderer);
     await confirmAndSettleAnalysis(renderer);
-    assert.equal(fetchCalls[0].body.periodsPerDay, 5);
+    assert.deepEqual(fetchCalls[0].body.periodsByDay, [5, 5, 5, 5, 5]);
     const text = flatText(renderer.root);
     assert.match(text, /25 posizioni/, 'la revisione mostra le 25 posizioni');
     // Lunedì 1ª e 2ª sono libere nella griglia reale: devono restare libere e al
@@ -1475,7 +1519,7 @@ test('revisione personale: sequenza completa visibile, vuoti inclusi, nessuna au
     assert.match(flatText(renderer.root), /Riga letta nel documento: Manganiello F\./);
     assert.match(
       flatText(byId(renderer, 'scan-personal-sequence-count')),
-      /25 posizioni \( ?5 ore x 5 giorni\): 18 occupate, 7 vuote/,
+      /25 posizioni \(Lun 5 · Mar 5 · Mer 5 · Gio 5 · Ven 5\): 18 occupate, 7 vuote/,
     );
 
     // Le 25 posizioni sono visibili, una per ora, con le libere evidenziate.

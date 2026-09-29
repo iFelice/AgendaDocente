@@ -156,8 +156,12 @@ async function flowToReview(overrides: Record<string, unknown> = {}) {
   });
 
   await act(async () => { byId(renderer, 'scan-analyze-cta').props.onClick(); });
-  await act(async () => { byId(renderer, 'scan-periods-per-day').props.onChange({ target: { value: String(PERIODS) } }); });
-  await act(async () => { byId(renderer, 'scan-periods-per-day-confirm').props.onChange({ target: { checked: true } }); });
+  // Struttura della settimana: stesso numero di ore in tutti i giorni.
+  await act(async () => { byId(renderer, 'scan-week-structure-edit').props.onClick(); });
+  for (let day = 0; day < 5; day += 1) {
+    await act(async () => { byId(renderer, `scan-week-periods-${day}`).props.onChange({ target: { value: String(PERIODS) } }); });
+  }
+  await act(async () => { byId(renderer, 'scan-week-structure-confirm').props.onChange({ target: { checked: true } }); });
   await act(async () => { byId(renderer, 'scan-cloud-consent').props.onChange({ target: { checked: true } }); });
   await act(async () => {
     byId(renderer, 'scan-consent-confirm').props.onClick();

@@ -33,6 +33,17 @@ import { crossrefTimetables, RECON_NOTES } from '../src/utils/timetableCrossref'
 import { DAY_LABELS } from '../src/utils/timetableTokens';
 
 /**
+ * Settimana RETTANGOLARE di comodo: `week(6)` = `[6, 6, 6, 6, 6]`.
+ *
+ * La geometria dello scanner è per giorno (`periodsByDay`); questi test
+ * descrivono il caso legacy in cui tutti i giorni hanno le stesse ore, e lo
+ * dicono esplicitamente invece di nasconderlo dietro un numero. Valori non
+ * ammessi (0, 13, decimali) restano tali: servono ai casi di rifiuto.
+ */
+const week = (periods: number): number[] => [periods, periods, periods, periods, periods];
+
+
+/**
  * MICRO-FIX: l'analisi curricolare riceve le coordinate del docente.
  *
  * Prima: `buildPersonalCoordinateScope()` produceva le coordinate giuste, ma
@@ -301,7 +312,7 @@ test('scope: obbligatorio per il curricolare e rifiutato per il personale (400 p
   );
   const accepted = validateTimetableAnalysisPayload({ ...base, documentType: 'curricular-timetable', coordinateScope: SCOPE });
   assert.deepEqual(accepted.coordinateScope, SCOPE);
-  assert.equal(accepted.periodsPerDay, undefined, 'il curricolare non dichiara la geometria personale');
+  assert.equal(accepted.periodsByDay, undefined, 'il curricolare non dichiara la geometria personale');
 });
 
 // ---------------------------------------------------------------------------
@@ -321,7 +332,7 @@ test('una coordinata può produrre 0, 1 o più materie: none, unique e ambiguous
       { dayOfWeek: 1, periodIndex: 2, classLabel: '1A', matches: [{ cellText: '1A', subject: 'Italiano' }, { cellText: '1A 1B', subject: 'Storia' }] },
       { dayOfWeek: 1, periodIndex: 3, classLabel: '1A', matches: [] },                      // non leggibile
     ],
-  }, '', 0, scope);
+  }, '', [], scope);
 
   const { slots } = curricularCellsToSlots(outcome.curricularRows ?? [], outcome.cells);
   assert.equal(slots.length, 3, 'una slot per ogni (coordinata, materia)');
@@ -434,7 +445,7 @@ test('filtro client-side resta attivo: una risposta fuori ambito viene comunque 
 // ---------------------------------------------------------------------------
 
 test('flusso personale invariato: prompt, validazione e request non conoscono le coordinate', () => {
-  const prompt = buildPersonalTimetablePrompt('rossi', 5);
+  const prompt = buildPersonalTimetablePrompt('rossi', week(5));
   assert.ok(prompt.includes('del nome: "rossi"'), 'il personale continua a ricevere le parole del nome del docente');
   assert.ok(prompt.includes('ESATTAMENTE 5 celle'), 'geometria personale invariata');
   assert.ok(!prompt.includes('COLONNE FISICHE DA LEGGERE'), 'il personale non riceve alcuno elenco di colonne');
@@ -447,7 +458,7 @@ test('flusso personale invariato: prompt, validazione e request non conoscono le
     'personal-support-timetable',
     { rowLabel: 'Rossi M.', days },
     'rossi',
-    5,
+    week(5),
     [{ dayOfWeek: 1, periodIndex: 1, classLabel: '2B' }],
   );
   assert.equal(outcome.cells.length, 25, '5 blocchi x 5 celle, come prima');
@@ -455,7 +466,7 @@ test('flusso personale invariato: prompt, validazione e request non conoscono le
   assert.equal(outcome.curricularRows, undefined, 'nessuna riga curricolare nel personale');
   assert.equal(outcome.rowLabel, 'Rossi M.');
   assert.throws(
-    () => parseTimetableAiResponse('personal-support-timetable', { rowLabel: 'Bianchi M.', days }, 'rossi', 5),
+    () => parseTimetableAiResponse('personal-support-timetable', { rowLabel: 'Bianchi M.', days }, 'rossi', week(5)),
     /non compatibile/,
     'la guardia d identità è ancora attiva',
   );
@@ -555,7 +566,7 @@ test('evidenza: due match validi sulla stessa coordinata -> ambiguità preservat
   assert.deepEqual(targets[0].subjects, ['Italiano', 'Storia'], 'compresenza: due materie provate');
 
   // Fino al crossref: due materie sulla stessa coordinata restano una scelta manuale.
-  const outcome = parseTimetableAiResponse('curricular-timetable', { targets: targets.map(t => ({ ...t, matches: [] })) }, '', 0, EVIDENCE_SCOPE);
+  const outcome = parseTimetableAiResponse('curricular-timetable', { targets: targets.map(t => ({ ...t, matches: [] })) }, '', [], EVIDENCE_SCOPE);
   const { slots } = curricularCellsToSlots(
     [
       { rowIndex: 0, rowLabel: '', subject: 'Italiano', classes: ['2B'] },
@@ -632,17 +643,17 @@ test('orario personale invariato: schema e prompt non conoscono matches né cell
     required: ['rowLabel', 'days'],
   });
 
-  const prompt = buildPersonalTimetablePrompt('rossi', 5);
+  const prompt = buildPersonalTimetablePrompt('rossi', week(5));
   for (const curricular of ['matches', 'cellText', 'targets', 'classLabel', 'COLONNE FISICHE DA LEGGERE']) {
     assert.ok(!prompt.includes(curricular), `il prompt personale non conosce ${curricular}`);
   }
   // Semantica personale invariata: geometria e guardia d'identità.
   const days = Array.from({ length: 5 }, () => ({ cells: ['2B', '', '', '', ''] }));
-  const outcome = parseTimetableAiResponse('personal-support-timetable', { rowLabel: 'Rossi M.', days }, 'rossi', 5);
+  const outcome = parseTimetableAiResponse('personal-support-timetable', { rowLabel: 'Rossi M.', days }, 'rossi', week(5));
   assert.equal(outcome.cells.length, 25, '5 blocchi x 5 celle');
   assert.equal(outcome.cells.filter(c => c.raw === '2B').length, 5);
   assert.throws(
-    () => parseTimetableAiResponse('personal-support-timetable', { rowLabel: 'Bianchi M.', days }, 'rossi', 5),
+    () => parseTimetableAiResponse('personal-support-timetable', { rowLabel: 'Bianchi M.', days }, 'rossi', week(5)),
     /non compatibile/,
   );
 });

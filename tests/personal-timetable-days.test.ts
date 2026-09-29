@@ -19,6 +19,17 @@ import { reconstructedToTimetableSlots } from '../src/utils/reconstructTimetable
 import { DAY_LABELS } from '../src/utils/timetableTokens';
 import type { TeacherProfile } from '../src/types';
 
+/**
+ * Settimana RETTANGOLARE di comodo: `week(6)` = `[6, 6, 6, 6, 6]`.
+ *
+ * La geometria dello scanner è per giorno (`periodsByDay`); questi test
+ * descrivono il caso legacy in cui tutti i giorni hanno le stesse ore, e lo
+ * dicono esplicitamente invece di nasconderlo dietro un numero. Valori non
+ * ammessi (0, 13, decimali) restano tali: servono ai casi di rifiuto.
+ */
+const week = (periods: number): number[] => [periods, periods, periods, periods, periods];
+
+
 /*
  * Contratto AI dell'ORARIO PERSONALE per blocchi giornalieri:
  * `{ rowLabel, days: [{ cells }, … x 5] }`.
@@ -64,13 +75,13 @@ function daysPayload(days: string[][], rowLabel = 'Manganiello F.') {
 
 /** Validazione + appiattimento deterministico fatto dal codice. */
 function cellsFromDays(days: string[][], periodsPerDay = PERIODS, rowLabel = 'Manganiello F.'): TimetableRawCell[] {
-  return validatePersonalSequencePayload(daysPayload(days, rowLabel), TARGET_SURNAME, periodsPerDay).cells;
+  return validatePersonalSequencePayload(daysPayload(days, rowLabel), TARGET_SURNAME, week(periodsPerDay)).cells;
 }
 
 const coord = (cell: TimetableRawCell) => `${cell.dayOfWeek}|${cell.periodIndex}`;
 
 test('A. ground truth: 25 posizioni, 18 occupate, 7 vuote, coordinate esatte', () => {
-  assert.equal(GROUND_TRUTH_FLAT.length, expectedPersonalCellCount(PERIODS), 'la ground truth ha le posizioni attese');
+  assert.equal(GROUND_TRUTH_FLAT.length, expectedPersonalCellCount(week(PERIODS)), 'la ground truth ha le posizioni attese');
   assert.equal(GROUND_TRUTH_FLAT.filter(raw => raw !== '').length, 18, '18 celle occupate');
   assert.equal(GROUND_TRUTH_FLAT.filter(raw => raw === '').length, 7, '7 celle vuote');
 
@@ -130,7 +141,7 @@ test('E. lunghezze 5,5,4,5,6 -> rifiuto nonostante il totale sia 25', () => {
   ];
   assert.deepEqual(drifted.map(day => day.length), [5, 5, 4, 5, 6], 'geometria dello scenario');
   assert.equal(drifted.flat().length, 25, 'il totale è comunque 25: col formato piatto passava');
-  assert.throws(() => cellsFromDays(drifted), /Lunghezza del giorno non valida/);
+  assert.throws(() => cellsFromDays(drifted), /Mercoledì: attese 5 celle, ricevute 4\./);
   assert.throws(() => cellsFromDays(drifted), TimetableShapeError);
 });
 
@@ -140,8 +151,8 @@ test('F. un giorno con una cella in meno -> rifiuto (per ogni numero di ore)', (
       Array.from({ length: periods }, (_, cellIndex) => (dayIndex === 2 && cellIndex === 0 ? '' : '3D')),
     );
     days[2] = days[2].slice(0, periods - 1);
-    assert.equal(days.flat().length, expectedPersonalCellCount(periods) - 1);
-    assert.throws(() => cellsFromDays(days, periods), /Lunghezza del giorno non valida/, `ore per giorno ${periods}`);
+    assert.equal(days.flat().length, expectedPersonalCellCount(week(periods)) - 1);
+    assert.throws(() => cellsFromDays(days, periods), new RegExp(`Mercoledì: attese ${periods} celle, ricevute ${periods - 1}\\.`), `ore per giorno ${periods}`);
   }
 });
 
@@ -151,21 +162,21 @@ test('G. un giorno con una cella in più -> rifiuto (per ogni numero di ore)', (
       Array.from({ length: periods }, (_, cellIndex) => (dayIndex === 4 && cellIndex === 0 ? '' : '3E')),
     );
     days[4] = [...days[4], '3E'];
-    assert.equal(days.flat().length, expectedPersonalCellCount(periods) + 1);
-    assert.throws(() => cellsFromDays(days, periods), /Lunghezza del giorno non valida/, `ore per giorno ${periods}`);
+    assert.equal(days.flat().length, expectedPersonalCellCount(week(periods)) + 1);
+    assert.throws(() => cellsFromDays(days, periods), new RegExp(`Venerdì: attese ${periods} celle, ricevute ${periods + 1}\\.`), `ore per giorno ${periods}`);
   }
 });
 
 test('H. vecchio payload piatto { rowLabel, cells } -> rifiuto, nessun fallback', () => {
   const legacy = { rowLabel: 'Manganiello F.', cells: GROUND_TRUTH_FLAT };
-  assert.throws(() => validatePersonalSequencePayload(legacy, TARGET_SURNAME, PERIODS), /Formato della risposta non supportato/);
-  assert.throws(() => validatePersonalSequencePayload(legacy, TARGET_SURNAME, PERIODS), TimetableShapeError);
+  assert.throws(() => validatePersonalSequencePayload(legacy, TARGET_SURNAME, week(PERIODS)), /Formato della risposta non supportato/);
+  assert.throws(() => validatePersonalSequencePayload(legacy, TARGET_SURNAME, week(PERIODS)), TimetableShapeError);
   // Nemmeno se i blocchi ci sono: la presenza di `cells` alla radice è ambigua.
   const hybrid = { ...daysPayload(GROUND_TRUTH_DAYS), cells: GROUND_TRUTH_FLAT };
-  assert.throws(() => validatePersonalSequencePayload(hybrid, TARGET_SURNAME, PERIODS), /Formato della risposta non supportato/);
+  assert.throws(() => validatePersonalSequencePayload(hybrid, TARGET_SURNAME, week(PERIODS)), /Formato della risposta non supportato/);
   // La forma vuota del vecchio contratto non è accettata nemmeno come "nessuna riga".
   assert.throws(
-    () => validatePersonalSequencePayload({ rowLabel: 'Manganiello F.', cells: [] }, TARGET_SURNAME, PERIODS),
+    () => validatePersonalSequencePayload({ rowLabel: 'Manganiello F.', cells: [] }, TARGET_SURNAME, week(PERIODS)),
     /Formato della risposta non supportato/,
   );
 });
@@ -184,7 +195,7 @@ test('I. rowLabel incompatibile col docente -> rifiuto, nessuna altra riga scelt
   }
   // Senza cognome nel profilo la riga non è verificabile.
   assert.throws(
-    () => validatePersonalSequencePayload(daysPayload(GROUND_TRUTH_DAYS), '', PERIODS),
+    () => validatePersonalSequencePayload(daysPayload(GROUND_TRUTH_DAYS), '', week(PERIODS)),
     /non compatibile/,
   );
 });
@@ -209,16 +220,16 @@ test('J. vuoto interno: martedì 2ª resta ESATTAMENTE vuota', () => {
   // `null` in una cella vale come cella vuota: comportamento preservato.
   const withNull = validatePersonalSequencePayload(
     { rowLabel: 'Manganiello F.', days: [{ cells: ['3D'] }, { cells: [null] }, { cells: [''] }, { cells: [''] }, { cells: [''] }] },
-    TARGET_SURNAME, 1,
+    TARGET_SURNAME, week(1),
   );
   assert.deepEqual(withNull.cells.map(c => c.raw), ['3D', '', '', '', ''], 'null -> "" (stesso fatto nel documento)');
   assert.deepEqual(withNull.cells.map(coord), ['1|1', '2|1', '3|1', '4|1', '5|1'], 'la geometria non dipende dal null');
 });
 
 test('K. prompt: ore per giorno reali, intestazione giorni, blocchi, colonne fisiche, celle vuote', () => {
-  const prompt = buildPersonalTimetablePrompt(TARGET_SURNAME, PERIODS);
+  const prompt = buildPersonalTimetablePrompt(TARGET_SURNAME, week(PERIODS));
   // Ore per giorno interpolate davvero (mai una costante scritta nel prompt).
-  assert.ok(prompt.includes('ESATTAMENTE 5 COLONNE FISICHE'), 'periodsPerDay reale: colonne fisiche per blocco');
+  assert.ok(prompt.includes('LUNEDÌ: 5, MARTEDÌ: 5, MERCOLEDÌ: 5, GIOVEDÌ: 5, VENERDÌ: 5'), 'geometria reale: colonne fisiche di ogni blocco');
   assert.ok(prompt.includes('ESATTAMENTE 5 celle'), 'periodsPerDay reale: celle per giorno');
   assert.ok(prompt.includes('ESATTAMENTE 5 oggetti'), 'periodsPerDay non tocca il numero dei blocchi');
   // Intestazione dei giorni e blocchi fisici.
@@ -240,8 +251,8 @@ test('K. prompt: ore per giorno reali, intestazione giorni, blocchi, colonne fis
   // L'esempio di formato mostra 5 blocchi da 5 celle.
   assert.equal(prompt.split('{ "cells": ["", "", "", "", ""] }').length - 1, 5, 'esempio: cinque blocchi da cinque colonne');
   // Con 6 ore il prompt cambia geometria, i blocchi restano cinque.
-  const six = buildPersonalTimetablePrompt(TARGET_SURNAME, 6);
-  assert.ok(six.includes('ESATTAMENTE 6 COLONNE FISICHE') && six.includes('ESATTAMENTE 6 celle'), '6 ore interpolate');
+  const six = buildPersonalTimetablePrompt(TARGET_SURNAME, week(6));
+  assert.ok(six.includes('LUNEDÌ: 6, MARTEDÌ: 6, MERCOLEDÌ: 6, GIOVEDÌ: 6, VENERDÌ: 6') && six.includes('ESATTAMENTE 6 celle'), '6 ore interpolate');
   assert.ok(!six.includes('ESATTAMENTE 5 celle'), 'nessuna geometria residua');
   assert.equal(six.split('{ "cells": ["", "", "", "", "", ""] }').length - 1, 5, 'cinque blocchi anche con 6 ore');
   // Il prompt personale NON incorpora TABLE_RULES (che resta al curricolare).
@@ -251,7 +262,7 @@ test('K. prompt: ore per giorno reali, intestazione giorni, blocchi, colonne fis
 
 test('L. end-to-end: blocchi -> risposta AI validata -> candidati -> crossref -> slot', () => {
   const payload = daysPayload(GROUND_TRUTH_DAYS);
-  const outcome = parseTimetableAiResponse('personal-support-timetable', payload, TARGET_SURNAME, PERIODS);
+  const outcome = parseTimetableAiResponse('personal-support-timetable', payload, TARGET_SURNAME, week(PERIODS));
   assert.equal(outcome.rowLabel, 'Manganiello F.', 'etichetta riportata, nessuna coordinata dal modello');
   assert.equal(outcome.cells.length, 25, 'il server appiattisce i blocchi nelle stesse celle di prima');
   assert.deepEqual(outcome.cells.map(c => c.raw), GROUND_TRUTH_FLAT, 'stessa sequenza del contratto precedente');
@@ -297,13 +308,13 @@ test('M. regressione: 5,5,4,5,6 fallisce PRIMA della derivazione delle coordinat
   let cells: TimetableRawCell[] | null = ['non-vuoto'] as unknown as TimetableRawCell[];
   let message = '';
   try {
-    cells = validatePersonalSequencePayload(daysPayload(drifted), TARGET_SURNAME, PERIODS).cells;
+    cells = validatePersonalSequencePayload(daysPayload(drifted), TARGET_SURNAME, week(PERIODS)).cells;
   } catch (error) {
     assert.ok(error instanceof TimetableShapeError, 'rifiuto tipizzato di forma');
     message = (error as Error).message;
   }
   assert.deepEqual(cells, ['non-vuoto'], 'nessuna cella prodotta: il gate precede la derivazione');
-  assert.match(message, /Lunghezza del giorno non valida \(#2\)/, 'si ferma sul primo blocco sbagliato, non in fondo');
+  assert.match(message, /Mercoledì: attese 5 celle, ricevute 4\./, 'si ferma sul primo blocco sbagliato, non in fondo');
 
   // Stesso totale, blocco sbagliato in prima posizione: il rifiuto arriva su #0.
   const frontDrift: string[][] = [
@@ -314,7 +325,7 @@ test('M. regressione: 5,5,4,5,6 fallisce PRIMA della derivazione delle coordinat
     GROUND_TRUTH_DAYS[4].slice(0, 4),
   ];
   assert.equal(frontDrift.flat().length, 25, 'totale di nuovo 25');
-  assert.throws(() => cellsFromDays(frontDrift), /Lunghezza del giorno non valida \(#0\)/);
+  assert.throws(() => cellsFromDays(frontDrift), /Lunedì: attese 5 celle, ricevute 6\./);
 
   // Nessun candidato e nessuno slot possono nascere da un payload rifiutato.
   let candidates: unknown[] = ['non-vuoto'];

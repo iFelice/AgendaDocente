@@ -9,7 +9,7 @@
 
 import type { TeacherProfile } from "../types";
 import { OFFLINE_ANALYSIS_MESSAGE, isOnline } from "../utils/documentScanner";
-import type { CurricularScopeCoordinate } from "../utils/timetableAnalysis";
+import type { CurricularScopeCoordinate, PersonalTimetablePeriodsByDay } from "../utils/timetableAnalysis";
 
 export type ScanTimetableDocumentType = "personal-support-timetable" | "curricular-timetable";
 
@@ -19,11 +19,13 @@ export interface ScanTimetableRequest {
   documentType: ScanTimetableDocumentType;
   profile: TeacherProfile;
   /**
-   * Ore per giorno dichiarate dall'utente. OBBLIGATORIO per l'orario personale:
-   * determina la lunghezza attesa della sequenza di celle (ore x giorni
-   * scolastici) e quindi la derivazione di giorno e periodo.
+   * STRUTTURA DELLA SETTIMANA dichiarata dall'utente: le ore di ciascun giorno,
+   * lunedì → venerdì. OBBLIGATORIA per l'orario personale, perché determina la
+   * lunghezza attesa di OGNI blocco giornaliero e quindi la derivazione di
+   * giorno e periodo. La settimana non è per forza rettangolare: `[6,6,6,7,6]`
+   * è un valore legittimo quanto `[6,6,6,6,6]`.
    */
-  periodsPerDay?: number;
+  periodsByDay?: PersonalTimetablePeriodsByDay;
   /**
    * SOLO orario curricolare: le coordinate (giorno + periodo assoluto + classe)
    * in cui il docente è presente, già costruite dal client. Il server le usa per

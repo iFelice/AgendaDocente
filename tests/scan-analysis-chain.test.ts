@@ -217,7 +217,7 @@ async function withStub(impl: (url: any, init: any) => Promise<Response>, option
   if (options.withoutAbortSignalTimeout) delete (AbortSignal as any).timeout;
   globalThis.fetch = impl as any;
   try {
-    return await analyzeTimetableDocument({ imageBase64: 'AAAA', mimeType: 'image/png', documentType: 'personal-support-timetable', periodsPerDay: 5, profile: clientProfile });
+    return await analyzeTimetableDocument({ imageBase64: 'AAAA', mimeType: 'image/png', documentType: 'personal-support-timetable', periodsByDay: [5, 5, 5, 5, 5], profile: clientProfile });
   } finally {
     globalThis.fetch = savedFetch;
     (AbortSignal as any).timeout = savedTimeout;
@@ -312,7 +312,7 @@ test('client: la request curricolare porta le coordinate (senza key), quella per
     });
     await analyzeTimetableDocument({
       imageBase64: 'AAAA', mimeType: 'image/png', documentType: 'personal-support-timetable',
-      periodsPerDay: 5, profile: clientProfile,
+      periodsByDay: [5, 5, 5, 5, 5], profile: clientProfile,
     });
   } finally {
     globalThis.fetch = savedFetch;
@@ -326,10 +326,11 @@ test('client: la request curricolare porta le coordinate (senza key), quella per
   assert.deepEqual(Object.keys(bodies[0].coordinateScope as object[]).length > 0
     ? Object.keys((bodies[0].coordinateScope as Array<Record<string, unknown>>)[0]).sort()
     : [], ['classLabel', 'dayOfWeek', 'periodIndex'], 'solo i tre campi del contratto');
-  assert.equal(bodies[0].periodsPerDay, undefined, 'il curricolare non dichiara la geometria personale');
+  assert.equal(bodies[0].periodsByDay, undefined, 'il curricolare non dichiara la geometria personale');
 
   assert.equal('coordinateScope' in bodies[1], false, 'la request personale non contiene coordinateScope (il server la rifiuta)');
-  assert.equal(bodies[1].periodsPerDay, 5, 'la request personale conserva le ore per giorno');
+  assert.deepEqual(bodies[1].periodsByDay, [5, 5, 5, 5, 5], 'la request personale porta la struttura della settimana');
+  assert.equal('periodsPerDay' in bodies[1], false, 'nessuna geometria scalare residua: una sola fonte di verità');
 });
 
 test('client: registro/offline — messaggio offline distinto, endpoint registro sulla stessa catena', async () => {

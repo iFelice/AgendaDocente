@@ -986,7 +986,7 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
   const abort = () => controller.abort();
   res.once("close", abort);
   try {
-    const { documentType, imageBase64, mimeType, profile, periodsPerDay, coordinateScope } = req.body;
+    const { documentType, imageBase64, mimeType, profile, periodsByDay, coordinateScope } = req.body;
     const ai = getGeminiClient();
     if (!ai) {
       return res.status(503).json({ success: false, error: "Il servizio di analisi non è disponibile. Riprova più tardi." });
@@ -996,16 +996,17 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
     // nel prompt, e il cognome non finisce nei log.
     const isPersonal = documentType === "personal-support-timetable";
     const targetSurname = isPersonal ? personalTargetSurname(profile) : "";
-    // Geometria dell'orario personale: le ore per giorno dichiarate dall'UTENTE
-    // (già validate nella request) sono interpolate nel prompt, che dice così al
-    // modello quante colonne fisiche ha ogni blocco giornaliero. Il modello non
+    // Geometria dell'orario personale: la struttura della settimana dichiarata
+    // dall'UTENTE (già validata e normalizzata nella request, scalare legacy
+    // incluso) è interpolata nel prompt, che dice così al modello quante colonne
+    // fisiche ha OGNI blocco giornaliero — anche quando i giorni differiscono. Il modello non
     // dichiara la geometria e non può influenzarla: il server verifica poi che
     // ogni blocco abbia esattamente quella lunghezza.
     // Orario curricolare: il prompt riceve l'ELENCO delle coordinate richieste
     // (giorno + periodo + classe, già validate nella request) e chiede solo
     // quelle, invece della trascrizione dell'intera tabella d'istituto.
     const systemInstruction = isPersonal
-      ? buildPersonalTimetablePrompt(targetSurname, periodsPerDay)
+      ? buildPersonalTimetablePrompt(targetSurname, periodsByDay)
       : buildCurricularTimetablePrompt(coordinateScope);
     const responseSchema = isPersonal ? personalTimetableSchema : curricularTimetableSchema;
     const analysisStartedAt = Date.now();
@@ -1052,11 +1053,11 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
     // gestito (messaggio utente invariato, diagnostica privacy-safe), non un crash
     // nel catch generico dell'endpoint — che era il sintomo su iPhone.
     // Nell'orario personale sono rifiuti anche un numero di blocchi giornalieri
-    // diverso da cinque, un blocco con un numero di celle diverso dalle ore per
-    // giorno e una riga non compatibile col cognome del profilo.
+    // diverso da cinque, un blocco con un numero di celle diverso dalle ore di
+    // QUEL giorno e una riga non compatibile col cognome del profilo.
     let outcome: TimetableAnalysisOutcome;
     try {
-      outcome = parseTimetableAiResponse(documentType, decoded.value, targetSurname, periodsPerDay, coordinateScope);
+      outcome = parseTimetableAiResponse(documentType, decoded.value, targetSurname, periodsByDay, coordinateScope);
     } catch (error: unknown) {
       console.warn(describeAnalysisFailure(error, decoded.value, documentType));
       // Messaggio generico, tranne quando la riga del docente non è stata
