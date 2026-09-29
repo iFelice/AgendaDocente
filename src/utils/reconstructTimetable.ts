@@ -23,7 +23,7 @@ import type { TeacherProfile, TimeSlotConfig, TimetableSlot } from "../types";
 import { getPrimarySchool, normalizeTeacherProfile, schoolByIdOrPrimary } from "./multiSchool";
 import { periodsForDay } from "./schoolDayPeriods";
 import type { SchoolWeekday } from "../types";
-import { getEffectivePeriodSlots, generateDefaultPeriodSlots } from "./timeSlots";
+import { getEffectivePeriodSlots, generateDefaultPeriodSlots, timeSlotConfigForSchool } from "./timeSlots";
 import type { ReconstructedSlot } from "./timetableCrossref";
 import { normalizeSubjectName } from "./subjects";
 import { isSupportTeacherOf } from "./teacherType";
@@ -146,7 +146,17 @@ export function partitionReconstructedSlots(
     normalizeTeacherProfile(options.profile).schools
   );
   const schoolId = destinationSchool?.id ?? getPrimarySchool(options.profile)?.id;
-  const effectivePeriods = getEffectivePeriodSlots(options.timeSlotConfig);
+  /**
+   * FASCE ORARIE dell'istituto di destinazione: le sue se le ha, altrimenti
+   * quelle globali (che `options.timeSlotConfig` continua a portare, quindi i
+   * chiamanti non cambiano).
+   *
+   * È la STESSA config usata dai due controlli qui sotto — quante ore prevede
+   * il giorno e se quell'ora ha un orario reale. Usarne due diverse
+   * significherebbe validare un orario con le campane di un altro istituto.
+   */
+  const destinationTimeSlotConfig = timeSlotConfigForSchool(destinationSchool, options.timeSlotConfig);
+  const effectivePeriods = getEffectivePeriodSlots(destinationTimeSlotConfig);
 
   const result: TimetableSlot[] = [];
   const rejected: RejectedReconstructedSlot[] = [];
@@ -157,7 +167,7 @@ export function partitionReconstructedSlots(
     if (!className) continue; // nessuna classe determinabile: mai inventata
 
     // 1. Il giorno prevede quell'ora?
-    const allowed = periodsForDay(slot.dayOfWeek as SchoolWeekday, destinationSchool, options.timeSlotConfig);
+    const allowed = periodsForDay(slot.dayOfWeek as SchoolWeekday, destinationSchool, destinationTimeSlotConfig);
     if (slot.periodIndex > allowed) {
       rejected.push({ item: slot, reason: "day-not-allowed" });
       continue;

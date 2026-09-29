@@ -24,7 +24,7 @@ import {
   slotsInReplacementScope,
   type TimetableMergeMode,
 } from "../utils/reconstructTimetable";
-import { getEffectivePeriodSlots } from "../utils/timeSlots";
+import { getEffectivePeriodSlots, timeSlotConfigForSchool } from "../utils/timeSlots";
 import { isSupportTeacherOf } from "../utils/teacherType";
 import { AnalysisProgressBar } from "./AnalysisProgressBar";
 import { RECON_NOTES, crossrefTimetables, reconSignal, type ReconstructedSlot } from "../utils/timetableCrossref";
@@ -398,9 +398,19 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     () => schoolByIdOrPrimary(scanSchoolId, normalizeTeacherProfile(profile).schools),
     [scanSchoolId, profile],
   );
-  const periodsByDayPrefill = useMemo(
-    () => derivePersonalScannerPeriodsByDay(scanSchool, timeSlotConfig),
+  /**
+   * FASCE ORARIE dell'istituto della scansione: le sue se le ha, altrimenti
+   * quelle globali. Unica derivazione per tutto il percorso — geometria
+   * proposta, avviso sulle fasce mancanti e orari degli slot importati devono
+   * parlare della stessa scuola.
+   */
+  const scanTimeSlotConfig = useMemo(
+    () => timeSlotConfigForSchool(scanSchool, timeSlotConfig),
     [scanSchool, timeSlotConfig],
+  );
+  const periodsByDayPrefill = useMemo(
+    () => derivePersonalScannerPeriodsByDay(scanSchool, scanTimeSlotConfig),
+    [scanSchool, scanTimeSlotConfig],
   );
 
   const periodsPerDayPrefill =
@@ -460,8 +470,8 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
    * preview.
    */
   const weekStructureSlotsWarning = useMemo(
-    () => (periodsByDay ? missingTimeSlotsWarning(periodsByDay, getEffectivePeriodSlots(timeSlotConfig).length) : null),
-    [periodsByDay, timeSlotConfig],
+    () => (periodsByDay ? missingTimeSlotsWarning(periodsByDay, getEffectivePeriodSlots(scanTimeSlotConfig).length) : null),
+    [periodsByDay, scanTimeSlotConfig],
   );
   /**
    * Cambio di uno qualsiasi dei cinque valori: aggiorna quel giorno e azzera la
@@ -541,8 +551,11 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
   }, [reconSlots, profile, timeSlotConfig, reconSchoolId]);
   const saveableSlots = savePartition.slots;
 
-  /** Fasce orarie REALI del docente: unica fonte degli orari mostrati in anteprima. */
-  const effectivePeriodSlots = useMemo(() => getEffectivePeriodSlots(timeSlotConfig), [timeSlotConfig]);
+  /**
+   * Fasce orarie REALI dell'istituto di destinazione: unica fonte degli orari
+   * mostrati in anteprima, e le stesse con cui D1 costruisce gli slot salvati.
+   */
+  const effectivePeriodSlots = useMemo(() => getEffectivePeriodSlots(scanTimeSlotConfig), [scanTimeSlotConfig]);
 
   /**
    * Elementi che NON verranno importati, indicizzati per id: l'anteprima deve

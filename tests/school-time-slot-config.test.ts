@@ -367,25 +367,34 @@ test('G1/18-19. la globale resta dov era: stessa API, stessa chiave, nessuna chi
   );
 });
 
-test('G1/20. fuori dall editor nessuno usa ancora school.timeSlotConfig', async () => {
+test('G1/20. il confine dei consumatori è esplicito: chi risolve per istituto e chi resta puro', async () => {
   const { readFileSync } = await import('node:fs');
   const { join } = await import('node:path');
-  // G1 ha introdotto il modello; G2 ne ha fatto il primo consumatore, il
-  // TimetableEditor. Tutto il resto — viste del Planning, scanner, D1, D3 —
-  // legge ancora la configurazione GLOBALE: è lo stato intermedio previsto dal
-  // piano, e arriva a G3. Il confine va tenuto esplicito.
+  const read = (...file: string[]) => readFileSync(join(process.cwd(), 'src', ...file), 'utf8');
+
+  // CONSUMATORI (G2 + G3): risolvono le campane della scuola effettiva e le
+  // usano al posto del singleton del docente. Sono i punti in cui "quale
+  // istituto" e "quali orari" devono viaggiare insieme.
   for (const file of [
+    ['components', 'TimetableEditor.tsx'],
     ['components', 'TodayView.tsx'],
     ['components', 'WeekView.tsx'],
     ['components', 'DocumentScannerModal.tsx'],
     ['utils', 'reconstructTimetable.ts'],
+  ]) {
+    assert.match(read(...file), /timeSlotConfigForSchool\(/, `${file.join('/')} deve risolvere le fasce per istituto`);
+  }
+
+  // UTILITY DI DOMINIO: restano pure. Ricevono scuola e config come parametri
+  // e non leggono il profilo né risolvono identità — è la convenzione che ha
+  // reso piccoli D3, F5 e G3, e va difesa.
+  for (const file of [
     ['utils', 'scannerWeekGeometry.ts'],
     ['utils', 'schoolDayPeriods.ts'],
   ]) {
-    const source = readFileSync(join(process.cwd(), 'src', ...file), 'utf8');
-    assert.equal(/timeSlotConfigForSchool/.test(source), false, `${file.join('/')} non deve ancora risolvere per istituto`);
-    // Il campo si legge solo da una SCUOLA: `options.timeSlotConfig` resta la
-    // configurazione globale di sempre ed è legittimo.
-    assert.equal(/\bschool\w*\s*\??\.\s*timeSlotConfig/i.test(source), false, `${file.join('/')} non deve ancora leggere le campane di un istituto`);
+    const source = read(...file);
+    assert.equal(/timeSlotConfigForSchool/.test(source), false, `${file.join('/')} deve restare puro`);
+    assert.equal(/\bschool\w*\s*\??\.\s*timeSlotConfig/i.test(source), false, `${file.join('/')} non deve leggere le campane da una scuola`);
+    assert.equal(/normalizeTeacherProfile|getPrimarySchool/.test(source), false, `${file.join('/')} non deve leggere il profilo`);
   }
 });

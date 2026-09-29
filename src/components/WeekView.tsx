@@ -16,6 +16,7 @@ import {
 import { CalendarEvent, TeacherProfile, TimeSlotConfig, TimetableSlot, TimetableType } from "../types";
 import { coTeachingSummary } from "../utils/coTeaching";
 import { effectiveSchoolForSlot, normalizeTeacherProfile } from "../utils/multiSchool";
+import { timeSlotConfigForSchool } from "../utils/timeSlots";
 import {
   isSlotOutOfConfiguredDay,
   OUT_OF_CONFIG_SLOT_BADGE,
@@ -375,7 +376,8 @@ export const WeekView: React.FC<WeekViewProps> = ({
                         // lezione per il badge E per le ore ammesse, e si
                         // marca senza mai filtrare.
                         const school = effectiveSchoolForSlot(slot, schools);
-                        const outOfConfig = isSlotOutOfConfiguredDay(slot, school, timeSlotConfig);
+                        const schoolConfig = timeSlotConfigForSchool(school, timeSlotConfig);
+                        const outOfConfig = isSlotOutOfConfiguredDay(slot, school, schoolConfig);
                         const lessonBody = (
                             <div className="min-w-0">
                               <div className="flex items-center gap-1.5 flex-wrap">

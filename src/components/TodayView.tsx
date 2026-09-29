@@ -22,6 +22,7 @@ import { scheduledAssessmentTypeLabel } from "../utils/scheduledAssessmentCalend
 import { readDailyCollapse, writeDailyCollapse, type CollapseGroup } from "../utils/collapsePreferences";
 import { coTeachingSummary } from "../utils/coTeaching";
 import { effectiveSchoolForSlot, normalizeTeacherProfile } from "../utils/multiSchool";
+import { timeSlotConfigForSchool } from "../utils/timeSlots";
 import {
   isSlotOutOfConfiguredDay,
   OUT_OF_CONFIG_SLOT_BADGE,
@@ -515,9 +516,12 @@ export const TodayView: React.FC<TodayViewProps> = ({
                     // lezione della secondaria non va più letta con la
                     // configurazione della primaria.
                     const school = effectiveSchoolForSlot(slot, schools);
+                    // Le campane di QUELLA scuola: sue se le ha, altrimenti le
+                    // globali. Scuola e fasce vanno sempre lette in coppia.
+                    const schoolConfig = timeSlotConfigForSchool(school, timeSlotConfig);
                     // Lezione salvata in un'ora che il giorno non prevede: si
                     // marca, non si nasconde e non si tocca il dato.
-                    const outOfConfig = isSlotOutOfConfiguredDay(slot, school, timeSlotConfig);
+                    const outOfConfig = isSlotOutOfConfiguredDay(slot, school, schoolConfig);
                     const lessonBody = (
                         <div className="flex items-start gap-3">
                           {/* Ora & periodo: blocco verticale compatto */}
