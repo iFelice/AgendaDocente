@@ -531,6 +531,25 @@ export function parseTimetableAiResponse(
 }
 
 /**
+ * Il payload è stato rifiutato PERCHÉ la riga letta non combacia col cognome
+ * del profilo?
+ *
+ * È un riconoscimento sul CODICE del rifiuto, mai sul testo del messaggio:
+ * l'unico modo di distinguere questo caso senza fare matching su una stringa e
+ * senza guardare dentro il documento. Serve a due chiamanti — il messaggio
+ * dedicato per l'utente e la decisione del fallback semantico verso Groq — che
+ * devono restare d'accordo su cosa conta come "riga non riconosciuta": ogni
+ * altro rifiuto di forma (geometria, schema, coordinate) resta fuori.
+ *
+ * NON allenta la guardia d'identità: `validatePersonalSequencePayload` continua
+ * a usare `findTeacherRows` con confronto a parole intere, e questa funzione
+ * osserva soltanto l'esito.
+ */
+export function isTeacherRowNotRecognized(error: unknown): boolean {
+  return error instanceof TimetableShapeError && error.code === TEACHER_ROW_NOT_RECOGNIZED;
+}
+
+/**
  * Messaggio per l'utente quando il payload del modello viene rifiutato.
  *
  * Di default resta generico: il motivo del rifiuto è diagnostica server-side.
@@ -540,7 +559,7 @@ export function parseTimetableAiResponse(
  * frammento del documento o del modello arriva al client: solo il motivo.
  */
 export function timetableRejectionMessage(error: unknown): string {
-  if (error instanceof TimetableShapeError && error.code === TEACHER_ROW_NOT_RECOGNIZED) {
+  if (isTeacherRowNotRecognized(error)) {
     return "Non ho riconosciuto la riga del tuo orario nel documento: il nome letto non corrisponde a quello del tuo profilo. Controlla nome e cognome in Profilo, oppure riprova con una foto più leggibile della colonna dei docenti.";
   }
   return "Analisi non riuscita. Riprova.";

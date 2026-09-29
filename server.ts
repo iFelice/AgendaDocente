@@ -13,7 +13,13 @@ import {
   type CircularPayloadSummary,
 } from "./server/circularAnalysisGuard";
 import { createAnalysisErrorHandler, createAnalysisGuards } from "./server/analysisGuards";
-import { groqConfigured, groqFallbackDecision, runGroqJson } from "./server/groqAnalysis";
+import {
+  groqConfigured,
+  groqFallbackDecision,
+  groqSemanticFallbackDecision,
+  runGroqJson,
+  type GroqFallbackDecision,
+} from "./server/groqAnalysis";
 import {
   STUDENT_DOCUMENT_PROMPT,
   buildCurricularTimetablePrompt,
@@ -22,6 +28,7 @@ import {
   STUDENT_DOCUMENT_TIMEOUT_MS,
   TIMETABLE_ANALYSIS_TIMEOUT_MS,
   describeAnalysisFailure,
+  isTeacherRowNotRecognized,
   timetableRejectionMessage,
   parseStudentDocumentAiResponse,
   parseTimetableAiResponse,
@@ -923,7 +930,90 @@ const scanAnalysisErrorHandler = createAnalysisErrorHandler(false);
 const TIMETABLE_USER_TEXT = "Analizza la tabella della foto/PDF allegata rispettando le regole del prompt.";
 
 /**
- * Fallback Groq Vision per l'analisi degli orari.
+ * Esito di `decodeAndValidateTimetable`: payload accettato, oppure rifiuto
+ * CLASSIFICATO senza mai esporre il contenuto del documento.
+ *
+ * I campi sono tutti sempre presenti (niente opzionali) perché senza
+ * `strictNullChecks` il narrowing su una union discriminata non è disponibile e
+ * costringerebbe il chiamante a un cast.
+ */
+interface TimetableDecodeResult {
+  ok: boolean;
+  /** Valorizzato solo con `ok = true`. */
+  outcome: TimetableAnalysisOutcome | null;
+  /** Il testo del modello non era JSON interpretabile: percorso 503, non 422. */
+  undecodable: boolean;
+  /** Errore del validatore quando il JSON era leggibile ma la forma è stata rifiutata. */
+  error: unknown;
+  /** UNICO rifiuto che abilita il secondo parere di Groq (fallback semantico). */
+  rowNotRecognized: boolean;
+}
+
+/**
+ * Groq Vision entra in gioco per DUE motivi distinti, che non vanno confusi:
+ *
+ *  - fallback TECNICO (`runGroqTimetableFallback`): Gemini ha esaurito i
+ *    tentativi e il fallimento è transitorio. Il provider non risponde.
+ *  - fallback SEMANTICO (`runGroqTimetableRowRetry`): Gemini HA risposto, il
+ *    JSON è valido, ma la riga letta non combacia col cognome del profilo.
+ *
+ * Entrambi condividono ingredienti ed esecuzione (`runGroqTimetableAttempt`) e
+ * differiscono solo nella decisione di partenza.
+ */
+/** Ingredienti della chiamata: IDENTICI per Gemini e per entrambi i fallback Groq. */
+interface GroqTimetableAttemptInput {
+  systemInstruction: string;
+  imageBase64: string;
+  mimeType: string;
+  responseSchema: unknown;
+  signal: AbortSignal;
+  /** Tempo già consumato dentro il deadline dell'endpoint (mai azzerato). */
+  elapsedMs: number;
+  /** Testo utente della chiamata (default: quello dell'analisi orario). */
+  userText?: string;
+  /** Etichetta dei log (default: "AI Orari"). */
+  label?: string;
+}
+
+/**
+ * Esecuzione di UN tentativo Groq, comune ai due fallback.
+ *
+ * La `decision` (tecnica o semantica) è già stata presa dal chiamante: qui si
+ * traccia l'esito di quella decisione e, se passa, si chiama il provider con
+ * gli STESSI `systemInstruction`, `userText`, immagine, `mimeType` e schema di
+ * Gemini, dentro il budget RESIDUO dell'endpoint. Nessun deadline nuovo.
+ *
+ * `silentReasons` elenca i motivi che non sono eventi (descrivono "non è questa
+ * la situazione"), per non riempire i log a ogni richiesta.
+ */
+async function runGroqTimetableAttempt(
+  input: GroqTimetableAttemptInput & { decision: GroqFallbackDecision; reason: string; silentReasons: readonly string[] },
+): Promise<{ ok: true; text: string; source: string } | { ok: false }> {
+  const label = input.label ?? "AI Orari";
+  const remainingBudgetMs = TIMETABLE_ANALYSIS_TIMEOUT_MS - input.elapsedMs;
+  if (!input.decision.proceed) {
+    if (!input.silentReasons.includes(input.decision.reason)) {
+      console.log(`[${label}] fallback=groq saltato motivo=${input.decision.reason}`);
+    }
+    return { ok: false };
+  }
+  // Solo motivo, MIME e budget: mai etichette di riga, nomi, OCR, JSON o classi.
+  console.log(`[${label}] fallback=groq motivo=${input.reason} mime=${input.mimeType} budgetMs=${remainingBudgetMs}`);
+  const result = await runGroqJson({
+    systemInstruction: input.systemInstruction,
+    userText: input.userText ?? TIMETABLE_USER_TEXT,
+    imageBase64: input.imageBase64,
+    mimeType: input.mimeType,
+    responseSchema: input.responseSchema,
+    signal: input.signal,
+    label,
+    budgetMs: remainingBudgetMs,
+  });
+  return result.ok ? { ok: true, text: result.text, source: result.source } : { ok: false };
+}
+
+/**
+ * Fallback TECNICO Groq Vision per l'analisi degli orari.
  *
  * Entra in gioco SOLO dopo che Gemini ha esaurito i tentativi E il fallimento è
  * transitorio (sovraccarico/quota/deadline/rete): su un errore deterministico —
@@ -939,45 +1029,55 @@ const TIMETABLE_USER_TEXT = "Analizza la tabella della foto/PDF allegata rispett
  * `validatePersonalSequencePayload` / `validateCurricularTargetsPayload`. Con
  * `ok=false` l'endpoint risponde esattamente come prima del fallback.
  */
-async function runGroqTimetableFallback(input: {
-  run: GeminiJsonRunResult;
-  systemInstruction: string;
-  imageBase64: string;
-  mimeType: string;
-  responseSchema: unknown;
-  signal: AbortSignal;
-  elapsedMs: number;
-  /** Testo utente della chiamata (default: quello dell'analisi orario). */
-  userText?: string;
-  /** Etichetta dei log (default: "AI Orari"). */
-  label?: string;
-}): Promise<{ ok: true; text: string; source: string } | { ok: false }> {
-  const label = input.label ?? "AI Orari";
-  const remainingBudgetMs = TIMETABLE_ANALYSIS_TIMEOUT_MS - input.elapsedMs;
-  const decision = groqFallbackDecision({
-    geminiOk: input.run.ok,
-    geminiTransient: input.run.category !== "ok" && isTransientGeminiCategory(input.run.category),
-    groqConfigured: groqConfigured(),
-    mimeType: input.mimeType,
-    remainingBudgetMs,
-  });
-  if (!decision.proceed) {
+async function runGroqTimetableFallback(
+  input: GroqTimetableAttemptInput & { run: GeminiJsonRunResult },
+): Promise<{ ok: true; text: string; source: string } | { ok: false }> {
+  return runGroqTimetableAttempt({
+    ...input,
+    decision: groqFallbackDecision({
+      geminiOk: input.run.ok,
+      geminiTransient: input.run.category !== "ok" && isTransientGeminiCategory(input.run.category),
+      groqConfigured: groqConfigured(),
+      mimeType: input.mimeType,
+      remainingBudgetMs: TIMETABLE_ANALYSIS_TIMEOUT_MS - input.elapsedMs,
+    }),
+    reason: input.run.category,
     // "gemini-ok" non è un evento: con Gemini a buon fine il fallback non parte.
-    if (decision.reason !== "gemini-ok") console.log(`[${label}] fallback=groq saltato motivo=${decision.reason}`);
-    return { ok: false };
-  }
-  console.log(`[${label}] fallback=groq motivo=${input.run.category} mime=${input.mimeType} budgetMs=${remainingBudgetMs}`);
-  const result = await runGroqJson({
-    systemInstruction: input.systemInstruction,
-    userText: input.userText ?? TIMETABLE_USER_TEXT,
-    imageBase64: input.imageBase64,
-    mimeType: input.mimeType,
-    responseSchema: input.responseSchema,
-    signal: input.signal,
-    label,
-    budgetMs: remainingBudgetMs,
+    silentReasons: ["gemini-ok"],
   });
-  return result.ok ? { ok: true, text: result.text, source: result.source } : { ok: false };
+}
+
+/** Motivo del fallback SEMANTICO nei log: stabile, privacy-safe, non testuale. */
+const GROQ_SEMANTIC_FALLBACK_REASON = "row-docente-non-riconosciuta";
+
+/**
+ * Fallback SEMANTICO: secondo parere su una riga docente non riconosciuta.
+ *
+ * Gemini ha risposto, il JSON è decodificabile, la forma è stata rifiutata
+ * SOLO perché l'etichetta della riga non combacia col cognome del profilo: una
+ * lettura OCR sbagliata su una cella di testo, non una richiesta sbagliata.
+ * Groq rilegge la STESSA immagine con lo stesso prompt e lo stesso schema, e il
+ * risultato torna nello STESSO validatore — la guardia d'identità resta identica
+ * e nessun payload può aggirarla. Se Groq non parte, fallisce o sbaglia ancora
+ * la riga, il chiamante mantiene il 422 già calcolato su Gemini.
+ */
+async function runGroqTimetableRowRetry(
+  input: GroqTimetableAttemptInput & { geminiOk: boolean; personalDocument: boolean; rowNotRecognized: boolean },
+): Promise<{ ok: true; text: string; source: string } | { ok: false }> {
+  return runGroqTimetableAttempt({
+    ...input,
+    decision: groqSemanticFallbackDecision({
+      geminiOk: input.geminiOk,
+      personalDocument: input.personalDocument,
+      rowNotRecognized: input.rowNotRecognized,
+      groqConfigured: groqConfigured(),
+      mimeType: input.mimeType,
+      remainingBudgetMs: TIMETABLE_ANALYSIS_TIMEOUT_MS - input.elapsedMs,
+    }),
+    reason: GROQ_SEMANTIC_FALLBACK_REASON,
+    // Non sono eventi: descrivono una richiesta che non è il caso previsto.
+    silentReasons: ["documento-non-personale", "errore-non-semantico"],
+  });
 }
 
 app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnalysisPayload), async (req, res) => {
@@ -1009,6 +1109,34 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
       ? buildPersonalTimetablePrompt(targetSurname, periodsByDay)
       : buildCurricularTimetablePrompt(coordinateScope);
     const responseSchema = isPersonal ? personalTimetableSchema : curricularTimetableSchema;
+    /**
+     * Decodifica + validazione del payload di UN provider, in un punto solo.
+     *
+     * Esiste perché il percorso va percorso due volte (Gemini e, nel caso della
+     * riga non riconosciuta, Groq) e duplicarlo significherebbe poter divergere:
+     * qui `parseGeminiJson` e `parseTimetableAiResponse` sono gli stessi, con gli
+     * stessi `documentType`, cognome, `periodsByDay` e `coordinateScope`.
+     * Nessuna scorciatoia per il secondo tentativo.
+     *
+     * Un rifiuto del validatore è un fallimento ATTESO e gestito (messaggio
+     * utente invariato, diagnostica privacy-safe), non un crash nel catch
+     * generico dell'endpoint — che era il sintomo su iPhone. Nell'orario
+     * personale sono rifiuti anche un numero di blocchi giornalieri diverso da
+     * cinque, un blocco con un numero di celle diverso dalle ore di QUEL giorno
+     * e una riga non compatibile col cognome del profilo.
+     */
+    const decodeAndValidateTimetable = (raw: string): TimetableDecodeResult => {
+      const decoded = parseGeminiJson(raw, "AI Orari");
+      if (!decoded.ok) return { ok: false, outcome: null, undecodable: true, error: null, rowNotRecognized: false };
+      try {
+        const parsed = parseTimetableAiResponse(documentType, decoded.value, targetSurname, periodsByDay, coordinateScope);
+        return { ok: true, outcome: parsed, undecodable: false, error: null, rowNotRecognized: false };
+      } catch (error: unknown) {
+        console.warn(describeAnalysisFailure(error, decoded.value, documentType));
+        // Il motivo è letto dal CODICE dell'errore, mai dal testo del messaggio.
+        return { ok: false, outcome: null, undecodable: false, error, rowNotRecognized: isTeacherRowNotRecognized(error) };
+      }
+    };
     const analysisStartedAt = Date.now();
     const run = await runGeminiJson({
       systemInstruction,
@@ -1044,26 +1172,50 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
       source = fallback.source;
     }
     // Runtime validation obbligatoria: il JSON del modello è sempre verificato,
-    // qualunque sia il provider che lo ha prodotto.
-    const decoded = parseGeminiJson(text, "AI Orari");
-    if (!decoded.ok) {
-      return res.status(503).json({ success: false, error: "Il documento non è stato elaborato. Riprova più tardi." });
-    }
-    // Forma del payload: un rifiuto del validatore è un fallimento ATTESO e
-    // gestito (messaggio utente invariato, diagnostica privacy-safe), non un crash
-    // nel catch generico dell'endpoint — che era il sintomo su iPhone.
-    // Nell'orario personale sono rifiuti anche un numero di blocchi giornalieri
-    // diverso da cinque, un blocco con un numero di celle diverso dalle ore di
-    // QUEL giorno e una riga non compatibile col cognome del profilo.
-    let outcome: TimetableAnalysisOutcome;
-    try {
-      outcome = parseTimetableAiResponse(documentType, decoded.value, targetSurname, periodsByDay, coordinateScope);
-    } catch (error: unknown) {
-      console.warn(describeAnalysisFailure(error, decoded.value, documentType));
-      // Messaggio generico, tranne quando la riga del docente non è stata
-      // riconosciuta: quello l'utente può risolverlo (profilo o foto), gli altri
-      // no. Solo il motivo esce, mai un frammento del documento o del modello.
-      return res.status(422).json({ success: false, error: timetableRejectionMessage(error) });
+    // qualunque sia il provider che lo ha prodotto. Un solo percorso, usato sia
+    // per Gemini sia per i fallback: impossibile che un provider ne salti un pezzo.
+    const validated = decodeAndValidateTimetable(text);
+    let outcome = validated.outcome;
+    if (!validated.ok) {
+      // Testo non interpretabile: nessun payload da valutare, resta il 503.
+      if (validated.undecodable) {
+        return res.status(503).json({ success: false, error: "Il documento non è stato elaborato. Riprova più tardi." });
+      }
+      // Il 422 di prima, invariato: messaggio generico tranne quando la riga del
+      // docente non è stata riconosciuta — quello l'utente può risolverlo
+      // (profilo o foto), gli altri no. Esce solo il motivo, mai un frammento
+      // del documento o del modello. È sempre l'errore di GEMINI a decidere il
+      // messaggio: il secondo tentativo può solo aggiungere un successo, mai
+      // cambiare la risposta di rifiuto.
+      const rejected = () => res.status(422).json({ success: false, error: timetableRejectionMessage(validated.error) });
+      // Fallback SEMANTICO (distinto da quello tecnico qui sopra): Gemini ha
+      // risposto e il JSON è valido, ma la riga letta non combacia col cognome
+      // del profilo. È l'unico rifiuto di forma che un secondo modello di
+      // visione può ribaltare rileggendo la STESSA immagine; geometria, schema,
+      // coordinate e payload troncato restano il 422/503 di prima.
+      //
+      // La condizione NON è duplicata qui: decide `groqSemanticFallbackDecision`
+      // e basta. Un secondo controllo in questo punto renderebbe i due presidi
+      // reciprocamente mascheranti — allentarne uno non farebbe fallire nulla.
+      const retry = await runGroqTimetableRowRetry({
+        geminiOk: run.ok,
+        personalDocument: isPersonal,
+        rowNotRecognized: validated.rowNotRecognized,
+        systemInstruction,
+        imageBase64,
+        mimeType,
+        responseSchema,
+        signal: controller.signal,
+        // Budget RESIDUO dell'endpoint: il deadline non viene rimesso a nuovo.
+        elapsedMs: Date.now() - analysisStartedAt,
+      });
+      if (!retry.ok) return rejected();
+      // Il secondo tentativo è puramente additivo: vale solo se produce un
+      // payload che supera lo STESSO validatore, guardia d'identità inclusa.
+      const retryValidated = decodeAndValidateTimetable(retry.text);
+      if (!retryValidated.ok) return rejected();
+      outcome = retryValidated.outcome;
+      source = retry.source;
     }
     if (!isPersonal) {
       // Diagnostica privacy-safe: SOLO conteggi. Mai classi, coordinate, materie,

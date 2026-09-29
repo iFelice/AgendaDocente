@@ -6,8 +6,10 @@ import { app, geminiCandidateModels, isTransientGeminiCategory } from '../server
 import {
   GROQ_CHAT_COMPLETIONS_URL,
   GROQ_IMAGE_MIME_TYPES,
+  GROQ_MIN_ATTEMPT_MS,
   GROQ_REASONING_EFFORT,
   GROQ_REASONING_FORMAT,
+  GROQ_RESPONSE_RESERVE_MS,
   GROQ_TEMPERATURE,
   GROQ_VISION_MODEL_DEFAULT,
   classifyGroqHttpStatus,
@@ -15,6 +17,7 @@ import {
   groqConfigured,
   groqFallbackDecision,
   groqJsonSchemaFrom,
+  groqSemanticFallbackDecision,
   groqSupportsMimeType,
   groqVisionModel,
   runGroqJson,
@@ -25,6 +28,7 @@ import {
   parseTimetableAiResponse,
   personalTimetableSchema,
 } from '../server/timetableAnalysis';
+import { TEACHER_ROW_NOT_RECOGNIZED } from '../src/utils/timetableAnalysis';
 
 /**
  * Settimana RETTANGOLARE di comodo: `week(6)` = `[6, 6, 6, 6, 6]`.
@@ -801,6 +805,351 @@ test('endpoint: i log dell intero flusso non contengono chiave, immagine né con
     assert.doesNotMatch(dump, /Docente/, 'nessun nome');
     // Le coordinate restano solo conteggi, come nel log curricolare esistente.
     assert.match(dump, /coordinateRichieste=\d+ coordinateRestituite=\d+ celle=\d+/);
+  } finally {
+    restore();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 7. FALLBACK SEMANTICO: Gemini risponde, ma la riga docente non è riconosciuta
+// ---------------------------------------------------------------------------
+
+/**
+ * Caso reale (H3): foto dell'orario personale con la riga chiaramente leggibile,
+ * profilo "Felice Manganiello". Gemini restituisce un payload formalmente
+ * valido e sbaglia UNA cella di testo — l'etichetta della riga — quindi la
+ * guardia d'identità lo rifiuta con `TEACHER_ROW_NOT_RECOGNIZED` e l'utente
+ * riceve un 422 pur avendo fotografato il documento giusto.
+ *
+ * Non è una richiesta sbagliata: è una lettura OCR sbagliata, l'unico rifiuto
+ * di forma su cui un secondo modello di visione può riuscire. Groq rilegge la
+ * STESSA immagine con lo stesso prompt, lo stesso schema, lo stesso testo utente
+ * e il budget RESIDUO; il payload che torna passa nello STESSO validatore.
+ *
+ * Il matcher NON diventa fuzzy: "Mangianello" resta rifiutato: cambia solo chi
+ * viene interrogato una seconda volta.
+ *
+ * Nomi e geometria di questa sezione riproducono la segnalazione; nessun altro
+ * dato reale è presente.
+ */
+
+/** Geometria NON rettangolare del caso reale: il giovedì ha 7 ore. */
+const REAL_WEEK = [6, 6, 6, 7, 6];
+
+/** Profilo del caso reale: il cognome è l'unico campo che raggiunge il prompt. */
+const manganielloProfile = { ...profile, fullName: 'Felice Manganiello' };
+
+/** `days` conforme a `REAL_WEEK`: celle sintetiche, nessun orario reale. */
+const realDays = REAL_WEEK.map((periods, dayIndex) => ({
+  cells: Array.from({ length: periods }, (_, cellIndex) => (cellIndex === 0 ? `1A` : '')),
+}));
+
+const personalPayload = (rowLabel: string, days: unknown = realDays) => JSON.stringify({ rowLabel, days });
+
+const personalBody = {
+  imageBase64: pngBase64,
+  mimeType: 'image/png',
+  documentType: 'personal-support-timetable',
+  periodsByDay: REAL_WEEK,
+  profile: manganielloProfile,
+};
+
+const geminiOk = (text: string) => () => ({ status: 200, body: geminiJsonResponse(text) });
+const groqOk = (text: string) => () => ({ status: 200, body: { choices: [{ message: { content: text }, finish_reason: 'stop' }] } });
+
+/** Quante volte ogni provider è stato chiamato in un test d'endpoint. */
+const calls = (host: 'gemini' | 'groq') => intercepted.filter((h) => h === host).length;
+
+test('caso reale: Gemini legge "Mangianello", Groq legge "Manganiello" -> 200 senza toccare la geometria', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  stubProviders({
+    gemini: geminiOk(personalPayload('Mangianello')),
+    groq: groqOk(personalPayload('Manganiello')),
+  });
+  const restore = captureLogs();
+  try {
+    const res = await postTimetable(personalBody);
+    assert.equal(res.status, 200, 'il secondo parere salva una scansione corretta');
+    const data = await res.json();
+    assert.equal(data.success, true);
+    assert.equal(data.rowLabel, 'Manganiello', 'vince la riga riconosciuta, non quella di Gemini');
+    assert.equal(data.source, GROQ_VISION_MODEL_DEFAULT, 'la risposta dichiara il provider che ha risposto');
+
+    // Geometria INTATTA: il giovedì mantiene 7 celle e nessun periodo scivola.
+    const perDay = REAL_WEEK.map((_, dayIndex) => data.cells.filter((c: any) => c.dayOfWeek === dayIndex + 1).length);
+    assert.deepEqual(perDay, REAL_WEEK, 'ogni giorno conserva le proprie ore');
+    assert.equal(data.cells.length, REAL_WEEK.reduce((a, b) => a + b, 0));
+    const thursday = data.cells.filter((c: any) => c.dayOfWeek === 4);
+    assert.deepEqual(thursday.map((c: any) => c.periodIndex), [1, 2, 3, 4, 5, 6, 7], 'giovedì: 7 periodi consecutivi');
+    // Coordinate derivate dalla POSIZIONE, come sempre: nessuna alterazione.
+    assert.deepEqual(
+      data.cells.filter((c: any) => c.raw === '1A').map((c: any) => `${c.dayOfWeek}|${c.periodIndex}`),
+      ['1|1', '2|1', '3|1', '4|1', '5|1'],
+    );
+
+    assert.equal(calls('gemini'), 1, 'Gemini ha risposto al primo colpo: nessun retry tecnico');
+    assert.equal(calls('groq'), 1, 'un solo secondo parere');
+    assert.match(logLines.join('\n'), /fallback=groq motivo=row-docente-non-riconosciuta/, 'motivo semantico tracciato');
+  } finally {
+    restore();
+  }
+});
+
+test('fallback semantico: Groq sbaglia ancora la riga -> 422 col messaggio attuale', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  stubProviders({
+    gemini: geminiOk(personalPayload('Mangianello')),
+    groq: groqOk(personalPayload('Manganiell')),
+  });
+  const restore = captureLogs();
+  try {
+    const res = await postTimetable(personalBody);
+    assert.equal(res.status, 422, 'il secondo parere non abbassa la guardia d identità');
+    const data = await res.json();
+    assert.equal(data.success, false);
+    assert.match(data.error, /Non ho riconosciuto la riga del tuo orario/i, 'messaggio utente invariato');
+    assert.equal(calls('groq'), 1, 'un solo tentativo: il fallback non ritenta in ciclo');
+  } finally {
+    restore();
+  }
+});
+
+test('fallback semantico: Groq fallisce HTTP -> 422 attuale, nessun 503 e nessun crash', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  stubProviders({
+    gemini: geminiOk(personalPayload('Mangianello')),
+    groq: () => ({ status: 503, body: { error: { message: 'overloaded' } } }),
+  });
+  const restore = captureLogs();
+  try {
+    const res = await postTimetable(personalBody);
+    assert.equal(res.status, 422, 'il payload di Gemini era decodificabile: resta il rifiuto di forma');
+    assert.match((await res.json()).error, /Non ho riconosciuto la riga del tuo orario/i);
+    assert.equal(calls('groq'), 1);
+    assert.match(logLines.join('\n'), /provider=groq .* esito=fallito categoria=sovraccarico/);
+  } finally {
+    restore();
+  }
+});
+
+test('fallback semantico: Groq non configurato -> 422 attuale, nessuna chiamata', async () => {
+  delete process.env.GROQ_API_KEY;
+  stubProviders({
+    gemini: geminiOk(personalPayload('Mangianello')),
+    groq: groqOk(personalPayload('Manganiello')),
+  });
+  const restore = captureLogs();
+  try {
+    const res = await postTimetable(personalBody);
+    assert.equal(res.status, 422, 'senza chiave il comportamento è quello di oggi');
+    assert.match((await res.json()).error, /Non ho riconosciuto la riga del tuo orario/i);
+    assert.equal(calls('groq'), 0, 'Groq non è raggiungibile senza chiave');
+    const dump = logLines.join('\n');
+    assert.match(dump, /fallback=groq saltato motivo=non-configurato/);
+    assert.doesNotMatch(dump, /GROQ_API_KEY|gsk_/);
+  } finally {
+    restore();
+  }
+});
+
+test('fallback semantico: PDF -> Groq NON viene chiamato (nessuna conversione), resta il 422', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  stubProviders({
+    gemini: geminiOk(personalPayload('Mangianello')),
+    groq: groqOk(personalPayload('Manganiello')),
+  });
+  const restore = captureLogs();
+  try {
+    const res = await postTimetable({ ...personalBody, imageBase64: pdfBase64, mimeType: 'application/pdf' });
+    assert.equal(res.status, 422);
+    assert.match((await res.json()).error, /Non ho riconosciuto la riga del tuo orario/i);
+    assert.equal(calls('groq'), 0, 'Groq Vision non prende PDF');
+    assert.match(logLines.join('\n'), /fallback=groq saltato motivo=mime-non-supportato/);
+  } finally {
+    restore();
+  }
+});
+
+test('fallback semantico: un TimetableShapeError diverso NON attiva Groq', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  // Riga RICONOSCIUTA, numero di blocchi giornalieri sbagliato (uno invece di
+  // cinque): è una risposta strutturalmente sbagliata, non una lettura sbagliata.
+  const restore = captureLogs();
+  try {
+    stubProviders({
+      gemini: geminiOk(personalPayload('Manganiello', [{ cells: ['', '', '', '', '', ''] }])),
+      groq: groqOk(personalPayload('Manganiello')),
+    });
+    const blocks = await postTimetable(personalBody);
+    assert.equal(blocks.status, 422, 'numero di giorni errato: 422 immediato');
+    assert.match((await blocks.json()).error, /Analisi non riuscita/i, 'messaggio generico, non quello della riga');
+    assert.equal(calls('groq'), 0, 'nessun secondo parere su un errore di struttura');
+
+    // `days` assente: forma non valida, stesso trattamento.
+    stubProviders({
+      gemini: geminiOk(JSON.stringify({ rowLabel: 'Manganiello' })),
+      groq: groqOk(personalPayload('Manganiello')),
+    });
+    const missing = await postTimetable(personalBody);
+    assert.equal(missing.status, 422);
+    assert.equal(calls('groq'), 0, 'schema non valido: nessun secondo parere');
+
+    // Coordinate curricolari fuori elenco: il fallback semantico è solo personale.
+    stubProviders({
+      gemini: geminiOk('{"targets":"non-un-array"}'),
+      groq: groqOk(groqCurricularText),
+    });
+    const curricular = await postTimetable(curricularBody);
+    assert.equal(curricular.status, 422);
+    assert.equal(calls('groq'), 0, 'il curricolare non ha una riga docente da riconoscere');
+
+    assert.doesNotMatch(logLines.join('\n'), /fallback=groq motivo=row-docente-non-riconosciuta/);
+  } finally {
+    restore();
+  }
+});
+
+test('fallback semantico: geometria del giovedì sbagliata -> Groq NON viene chiamato', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  // Settimana dichiarata [6,6,6,7,6], giovedì con 6 celle: una cella persa non
+  // si recupera chiedendo a un altro modello, si rifiuta.
+  const shortThursday = REAL_WEEK.map((periods, dayIndex) => ({
+    cells: Array.from({ length: dayIndex === 3 ? 6 : periods }, () => ''),
+  }));
+  stubProviders({
+    gemini: geminiOk(personalPayload('Manganiello', shortThursday)),
+    groq: groqOk(personalPayload('Manganiello')),
+  });
+  const restore = captureLogs();
+  try {
+    const res = await postTimetable(personalBody);
+    assert.equal(res.status, 422);
+    assert.match((await res.json()).error, /Analisi non riuscita/i);
+    assert.equal(calls('groq'), 0, 'la geometria non è un caso da secondo parere');
+    assert.doesNotMatch(logLines.join('\n'), /fallback=groq motivo=row-docente-non-riconosciuta/);
+  } finally {
+    restore();
+  }
+});
+
+test('fallback semantico: Gemini riconosce la riga -> Groq NON viene chiamato', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  stubProviders({
+    gemini: geminiOk(personalPayload('Manganiello')),
+    groq: groqOk(personalPayload('Manganiello')),
+  });
+  const restore = captureLogs();
+  try {
+    const res = await postTimetable(personalBody);
+    assert.equal(res.status, 200);
+    const data = await res.json();
+    assert.equal(data.rowLabel, 'Manganiello');
+    assert.equal(data.source, geminiCandidateModels()[0], 'nessun cambio di provider');
+    assert.equal(calls('groq'), 0, 'niente da correggere, niente seconda chiamata');
+    assert.doesNotMatch(logLines.join('\n'), /fallback=groq/);
+  } finally {
+    restore();
+  }
+});
+
+test('fallback tecnico: 503 di Gemini -> Groq, e la riga sbagliata di Groq NON provoca una terza chiamata', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  stubProviders({
+    gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
+    groq: groqOk(personalPayload('Manganiello')),
+  });
+  const restore = captureLogs();
+  try {
+    // Il percorso tecnico resta quello di prima: Gemini esaurisce i tentativi,
+    // Groq risponde e il payload passa nello stesso validatore.
+    const ok = await postTimetable(personalBody);
+    assert.equal(ok.status, 200, 'fallback tecnico invariato');
+    assert.equal((await ok.json()).source, GROQ_VISION_MODEL_DEFAULT);
+    assert.equal(calls('groq'), 1);
+    assert.match(logLines.join('\n'), /fallback=groq motivo=sovraccarico/);
+
+    // Se è GROQ a sbagliare la riga, richiamarlo ripeterebbe la stessa lettura:
+    // il secondo parere non parte e resta il 422.
+    stubProviders({
+      gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
+      groq: groqOk(personalPayload('Mangianello')),
+    });
+    const rejected = await postTimetable(personalBody);
+    assert.equal(rejected.status, 422);
+    assert.match((await rejected.json()).error, /Non ho riconosciuto la riga del tuo orario/i);
+    assert.equal(calls('groq'), 1, 'una sola chiamata a Groq, non due');
+    assert.match(logLines.join('\n'), /fallback=groq saltato motivo=gemini-non-ok/);
+  } finally {
+    restore();
+  }
+});
+
+test('matcher strict: il fallback semantico non introduce alcun fuzzy matching', () => {
+  // La guardia d'identità è la stessa funzione di prima e resta a parole intere:
+  // il secondo parere cambia CHI legge, non COSA viene accettato.
+  const week = [6, 6, 6, 7, 6];
+  const days = week.map((periods) => ({ cells: Array.from({ length: periods }, () => '') }));
+  const parse = (rowLabel: string) =>
+    parseTimetableAiResponse('personal-support-timetable', { rowLabel, days }, 'Felice Manganiello', week);
+
+  // Troncature, refusi e prefissi restano rifiutati, da qualunque provider arrivino.
+  for (const rowLabel of ['Manganiell', 'Mangianello', 'Manganiellos', 'Mangan', 'Manganielli', 'Felic']) {
+    assert.throws(() => parse(rowLabel), (error: any) => {
+      assert.equal(error.name, 'TimetableShapeError');
+      assert.equal(error.code, TEACHER_ROW_NOT_RECOGNIZED, `"${rowLabel}" resta non riconosciuto`);
+      return true;
+    }, `"${rowLabel}" non deve combaciare con "Manganiello"`);
+  }
+  // Le sole forme accettate restano quelle di sempre: parola intera del profilo.
+  for (const rowLabel of ['Manganiello', 'MANGANIELLO', 'Manganiello F.', 'Prof. Manganiello', 'Felice Manganiello']) {
+    assert.equal(parse(rowLabel).rowLabel, rowLabel, `"${rowLabel}" resta accettato`);
+  }
+});
+
+test('decisione semantica: pura, e stretta su ogni condizione', () => {
+  const semantic = (overrides: Partial<Parameters<typeof groqSemanticFallbackDecision>[0]> = {}) =>
+    groqSemanticFallbackDecision({
+      geminiOk: true,
+      personalDocument: true,
+      rowNotRecognized: true,
+      groqConfigured: true,
+      mimeType: 'image/png',
+      remainingBudgetMs: 30_000,
+      ...overrides,
+    });
+
+  assert.equal(semantic().proceed, true, 'il caso previsto passa');
+  assert.deepEqual(semantic({ geminiOk: false }), { proceed: false, reason: 'gemini-non-ok' });
+  assert.deepEqual(semantic({ personalDocument: false }), { proceed: false, reason: 'documento-non-personale' });
+  assert.deepEqual(semantic({ rowNotRecognized: false }), { proceed: false, reason: 'errore-non-semantico' });
+  assert.deepEqual(semantic({ groqConfigured: false }), { proceed: false, reason: 'non-configurato' });
+  assert.deepEqual(semantic({ mimeType: 'application/pdf' }), { proceed: false, reason: 'mime-non-supportato' });
+  assert.deepEqual(semantic({ remainingBudgetMs: 3_000 }), { proceed: false, reason: 'budget-esaurito' });
+
+  // Stessi MIME del fallback tecnico: nessun elenco parallelo.
+  for (const mimeType of GROQ_IMAGE_MIME_TYPES) assert.equal(semantic({ mimeType }).proceed, true, mimeType);
+  // Il budget è quello RESIDUO: sotto la soglia minima il tentativo non parte.
+  assert.equal(semantic({ remainingBudgetMs: GROQ_MIN_ATTEMPT_MS + GROQ_RESPONSE_RESERVE_MS }).proceed, true);
+  assert.equal(semantic({ remainingBudgetMs: GROQ_MIN_ATTEMPT_MS + GROQ_RESPONSE_RESERVE_MS - 1 }).proceed, false);
+});
+
+test('privacy: il fallback semantico non logga riga, nome del profilo, OCR né JSON', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  stubProviders({
+    gemini: geminiOk(personalPayload('Mangianello')),
+    groq: groqOk(personalPayload('Manganiello')),
+  });
+  const restore = captureLogs();
+  try {
+    assert.equal((await postTimetable(personalBody)).status, 200);
+    const dump = logLines.join('\n');
+    assert.match(dump, /fallback=groq motivo=row-docente-non-riconosciuta/, 'il motivo è un codice, non un contenuto');
+    assert.doesNotMatch(dump, /Manganiello|Mangianello/, 'mai la riga letta né il cognome del profilo');
+    assert.doesNotMatch(dump, /Felice/, 'mai il nome del profilo');
+    assert.doesNotMatch(dump, /rowLabel|"days"/, 'mai il JSON del modello');
+    assert.doesNotMatch(dump, /1A|2B/, 'mai le classi');
+    assert.doesNotMatch(dump, new RegExp(pngBase64.slice(0, 24)), 'nessun frammento di base64');
+    assert.doesNotMatch(dump, new RegExp(TEST_GROQ_KEY), 'nessuna chiave');
   } finally {
     restore();
   }
