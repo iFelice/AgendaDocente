@@ -1,6 +1,7 @@
 import express, { type RequestHandler, type ErrorRequestHandler } from 'express';
 import { isIP } from 'node:net';
 import { TEACHER_ROLE_KINDS, type TeacherRoleKind } from '../src/types';
+import { isValidTime } from '../src/utils/dates';
 
 /**
  * Guardia condivisa per gli endpoint di analisi documentale
@@ -29,16 +30,70 @@ const SCHOOL_LEVELS = ['infanzia', 'primaria', 'ssig', 'ssiig'];
 const hours = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v >= 0;
 
 /**
+ * Intero entro un intervallo chiuso: stesso predicato usato dai validatori di
+ * backup (dayPeriodsInt) e di sync (intWithin).
+ */
+const intWithin = (v: unknown, min: number, max: number): boolean =>
+  Number.isInteger(v) && (v as number) >= min && (v as number) <= max;
+
+/**
+ * SchoolProfile.dayPeriods — struttura della giornata scolastica dell'istituto.
+ *
+ * Soglie IDENTICHE a backup (src/services/backup.ts, dayPeriodsValidator) e a
+ * sync (src/services/sync/remoteSchema.ts, isValidSchoolDayPeriods):
+ * ordinario 1..12, giorni ammessi solo "1".."6", ore aggiuntive 0..11.
+ * Accettare qui una forma che sync poi rifiuta produrrebbe profili analizzabili
+ * ma non sincronizzabili; accettarla senza validarla riaprirebbe un buco nella
+ * allow-list chiusa. Il predicato resta duplicato e indipendente di proposito
+ * (nessuna dipendenza fra server e servizi client): ad allinearlo sono i test.
+ */
+function dayPeriods(v: unknown): boolean {
+  return record(v)
+    && optional(v.ordinaryPeriodsPerDay, n => intWithin(n, 1, 12))
+    && optional(v.extraPeriodsByDay, map => record(map)
+      && Object.entries(map).every(([day, extra]) => /^[1-6]$/.test(day) && intWithin(extra, 0, 11)))
+    && !Object.keys(v).some(k => !['ordinaryPeriodsPerDay', 'extraPeriodsByDay'].includes(k));
+}
+
+/** Un singolo PeriodSlot di customSlots: ora di fine sempre dopo quella di inizio. */
+function periodSlot(v: unknown): boolean {
+  return record(v) && Number.isInteger(v.periodNumber) && (v.periodNumber as number) > 0
+    && isValidTime(v.startTime) && isValidTime(v.endTime) && (v.endTime as string) > (v.startTime as string)
+    && optional(v.label, x => text(x))
+    && !Object.keys(v).some(k => !['periodNumber', 'label', 'startTime', 'endTime'].includes(k));
+}
+
+/**
+ * SchoolProfile.timeSlotConfig — le "campane" dell'istituto. Vincoli allineati
+ * a backup (timeSlotConfigValidator): orari HH:MM, periodsPerDay e
+ * standardDurationMinutes interi positivi, customSlots opzionale e coerente.
+ */
+function timeSlotConfig(v: unknown): boolean {
+  return record(v) && isValidTime(v.firstHourStartTime)
+    && Number.isInteger(v.periodsPerDay) && (v.periodsPerDay as number) > 0
+    && Number.isInteger(v.standardDurationMinutes) && (v.standardDurationMinutes as number) > 0
+    && optional(v.customSlots, slots => Array.isArray(slots) && slots.every(periodSlot))
+    && !Object.keys(v).some(k => !['firstHourStartTime', 'periodsPerDay', 'standardDurationMinutes', 'customSlots'].includes(k));
+}
+
+/**
  * Istituti del modello multi-scuola (SchoolProfile): forma nota e limitata,
  * mai chiavi impreviste. È un campo reale del profilo salvato dall'app, quindi
  * deve essere accettato: rifiutarlo blocca ogni analisi documentale.
+ *
+ * `dayPeriods` e `timeSlotConfig` sono campi reali aggiunti dai passi C/G
+ * (struttura della giornata e fasce orarie per istituto). Finché mancavano dalla
+ * allow-list, un istituto configurato con la 7ª ora faceva fallire
+ * validateTeacherProfile() e lo scanner dell'orario rispondeva 400
+ * "Richiesta di analisi non valida." prima ancora di interpellare il modello.
  */
 function schools(v: unknown): boolean {
-  const keys = ['id', 'name', 'institutionalEmail', 'campuses', 'schoolLevel', 'weeklyHours', 'isPrimary', 'active'];
+  const keys = ['id', 'name', 'institutionalEmail', 'campuses', 'schoolLevel', 'weeklyHours', 'isPrimary', 'active', 'dayPeriods', 'timeSlotConfig'];
   return Array.isArray(v) && v.length <= 10 && v.every(s => record(s) && text(s.id) && text(s.name)
     && optional(s.institutionalEmail, x => text(x)) && optional(s.campuses, strings)
     && optional(s.schoolLevel, x => SCHOOL_LEVELS.includes(x as string)) && optional(s.weeklyHours, hours)
     && optional(s.isPrimary, x => typeof x === 'boolean') && optional(s.active, x => typeof x === 'boolean')
+    && optional(s.dayPeriods, dayPeriods) && optional(s.timeSlotConfig, timeSlotConfig)
     && !Object.keys(s).some(k => !keys.includes(k)));
 }
 
