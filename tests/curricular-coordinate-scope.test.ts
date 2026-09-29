@@ -617,13 +617,25 @@ test('evidenza: coordinata fuori dallo scope resta scartata come prima', () => {
   assert.deepEqual(targets[0], { dayOfWeek: 1, periodIndex: 2, classLabel: '2B', subjects: ['Matematica'] });
 });
 
-test('orario personale invariato: schema e prompt non conoscono matches né cellText', () => {
-  // Schema personale fissato byte per byte: il contratto dell'evidenza è solo
-  // curricolare e non può toccarlo.
+test('orario personale: H4 resta separata dall evidenza curricolare matches/cellText', () => {
+  // Schema personale fissato byte per byte: H4 aggiunge solo il riepilogo della
+  // riga; il contratto dell'evidenza matches/cellText resta solo curricolare.
   assert.deepEqual(JSON.parse(JSON.stringify(personalTimetableSchema)), {
     type: 'OBJECT',
     properties: {
       rowLabel: { type: 'STRING', description: 'Etichetta ESATTA della riga del docente letta nel documento (solo testo, nessun numero di riga)' },
+      declaredClassTotals: {
+        type: 'ARRAY',
+        description: 'SOLO il riepilogo classi/ore chiaramente visibile accanto al docente PRIMA della griglia; mai calcolato dalle celle; array vuoto se assente o illeggibile',
+        items: {
+          type: 'OBJECT',
+          properties: {
+            classLabel: { type: 'STRING', description: 'Sigla della classe come riportata nel riepilogo visibile' },
+            hours: { type: 'INTEGER', description: 'Ore intere positive stampate nel riepilogo visibile' },
+          },
+          required: ['classLabel', 'hours'],
+        },
+      },
       days: {
         type: 'ARRAY',
         items: {
@@ -640,11 +652,11 @@ test('orario personale invariato: schema e prompt non conoscono matches né cell
         description: 'Blocchi giornalieri in ordine fisico: il primo è LUNEDÌ, poi MARTEDÌ, MERCOLEDÌ, GIOVEDÌ e l\'ultimo è VENERDÌ. Un solo blocco per elemento, senza etichette di giorno e senza ore per giorno',
       },
     },
-    required: ['rowLabel', 'days'],
+    required: ['rowLabel', 'declaredClassTotals', 'days'],
   });
 
   const prompt = buildPersonalTimetablePrompt('rossi', week(5));
-  for (const curricular of ['matches', 'cellText', 'targets', 'classLabel', 'COLONNE FISICHE DA LEGGERE']) {
+  for (const curricular of ['matches', 'cellText', 'targets', 'COLONNE FISICHE DA LEGGERE']) {
     assert.ok(!prompt.includes(curricular), `il prompt personale non conosce ${curricular}`);
   }
   // Semantica personale invariata: geometria e guardia d'identità.

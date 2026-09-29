@@ -844,7 +844,11 @@ const realDays = REAL_WEEK.map((periods, dayIndex) => ({
   cells: Array.from({ length: periods }, (_, cellIndex) => (cellIndex === 0 ? `1A` : '')),
 }));
 
-const personalPayload = (rowLabel: string, days: unknown = realDays) => JSON.stringify({ rowLabel, days });
+const personalPayload = (rowLabel: string, days: unknown = realDays, declaredClassTotals?: unknown) => JSON.stringify({
+  rowLabel,
+  ...(declaredClassTotals === undefined ? {} : { declaredClassTotals }),
+  days,
+});
 
 const personalBody = {
   imageBase64: pngBase64,
@@ -1084,6 +1088,106 @@ test('fallback tecnico: 503 di Gemini -> Groq, e la riga sbagliata di Groq NON p
   }
 });
 
+const REAL_DECLARED_TOTALS = [
+  { classLabel: '3D', hours: 10 },
+  { classLabel: '3E', hours: 6 },
+  { classLabel: '1C', hours: 2 },
+];
+
+function totalsDays(dHours: number, eHours = 6, cHours = 2) {
+  const totalPositions = REAL_WEEK.reduce((sum, periods) => sum + periods, 0);
+  const flat = [
+    ...Array.from({ length: dHours }, () => '3D'),
+    ...Array.from({ length: eHours }, () => '3E'),
+    ...Array.from({ length: cHours }, () => '1C'),
+  ];
+  flat.push(...Array.from({ length: totalPositions - flat.length }, () => ''));
+  let offset = 0;
+  return REAL_WEEK.map((periods) => {
+    const cells = flat.slice(offset, offset + periods);
+    offset += periods;
+    return { cells };
+  });
+}
+
+test('H4 endpoint: Gemini 11/6/2 incoerente -> Groq 10/6/2 coerente -> 200', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  stubProviders({
+    gemini: geminiOk(personalPayload('Manganiello', totalsDays(11), REAL_DECLARED_TOTALS)),
+    groq: groqOk(personalPayload('Manganiello', totalsDays(10), REAL_DECLARED_TOTALS)),
+  });
+  const restore = captureLogs();
+  try {
+    const res = await postTimetable(personalBody);
+    assert.equal(res.status, 200);
+    const data = await res.json();
+    assert.equal(data.source, GROQ_VISION_MODEL_DEFAULT);
+    assert.equal(data.cells.filter((cell: any) => cell.raw === '3D').length, 10, 'vince solo la trascrizione coerente');
+    assert.equal(calls('gemini'), 1);
+    assert.equal(calls('groq'), 1);
+    const dump = logLines.join('\n');
+    assert.match(dump, /fase=validazione-totali esito=incoerente classiDichiarate=3 classiLette=3/);
+    assert.match(dump, /fallback=groq motivo=totali-classi-incoerenti/);
+    assert.doesNotMatch(dump, /3D|3E|1C|Manganiello/, 'log H4 senza classi, conteggi per classe o docente');
+  } finally {
+    restore();
+  }
+});
+
+test('H4 endpoint: Gemini mismatch e Groq mismatch -> 422 controllato con controllo manuale', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  stubProviders({
+    gemini: geminiOk(personalPayload('Manganiello', totalsDays(11), REAL_DECLARED_TOTALS)),
+    groq: groqOk(personalPayload('Manganiello', totalsDays(9, 7, 2), REAL_DECLARED_TOTALS)),
+  });
+  const restore = captureLogs();
+  try {
+    const res = await postTimetable(personalBody);
+    assert.equal(res.status, 422);
+    const data = await res.json();
+    assert.equal(data.success, false);
+    assert.match(data.error, /riepilogo|ore per classe/i);
+    assert.match(data.error, /Riprova|manualmente/i);
+    assert.equal(calls('groq'), 1, 'nessun loop sul secondo provider');
+  } finally {
+    restore();
+  }
+});
+
+test('H4 endpoint: Gemini coerente -> 200 e Groq NON chiamato', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  stubProviders({
+    gemini: geminiOk(personalPayload('Manganiello', totalsDays(10), REAL_DECLARED_TOTALS)),
+    groq: groqOk(personalPayload('Manganiello', totalsDays(10), REAL_DECLARED_TOTALS)),
+  });
+  const restore = captureLogs();
+  try {
+    const res = await postTimetable(personalBody);
+    assert.equal(res.status, 200);
+    assert.equal(calls('groq'), 0);
+  } finally {
+    restore();
+  }
+});
+
+test('H4 endpoint: PDF mismatch rispetta il limite provider e non chiama Groq', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  stubProviders({
+    gemini: geminiOk(personalPayload('Manganiello', totalsDays(11), REAL_DECLARED_TOTALS)),
+    groq: groqOk(personalPayload('Manganiello', totalsDays(10), REAL_DECLARED_TOTALS)),
+  });
+  const restore = captureLogs();
+  try {
+    const res = await postTimetable({ ...personalBody, imageBase64: pdfBase64, mimeType: 'application/pdf' });
+    assert.equal(res.status, 422);
+    assert.match((await res.json()).error, /riepilogo|ore per classe/i);
+    assert.equal(calls('groq'), 0);
+    assert.match(logLines.join('\n'), /fallback=groq saltato motivo=mime-non-supportato/);
+  } finally {
+    restore();
+  }
+});
+
 test('matcher strict: il fallback semantico non introduce alcun fuzzy matching', () => {
   // La guardia d'identità è la stessa funzione di prima e resta a parole intere:
   // il secondo parere cambia CHI legge, non COSA viene accettato.
@@ -1122,6 +1226,8 @@ test('decisione semantica: pura, e stretta su ogni condizione', () => {
   assert.deepEqual(semantic({ geminiOk: false }), { proceed: false, reason: 'gemini-non-ok' });
   assert.deepEqual(semantic({ personalDocument: false }), { proceed: false, reason: 'documento-non-personale' });
   assert.deepEqual(semantic({ rowNotRecognized: false }), { proceed: false, reason: 'errore-non-semantico' });
+  assert.equal(semantic({ rowNotRecognized: false, classTotalsMismatch: true }).proceed, true, 'H4 è il secondo errore di lettura ammesso');
+  assert.deepEqual(semantic({ rowNotRecognized: false, classTotalsMismatch: false }), { proceed: false, reason: 'errore-non-semantico' });
   assert.deepEqual(semantic({ groqConfigured: false }), { proceed: false, reason: 'non-configurato' });
   assert.deepEqual(semantic({ mimeType: 'application/pdf' }), { proceed: false, reason: 'mime-non-supportato' });
   assert.deepEqual(semantic({ remainingBudgetMs: 3_000 }), { proceed: false, reason: 'budget-esaurito' });

@@ -1487,7 +1487,7 @@ test('prompt personale: riga del docente, blocchi giornalieri e colonne fisiche 
 });
 
 test('contratto personale: il modello non può dichiarare coordinate (schema + validazione)', () => {
-  // Lo schema espone SOLO rowLabel e i blocchi giornalieri di stringhe.
+  // Lo schema espone SOLO rowLabel, il riepilogo separato H4 e i blocchi di stringhe.
   const schema = personalTimetableSchema as unknown as {
     properties: Record<string, {
       type: string;
@@ -1495,8 +1495,8 @@ test('contratto personale: il modello non può dichiarare coordinate (schema + v
     }>;
     required: string[];
   };
-  assert.deepEqual(Object.keys(schema.properties).sort(), ['days', 'rowLabel']);
-  assert.deepEqual([...schema.required].sort(), ['days', 'rowLabel']);
+  assert.deepEqual(Object.keys(schema.properties).sort(), ['days', 'declaredClassTotals', 'rowLabel']);
+  assert.deepEqual([...schema.required].sort(), ['days', 'declaredClassTotals', 'rowLabel']);
   assert.equal(String(schema.properties.days.type), 'ARRAY');
   assert.equal(String(schema.properties.days.items?.type), 'OBJECT', 'un oggetto per blocco giornaliero');
   assert.deepEqual(schema.properties.days.items?.required, ['cells'], 'nel blocco serve solo la sequenza delle celle');

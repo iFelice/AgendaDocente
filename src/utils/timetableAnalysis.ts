@@ -236,6 +236,89 @@ function normalizeSequenceCell(value: unknown, index: number): string {
   return value.trim();
 }
 
+export interface DeclaredClassTotal {
+  /** Sigla letta nella zona riepilogativa della riga, normalizzata senza fuzzy matching. */
+  classLabel: string;
+  /** Ore dichiarate dal documento per la classe. */
+  hours: number;
+}
+
+export type ClassTotalsComparisonStatus = "not-available" | "consistent" | "inconsistent";
+
+export interface ClassTotalsComparison {
+  status: ClassTotalsComparisonStatus;
+  /** Soli conteggi di categorie, utilizzabili nella diagnostica privacy-safe. */
+  declaredClassCount: number;
+  readClassCount: number;
+}
+
+/**
+ * Numero massimo di classi distinte accettate nel riepilogo stampato.
+ * È molto superiore a un normale incarico settimanale, ma impedisce output AI
+ * chilometrici o ostili senza legare il limite alla geometria dei singoli giorni.
+ */
+export const MAX_DECLARED_CLASS_TOTALS = 50;
+
+/** Motivo stabile della guardia semantica H4 (mai riconosciuto dal testo dell'errore). */
+export const TIMETABLE_CLASS_TOTALS_MISMATCH = "TIMETABLE_CLASS_TOTALS_MISMATCH";
+
+/**
+ * Valida e normalizza ESCLUSIVAMENTE il campo separato `declaredClassTotals`.
+ * L'assenza e l'array vuoto significano "riepilogo non disponibile"; un campo
+ * presente ma malformato viene invece rifiutato. Le duplicate, anche se scritte
+ * con grafie equivalenti ("3D" / "3 D"), sono rifiutate: aggregarle potrebbe
+ * mascherare una trascrizione AI duplicata.
+ */
+export function validateDeclaredClassTotals(value: unknown, maxWeeklyPositions: number): DeclaredClassTotal[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > MAX_DECLARED_CLASS_TOTALS) {
+    invalidShape("Riepilogo classi dichiarato non valido.");
+  }
+  const seen = new Set<string>();
+  return value.map((entry, index) => {
+    if (!record(entry) || Object.keys(entry).some((key) => key !== "classLabel" && key !== "hours")) {
+      invalidShape(`Voce del riepilogo classi non valida (#${index}).`);
+    }
+    const classLabel = typeof entry.classLabel === "string" && entry.classLabel.length <= 20
+      ? normalizeClassLabel(entry.classLabel)
+      : null;
+    if (!classLabel || !intWithin(entry.hours, 1, maxWeeklyPositions)) {
+      invalidShape(`Voce del riepilogo classi non valida (#${index}).`);
+    }
+    if (seen.has(classLabel)) invalidShape("Classe duplicata nel riepilogo dichiarato.");
+    seen.add(classLabel);
+    return { classLabel, hours: entry.hours };
+  });
+}
+
+/**
+ * Confronta per CLASSE (non solo il totale complessivo) il riepilogo separato
+ * con le celle già validate. Ogni classe estratta da una cella contribuisce 1;
+ * quindi "3D 3E" incrementa entrambe, mentre sos/D/P/Co non incrementano nulla.
+ */
+export function compareDeclaredClassTotals(
+  declaredClassTotals: readonly DeclaredClassTotal[],
+  cells: readonly TimetableRawCell[],
+): ClassTotalsComparison {
+  if (declaredClassTotals.length === 0) {
+    return { status: "not-available", declaredClassCount: 0, readClassCount: 0 };
+  }
+  const declared = new Map(declaredClassTotals.map(({ classLabel, hours }) => [classLabel, hours]));
+  const read = new Map<string, number>();
+  for (const cell of cells) {
+    for (const classLabel of extractClassesFromCell(cell.raw)) {
+      read.set(classLabel, (read.get(classLabel) ?? 0) + 1);
+    }
+  }
+  const consistent = declared.size === read.size
+    && Array.from(declared).every(([classLabel, hours]) => read.get(classLabel) === hours);
+  return {
+    status: consistent ? "consistent" : "inconsistent",
+    declaredClassCount: declared.size,
+    readClassCount: read.size,
+  };
+}
+
 export interface PersonalSequence {
   /**
    * Etichetta della riga letta dal modello. È SOLO una guardia d'identità:
@@ -341,6 +424,22 @@ export function validatePersonalSequencePayload(
       });
     });
   });
+
+  // H4 è deliberatamente DOPO identità e geometria: un blocco corto/lungo resta
+  // un errore geometrico e non viene trasformato in mismatch né abilita retry.
+  // Il riepilogo è letto dal suo campo separato, mai ricostruito dalle celle.
+  const declaredClassTotals = validateDeclaredClassTotals(raw.declaredClassTotals, expectedPersonalCellCount(week));
+  const totalsComparison = compareDeclaredClassTotals(declaredClassTotals, cells);
+  if (totalsComparison.status === "inconsistent") {
+    const error = new TimetableShapeError(
+      "Totali classi dichiarati non coerenti con le celle trascritte.",
+      TIMETABLE_CLASS_TOTALS_MISMATCH,
+    ) as TimetableShapeError & { declaredClassCount: number; readClassCount: number };
+    // Solo cardinalità, mai sigle né ore per classe: diagnostica privacy-safe.
+    error.declaredClassCount = totalsComparison.declaredClassCount;
+    error.readClassCount = totalsComparison.readClassCount;
+    throw error;
+  }
   return { rowLabel, cells };
 }
 
