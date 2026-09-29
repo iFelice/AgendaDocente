@@ -20,7 +20,9 @@
  */
 
 import type { TeacherProfile, TimeSlotConfig, TimetableSlot } from "../types";
-import { normalizeTeacherProfile } from "./multiSchool";
+import { getPrimarySchool, normalizeTeacherProfile } from "./multiSchool";
+import { periodsForDay } from "./schoolDayPeriods";
+import type { SchoolWeekday } from "../types";
 import { getEffectivePeriodSlots, generateDefaultPeriodSlots } from "./timeSlots";
 import type { ReconstructedSlot } from "./timetableCrossref";
 import { normalizeSubjectName } from "./subjects";
@@ -67,29 +69,95 @@ export interface ReconstructedTimetableOptions {
 }
 
 /**
- * Converte gli slot ricostruiti (confermati dall'utente) nel modello orario
- * esistente:
- *  - docente di sostegno: subject = "Sostegno", materia in compresenza in
- *    `coTeachingSubjects` (campo già esistente, mai duplicato);
- *  - nessun nome di docente curricolare viene salvato;
- *  - classe e scuola sono quelle (corrette) dall'utente nella conferma;
- *  - gli slot senza classe non vengono salvati (l'utente deve correggerli o
- *    deselezionarli: il modello richiede una classe).
+ * Perche un elemento ricostruito NON puo diventare una TimetableSlot.
+ *
+ * Union type (non stringhe libere): il motivo e logica, non testo. L'etichetta
+ * mostrata all'utente si ricava con `rejectionReasonLabel`, cosi il messaggio
+ * puo cambiare senza toccare le condizioni.
  */
-export function reconstructedToTimetableSlots(
+export type ReconstructedRejectionReason =
+  /** Il giorno non prevede quell'ora secondo `dayPeriods` dell'istituto. */
+  | "day-not-allowed"
+  /** Non esiste una fascia oraria REALE per quel periodo nella configurazione. */
+  | "missing-period-slot";
+
+export interface RejectedReconstructedSlot {
+  item: ReconstructedSlot & { correctedClass?: string; correctedSubject?: string; selected?: boolean };
+  reason: ReconstructedRejectionReason;
+}
+
+export interface PartitionedReconstructedSlots {
+  slots: TimetableSlot[];
+  rejected: RejectedReconstructedSlot[];
+}
+
+/** Testo mostrato all'utente per un motivo di esclusione. */
+export function rejectionReasonLabel(reason: ReconstructedRejectionReason): string {
+  return reason === "day-not-allowed"
+    ? "Ora non prevista per questo giorno"
+    : "Fascia oraria non configurata";
+}
+
+/**
+ * CONVERSIONE + VALIDAZIONE degli elementi ricostruiti dallo scanner.
+ *
+ * Regola unica: si importa solo cio che e riferito a un periodo REALMENTE
+ * configurato e AMMESSO da quel giorno. Due controlli, entrambi sulle utility
+ * gia esistenti (nessuna logica duplicata):
+ *
+ *  1. `periodsForDay(dayOfWeek, primarySchool, timeSlotConfig)` — quante ore
+ *     prevede quel giorno. Oltre quel limite l'elemento e scartato
+ *     ("day-not-allowed"), anche se una fascia oraria esistesse.
+ *  2. `getEffectivePeriodSlots(timeSlotConfig)` — la fascia di quel periodo deve
+ *     esistere davvero. Se manca l'elemento e scartato
+ *     ("missing-period-slot") e gli orari NON vengono sintetizzati: e qui che
+ *     il ramo generativo di `periodTimesForIndex` usciva dal percorso scanner
+ *     producendo orari mai configurati dall'utente (visibile soprattutto con
+ *     una scansione CUSTOM irregolare).
+ *
+ * `startTime`/`endTime` di uno slot importato provengono quindi ESCLUSIVAMENTE
+ * dalla fascia reale trovata al punto 2.
+ *
+ * `dayPeriods` e letto dalla SchoolProfile PRIMARIA, per coerenza con C1/C2.
+ * NOTA: `options.schoolId` identifica gia l'istituto di destinazione e in futuro
+ * potrebbe selezionare la SchoolProfile corrispondente; non viene fatto qui per
+ * non anticipare il multi-istituto generale.
+ *
+ * Gli elementi scartati non diventano slot: di conseguenza non entrano nel
+ * dedupe, non partecipano al merge e non possono allargare l'ambito di
+ * `replace-scope` (che deriva dagli slot in arrivo).
+ */
+export function partitionReconstructedSlots(
   slots: Array<ReconstructedSlot & { correctedClass?: string; correctedSubject?: string; selected?: boolean }>,
   options: ReconstructedTimetableOptions
-): TimetableSlot[] {
+): PartitionedReconstructedSlots {
   const support = isSupportTeacherProfile(options.profile);
   const schoolId = options.schoolId ?? normalizeTeacherProfile(options.profile).schools?.find(s => s.isPrimary)?.id;
+  const primarySchool = getPrimarySchool(options.profile);
+  const effectivePeriods = getEffectivePeriodSlots(options.timeSlotConfig);
 
   const result: TimetableSlot[] = [];
+  const rejected: RejectedReconstructedSlot[] = [];
+
   for (const slot of slots) {
     if (slot.selected === false) continue; // slot deselezionato: non salvato
     const className = (slot.correctedClass ?? slot.classLabel ?? "").trim().toUpperCase();
     if (!className) continue; // nessuna classe determinabile: mai inventata
 
-    const times = periodTimesForIndex(options.timeSlotConfig, slot.periodIndex);
+    // 1. Il giorno prevede quell'ora?
+    const allowed = periodsForDay(slot.dayOfWeek as SchoolWeekday, primarySchool, options.timeSlotConfig);
+    if (slot.periodIndex > allowed) {
+      rejected.push({ item: slot, reason: "day-not-allowed" });
+      continue;
+    }
+
+    // 2. Esiste la fascia oraria reale? Nessun orario viene sintetizzato.
+    const period = effectivePeriods.find(p => p.periodNumber === slot.periodIndex);
+    if (!period) {
+      rejected.push({ item: slot, reason: "missing-period-slot" });
+      continue;
+    }
+
     // La correzione manuale dell'utente sostituisce la proposta (non si accumulano materie).
     const correctedSubject = slot.correctedSubject?.trim();
     let coTeaching: string[] = [];
@@ -104,8 +172,8 @@ export function reconstructedToTimetableSlots(
       id: `tt-recon-${crypto.randomUUID()}`,
       dayOfWeek: slot.dayOfWeek as TimetableSlot["dayOfWeek"],
       periodNumber: slot.periodIndex,
-      startTime: times.startTime,
-      endTime: times.endTime,
+      startTime: period.startTime,
+      endTime: period.endTime,
       subject,
       className,
       isProvisional: false,
@@ -114,7 +182,30 @@ export function reconstructedToTimetableSlots(
     if (schoolId) timetale.schoolId = schoolId;
     result.push(timetale);
   }
-  return result;
+
+  return { slots: result, rejected };
+}
+
+/**
+ * Converte gli slot ricostruiti (confermati dall'utente) nel modello orario
+ * esistente:
+ *  - docente di sostegno: subject = "Sostegno", materia in compresenza in
+ *    `coTeachingSubjects` (campo già esistente, mai duplicato);
+ *  - nessun nome di docente curricolare viene salvato;
+ *  - classe e scuola sono quelle (corrette) dall'utente nella conferma;
+ *  - gli slot senza classe non vengono salvati (l'utente deve correggerli o
+ *    deselezionarli: il modello richiede una classe).
+ *
+ * Firma invariata (solo gli slot importabili) per non allargare il diff sui
+ * chiamanti: la conversione e la validazione vivono in
+ * `partitionReconstructedSlots`, da usare quando servono anche gli ESCLUSI e
+ * il loro motivo (anteprima dello scanner).
+ */
+export function reconstructedToTimetableSlots(
+  slots: Array<ReconstructedSlot & { correctedClass?: string; correctedSubject?: string; selected?: boolean }>,
+  options: ReconstructedTimetableOptions
+): TimetableSlot[] {
+  return partitionReconstructedSlots(slots, options).slots;
 }
 
 function dedupePreservingOrder(values: string[]): string[] {

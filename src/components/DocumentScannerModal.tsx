@@ -17,12 +17,14 @@ import {
   type DocumentFileMeta,
 } from "../utils/documentScanner";
 import {
-  periodTimesForIndex,
+  partitionReconstructedSlots,
+  rejectionReasonLabel,
   previewReconstruction,
   reconstructedToTimetableSlots,
   slotsInReplacementScope,
   type TimetableMergeMode,
 } from "../utils/reconstructTimetable";
+import { getEffectivePeriodSlots } from "../utils/timeSlots";
 import { isSupportTeacherOf } from "../utils/teacherType";
 import { AnalysisProgressBar } from "./AnalysisProgressBar";
 import { RECON_NOTES, crossrefTimetables, reconSignal, type ReconstructedSlot } from "../utils/timetableCrossref";
@@ -379,11 +381,26 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
    * unico sia dell'anteprima sia del rilevamento del vecchio orario, così la
    * domanda e la scrittura non possono divergere.
    */
-  const saveableSlots = useMemo<TimetableSlot[]>(() => {
+  const savePartition = useMemo(() => {
     const selected = (reconSlots ?? []).filter(s => s.selected !== false);
     const toSave = selected.filter(s => (s.correctedClass ?? s.classLabel ?? "").trim());
-    return reconstructedToTimetableSlots(toSave, { profile, timeSlotConfig, schoolId: reconSchoolId });
+    return partitionReconstructedSlots(toSave, { profile, timeSlotConfig, schoolId: reconSchoolId });
   }, [reconSlots, profile, timeSlotConfig, reconSchoolId]);
+  const saveableSlots = savePartition.slots;
+
+  /** Fasce orarie REALI del docente: unica fonte degli orari mostrati in anteprima. */
+  const effectivePeriodSlots = useMemo(() => getEffectivePeriodSlots(timeSlotConfig), [timeSlotConfig]);
+
+  /**
+   * Elementi che NON verranno importati, indicizzati per id: l'anteprima deve
+   * spiegarli uno per uno, non farli sparire in silenzio. Stessa partizione del
+   * salvataggio, quindi cio che l'utente vede escluso e esattamente cio che
+   * resta fuori dall'archivio.
+   */
+  const rejectedById = useMemo(
+    () => new Map(savePartition.rejected.map(r => [r.item.id, r.reason])),
+    [savePartition]
+  );
 
   /**
    * Vecchie ore PERTINENTI nei due archivi, con la STESSA regola della
@@ -1748,15 +1765,53 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                 </p>
               ) : (
                 <div className="space-y-3">
+                  {savePartition.rejected.length > 0 && (
+                    <div
+                      role="status"
+                      data-recon-rejected-summary={savePartition.rejected.length}
+                      className="p-3 rounded-xl border border-amber-300 bg-amber-50 text-[11px] text-amber-900 space-y-1"
+                    >
+                      <p className="font-semibold">
+                        {`${savePartition.rejected.length} ${savePartition.rejected.length === 1 ? "ora non verra importata" : "ore non verranno importate"}.`}
+                      </p>
+                      <ul className="space-y-0.5">
+                        {savePartition.rejected.map(({ item, reason }) => (
+                          <li key={item.id}>
+                            {`${DAY_LABELS[item.dayOfWeek]} · ${item.periodIndex}ª ora`}
+                            {(item.correctedClass ?? item.classLabel ?? "").trim()
+                              ? ` · ${(item.correctedClass ?? item.classLabel ?? "").trim()}`
+                              : ""}
+                            {item.correctedSubject?.trim() || item.coTeachingSubjects[0]
+                              ? ` · ${item.correctedSubject?.trim() || item.coTeachingSubjects[0]}`
+                              : ""}
+                            {` — ${rejectionReasonLabel(reason)}`}
+                          </li>
+                        ))}
+                      </ul>
+                      <p>
+                        Le altre ore vengono importate normalmente. Per recuperare queste, configura le
+                        fasce orarie o la struttura della giornata nel Profilo e ripeti l'import.
+                      </p>
+                    </div>
+                  )}
                   {reconSlots.map(slot => {
                     const signal = reconSignal(slot);
-                    const times = periodTimesForIndex(timeSlotConfig, slot.periodIndex);
+                    // Orari SOLO dalla fascia reale: se non esiste, l'elemento e
+                    // escluso e non si mostra nessun orario sintetizzato.
+                    const period = effectivePeriodSlots.find(p => p.periodNumber === slot.periodIndex);
+                    const rejectedReason = rejectedById.get(slot.id);
                     const hasClass = !!(slot.correctedClass ?? slot.classLabel ?? "").trim();
                     return (
                       <div
                         key={slot.id}
                         id={`recon-slot-${slot.id}`}
-                        className={`p-3 rounded-xl border space-y-2 ${slot.selected === false ? "border-stone-200 opacity-70" : "border-stone-300 bg-white"}`}
+                        className={`p-3 rounded-xl border space-y-2 ${
+                          rejectedReason
+                            ? "border-amber-400 bg-amber-50/70"
+                            : slot.selected === false
+                              ? "border-stone-200 opacity-70"
+                              : "border-stone-300 bg-white"
+                        }`}
                       >
                         <div className="flex items-center gap-2">
                           <input
@@ -1790,8 +1845,20 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                               <option key={p} value={p}>{`${p}ª ora`}</option>
                             ))}
                           </select>
-                          <span className="text-[11px] text-stone-500 ml-auto">{`${times.startTime}–${times.endTime}`}</span>
+                          <span className="text-[11px] text-stone-500 ml-auto">
+                            {period ? `${period.startTime}–${period.endTime}` : "Orario non configurato"}
+                          </span>
                         </div>
+
+                        {rejectedReason && (
+                          <p
+                            role="status"
+                            data-recon-rejected={rejectedReason}
+                            className="text-[11px] font-semibold text-amber-900 bg-amber-100/70 border border-amber-300 rounded-lg p-2"
+                          >
+                            {`Non verra importata · ${DAY_LABELS[slot.dayOfWeek]} · ${slot.periodIndex}ª ora — ${rejectionReasonLabel(rejectedReason)}`}
+                          </p>
+                        )}
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                           <label className="flex items-center gap-2 text-xs">
