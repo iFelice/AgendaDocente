@@ -896,9 +896,18 @@ export function validateTeacherRowLabelsPayload(raw: unknown): string[] {
   return labels;
 }
 
-/** Esito del matching server-side del Passo A: mai una scelta arbitraria. */
+/**
+ * Esito del matching server-side del Passo A: mai una scelta arbitraria.
+ *
+ * H6 — il `matched` porta anche `rowIndex`: la POSIZIONE (base 0) della riga
+ * dentro la lista validata del Passo A. Serve al prompt del Passo B, che riceve
+ * etichetta e posizione della riga (base 1 nel testo) invece di doverla
+ * identificare da solo; il server la usa ESCLUSIVAMENTE per focalizzare,
+ * mai per ricostruire coordinate (giorno/periodo nascono solo dall'ordine dei
+ * blocchi, come sempre).
+ */
 export type TeacherRowLabelMatch =
-  | { status: "matched"; label: string }
+  | { status: "matched"; label: string; rowIndex: number }
   | { status: "none" }
   | { status: "ambiguous" };
 
@@ -906,7 +915,7 @@ export type TeacherRowLabelMatch =
  * Confronta le etichette del Passo A col profilo usando ESCLUSIVAMENTE il
  * matcher rigoroso già esistente (`findTeacherRows`, parola intera, nessun
  * fuzzy/Levenshtein/sottostringa/correzione). Non deduplica e non sceglie:
- *  - esattamente una riga compatibile -> `matched` con la SUA etichetta;
+ *  - esattamente una riga compatibile -> `matched` con etichetta E posizione;
  *  - zero righe compatibili           -> `none` (il Passo B non parte, resta H3);
  *  - più di una riga compatibile      -> `ambiguous` (rifiuto conservativo).
  */
@@ -914,7 +923,7 @@ export function matchTeacherRowLabel(rowLabels: string[], profileName: unknown):
   const matches = findTeacherRows(rowLabels, profileName);
   if (matches.length === 0) return { status: "none" };
   if (matches.length > 1) return { status: "ambiguous" };
-  return { status: "matched", label: matches[0].rowLabel };
+  return { status: "matched", label: matches[0].rowLabel, rowIndex: matches[0].rowIndex };
 }
 
 // ---------------------------------------------------------------------------
