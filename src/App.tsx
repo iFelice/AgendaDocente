@@ -383,7 +383,8 @@ export default function App({ initialData }: { initialData: LocalData }) {
    */
   const handleSaveSchoolTimeSlotConfig = withPersistenceFeedback(async (
     schoolId: string,
-    config: TimeSlotConfig
+    config: TimeSlotConfig,
+    realignment?: { provisional: TimetableSlot[]; definitive: TimetableSlot[] }
   ) => {
     const normalized = normalizeTeacherProfile(profile);
     const schools = normalized.schools ?? [];
@@ -392,13 +393,24 @@ export default function App({ initialData }: { initialData: LocalData }) {
     if (!schools.some(school => school.id === schoolId)) {
       throw new Error("Istituto non trovato nel profilo.");
     }
-    await storage.saveProfile({
+    const updatedProfile: TeacherProfile = {
       ...normalized,
       schools: schools.map(school =>
         school.id === schoolId ? { ...school, timeSlotConfig: config } : school
       ),
+    };
+
+    // Fasce e lezioni riallineate sono UNA sola operazione: se fallisse a metà
+    // resterebbero campane nuove e lezioni sui vecchi orari, cioè proprio
+    // l'incoerenza che questo passo elimina.
+    await database.atomic(async () => {
+      await storage.saveProfile(updatedProfile);
+      if (realignment) {
+        await storage.saveProvisionalTimetable(realignment.provisional);
+        await storage.saveDefinitiveTimetable(realignment.definitive);
+      }
     });
-    showToast("Fasce orarie aggiornate.");
+    showToast(realignment ? "Fasce orarie e lezioni aggiornate." : "Fasce orarie aggiornate.");
   });
 
   const handleDeleteTimetableSlot = withPersistenceFeedback(async (id: string, type: TimetableType) => {

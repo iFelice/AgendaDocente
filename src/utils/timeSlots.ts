@@ -1,4 +1,5 @@
-import type { PeriodSlot, SchoolProfile, TimeSlotConfig } from "../types";
+import type { PeriodSlot, SchoolProfile, TimetableSlot, TimeSlotConfig } from "../types";
+import { effectiveSchoolForSlot } from "./multiSchool";
 
 /**
  * Normalizes a class name by trimming whitespace and converting to uppercase.
@@ -132,4 +133,61 @@ export function getEffectivePeriodSlots(config?: TimeSlotConfig): PeriodSlot[] {
     config.periodsPerDay || 6,
     config.standardDurationMinutes || 60
   );
+}
+
+/**
+ * Lezioni che userebbero orari diversi dalle NUOVE campane di un istituto.
+ *
+ * Gli orari vivono copiati dentro ogni `TimetableSlot`: cambiare le fasce di
+ * una scuola non li aggiorna da solo. Questa funzione dice quali lezioni
+ * resterebbero indietro — non le aggiorna di nascosto: produce il piano, e la
+ * decisione resta dell'utente.
+ *
+ * Una lezione entra nel piano solo se TUTTE queste cose sono vere:
+ *
+ *  1. appartiene a quell'istituto secondo l'identità canonica runtime
+ *     (`effectiveSchoolForSlot`): gli slot legacy senza `schoolId` e quelli con
+ *     un id orfano contano come della primaria, non spariscono;
+ *  2. la NUOVA configurazione ha davvero una fascia per il suo `periodNumber`;
+ *  3. i suoi orari sono diversi da quelli di quella fascia.
+ *
+ * Sul punto 2: un'ora che nella nuova configurazione non ha più una fascia NON
+ * viene toccata, né spostata, né cancellata — resta con i suoi orari storici e
+ * la segnalano C1/C2/D1, che è il loro mestiere. Qui non si inventano orari.
+ *
+ * Sul punto 3: NON si confronta con la vecchia fascia. Un orario modificato a
+ * mano è indistinguibile da uno derivato, quindi l'unico criterio onesto è
+ * "diverso da dove lo metterebbe la nuova campanella"; avvertire l'utente che
+ * le modifiche manuali verranno sostituite spetta alla UI.
+ *
+ * Funzione pura: non muta gli slot in ingresso e restituisce copie.
+ */
+export interface TimeSlotRealignmentPlan {
+  /** Le lezioni che cambierebbero orario (riferimenti agli slot originali). */
+  affected: TimetableSlot[];
+  /** L'array completo, con le sole lezioni interessate sostituite da copie aggiornate. */
+  updated: TimetableSlot[];
+}
+
+export function planTimeSlotRealignment(
+  slots: readonly TimetableSlot[],
+  school: Pick<SchoolProfile, "id"> | undefined,
+  schools: readonly SchoolProfile[] | undefined,
+  newConfig: TimeSlotConfig | undefined
+): TimeSlotRealignmentPlan {
+  const schoolId = school?.id;
+  if (!schoolId) return { affected: [], updated: [...slots] };
+
+  const periods = getEffectivePeriodSlots(newConfig);
+  const affected: TimetableSlot[] = [];
+  const updated = slots.map(slot => {
+    if (effectiveSchoolForSlot(slot, schools)?.id !== schoolId) return slot;
+    const period = periods.find(p => p.periodNumber === slot.periodNumber);
+    if (!period) return slot;
+    if (slot.startTime === period.startTime && slot.endTime === period.endTime) return slot;
+    affected.push(slot);
+    return { ...slot, startTime: period.startTime, endTime: period.endTime };
+  });
+
+  return { affected, updated };
 }

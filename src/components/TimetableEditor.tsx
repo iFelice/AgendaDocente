@@ -32,6 +32,7 @@ import {
   DEFAULT_PERIOD_SLOTS,
   generateDefaultPeriodSlots,
   getEffectivePeriodSlots,
+  planTimeSlotRealignment,
   timeSlotConfigForSchool,
   normalizeClassName,
   areSlotsMatchingAuto,
@@ -190,7 +191,16 @@ interface TimetableEditorProps {
    */
   onSaveSchoolTimeSlotConfig?: (
     schoolId: string,
-    config: TimeSlotConfig
+    config: TimeSlotConfig,
+    /**
+     * Lezioni da riallineare alle nuove campane, già calcolate e confermate
+     * dall'utente. Assente = si salvano solo le fasce.
+     *
+     * Porta i DATI, non una modalità: niente flag opachi da interpretare
+     * dall'altra parte. Quando c'è, config e lezioni vanno persistite come
+     * un'unica operazione.
+     */
+    realignment?: { provisional: TimetableSlot[]; definitive: TimetableSlot[] }
   ) => void | false | Promise<void | false>;
   /**
    * Lezione da aprire DIRETTAMENTE in modifica (tap su una lezione del
@@ -292,6 +302,19 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
    * (vedi `isEditingTimeSlots`), quindi questo è il secondo dei due lucchetti.
    */
   const [slotConfigSchoolId, setSlotConfigSchoolId] = useState<string | undefined>(undefined);
+  /**
+   * Richiesta di conferma prima di riallineare le lezioni esistenti alle nuove
+   * campane. Finché è aperta NON è stato scritto ancora nulla: né le fasce né
+   * gli orari delle lezioni.
+   */
+  const [realignmentPrompt, setRealignmentPrompt] = useState<{
+    schoolId: string;
+    schoolName: string;
+    config: TimeSlotConfig;
+    count: number;
+    provisional: TimetableSlot[];
+    definitive: TimetableSlot[];
+  } | null>(null);
   const [firstHourTime, setFirstHourTime] = useState(
     timeSlotConfig?.firstHourStartTime || "07:50"
   );
@@ -1031,24 +1054,63 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
     // dalle scuole che non si sono ancora personalizzate.
     const targetSchoolId = slotConfigSchoolId ?? activeSchool?.id;
 
+    // Lezioni già salvate che, con le nuove campane, resterebbero su orari
+    // diversi. Se ce ne sono, NON si scrive nulla adesso: prima si chiede.
+    // Gli orari sono dati dell'utente — alcuni potrebbero essere stati messi a
+    // mano — e non si sovrascrivono di nascosto.
+    if (targetSchoolId && onSaveSchoolTimeSlotConfig) {
+      const school = schools.find(s => s.id === targetSchoolId);
+      const provisionalPlan = planTimeSlotRealignment(provisionalTimetable, school, schools, newConfig);
+      const definitivePlan = planTimeSlotRealignment(definitiveTimetable, school, schools, newConfig);
+      const count = provisionalPlan.affected.length + definitivePlan.affected.length;
+      if (count > 0) {
+        setRealignmentPrompt({
+          schoolId: targetSchoolId,
+          schoolName: school?.name ?? "",
+          config: newConfig,
+          count,
+          provisional: provisionalPlan.updated,
+          definitive: definitivePlan.updated,
+        });
+        return;
+      }
+    }
+
+    await persistSlotConfig(newConfig, targetSchoolId);
+  };
+
+  /**
+   * Scrive le fasce (e, se passate, le lezioni riallineate).
+   *
+   * Il drawer si chiude SOLO se la persistenza è andata a buon fine: su errore
+   * si resta qui con il messaggio, senza dichiarare un salvataggio che non c'è
+   * stato.
+   */
+  const persistSlotConfig = async (
+    config: TimeSlotConfig,
+    targetSchoolId: string | undefined,
+    realignment?: { provisional: TimetableSlot[]; definitive: TimetableSlot[] }
+  ) => {
     const ok = await slotConfigSave.run(async (): Promise<false | void> => {
       if (targetSchoolId && onSaveSchoolTimeSlotConfig) {
-        const res = await onSaveSchoolTimeSlotConfig(targetSchoolId, newConfig);
+        const res = await onSaveSchoolTimeSlotConfig(targetSchoolId, config, realignment);
         if (res === false) return false;
         return;
       }
       // Nessun istituto risolvibile (profilo anomalo): si conserva il
       // comportamento storico invece di perdere la modifica dell'utente.
       if (onSaveTimeSlotConfig) {
-        const res = await onSaveTimeSlotConfig(newConfig);
+        const res = await onSaveTimeSlotConfig(config);
         if (res === false) return false;
       }
     });
 
     if (ok) {
+      setRealignmentPrompt(null);
       setIsSlotConfigOpen(false);
       setSlotConfigSchoolId(undefined);
     }
+    return ok;
   };
 
   // Handle first-time setup confirmation
@@ -2154,6 +2216,77 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
       )}
 
       {/* Time Slot Configuration Drawer / Modal */}
+      {/* Conferma del riallineamento. Compare SOPRA il drawer, che resta
+          aperto: l'istituto è ancora congelato e il selettore bloccato, così
+          la scuola non può cambiare a metà operazione. Nessuna scrittura è
+          avvenuta: da qui si esce annullando, salvando le sole fasce, oppure
+          salvando fasce e lezioni insieme. */}
+      {realignmentPrompt && (
+        <div className="fixed inset-0 z-[60] bg-black/40 flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div
+            id="realign-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="realign-title"
+            className="bg-white w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl p-5 space-y-4 shadow-xl"
+          >
+            <h3 id="realign-title" className="text-base font-bold text-stone-900">
+              Aggiornare gli orari delle lezioni?
+            </h3>
+            <p id="realign-message" className="text-xs text-stone-700 leading-relaxed">
+              {realignmentPrompt.count === 1 ? "1 lezione" : `${realignmentPrompt.count} lezioni`}
+              {realignmentPrompt.schoolName ? ` di ${realignmentPrompt.schoolName}` : ""}
+              {" "}
+              {realignmentPrompt.count === 1 ? "ha" : "hanno"} orari diversi dalle nuove fasce.
+            </p>
+            <p className="text-xs text-stone-600 leading-relaxed">
+              Se aggiorni, i loro orari seguiranno la nuova campanella. Eventuali orari
+              modificati a mano verranno sostituiti.
+            </p>
+
+            {slotConfigSave.error && (
+              <p role="alert" className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg p-2">
+                {slotConfigSave.error}
+              </p>
+            )}
+
+            <div className="flex flex-col sm:flex-row sm:justify-end gap-2 pt-1">
+              <button
+                type="button"
+                id="realign-cancel"
+                disabled={slotConfigSave.pending}
+                onClick={() => setRealignmentPrompt(null)}
+                className="px-4 py-2 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-lg min-h-[42px]"
+              >
+                Annulla
+              </button>
+              <button
+                type="button"
+                id="realign-config-only"
+                disabled={slotConfigSave.pending}
+                onClick={() => void persistSlotConfig(realignmentPrompt.config, realignmentPrompt.schoolId)}
+                className="px-4 py-2 text-xs font-semibold text-stone-700 border border-stone-300 hover:bg-stone-100 rounded-lg min-h-[42px]"
+              >
+                Salva solo le fasce
+              </button>
+              <button
+                type="button"
+                id="realign-confirm"
+                disabled={slotConfigSave.pending}
+                onClick={() => void persistSlotConfig(
+                  realignmentPrompt.config,
+                  realignmentPrompt.schoolId,
+                  { provisional: realignmentPrompt.provisional, definitive: realignmentPrompt.definitive },
+                )}
+                className="px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold rounded-lg min-h-[42px]"
+              >
+                Salva e aggiorna
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {isSlotConfigOpen && (
         <div className="app-modal app-modal-scroll fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-stone-900/40 backdrop-blur-xs">
           <div className="app-modal-panel bg-white rounded-2xl max-w-lg w-full p-4 sm:p-6 shadow-xl border border-stone-200 animate-in fade-in zoom-in-95 my-auto max-h-[92vh] overflow-y-auto">
