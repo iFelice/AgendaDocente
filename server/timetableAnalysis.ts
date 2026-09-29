@@ -12,6 +12,7 @@ import {
   PERSONAL_SCHOOL_DAYS,
   teacherNameTokens,
   TEACHER_ROW_NOT_RECOGNIZED,
+  TIMETABLE_CLASS_TOTALS_MISMATCH,
   normalizePersonalPeriodsByDay,
   uniformPersonalPeriodsByDay,
   validateCurricularTargetsPayload,
@@ -238,6 +239,8 @@ P4. NON trasformare mai D/P/Co o altri codici brevi in classi: le classi hanno i
 P5. Se una cella contiene più valori separati (es. "3D 3E"), riportali integri nella stessa stringa.
 P6. ${target ? `Individua la riga del docente a cui appartengono queste parole del nome: "${target}". L'etichetta della riga può scriverle in forme diverse (solo il cognome, "COGNOME N.", "Prof.ssa COGNOME NOME", maiuscole o minuscole): cerca ogni parola come PAROLA INTERA, mai una sottostringa ("Bianchi" NON combacia con "Bianchini").` : "Nessun cognome target disponibile: restituisci \"days\": [] e NON scegliere una riga a caso."}
 P7. In "rowLabel" riporta l'etichetta ESATTA della riga che hai letto (solo il testo dell'etichetta: nessun numero di riga).
+P7a. Il riepilogo classi/ore stampato accanto al docente PRIMA della griglia (es. "3D10 3E6 1C2") è una fonte SEPARATA dalla griglia. Copialo in "declaredClassTotals" SOLO se è chiaramente visibile e leggibile in quella zona della riga: ogni voce contiene "classLabel" come riportata e "hours" come intero positivo.
+P7b. NON calcolare, NON dedurre e NON ricostruire MAI "declaredClassTotals" dalle celle della griglia. Se la zona riepilogativa non esiste, è vuota o non è leggibile, restituisci "declaredClassTotals": []. Non inserire voci dubbie.
 P8. Leggi SOLO quella riga: nessuna cella di altre righe.
 P9. Leggi prima l'INTESTAZIONE della griglia, cioè le colonne dei giorni LUNEDÌ, MARTEDÌ, MERCOLEDÌ, GIOVEDÌ, VENERDÌ: da lì riconosci ${PERSONAL_SCHOOL_DAYS} BLOCCHI FISICI giornalieri, da sinistra verso destra.
 P10. Ogni blocco giornaliero ha il SUO numero di COLONNE FISICHE, una per ogni ora di quel giorno: ${perDayList}. I giorni NON hanno per forza lo stesso numero di ore. In tutto la riga del docente ha ${count} celle.
@@ -252,8 +255,8 @@ P18. Se la riga del docente non è individuabile, o se i suoi blocchi giornalier
 P19. Se il documento non è una tabella di orario o non è leggibile, restituisci "days": []. Non inventare nulla.
 P20. Restituisci SOLO l'oggetto JSON richiesto, senza commenti.
 Formato richiesto (nessun altro campo):
-{ "rowLabel": "Cognome N.", "days": [${daysExample}] }
-Riepilogo: "rowLabel" = etichetta della riga letta; "days" = ${PERSONAL_SCHOOL_DAYS} blocchi giornalieri nell'ordine lunedì, martedì, mercoledì, giovedì, venerdì, con "cells" lungo esattamente ${perDayList} — una stringa per ogni colonna fisica di quel giorno, celle vuote incluse al loro posto, ${count} posizioni in tutto.`;
+{ "rowLabel": "Cognome N.", "declaredClassTotals": [ { "classLabel": "3D", "hours": 10 }, { "classLabel": "3E", "hours": 6 }, { "classLabel": "1C", "hours": 2 } ], "days": [${daysExample}] }
+Riepilogo: "rowLabel" = etichetta della riga letta; "declaredClassTotals" = SOLO il riepilogo classi/ore visibile prima della griglia, mai calcolato dalle celle, oppure [] se assente/non leggibile; "days" = ${PERSONAL_SCHOOL_DAYS} blocchi giornalieri nell'ordine lunedì, martedì, mercoledì, giovedì, venerdì, con "cells" lungo esattamente ${perDayList} — una stringa per ogni colonna fisica di quel giorno, celle vuote incluse al loro posto, ${count} posizioni in tutto.`;
 }
 
 /**
@@ -358,6 +361,18 @@ export const personalTimetableSchema = {
   type: Type.OBJECT,
   properties: {
     rowLabel: { type: Type.STRING, description: 'Etichetta ESATTA della riga del docente letta nel documento (solo testo, nessun numero di riga)' },
+    declaredClassTotals: {
+      type: Type.ARRAY,
+      description: 'SOLO il riepilogo classi/ore chiaramente visibile accanto al docente PRIMA della griglia; mai calcolato dalle celle; array vuoto se assente o illeggibile',
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          classLabel: { type: Type.STRING, description: 'Sigla della classe come riportata nel riepilogo visibile' },
+          hours: { type: Type.INTEGER, description: 'Ore intere positive stampate nel riepilogo visibile' },
+        },
+        required: ['classLabel', 'hours'],
+      },
+    },
     days: {
       type: Type.ARRAY,
       items: {
@@ -374,7 +389,7 @@ export const personalTimetableSchema = {
       description: 'Blocchi giornalieri in ordine fisico: il primo è LUNEDÌ, poi MARTEDÌ, MERCOLEDÌ, GIOVEDÌ e l\'ultimo è VENERDÌ. Un solo blocco per elemento, senza etichette di giorno e senza ore per giorno',
     },
   },
-  required: ['rowLabel', 'days'],
+  required: ['rowLabel', 'declaredClassTotals', 'days'],
 };
 
 /**
@@ -549,6 +564,11 @@ export function isTeacherRowNotRecognized(error: unknown): boolean {
   return error instanceof TimetableShapeError && error.code === TEACHER_ROW_NOT_RECOGNIZED;
 }
 
+/** Guardia H4 riconosciuta esclusivamente dal codice stabile, mai dal messaggio. */
+export function isTimetableClassTotalsMismatch(error: unknown): boolean {
+  return error instanceof TimetableShapeError && error.code === TIMETABLE_CLASS_TOTALS_MISMATCH;
+}
+
 /**
  * Messaggio per l'utente quando il payload del modello viene rifiutato.
  *
@@ -562,6 +582,9 @@ export function timetableRejectionMessage(error: unknown): string {
   if (isTeacherRowNotRecognized(error)) {
     return "Non ho riconosciuto la riga del tuo orario nel documento: il nome letto non corrisponde a quello del tuo profilo. Controlla nome e cognome in Profilo, oppure riprova con una foto più leggibile della colonna dei docenti.";
   }
+  if (isTimetableClassTotalsMismatch(error)) {
+    return "Il riepilogo delle ore per classe non coincide con le celle lette nell'orario. Riprova con una foto più leggibile oppure controlla manualmente la riga prima di importarla.";
+  }
   return "Analisi non riuscita. Riprova.";
 }
 
@@ -573,6 +596,12 @@ export function timetableRejectionMessage(error: unknown): string {
  * JSON del modello.
  */
 export function describeAnalysisFailure(error: unknown, value: unknown, documentType: TimetableDocumentType): string {
+  if (isTimetableClassTotalsMismatch(error)) {
+    const safe = error as TimetableShapeError & { declaredClassCount?: unknown; readClassCount?: unknown };
+    const declared = typeof safe.declaredClassCount === 'number' ? safe.declaredClassCount : -1;
+    const read = typeof safe.readClassCount === 'number' ? safe.readClassCount : -1;
+    return `[AI Orari] fase=validazione-totali esito=incoerente classiDichiarate=${declared} classiLette=${read}`;
+  }
   const shape = error instanceof TimetableShapeError;
   const type = error instanceof Error ? error.name : 'UnknownError';
   // Per gli errori inattesi (bug interni) si logga solo il tipo: il messaggio di

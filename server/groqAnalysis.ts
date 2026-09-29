@@ -147,29 +147,16 @@ export function groqFallbackDecision(input: {
 
 /**
  * Decide SE chiamare Groq una seconda volta per un motivo SEMANTICO, e non
- * tecnico: Gemini ha risposto, il JSON è decodificabile, ma la riga letta non
- * combacia col cognome del profilo.
+ * tecnico: Gemini ha risposto e il JSON è decodificabile, ma fallisce H3
+ * (`TEACHER_ROW_NOT_RECOGNIZED`) oppure H4
+ * (`TIMETABLE_CLASS_TOTALS_MISMATCH`). Sono errori di lettura indipendenti dalla
+ * geometria sui quali un vero secondo provider può riuscire. La risposta non
+ * viene "accettata di più": viene riletta e passata allo STESSO validatore.
  *
- * perché esiste: sulla foto di un orario personale Gemini può restituire un
- * payload formalmente perfetto e sbagliare UNA sola cella di testo, l'etichetta
- * della riga ("Mangianello" per "Manganiello"). Con la guardia d'identità
- * rigorosa — ed è giusto che resti rigorosa, perché scegliere la riga di un
- * altro docente è il danno peggiore che questa funzione possa fare — il payload
- * è rifiutato e l'utente riceve un 422 pur avendo fotografato il documento
- * giusto. Non è un errore dell'utente né una richiesta sbagliata: è UNA lettura
- * OCR sbagliata, esattamente il tipo di errore su cui un secondo modello di
- * visione ha buone probabilità di riuscire. La risposta non viene "accettata di
- * più": viene chiesta di nuovo, e poi passata allo STESSO validatore.
- *
- * perché è distinto da `groqFallbackDecision`: quello copre il fallimento
- * TECNICO di Gemini (sovraccarico/quota/deadline/rete) e non parte mai con
- * `geminiOk`. Questo parte SOLO con `geminiOk`, e su un solo codice di rifiuto.
- *
- * perché così stretto: ogni altro rifiuto di forma — numero di blocchi
- * giornalieri, lunghezza delle celle di un giorno, schema, coordinate
- * curricolari fuori elenco, payload troncato — descrive una risposta
- * strutturalmente sbagliata o una richiesta che un secondo modello
- * sbaglierebbe allo stesso modo, quindi resta il 422/503 già previsto.
+ * È distinto da `groqFallbackDecision`, che copre i fallimenti TECNICI di
+ * Gemini e non parte mai con `geminiOk`. Ogni altro shape error — numero di
+ * blocchi, lunghezza giornaliera, schema, coordinate fuori elenco o payload
+ * troncato — resta escluso e conserva il 422/503 già previsto.
  */
 export function groqSemanticFallbackDecision(input: {
   /** Gemini ha prodotto il payload appena rifiutato? */
@@ -178,6 +165,8 @@ export function groqSemanticFallbackDecision(input: {
   personalDocument: boolean;
   /** Il rifiuto è ESATTAMENTE `TEACHER_ROW_NOT_RECOGNIZED`? */
   rowNotRecognized: boolean;
+  /** Il rifiuto è ESATTAMENTE `TIMETABLE_CLASS_TOTALS_MISMATCH`? */
+  classTotalsMismatch?: boolean;
   groqConfigured: boolean;
   mimeType: string;
   remainingBudgetMs: number;
@@ -187,9 +176,11 @@ export function groqSemanticFallbackDecision(input: {
   // lo stesso prompt: nessun secondo parere, solo latenza e quota bruciate.
   if (!input.geminiOk) return { proceed: false, reason: "gemini-non-ok" };
   if (!input.personalDocument) return { proceed: false, reason: "documento-non-personale" };
-  // UNICO codice ammesso: qui si decide di non allargare il fallback semantico
-  // a tutti gli errori di forma.
-  if (!input.rowNotRecognized) return { proceed: false, reason: "errore-non-semantico" };
+  // Soli due codici di LETTURA ammessi: identità della riga (H3) o coerenza del
+  // riepilogo separato (H4). Geometria e ogni altro shape error restano esclusi.
+  if (!input.rowNotRecognized && !input.classTotalsMismatch) {
+    return { proceed: false, reason: "errore-non-semantico" };
+  }
   if (!input.groqConfigured) return { proceed: false, reason: "non-configurato" };
   // PDF: Groq Vision prende immagini, non PDF. Nessuna conversione, resta il 422.
   if (!groqSupportsMimeType(input.mimeType)) return { proceed: false, reason: "mime-non-supportato" };

@@ -29,6 +29,7 @@ import {
   TIMETABLE_ANALYSIS_TIMEOUT_MS,
   describeAnalysisFailure,
   isTeacherRowNotRecognized,
+  isTimetableClassTotalsMismatch,
   timetableRejectionMessage,
   parseStudentDocumentAiResponse,
   parseTimetableAiResponse,
@@ -945,8 +946,10 @@ interface TimetableDecodeResult {
   undecodable: boolean;
   /** Errore del validatore quando il JSON era leggibile ma la forma è stata rifiutata. */
   error: unknown;
-  /** UNICO rifiuto che abilita il secondo parere di Groq (fallback semantico). */
+  /** Rifiuto H3 che abilita un secondo parere di Groq. */
   rowNotRecognized: boolean;
+  /** Rifiuto H4 che abilita un secondo parere di Groq. */
+  classTotalsMismatch: boolean;
 }
 
 /**
@@ -954,8 +957,8 @@ interface TimetableDecodeResult {
  *
  *  - fallback TECNICO (`runGroqTimetableFallback`): Gemini ha esaurito i
  *    tentativi e il fallimento è transitorio. Il provider non risponde.
- *  - fallback SEMANTICO (`runGroqTimetableRowRetry`): Gemini HA risposto, il
- *    JSON è valido, ma la riga letta non combacia col cognome del profilo.
+ *  - fallback SEMANTICO (`runGroqTimetableRowRetry`): Gemini HA risposto e il
+ *    JSON è valido, ma fallisce una guardia di lettura H3/H4 (riga o totali).
  *
  * Entrambi condividono ingredienti ed esecuzione (`runGroqTimetableAttempt`) e
  * differiscono solo nella decisione di partenza.
@@ -1051,18 +1054,21 @@ async function runGroqTimetableFallback(
 const GROQ_SEMANTIC_FALLBACK_REASON = "row-docente-non-riconosciuta";
 
 /**
- * Fallback SEMANTICO: secondo parere su una riga docente non riconosciuta.
+ * Fallback SEMANTICO: secondo parere su una lettura rifiutata da H3 o H4.
  *
- * Gemini ha risposto, il JSON è decodificabile, la forma è stata rifiutata
- * SOLO perché l'etichetta della riga non combacia col cognome del profilo: una
- * lettura OCR sbagliata su una cella di testo, non una richiesta sbagliata.
- * Groq rilegge la STESSA immagine con lo stesso prompt e lo stesso schema, e il
- * risultato torna nello STESSO validatore — la guardia d'identità resta identica
- * e nessun payload può aggirarla. Se Groq non parte, fallisce o sbaglia ancora
- * la riga, il chiamante mantiene il 422 già calcolato su Gemini.
+ * Gemini ha risposto e il JSON è decodificabile, ma l'etichetta non combacia
+ * col profilo oppure il riepilogo separato non combacia con le celle. Groq
+ * rilegge la STESSA immagine con lo stesso prompt e lo stesso schema; il suo
+ * risultato torna nello STESSO validatore, senza allentare né correggere alcuna
+ * guardia. Se non parte, fallisce o resta incoerente, rimane il 422 di Gemini.
  */
 async function runGroqTimetableRowRetry(
-  input: GroqTimetableAttemptInput & { geminiOk: boolean; personalDocument: boolean; rowNotRecognized: boolean },
+  input: GroqTimetableAttemptInput & {
+    geminiOk: boolean;
+    personalDocument: boolean;
+    rowNotRecognized: boolean;
+    classTotalsMismatch: boolean;
+  },
 ): Promise<{ ok: true; text: string; source: string } | { ok: false }> {
   return runGroqTimetableAttempt({
     ...input,
@@ -1070,11 +1076,12 @@ async function runGroqTimetableRowRetry(
       geminiOk: input.geminiOk,
       personalDocument: input.personalDocument,
       rowNotRecognized: input.rowNotRecognized,
+      classTotalsMismatch: input.classTotalsMismatch,
       groqConfigured: groqConfigured(),
       mimeType: input.mimeType,
       remainingBudgetMs: TIMETABLE_ANALYSIS_TIMEOUT_MS - input.elapsedMs,
     }),
-    reason: GROQ_SEMANTIC_FALLBACK_REASON,
+    reason: input.classTotalsMismatch ? "totali-classi-incoerenti" : GROQ_SEMANTIC_FALLBACK_REASON,
     // Non sono eventi: descrivono una richiesta che non è il caso previsto.
     silentReasons: ["documento-non-personale", "errore-non-semantico"],
   });
@@ -1127,14 +1134,21 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
      */
     const decodeAndValidateTimetable = (raw: string): TimetableDecodeResult => {
       const decoded = parseGeminiJson(raw, "AI Orari");
-      if (!decoded.ok) return { ok: false, outcome: null, undecodable: true, error: null, rowNotRecognized: false };
+      if (!decoded.ok) return { ok: false, outcome: null, undecodable: true, error: null, rowNotRecognized: false, classTotalsMismatch: false };
       try {
         const parsed = parseTimetableAiResponse(documentType, decoded.value, targetSurname, periodsByDay, coordinateScope);
-        return { ok: true, outcome: parsed, undecodable: false, error: null, rowNotRecognized: false };
+        return { ok: true, outcome: parsed, undecodable: false, error: null, rowNotRecognized: false, classTotalsMismatch: false };
       } catch (error: unknown) {
         console.warn(describeAnalysisFailure(error, decoded.value, documentType));
         // Il motivo è letto dal CODICE dell'errore, mai dal testo del messaggio.
-        return { ok: false, outcome: null, undecodable: false, error, rowNotRecognized: isTeacherRowNotRecognized(error) };
+        return {
+          ok: false,
+          outcome: null,
+          undecodable: false,
+          error,
+          rowNotRecognized: isTeacherRowNotRecognized(error),
+          classTotalsMismatch: isTimetableClassTotalsMismatch(error),
+        };
       }
     };
     const analysisStartedAt = Date.now();
@@ -1189,10 +1203,10 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
       // cambiare la risposta di rifiuto.
       const rejected = () => res.status(422).json({ success: false, error: timetableRejectionMessage(validated.error) });
       // Fallback SEMANTICO (distinto da quello tecnico qui sopra): Gemini ha
-      // risposto e il JSON è valido, ma la riga letta non combacia col cognome
-      // del profilo. È l'unico rifiuto di forma che un secondo modello di
-      // visione può ribaltare rileggendo la STESSA immagine; geometria, schema,
-      // coordinate e payload troncato restano il 422/503 di prima.
+      // risposto e il JSON è valido, ma H3 (riga) o H4 (totali separati) segnala
+      // una lettura incoerente. Sono gli unici due codici su cui un secondo
+      // modello può rileggere la STESSA immagine; geometria, schema, coordinate
+      // e payload troncato restano il 422/503 di prima.
       //
       // La condizione NON è duplicata qui: decide `groqSemanticFallbackDecision`
       // e basta. Un secondo controllo in questo punto renderebbe i due presidi
@@ -1201,6 +1215,7 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
         geminiOk: run.ok,
         personalDocument: isPersonal,
         rowNotRecognized: validated.rowNotRecognized,
+        classTotalsMismatch: validated.classTotalsMismatch,
         systemInstruction,
         imageBase64,
         mimeType,
