@@ -617,7 +617,23 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
     daySwipeStartRef.current = null;
   };
 
-  // Open Add slot modal prefilled with the selected day and period
+  /**
+   * Nuova lezione: modale precompilato con giorno, ora e ISTITUTO.
+   *
+   * L'istituto è quello della griglia da cui si è premuto "+", ed è catturato
+   * QUI, all'apertura — non riletto al salvataggio. Il draft in composizione
+   * non deve poter cambiare significato sotto le mani dell'utente se lo stato
+   * del selettore cambia mentre il modale è aperto.
+   *
+   * Si passa da `activeSchool`, non dall'id grezzo: così una nuova lezione
+   * riceve sempre l'id di una scuola REALE del profilo normalizzato e non può
+   * nascere già orfana (la rete di F2 esiste per leggere i dati vecchi, non per
+   * coprire dati che stiamo scrivendo adesso).
+   *
+   * Vale anche con un istituto solo: il campo diventa esplicito e i nuovi dati
+   * smettono di dipendere dal fallback legacy, senza che l'UX cambi di una
+   * virgola. Gli slot già salvati non vengono toccati: nessuna migrazione.
+   */
   const handleOpenAdd = (day: 1 | 2 | 3 | 4 | 5 | 6, periodNum: number) => {
     const periodConf = periods.find((p) => p.periodNumber === periodNum) || periods[0] || {
       periodNumber: 1,
@@ -632,6 +648,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
 
     const initialClass =
       profile.classes && profile.classes.length > 0 ? profile.classes[0] : "";
+    const creationSchoolId = activeSchool?.id ?? activeSchoolId;
 
     setEditingSlot({
       id: `tt-${Date.now()}`,
@@ -644,6 +661,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
       classroom: "",
       campus: (profile.campuses && profile.campuses[0]) || "",
       isProvisional: activeTab === "provvisorio",
+      ...(creationSchoolId ? { schoolId: creationSchoolId } : {}),
     });
     setIsModalOpen(true);
   };

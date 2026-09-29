@@ -566,3 +566,201 @@ test('F2/17. il rendering della griglia NON torna sull array aggregato', async (
   // F3/F4/F5 restano fuori da questo passo.
   assert.ok(!/schoolId:\s*activeSchoolId/.test(code), 'la creazione manuale non assegna ancora schoolId (F3)');
 });
+
+
+// ---------------------------------------------------------------------------
+// F3 — CREAZIONE MANUALE CON ISTITUTO IMPLICITO
+//
+// Ultima porta interattiva che generava lezioni senza `schoolId`: il "+" della
+// griglia. Da qui in poi la scuola è quella della griglia da cui si è premuto,
+// catturata all'APERTURA del modale. Nessun backfill sugli slot già salvati.
+// ---------------------------------------------------------------------------
+
+/** Premi il "+" della cella `giorno`/`ora` (la cella deve essere aggiungibile). */
+async function clickAdd(renderer: any, dayLabel: string, periodLabel: string) {
+  const button = renderer.root.findAll(
+    (el: any) => el.type === 'button' && String(el.props?.title ?? '') === `Aggiungi lezione ${dayLabel} ${periodLabel}`,
+  )[0];
+  assert.ok(button, `cella "+" ${dayLabel} ${periodLabel} assente`);
+  await act(async () => { button.props.onClick(); });
+  assert.equal(formCount(renderer), 1, 'il modale di creazione è aperto');
+}
+
+/** Compila la classe e invia il form: restituisce lo slot passato a onSaveSlot. */
+async function submitNewSlot(renderer: any, className = '1A') {
+  const form = formOf(renderer);
+  const classSelect = form.findAllByType('select')[2];
+  await act(async () => { classSelect.props.onChange({ target: { value: className } }); });
+  await act(async () => { await form.props.onSubmit({ preventDefault() {} }); });
+}
+
+/** Lo slot del draft attualmente in composizione, letto dai campi del modale. */
+const draftPeriod = (renderer: any) => periodSelect(renderer).props.value;
+
+test('F3/1-6. creazione sulla secondaria: schoolId = B, visibile solo nella griglia B', async () => {
+  const saved: Array<{ slot: TimetableSlot; type: string }> = [];
+  let timetable: TimetableSlot[] = [];
+  const renderer = await renderEditor({
+    definitiveTimetable: timetable,
+    onSaveSlot: (slot: TimetableSlot, type: string) => { saved.push({ slot, type }); },
+  });
+  try {
+    await selectSchool(renderer, SCHOOL_B_ID);
+    await clickAdd(renderer, 'Mercoledì', '2ª Ora');
+    await submitNewSlot(renderer, '2E');
+
+    assert.equal(saved.length, 1, 'una sola lezione salvata');
+    assert.equal(saved[0].slot.schoolId, SCHOOL_B_ID, 'la nuova lezione nasce nella scuola mostrata');
+    assert.equal(saved[0].type, 'definitivo');
+    assert.equal(saved[0].slot.dayOfWeek, 3);
+    assert.equal(saved[0].slot.periodNumber, 2);
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+
+  // Lo slot salvato, rimesso nell'orario, compare SOLO nella griglia di B.
+  timetable = [saved[0].slot];
+  const reopened = await renderEditor({ definitiveTimetable: timetable });
+  try {
+    assert.equal(rootText(reopened).includes('2E'), false, 'non compare nella primaria');
+    await selectSchool(reopened, SCHOOL_B_ID);
+    assert.match(rootText(reopened), /2E/, 'compare nella griglia di B');
+  } finally {
+    await act(async () => { reopened.unmount(); });
+  }
+});
+
+test('F3/7. creazione sulla primaria: schoolId = id della primaria', async () => {
+  const saved: TimetableSlot[] = [];
+  const renderer = await renderEditor({ onSaveSlot: (slot: TimetableSlot) => { saved.push(slot); } });
+  try {
+    await clickAdd(renderer, 'Lunedì', '1ª Ora');
+    await submitNewSlot(renderer);
+    assert.equal(saved[0].schoolId, PRIMARY_ID);
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('F3/9-10. una sola scuola: nessun selettore, ma schoolId comunque esplicito', async () => {
+  const saved: TimetableSlot[] = [];
+  const renderer = await renderEditor({
+    profile: singleSchoolProfile,
+    onSaveSlot: (slot: TimetableSlot) => { saved.push(slot); },
+  });
+  try {
+    assert.equal(hasSchoolSelect(renderer), false, 'UX invariata: nessun selettore');
+    await clickAdd(renderer, 'Lunedì', '1ª Ora');
+    await submitNewSlot(renderer);
+    assert.equal(saved[0].schoolId, PRIMARY_ID, 'i nuovi dati non dipendono più dal fallback legacy');
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('F3/11-12. istituto e tipo di orario sono indipendenti anche in creazione', async () => {
+  const saved: Array<{ slot: TimetableSlot; type: string }> = [];
+  const renderer = await renderEditor({
+    onSaveSlot: (slot: TimetableSlot, type: string) => { saved.push({ slot, type }); },
+  });
+  try {
+    const tabCard = (label: string) =>
+      renderer.root.findAll((el: any) => el.type === 'button' && flatText(el).includes(label))[0];
+
+    // Definitivo + scuola B.
+    await selectSchool(renderer, SCHOOL_B_ID);
+    await clickAdd(renderer, 'Lunedì', '1ª Ora');
+    await submitNewSlot(renderer);
+
+    // Provvisorio + scuola B: l'istituto non dipende dal tipo di orario.
+    await act(async () => { tabCard('Orario Provvisorio').props.onClick(); });
+    assert.equal(schoolSelect(renderer).props.value, SCHOOL_B_ID, 'la scuola resta B');
+    await clickAdd(renderer, 'Lunedì', '1ª Ora');
+    await submitNewSlot(renderer);
+
+    assert.deepEqual(saved.map(s => s.type), ['definitivo', 'provvisorio']);
+    assert.deepEqual(saved.map(s => s.slot.schoolId), [SCHOOL_B_ID, SCHOOL_B_ID]);
+    assert.deepEqual(saved.map(s => s.slot.isProvisional), [false, true]);
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('F3/13-14. il draft cattura l istituto all APERTURA e non lo rilegge al salvataggio', async () => {
+  const saved: TimetableSlot[] = [];
+  const renderer = await renderEditor({ onSaveSlot: (slot: TimetableSlot) => { saved.push(slot); } });
+  try {
+    // "+" premuto dalla griglia di B: da questo momento il draft è di B.
+    await selectSchool(renderer, SCHOOL_B_ID);
+    await clickAdd(renderer, 'Lunedì', '7ª Ora');
+
+    // Lo stato del selettore cambia mentre il modale è ancora aperto: una
+    // lezione già in composizione non deve cambiare istituto sotto le mani.
+    await selectSchool(renderer, PRIMARY_ID);
+    assert.equal(formCount(renderer), 1, 'il modale resta aperto');
+    assert.equal(draftPeriod(renderer), 7, 'la 7ª ora del draft non viene toccata');
+
+    await submitNewSlot(renderer);
+    assert.equal(saved[0].schoolId, SCHOOL_B_ID, 'salvata in B: l istituto era stato catturato all apertura');
+    assert.equal(saved[0].periodNumber, 7, 'e la 7ª ora, valida per B, non è stata clampata');
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('F3/15-16. modifica: B resta B, e uno slot legacy NON viene convertito da F3', async () => {
+  const saved: TimetableSlot[] = [];
+  const renderer = await renderEditor({
+    definitiveTimetable: [slotB, slotLegacy],
+    onSaveSlot: (slot: TimetableSlot) => { saved.push(slot); },
+  });
+  try {
+    // Slot della secondaria: modificato, resta della secondaria.
+    await selectSchool(renderer, SCHOOL_B_ID);
+    await act(async () => { lessonCells(renderer)[0].props.onClick(); });
+    await submitNewSlot(renderer, '2E');
+    assert.equal(saved[0].id, slotB.id, 'stesso slot, non uno nuovo');
+    assert.equal(saved[0].schoolId, SCHOOL_B_ID, 'schoolId preservato dalla modifica');
+
+    // Slot legacy: F3 riguarda la CREAZIONE, non la normalizzazione
+    // opportunistica in modifica. Il campo resta assente.
+    await selectSchool(renderer, PRIMARY_ID);
+    await act(async () => { lessonCells(renderer)[0].props.onClick(); });
+    await submitNewSlot(renderer, '1A');
+    assert.equal(saved[1].id, slotLegacy.id);
+    assert.equal('schoolId' in saved[1], false, 'nessuna conversione opportunistica dello slot legacy');
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
+
+test('F3/17-18. nuova lezione di B: nessun falso clamp, e il cambio giorno usa B', async () => {
+  // B: 6 ore, ma il lunedì 8 (6 + 2). La primaria ne ha 4: se la creazione
+  // guardasse lei, la 7ª non sarebbe nemmeno aggiungibile.
+  const longMonday: SchoolProfile = {
+    ...schoolB, dayPeriods: { ordinaryPeriodsPerDay: 6, extraPeriodsByDay: { 1: 2 } },
+  };
+  const shortPrimary: SchoolProfile = { ...schoolA(PRIMARY_ID), dayPeriods: { ordinaryPeriodsPerDay: 4 } };
+  const profile: TeacherProfile = { ...baseProfile, schools: [shortPrimary, longMonday] };
+  const saved: TimetableSlot[] = [];
+  const renderer = await renderEditor({ profile, onSaveSlot: (slot: TimetableSlot) => { saved.push(slot); } });
+  try {
+    await selectSchool(renderer, SCHOOL_B_ID);
+    // 8ª ora del lunedì: valida per B, impensabile per la primaria (4 ore).
+    await clickAdd(renderer, 'Lunedì', '8ª Ora');
+    assert.equal(draftPeriod(renderer), 8, 'nessun falso clamp alla creazione');
+    assert.deepEqual(periodOptions(renderer), [1, 2, 3, 4, 5, 6, 7, 8], 'le ore offerte sono quelle di B');
+
+    // Cambio giorno: il martedì di B ne prevede 6, quindi si scende a 6 — non a
+    // 4, che sarebbe la geometria della primaria.
+    await act(async () => { daySelect(renderer).props.onChange({ target: { value: '2' } }); });
+    assert.equal(draftPeriod(renderer), 6, 'clamp secondo B');
+    assert.notEqual(draftPeriod(renderer), 4, 'NON secondo la primaria');
+
+    await submitNewSlot(renderer);
+    assert.equal(saved[0].schoolId, SCHOOL_B_ID);
+    assert.equal(saved[0].periodNumber, 6);
+  } finally {
+    await act(async () => { renderer.unmount(); });
+  }
+});
