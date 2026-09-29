@@ -13,14 +13,26 @@ import {
   FileText,
   Trash2,
 } from "lucide-react";
-import { CalendarEvent, TeacherProfile, TimetableSlot, TimetableType } from "../types";
+import { CalendarEvent, TeacherProfile, TimeSlotConfig, TimetableSlot, TimetableType } from "../types";
 import { coTeachingSummary } from "../utils/coTeaching";
+import { getPrimarySchool } from "../utils/multiSchool";
+import {
+  isSlotOutOfConfiguredDay,
+  OUT_OF_CONFIG_SLOT_BADGE,
+  OUT_OF_CONFIG_SLOT_TITLE,
+} from "../utils/schoolDayPeriods";
 import type { ScheduledAssessmentCalendarItem } from "../utils/scheduledAssessmentCalendar";
 import { scheduledAssessmentTypeLabel } from "../utils/scheduledAssessmentCalendar";
 import { readWeeklyCollapse, writeWeeklyCollapse, type CollapseGroup } from "../utils/collapsePreferences";
 
 interface WeekViewProps {
   profile?: TeacherProfile;
+  /**
+   * Fasce orarie del docente: come in Oggi, serve SOLO a marcare le lezioni
+   * salvate in un'ora che il giorno non prevede. La colonna resta guidata dagli
+   * slot salvati.
+   */
+  timeSlotConfig?: TimeSlotConfig;
   timetable: TimetableSlot[];
   events: CalendarEvent[];
   isProvisionalTimetable?: boolean;
@@ -51,6 +63,7 @@ interface WeekViewProps {
 
 export const WeekView: React.FC<WeekViewProps> = ({
   profile,
+  timeSlotConfig,
   timetable,
   events,
   isProvisionalTimetable,
@@ -68,6 +81,8 @@ export const WeekView: React.FC<WeekViewProps> = ({
   
   // Per i docenti del SSIG (Scuola Secondaria di I Grado), la settimana corta è lo standard:
   // "inclusi sabato" viene impostato di default SENZA spunta (false).
+  /** Configurazione di riferimento: scuola PRIMARIA, come in Oggi e nella griglia. */
+  const primarySchool = React.useMemo(() => (profile ? getPrimarySchool(profile) : undefined), [profile]);
   const isSsig = profile?.schoolLevel === "ssig";
   const [includeSaturday, setIncludeSaturday] = useState<boolean>(!isSsig);
   const [filterMode, setFilterMode] = useState<"ALL" | "CIRCULARS">("ALL");
@@ -348,6 +363,8 @@ export const WeekView: React.FC<WeekViewProps> = ({
                     <div className="space-y-1.5">
                       {dayLessons.map((slot) => {
                         const summary = coTeachingSummary(slot);
+                        // Stesso criterio di Oggi: si marca, non si filtra.
+                        const outOfConfig = isSlotOutOfConfiguredDay(slot, primarySchool, timeSlotConfig);
                         const lessonBody = (
                             <div className="min-w-0">
                               <div className="flex items-center gap-1.5 flex-wrap">
@@ -358,6 +375,15 @@ export const WeekView: React.FC<WeekViewProps> = ({
                                 <span className="text-[10px] font-semibold px-1 py-0.5 rounded bg-white text-stone-600 border border-stone-200 shrink-0">
                                   {slot.className}
                                 </span>
+                                {outOfConfig && (
+                                  <span
+                                    data-slot-out-of-config="true"
+                                    title={OUT_OF_CONFIG_SLOT_TITLE}
+                                    className="text-[10px] font-semibold px-1 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-300 shrink-0"
+                                  >
+                                    {OUT_OF_CONFIG_SLOT_BADGE}
+                                  </span>
+                                )}
                               </div>
                               <div className="text-[10px] text-stone-500 mt-1 truncate">
                                 {slot.startTime}–{slot.endTime}
@@ -388,7 +414,12 @@ export const WeekView: React.FC<WeekViewProps> = ({
                               data-slot-cell="lesson"
                               aria-label={`Modifica la lezione: ${slot.subject}, classe ${slot.className}, ${slot.periodNumber}\u00aa ora (${slot.startTime}\u2013${slot.endTime})`}
                               onClick={() => onOpenTimetableSlotForEdit(slot, lessonType, day.iso)}
-                              className="block w-full min-h-[44px] text-left p-2 rounded-lg border border-emerald-100 bg-emerald-50/40 text-xs hover:border-emerald-300 active:border-emerald-400 focus-visible:outline-2 focus-visible:outline-emerald-600 focus-visible:outline-offset-2 transition-colors"
+                              title={outOfConfig ? OUT_OF_CONFIG_SLOT_TITLE : undefined}
+                              className={`block w-full min-h-[44px] text-left p-2 rounded-lg border text-xs focus-visible:outline-2 focus-visible:outline-emerald-600 focus-visible:outline-offset-2 transition-colors ${
+                                outOfConfig
+                                  ? "border-amber-300 bg-amber-50/70 hover:border-amber-400"
+                                  : "border-emerald-100 bg-emerald-50/40 hover:border-emerald-300 active:border-emerald-400"
+                              }`}
                             >
                               {lessonBody}
                             </button>
@@ -397,7 +428,8 @@ export const WeekView: React.FC<WeekViewProps> = ({
                         return (
                           <div
                             key={slot.id}
-                            className="p-2 rounded-lg border border-emerald-100 bg-emerald-50/40 text-xs"
+                            title={outOfConfig ? OUT_OF_CONFIG_SLOT_TITLE : undefined}
+                            className={`p-2 rounded-lg border text-xs ${outOfConfig ? "border-amber-300 bg-amber-50/70" : "border-emerald-100 bg-emerald-50/40"}`}
                           >
                             {lessonBody}
                           </div>

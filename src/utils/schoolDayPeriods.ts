@@ -129,3 +129,33 @@ export function maxPeriodsInWeek(
   if (days.length === 0) return base;
   return periodsByDay(days, school, timeSlotConfig).reduce((max, n) => (n > max ? n : max), 0);
 }
+
+/**
+ * Testi UNICI della marcatura "fuori configurazione", condivisi fra griglia,
+ * Oggi e Settimana: la stessa situazione non deve essere descritta con parole
+ * diverse a seconda della vista.
+ */
+export const OUT_OF_CONFIG_SLOT_TITLE = "Ora non prevista dalla configurazione della scuola";
+export const OUT_OF_CONFIG_SLOT_BADGE = "Ora non prevista";
+
+/**
+ * La lezione occupa un'ora che il suo giorno NON prevede.
+ *
+ * Attenzione al confine: qui si risponde solo con `dayPeriods` (quante ore ha
+ * quel giorno). Una lezione la cui FASCIA ORARIA non è più configurata non è
+ * "fuori configurazione" in questo senso — è un altro caso, descritto dalla
+ * colonna Campana della griglia — e non viene marcata da qui.
+ *
+ * Nessuna validazione e nessuna scrittura: è solo un predicato di
+ * presentazione. La configurazione usata è quella della scuola PRIMARIA, come
+ * nel resto dell'app: una lezione di un istituto secondario può quindi
+ * risultare marcata rispetto alla primaria (limite noto, multi-istituto
+ * deliberatamente rimandato).
+ */
+export function isSlotOutOfConfiguredDay(
+  slot: { dayOfWeek: number; periodNumber: number },
+  school?: Pick<SchoolProfile, "dayPeriods">,
+  timeSlotConfig?: TimeSlotConfig
+): boolean {
+  return slot.periodNumber > periodsForDay(slot.dayOfWeek as SchoolWeekday, school, timeSlotConfig);
+}

@@ -1329,7 +1329,20 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
             </tr>
           </thead>
           <tbody className="divide-y divide-stone-100 text-xs">
-            {gridRows.map((row) => (
+            {gridRows.map((row) => {
+              /*
+               * La riga senza fascia oraria va descritta per quello che E':
+               *  - VUOTA -> manca davvero un orario da configurare, e si offre
+               *    la scorciatoia al drawer;
+               *  - con almeno una LEZIONE salvata -> non e una fascia "da
+               *    creare": e una fascia che non c'e piu in configurazione.
+               *    Invitare a configurarla accanto a una lezione esistente
+               *    sarebbe ambiguo, quindi si resta su una nota discreta.
+               * Il conto guarda TUTTA la riga (non la singola cella) e ignora
+               * il filtro giorno del mobile.
+               */
+              const rowHasLesson = currentSlots.some((s) => s.periodNumber === row.periodNumber);
+              return (
               <tr key={row.periodNumber} className="hover:bg-stone-50/50 transition-colors">
                 <td className="p-2 sm:p-3 text-center border-r border-stone-200 bg-stone-50/80 sticky left-0 z-10 shadow-2xs">
                   <div className="font-bold text-stone-900">
@@ -1344,16 +1357,27 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                        orario viene inventato, si offre solo la strada per
                        configurarlo nel drawer delle fasce. */
                     <div className="mt-0.5 space-y-1">
-                      <div className="text-[10px] font-semibold text-amber-700 leading-tight">
-                        Orario da configurare
-                      </div>
-                      <button
-                        type="button"
-                        onClick={handleOpenSlotConfig}
-                        className="text-[10px] font-semibold text-emerald-700 underline underline-offset-2 hover:text-emerald-800"
-                      >
-                        {`Configura ${row.periodNumber}ª ora`}
-                      </button>
+                      {rowHasLesson ? (
+                        <div
+                          className="text-[10px] font-semibold text-amber-700 leading-tight"
+                          title="La lezione resta salvata: la sua fascia oraria non e piu nella configurazione corrente."
+                        >
+                          Fascia oraria non piu configurata
+                        </div>
+                      ) : (
+                        <>
+                          <div className="text-[10px] font-semibold text-amber-700 leading-tight">
+                            Orario da configurare
+                          </div>
+                          <button
+                            type="button"
+                            onClick={handleOpenSlotConfig}
+                            className="text-[10px] font-semibold text-emerald-700 underline underline-offset-2 hover:text-emerald-800"
+                          >
+                            {`Configura ${row.periodNumber}ª ora`}
+                          </button>
+                        </>
+                      )}
                     </div>
                   )}
                 </td>
@@ -1466,7 +1490,8 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                     );
                   })}
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>

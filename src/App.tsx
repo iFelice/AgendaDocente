@@ -761,6 +761,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
         {currentView === "oggi" && (
           <TodayView
             profile={profile}
+            timeSlotConfig={timeSlotConfig}
             timetable={timetable}
             events={events}
             scheduledAssessments={calendarScheduledAssessments}
@@ -784,6 +785,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
         {currentView === "settimana" && (
           <WeekView
             profile={profile}
+            timeSlotConfig={timeSlotConfig}
             timetable={timetable}
             events={events}
             scheduledAssessments={calendarScheduledAssessments}
