@@ -16,11 +16,18 @@ import {
   Pencil,
   Trash2,
 } from "lucide-react";
-import { CalendarEvent, TeacherProfile, TimetableSlot, TimetableType } from "../types";
+import { CalendarEvent, TeacherProfile, TimeSlotConfig, TimetableSlot, TimetableType } from "../types";
 import type { ScheduledAssessmentCalendarItem } from "../utils/scheduledAssessmentCalendar";
 import { scheduledAssessmentTypeLabel } from "../utils/scheduledAssessmentCalendar";
 import { readDailyCollapse, writeDailyCollapse, type CollapseGroup } from "../utils/collapsePreferences";
 import { coTeachingSummary } from "../utils/coTeaching";
+import { effectiveSchoolForSlot, normalizeTeacherProfile } from "../utils/multiSchool";
+import { timeSlotConfigForSchool } from "../utils/timeSlots";
+import {
+  isSlotOutOfConfiguredDay,
+  OUT_OF_CONFIG_SLOT_BADGE,
+  OUT_OF_CONFIG_SLOT_TITLE,
+} from "../utils/schoolDayPeriods";
 import { daySwipeDirection, isInteractiveSwipeTarget, DAY_SWIPE_INTERACTIVE_SELECTOR } from "../utils/daySwipe";
 
 /**
@@ -89,6 +96,12 @@ interface TodayViewProps {
    */
   onOpenTimetableSlotForEdit?: (slot: TimetableSlot, type: TimetableType, selectedIso: string) => void;
   /**
+   * Configurazione delle fasce orarie del docente. Serve SOLO a riconoscere le
+   * lezioni salvate in un'ora che il giorno non prevede, per marcarle: la vista
+   * resta guidata dagli slot salvati e non disegna mai righe da questa config.
+   */
+  timeSlotConfig?: TimeSlotConfig;
+  /**
    * Orario a cui appartiene l'array `timetable` (da App: activeType). La card
    * lezione lo usa come tipo della richiesta di modifica.
    */
@@ -105,6 +118,8 @@ interface TodayViewProps {
 }
 
 export const TodayView: React.FC<TodayViewProps> = ({
+  profile,
+  timeSlotConfig,
   timetable,
   events,
   scheduledAssessments = [],
@@ -125,6 +140,15 @@ export const TodayView: React.FC<TodayViewProps> = ({
   initialDateIso,
   onSelectedDateChange,
 }) => {
+  /** Configurazione di riferimento: scuola PRIMARIA, come nel resto dell'app. */
+  /**
+   * Istituti del docente (elenco normalizzato: espone sempre una primaria).
+   * Serve a due cose, e sono la STESSA cosa: dire a quale scuola appartiene una
+   * lezione e con quali `dayPeriods` va valutata.
+   */
+  const schools = React.useMemo(() => normalizeTeacherProfile(profile).schools ?? [], [profile]);
+  /** Il badge istituto ha senso solo se ce n'è più di uno da distinguere. */
+  const showSchoolBadge = schools.length > 1;
   const [confirmingDeleteEventId, setConfirmingDeleteEventId] = React.useState<string | null>(null);
   // Selected civil date (defaults to the real today, or to initialDateIso when
   // the parent restores a previously viewed context). Navigation is day-by-day
@@ -487,6 +511,17 @@ export const TodayView: React.FC<TodayViewProps> = ({
                 <div className="space-y-2.5">
                   {todayLessons.map((slot) => {
                     const summary = coTeachingSummary(slot);
+                    // Istituto EFFETTIVO della lezione: uno solo, e lo stesso
+                    // sia per il badge sia per le ore ammesse dal giorno. Una
+                    // lezione della secondaria non va più letta con la
+                    // configurazione della primaria.
+                    const school = effectiveSchoolForSlot(slot, schools);
+                    // Le campane di QUELLA scuola: sue se le ha, altrimenti le
+                    // globali. Scuola e fasce vanno sempre lette in coppia.
+                    const schoolConfig = timeSlotConfigForSchool(school, timeSlotConfig);
+                    // Lezione salvata in un'ora che il giorno non prevede: si
+                    // marca, non si nasconde e non si tocca il dato.
+                    const outOfConfig = isSlotOutOfConfiguredDay(slot, school, schoolConfig);
                     const lessonBody = (
                         <div className="flex items-start gap-3">
                           {/* Ora & periodo: blocco verticale compatto */}
@@ -512,6 +547,27 @@ export const TodayView: React.FC<TodayViewProps> = ({
                               <span className="text-[11px] font-semibold px-1.5 py-0.5 rounded-md bg-stone-100 text-stone-700 border border-stone-200 whitespace-nowrap">
                                 {slot.className}
                               </span>
+                              {/* Istituto: metadato secondario accanto agli
+                                  altri, mai una riga propria. È l'unico modo
+                                  per distinguere due lezioni che occupano la
+                                  stessa ora in scuole diverse. */}
+                              {showSchoolBadge && school?.name && (
+                                <span
+                                  data-slot-school={school.id}
+                                  className="text-[11px] font-medium px-1.5 py-0.5 rounded-md bg-sky-50 text-sky-900 border border-sky-200 whitespace-nowrap"
+                                >
+                                  {school.name}
+                                </span>
+                              )}
+                              {outOfConfig && (
+                                <span
+                                  data-slot-out-of-config="true"
+                                  title={OUT_OF_CONFIG_SLOT_TITLE}
+                                  className="text-[11px] font-semibold px-1.5 py-0.5 rounded-md bg-amber-100 text-amber-900 border border-amber-300 whitespace-nowrap"
+                                >
+                                  {OUT_OF_CONFIG_SLOT_BADGE}
+                                </span>
+                              )}
                             </div>
 
                             {(slot.classroom || slot.campus) && (
@@ -556,7 +612,12 @@ export const TodayView: React.FC<TodayViewProps> = ({
                             if (consumeLessonSwipeClick()) return;
                             onOpenTimetableSlotForEdit(slot, lessonType, selectedIso);
                           }}
-                          className="block w-full min-h-[44px] text-left p-3 rounded-xl border border-stone-200 hover:border-emerald-300 active:border-emerald-400 focus-visible:outline-2 focus-visible:outline-emerald-600 focus-visible:outline-offset-2 transition-colors bg-white"
+                          title={outOfConfig ? OUT_OF_CONFIG_SLOT_TITLE : undefined}
+                          className={`block w-full min-h-[44px] text-left p-3 rounded-xl border focus-visible:outline-2 focus-visible:outline-emerald-600 focus-visible:outline-offset-2 transition-colors ${
+                            outOfConfig
+                              ? "border-amber-300 bg-amber-50/60 hover:border-amber-400"
+                              : "border-stone-200 bg-white hover:border-emerald-300 active:border-emerald-400"
+                          }`}
                         >
                           {lessonBody}
                         </button>
@@ -565,7 +626,12 @@ export const TodayView: React.FC<TodayViewProps> = ({
                     return (
                       <div
                         key={slot.id}
-                        className="p-3 rounded-xl border border-stone-200 hover:border-emerald-300 active:border-emerald-400 transition-colors bg-white"
+                        title={outOfConfig ? OUT_OF_CONFIG_SLOT_TITLE : undefined}
+                        className={`p-3 rounded-xl border transition-colors ${
+                          outOfConfig
+                            ? "border-amber-300 bg-amber-50/60"
+                            : "border-stone-200 hover:border-emerald-300 active:border-emerald-400 bg-white"
+                        }`}
                       >
                         {lessonBody}
                       </div>

@@ -129,6 +129,59 @@ export function getOtherActiveSchools(profile: TeacherProfile): SchoolProfile[] 
   return (normalized.schools ?? []).filter(s => !s.isPrimary && s.active !== false);
 }
 
+/**
+ * ISTITUTO EFFETTIVO DI UNA LEZIONE, per la presentazione.
+ *
+ * Estende l'identità canonica `slotSchoolKey` con l'unica regola che quella,
+ * da sola, non può dare: la lezione deve finire da qualche parte ANCHE quando
+ * il suo `schoolId` non corrisponde a nessun istituto del profilo.
+ *
+ *  - `schoolId` valido      -> quell'istituto;
+ *  - `schoolId` assente     -> istituto principale (slot legacy, mai migrati);
+ *  - `schoolId` ORFANO      -> istituto principale.
+ *
+ * Il terzo caso è quello che protegge i dati: un istituto rimosso dal profilo,
+ * o un backup più vecchio, lascerebbero altrimenti lezioni senza scuola —
+ * quindi senza nome da mostrare e senza `dayPeriods` su cui valutarle. È la
+ * stessa regola con cui la griglia dell'orario decide in quale istituto
+ * mostrare una lezione, così le viste non possono divergere fra loro.
+ *
+ * `schools` deve essere l'elenco NORMALIZZATO (`normalizeTeacherProfile`), che
+ * espone sempre una primaria anche per i profili legacy. Sola lettura: non
+ * scrive e non corregge nulla sullo slot.
+ */
+export function effectiveSchoolForSlot(
+  slot: Pick<TimetableSlot, "schoolId">,
+  schools: readonly SchoolProfile[] | undefined
+): SchoolProfile | undefined {
+  return schoolByIdOrPrimary(slot.schoolId, schools);
+}
+
+/**
+ * Stessa risoluzione di `effectiveSchoolForSlot`, ma a partire da un ID nudo:
+ * serve quando l'istituto è già stato SCELTO e la lezione non esiste ancora —
+ * la scansione di un orario, che deve conoscere la scuola di destinazione
+ * prima di avere qualsiasi slot.
+ *
+ *  - id valido   -> quell'istituto;
+ *  - id assente  -> istituto principale;
+ *  - id ORFANO   -> istituto principale.
+ *
+ * Tenere una sola implementazione è il punto: geometria attesa, validazione e
+ * `schoolId` scritto sugli slot devono rispondere tutti alla stessa domanda
+ * nello stesso modo, altrimenti si importano lezioni convalidate con le ore di
+ * un istituto e salvate in un altro.
+ */
+export function schoolByIdOrPrimary(
+  schoolId: string | undefined,
+  schools: readonly SchoolProfile[] | undefined
+): SchoolProfile | undefined {
+  const list = schools ?? [];
+  const key = (schoolId ?? "").trim();
+  const match = key ? list.find(school => school.id === key) : undefined;
+  return match ?? list.find(school => school.isPrimary) ?? list[0];
+}
+
 /** Gets the primary school profile. */
 export function getPrimarySchool(profile: TeacherProfile): SchoolProfile | undefined {
   const normalized = normalizeTeacherProfile(profile);

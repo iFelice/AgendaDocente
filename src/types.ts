@@ -16,6 +16,35 @@ export type EventCategory =
 
 export type SchoolLevel = "infanzia" | "primaria" | "ssig" | "ssiig";
 
+/** Giorni della settimana scolastica: 1 = Lunedì … 6 = Sabato (stessa scala di TimetableSlot.dayOfWeek). */
+export type SchoolWeekday = 1 | 2 | 3 | 4 | 5 | 6;
+
+/**
+ * STRUTTURA DELLA GIORNATA SCOLASTICA DELL'ISTITUTO.
+ *
+ * NON è il carico del docente: `TeacherProfile.weeklyDeclaredHours` e
+ * `SchoolProfile.weeklyHours` descrivono quante ore lavora la persona, questo
+ * descrive quante ore ESISTONO nella giornata della scuola. Un istituto può
+ * avere 7 ore il giovedì anche se quel giorno il docente ne lavora 4.
+ *
+ * Appartiene alla scuola perché un docente su due istituti può trovarsi due
+ * strutture giornaliere diverse.
+ *
+ * Modello: un numero ordinario + i soli giorni che DEVIANO.
+ *   ordinaryPeriodsPerDay: 6, extraPeriodsByDay: { 4: 1 }
+ *   → Lun 6, Mar 6, Mer 6, Gio 7, Ven 6
+ * Generalizzato a +2 / ottava ora e a qualsiasi combinazione (6/6/8/6/7).
+ *
+ * Tutto opzionale e additivo: assente ⇒ comportamento identico a prima
+ * dell'introduzione del campo (vedi src/utils/schoolDayPeriods.ts).
+ */
+export interface SchoolDayPeriodsConfig {
+  /** Ore ordinarie della giornata. Assente/non valido ⇒ dedotto dalle fasce orarie effettive. */
+  ordinaryPeriodsPerDay?: number;
+  /** Ore AGGIUNTIVE per i soli giorni che deviano dall'ordinario. Giorni assenti ⇒ +0. */
+  extraPeriodsByDay?: Partial<Record<SchoolWeekday, number>>;
+}
+
 export interface SchoolProfile {
   id: string;
   name: string;
@@ -25,6 +54,19 @@ export interface SchoolProfile {
   weeklyHours?: number;
   isPrimary?: boolean;
   active?: boolean;
+  /** Struttura della giornata scolastica dell'istituto (opzionale, retrocompatibile). */
+  dayPeriods?: SchoolDayPeriodsConfig;
+  /**
+   * Fasce orarie (le "campane") di QUESTO istituto: a che ora inizia e finisce
+   * ogni ora di lezione. È l'altra metà di `dayPeriods`, che dice invece
+   * QUANTE ore ha ogni giorno.
+   *
+   * Opzionale e retrocompatibile: quando manca vale la configurazione globale
+   * del docente, che resta il default finché l'istituto non viene
+   * personalizzato. Nessun dato viene migrato e nessuna config viene creata
+   * automaticamente.
+   */
+  timeSlotConfig?: TimeSlotConfig;
 }
 
 /** Future-proof class directory record; current ClassesView still uses className strings. */

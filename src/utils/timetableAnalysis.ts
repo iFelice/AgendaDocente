@@ -18,7 +18,7 @@
 
 import type { TimetableSlot } from "../types";
 import type { TimetableToken } from "./timetableTokens";
-import { classifyTimetableToken, extractClassesFromCell, normalizeClassLabel } from "./timetableTokens";
+import { classifyTimetableToken, extractClassesFromCell, normalizeClassLabel, DAY_LABELS } from "./timetableTokens";
 import { foldName } from "./studentMatcher";
 import { isGenericSubject } from "./circularRelevance";
 import { normalizeSubjectName, sameSubject } from "./subjects";
@@ -149,15 +149,70 @@ export const MAX_GRID_PERIODS = 12;
 export const PERSONAL_SCHOOL_DAYS = 5;
 
 /**
- * Celle attese nella sequenza dell'orario personale.
+ * STRUTTURA DELLA SETTIMANA dell'orario personale: quante ore ha ciascun giorno,
+ * da lunedì a venerdì, nell'ordine dei giorni.
  *
- * È l'UNICA geometria ammessa e NON è una costante: il numero di celle non
- * compare mai scritto a mano, è il prodotto fra le ore per giorno dichiarate
- * dall'UTENTE e i giorni scolastici del percorso (5 ore x 5 giorni = 25
- * posizioni fisiche).
+ *   indice 0 = lunedì, 1 = martedì, 2 = mercoledì, 3 = giovedì, 4 = venerdì
+ *
+ * perché una tupla di numeri arbitrari e NON "base + deroghe": la settimana
+ * scolastica non è per forza rettangolare (6/6/6/7/6 è la forma che ha motivato
+ * questo modello) e nemmeno per forza più lunga dell'ordinario in qualche giorno
+ * (6/5/6/7/4 è altrettanto legittimo). Il modello "ordinarie + extra" del
+ * Profilo non sa esprimere un giorno PIÙ CORTO dell'ordinario, quindi lo
+ * scanner non lo adotta: riceve la geometria già risolta, un intero per giorno.
+ *
+ * Non è un dato persistito: nasce derivato dal Profilo, l'utente può correggerlo
+ * per la singola scansione e muore con essa.
  */
-export function expectedPersonalCellCount(periodsPerDay: number): number {
-  return periodsPerDay * PERSONAL_SCHOOL_DAYS;
+export type PersonalTimetablePeriodsByDay = readonly [number, number, number, number, number];
+
+/** Un'ora per giorno ammissibile: intero dentro il tetto di geometria dell'app. */
+const isPeriodsValue = (value: unknown): value is number =>
+  typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= MAX_GRID_PERIODS;
+
+/**
+ * Riconosce una struttura della settimana utilizzabile: ESATTAMENTE
+ * `PERSONAL_SCHOOL_DAYS` valori, ognuno intero fra 1 e `MAX_GRID_PERIODS`.
+ * Stringhe numeriche, decimali, zero, negativi e array di lunghezza diversa
+ * sono rifiutati: una geometria attesa sbagliata farebbe passare o scartare
+ * un'analisi intera.
+ */
+export function isPersonalPeriodsByDay(value: unknown): value is PersonalTimetablePeriodsByDay {
+  return Array.isArray(value) && value.length === PERSONAL_SCHOOL_DAYS && value.every(isPeriodsValue);
+}
+
+/**
+ * Normalizza un valore in una struttura della settimana, oppure `null` se non è
+ * utilizzabile. Unico punto di conversione: chi la ottiene può fidarsi.
+ */
+export function normalizePersonalPeriodsByDay(value: unknown): PersonalTimetablePeriodsByDay | null {
+  if (!isPersonalPeriodsByDay(value)) return null;
+  return [value[0], value[1], value[2], value[3], value[4]] as const;
+}
+
+/**
+ * Settimana rettangolare: lo stesso numero di ore in tutti i giorni.
+ *
+ * È la forma del mondo pre-D3 (e del `periodsPerDay` scalare legacy): serve a
+ * convertirlo UNA volta sola al confine, non a tenere in vita due contratti.
+ */
+export function uniformPersonalPeriodsByDay(periodsPerDay: number): PersonalTimetablePeriodsByDay | null {
+  if (!isPeriodsValue(periodsPerDay)) return null;
+  return [periodsPerDay, periodsPerDay, periodsPerDay, periodsPerDay, periodsPerDay] as const;
+}
+
+/**
+ * Posizioni attese nella riga del docente: la SOMMA delle ore dei singoli
+ * giorni (6+6+6+7+6 = 31), non un prodotto.
+ *
+ * ATTENZIONE: è un numero INFORMATIVO, mostrato all'utente e scritto nel
+ * prompt. NON è una validazione e non deve diventarlo: il totale è proprio il
+ * controllo che non bastava (5+5+4+5+6 somma le stesse posizioni di 5x5 pur
+ * avendo un giorno corto e uno lungo). La verifica vera è per giorno, in
+ * `validatePersonalSequencePayload`.
+ */
+export function expectedPersonalCellCount(periodsByDay: readonly number[]): number {
+  return periodsByDay.reduce((sum, periods) => sum + periods, 0);
 }
 
 /** Etichetta della riga docenti: `null`/`""` = riga senza etichetta leggibile. */
@@ -209,8 +264,9 @@ export interface PersonalSequence {
  *
  * Gate duri (nessuna compensazione, nessuna rinumerazione, nessun anchoring):
  *  1. `days` è un array di ESATTAMENTE `PERSONAL_SCHOOL_DAYS` blocchi;
- *  2. ogni blocco è un oggetto con `cells` array lungo ESATTAMENTE
- *     `periodsPerDay`, di stringhe (`null` vale cella vuota, non stringa no);
+ *  2. ogni blocco è un oggetto con `cells` array lungo ESATTAMENTE le ore di
+ *     QUEL giorno (`periodsByDay[indice del blocco]`), di stringhe (`null` vale
+ *     cella vuota, non stringa no);
  *  3. `rowLabel` deve combaciare col cognome del profilo tramite il matcher
  *     già esistente (`findTeacherRows`, cognome come parola intera): se non è
  *     compatibile l'analisi è rifiutata e NESSUN'altra riga viene scelta.
@@ -229,17 +285,21 @@ export interface PersonalSequence {
  * sintetica `rowIndex = 0`. È l'unica sorgente di coordinate del percorso
  * personale: il modello non può influenzarla.
  *
- * `periodsPerDay` arriva dalla REQUEST (dichiarato dall'utente), mai dal
- * payload del modello.
+ * `periodsByDay` arriva dalla REQUEST (dichiarato dall'utente), mai dal payload
+ * del modello. La settimana NON è per forza rettangolare: 6/6/6/7/6 è valida
+ * quanto 6/6/6/6/6, e ogni giorno viene verificato contro la PROPRIA lunghezza.
+ * Una cella mancante nel giovedì resta un rifiuto anche se il venerdì ne porta
+ * una in più: non esiste compensazione fra giorni, perché il totale tornerebbe
+ * mentre le coordinate sarebbero tutte spostate.
  */
 export function validatePersonalSequencePayload(
   raw: unknown,
   targetTeacherSurname: string,
-  periodsPerDay: number,
+  periodsByDay: readonly number[],
 ): PersonalSequence {
   if (!record(raw)) invalidShape("Risposta analisi non valida.");
-  const periods = intWithin(periodsPerDay, 1, MAX_GRID_PERIODS) ? periodsPerDay : 0;
-  if (periods === 0) invalidShape("Ore per giorno non valide.");
+  const week = normalizePersonalPeriodsByDay(periodsByDay);
+  if (!week) invalidShape("Ore per giorno non valide.");
 
   const rowLabel = normalizeRowLabel(raw.rowLabel, 0);
   // Guardia d'identità col matcher esistente (cognome intero, mai sottostringa):
@@ -259,15 +319,25 @@ export function validatePersonalSequencePayload(
   raw.days.forEach((day, dayIndex) => {
     if (!record(day)) invalidShape(`Giorno non valido (#${dayIndex}).`);
     if (!Array.isArray(day.cells)) invalidShape(`Celle del giorno non valide (#${dayIndex}).`);
-    // Lunghezza del SINGOLO blocco: il totale delle celle non è una prova
-    // sufficiente (5+5+4+5+6 fa lo stesso totale di 5+5+5+5+5).
-    if (day.cells.length !== periods) invalidShape(`Lunghezza del giorno non valida (#${dayIndex}).`);
+    // Lunghezza del SINGOLO blocco, confrontata con le ore di QUEL giorno: il
+    // totale delle celle non è una prova sufficiente (5+5+4+5+6 fa lo stesso
+    // totale di 5+5+5+5+5) e con una settimana non rettangolare lo è ancora
+    // meno. Il messaggio nomina il giorno, l'atteso e il ricevuto: è
+    // diagnostica server-side, all'utente arriva il messaggio generico.
+    const expected = week[dayIndex];
+    if (day.cells.length !== expected) {
+      invalidShape(`${DAY_LABELS[dayIndex + 1]}: attese ${expected} celle, ricevute ${day.cells.length}.`);
+    }
     day.cells.forEach((value, cellIndex) => {
       cells.push({
         rowIndex: 0,
         dayOfWeek: dayIndex + 1,
+        // La cella in più del giovedì NON sposta il venerdì: il periodo nasce
+        // dall'indice DENTRO il blocco, e il giorno dall'indice del blocco.
         periodIndex: cellIndex + 1,
-        raw: normalizeSequenceCell(value, dayIndex * periods + cellIndex),
+        // Indice PIATTO progressivo, solo per la diagnostica: con una settimana
+        // non rettangolare non è più un prodotto, è la posizione corrente.
+        raw: normalizeSequenceCell(value, cells.length),
       });
     });
   });

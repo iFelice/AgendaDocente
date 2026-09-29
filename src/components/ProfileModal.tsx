@@ -23,7 +23,7 @@ import {
   TriangleAlert,
 } from "lucide-react";
 import { User as FirebaseUser } from "firebase/auth";
-import { TeacherProfile, TeacherRole, TeacherRoleKind, TEACHER_ROLE_KINDS, SchoolLevel, CalendarEvent, SchoolProfile } from "../types";
+import { TeacherProfile, TeacherRole, TeacherRoleKind, TEACHER_ROLE_KINDS, SchoolLevel, CalendarEvent, SchoolProfile, SchoolDayPeriodsConfig, TimeSlotConfig } from "../types";
 import { ROLE_LABELS, roleDisplayName } from "../utils/teacherRoles";
 import { formatPersonDisplayName } from "../utils/names";
 import { storage } from "../services/storage";
@@ -35,6 +35,7 @@ import type { SyncStatus } from "../services/sync/types";
 import { CloudSync } from "./CloudSyncCard";
 import { useManualSync } from "../hooks/useManualSync";
 import { hasActiveSecondarySchool, normalizeTeacherProfile } from "../utils/multiSchool";
+import { SchoolDayPeriodsEditor } from "./SchoolDayPeriodsEditor";
 import { isSupportTeacherOf } from "../utils/teacherType";
 
 interface ProfileModalProps {
@@ -56,7 +57,44 @@ interface ProfileModalProps {
   onSyncResolve?: (choice: "local" | "remote") => void;
   /** Device connectivity, forwarded to the account-sync card (offline message + badge). */
   online?: boolean;
+  /**
+   * Fasce orarie del docente. Serve SOLO a dedurre l'ordinario legacy della
+   * struttura giornaliera quando un istituto non l'ha mai configurata
+   * (getEffectivePeriodSlots().length tramite le utility): non e una
+   * configurazione della scuola e non viene mai scritta da questa modale.
+   */
+  timeSlotConfig?: TimeSlotConfig;
   initialTab?: "profilo" | "backup" | "google";
+}
+
+/**
+ * SchoolProfile primaria secondo il modello multi-istituto esistente: si passa
+ * sempre dalla normalizzazione, cosi un profilo legacy senza schools[] espone
+ * comunque la primaria che normalizeTeacherProfile crea gia oggi.
+ */
+function primarySchoolOf(profile: TeacherProfile): SchoolProfile | undefined {
+  const schools = normalizeTeacherProfile(profile).schools ?? [];
+  return schools.find(s => s.isPrimary) ?? schools[0];
+}
+
+/**
+ * Scrive la struttura giornaliera nella SchoolProfile PRIMARIA del profilo gia
+ * normalizzato, preservando ogni altro campo (id, nome, email, sedi, grado,
+ * weeklyHours, isPrimary, active). Gli altri istituti non vengono toccati.
+ */
+export function withPrimaryDayPeriods(profile: TeacherProfile, dayPeriods?: SchoolDayPeriodsConfig): TeacherProfile {
+  const schools = profile.schools ?? [];
+  const primaryIndex = schools.findIndex(s => s.isPrimary);
+  const targetIndex = primaryIndex >= 0 ? primaryIndex : 0;
+  if (schools.length === 0) return profile;
+  return {
+    ...profile,
+    schools: schools.map((school, index) =>
+      index === targetIndex
+        ? (dayPeriods ? { ...school, dayPeriods } : (({ dayPeriods: _drop, ...rest }) => rest)(school))
+        : school
+    ),
+  };
 }
 
 export const ProfileModal: React.FC<ProfileModalProps> = ({
@@ -77,6 +115,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   onSyncToggle,
   onSyncResolve,
   online,
+  timeSlotConfig,
   initialTab = "profilo",
 }) => {
   const save = usePersistenceAction();
@@ -103,6 +142,10 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
       setMultiSchoolEnabled(hasActiveSecondarySchool(profile));
       const secondary = (profile.schools ?? []).find(s => !s.isPrimary);
       if (secondary) setSecondarySchool(secondary);
+      // Struttura giornaliera ri-derivata a ogni apertura, come il flag multi-istituto:
+      // dopo un salvataggio o una sincronizzazione account la modale non deve mostrare
+      // lo stato della prima renderizzazione.
+      setPrimaryDayPeriods(primarySchoolOf(profile)?.dayPeriods);
     }
   }, [isOpen, initialTab, profile]);
   const [schoolName, setSchoolName] = useState(profile.schoolName);
@@ -112,6 +155,12 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
     profile.weeklyDeclaredHours !== undefined ? profile.weeklyDeclaredHours : 18
   );
   const existingSecondary = (profile.schools ?? []).find(s => !s.isPrimary);
+  // La struttura giornaliera appartiene alla SchoolProfile primaria: si legge dal
+  // profilo normalizzato, cosi anche un profilo legacy senza schools[] parte dalla
+  // primaria che normalizeTeacherProfile crea gia oggi.
+  const [primaryDayPeriods, setPrimaryDayPeriods] = useState<SchoolDayPeriodsConfig | undefined>(
+    () => primarySchoolOf(profile)?.dayPeriods
+  );
   const [multiSchoolEnabled, setMultiSchoolEnabled] = useState(hasActiveSecondarySchool(profile));
   const [secondarySchool, setSecondarySchool] = useState<SchoolProfile>(existingSecondary ?? { id: `school-secondary-${profile.id}`, name: "", institutionalEmail: "", campuses: [], schoolLevel: profile.schoolLevel, weeklyHours: undefined, active: true, isPrimary: false });
   const [secondaryCampusInput, setSecondaryCampusInput] = useState("");
@@ -230,7 +279,9 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
           (profile.schools ?? []).filter(s => !s.isPrimary).map(s => ({ ...s, active: false }))),
       ],
     };
-    const normalizedUpdated = normalizeTeacherProfile(updated);
+    // La primaria puo essere creata/riproiettata dalla normalizzazione (profili legacy):
+    // la struttura giornaliera viene scritta DOPO, sulla primaria definitiva.
+    const normalizedUpdated = withPrimaryDayPeriods(normalizeTeacherProfile(updated), primaryDayPeriods);
     if (!await save.run(() => onSaveProfile(normalizedUpdated, editBaseline.current))) return;
     onClose();
   };
@@ -626,6 +677,16 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                 </div>
               </div>
 
+              {/* Struttura della giornata dell'ISTITUTO PRINCIPALE: quante ore prevede la
+                  scuola, non quante ne lavora il docente (quelle restano il monte ore
+                  dichiarato, qui sopra, e non entrano in questo calcolo). */}
+              <SchoolDayPeriodsEditor
+                context="istituto principale"
+                value={primaryDayPeriods}
+                timeSlotConfig={timeSlotConfig}
+                onChange={setPrimaryDayPeriods}
+              />
+
               <div className="rounded-xl border border-stone-200 bg-white p-3.5 space-y-3">
                 <label className="flex items-center gap-2 text-xs font-semibold text-stone-700 cursor-pointer">
                   <input type="checkbox" checked={multiSchoolEnabled} onChange={e => setMultiSchoolEnabled(e.target.checked)} className="accent-emerald-700" />
@@ -640,6 +701,14 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                     <div className="flex gap-2"><input aria-label="Plesso altro istituto" value={secondaryCampusInput} onChange={e => setSecondaryCampusInput(e.target.value)} placeholder="Plesso/Sede" className="min-w-0 flex-1 p-2.5 border border-stone-300 rounded-xl text-xs" /><button type="button" className="px-2 rounded-lg bg-stone-700 text-white text-xs" onClick={() => { const c = secondaryCampusInput.trim(); if (c && !(secondarySchool.campuses ?? []).includes(c)) updateSecondary({ campuses: [...(secondarySchool.campuses ?? []), c] }); setSecondaryCampusInput(""); }}>Aggiungi</button></div>
                   </div>
                   <div className="flex flex-wrap gap-1.5">{(secondarySchool.campuses ?? []).map(c => <span key={c} className="text-[11px] rounded bg-stone-200 px-2 py-1">{c}</span>)}</div>
+                  {/* Il secondo istituto ha la PROPRIA struttura giornaliera: puo avere
+                      giorni piu lunghi o piu corti del principale. */}
+                  <SchoolDayPeriodsEditor
+                    context="altro istituto"
+                    value={secondarySchool.dayPeriods}
+                    timeSlotConfig={timeSlotConfig}
+                    onChange={next => updateSecondary({ dayPeriods: next })}
+                  />
                   <p className="text-[11px] text-stone-500">I dati restano conservati anche se disattivi questa opzione.</p>
                 </div>}
               </div>

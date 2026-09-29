@@ -19,6 +19,9 @@ import {
   RotateCcw,
 } from "lucide-react";
 import {
+  PeriodSlot,
+  SchoolProfile,
+  SchoolWeekday,
   TeacherProfile,
   TimeSlotConfig,
   TimetableMode,
@@ -29,6 +32,8 @@ import {
   DEFAULT_PERIOD_SLOTS,
   generateDefaultPeriodSlots,
   getEffectivePeriodSlots,
+  planTimeSlotRealignment,
+  timeSlotConfigForSchool,
   normalizeClassName,
   areSlotsMatchingAuto,
 } from "../utils/timeSlots";
@@ -36,6 +41,9 @@ import { MultiChipInput } from "./MultiChipInput";
 import { collectKnownTeacherNames, coTeachingSummary, coTeachingSubjectsOf, pruneCoTeachingFields } from "../utils/coTeaching";
 import { isSupportTeacherOf } from "../utils/teacherType";
 import { DEFAULT_SUBJECTS, mergeSubjectSuggestions, normalizeSubjectName } from "../utils/subjects";
+import { effectiveSchoolForSlot, getPrimarySchool, normalizeTeacherProfile } from "../utils/multiSchool";
+import { slotSchoolKey } from "../utils/reconstructTimetable";
+import { MAX_PERIODS_PER_DAY, maxPeriodsInWeek, periodsForDay, reassignTimetableSlotSchool } from "../utils/schoolDayPeriods";
 import {
   DAY_SWIPE_HORIZONTAL_RATIO,
   DAY_SWIPE_INTERACTIVE_SELECTOR,
@@ -44,6 +52,53 @@ import {
   isInteractiveSwipeTarget as isInteractiveSwipeControl,
   type DaySwipeDirection,
 } from "../utils/daySwipe";
+
+/**
+ * Coordinata già occupata da un'altra lezione dello STESSO istituto.
+ *
+ * Non è un conflitto di orario in senso lato (due istituti possono benissimo
+ * sovrapporsi): è il fatto che la griglia ha una sola cella per giorno/ora e
+ * la seconda lezione resterebbe invisibile.
+ */
+export const DUPLICATE_SLOT_ERROR =
+  "Esiste già una lezione di questo istituto in questo giorno e in quest'ora. Cambia giorno, ora o istituto.";
+
+/**
+ * Porta una lista di fasce ORARIE al numero richiesto, restando nel draft locale.
+ *
+ * Estensione: ogni nuova fascia parte dall'`endTime` di quella precedente e dura
+ * `durationMinutes` — la STESSA regola dell'azione "Aggiungi ulteriore ora", così
+ * una scansione personalizzata (con intervalli, ore da 55 minuti, ecc.) viene
+ * continuata e non ricalcolata da zero. Per questo NON si usa
+ * `periodTimesForIndex`: quella funzione rigenera una scala automatica dalla prima
+ * ora e, su fasce personalizzate, produrrebbe orari inventati.
+ *
+ * Riduzione: si tronca in coda, senza rinumerare le fasce superstiti.
+ * Funzione pura: nessuna persistenza, il salvataggio resta il bottone "Salva".
+ */
+export function resizePeriodSlotsDraft(
+  slots: PeriodSlot[],
+  targetCount: number,
+  durationMinutes: number
+): PeriodSlot[] {
+  const target = Math.max(1, Math.min(MAX_PERIODS_PER_DAY, Math.floor(targetCount) || 1));
+  if (slots.length === target) return slots;
+  if (slots.length > target) return slots.slice(0, target);
+
+  const extended = [...slots];
+  while (extended.length < target) {
+    const last = extended[extended.length - 1];
+    const startTime = last ? last.endTime : "08:00";
+    const periodNumber = extended.length + 1;
+    extended.push({
+      periodNumber,
+      label: `${periodNumber}ª Ora`,
+      startTime,
+      endTime: generateDefaultPeriodSlots(startTime, 1, durationMinutes)[0].endTime,
+    });
+  }
+  return extended;
+}
 
 // ---------------------------------------------------------------------------
 // Swipe fra i giorni dell'orario (scorciatoia mobile: i chip restano il controllo
@@ -136,6 +191,28 @@ interface TimetableEditorProps {
     config: TimeSlotConfig
   ) => void | false | Promise<void | false>;
   /**
+   * Salva le fasce orarie di UN istituto (`SchoolProfile.timeSlotConfig`).
+   *
+   * Deliberatamente separata da `onSaveTimeSlotConfig`, che continua a scrivere
+   * la configurazione GLOBALE del docente: sono due operazioni diverse e una
+   * callback sola che cambia destinazione a seconda di un argomento
+   * facoltativo renderebbe impossibile dire, leggendo il codice, dove
+   * finiscono davvero le campane appena modificate.
+   */
+  onSaveSchoolTimeSlotConfig?: (
+    schoolId: string,
+    config: TimeSlotConfig,
+    /**
+     * Lezioni da riallineare alle nuove campane, già calcolate e confermate
+     * dall'utente. Assente = si salvano solo le fasce.
+     *
+     * Porta i DATI, non una modalità: niente flag opachi da interpretare
+     * dall'altra parte. Quando c'è, config e lezioni vanno persistite come
+     * un'unica operazione.
+     */
+    realignment?: { provisional: TimetableSlot[]; definitive: TimetableSlot[] }
+  ) => void | false | Promise<void | false>;
+  /**
    * Lezione da aprire DIRETTAMENTE in modifica (tap su una lezione del
    * Planning: Oggi/Settimana). È solo l'handle della richiesta: la validazione
    * vera avviene cercando lo slot PER ID nell'orario dichiarato da
@@ -176,6 +253,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   onClearTimetable,
   onSaveProfile,
   onSaveTimeSlotConfig,
+  onSaveSchoolTimeSlotConfig,
   initialSlot = null,
   initialSlotType = null,
   onBackToOrigin,
@@ -197,6 +275,12 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   // la lezione nell'orario dichiarato: niente modale, niente fallback, niente
   // scritture — solo un messaggio chiaro e chiudibile.
   const [slotEditNotice, setSlotEditNotice] = useState<string | null>(null);
+  /**
+   * Avviso inline del modale quando il cambio giorno ha dovuto riportare la
+   * lezione a un'ora ammessa dal nuovo giorno. Solo UI: sparisce appena la
+   * situazione non è più pertinente (altro cambio valido, chiusura del modale).
+   */
+  const [periodClampNotice, setPeriodClampNotice] = useState<string | null>(null);
 
   // Richiesta ONE-SHOT di apertura diretta (tap su una lezione del Planning):
   // catturata al primo render e consumata una sola volta per mount. La fonte
@@ -212,6 +296,11 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   const [isAddingNewClass, setIsAddingNewClass] = useState(false);
   const [newClassNameInput, setNewClassNameInput] = useState("");
   const [classAddError, setClassAddError] = useState<string | null>(null);
+  /**
+   * Coordinata già occupata nello stesso istituto: si blocca al salvataggio,
+   * non mentre l'utente compone il draft.
+   */
+  const [slotConflictError, setSlotConflictError] = useState<string | null>(null);
 
   // First-use setup state (when timeSlotConfig is not configured)
   const [initFirstHour, setInitFirstHour] = useState("07:50");
@@ -220,6 +309,27 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
 
   // Time slot settings modal/drawer state
   const [isSlotConfigOpen, setIsSlotConfigOpen] = useState(false);
+  /**
+   * ISTITUTO A CUI APPARTENGONO LE FASCE IN MODIFICA, catturato all'apertura
+   * del drawer. Non si rilegge il selettore al salvataggio: un draft aperto
+   * per il Liceo non deve poter finire sull'IC perché nel frattempo è cambiata
+   * la griglia. Il selettore resta comunque bloccato mentre il drawer è aperto
+   * (vedi `isEditingTimeSlots`), quindi questo è il secondo dei due lucchetti.
+   */
+  const [slotConfigSchoolId, setSlotConfigSchoolId] = useState<string | undefined>(undefined);
+  /**
+   * Richiesta di conferma prima di riallineare le lezioni esistenti alle nuove
+   * campane. Finché è aperta NON è stato scritto ancora nulla: né le fasce né
+   * gli orari delle lezioni.
+   */
+  const [realignmentPrompt, setRealignmentPrompt] = useState<{
+    schoolId: string;
+    schoolName: string;
+    config: TimeSlotConfig;
+    count: number;
+    provisional: TimetableSlot[];
+    definitive: TimetableSlot[];
+  } | null>(null);
   const [firstHourTime, setFirstHourTime] = useState(
     timeSlotConfig?.firstHourStartTime || "07:50"
   );
@@ -234,6 +344,14 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   );
   const [isCustomMode, setIsCustomMode] = useState(false);
   const [showAdvancedSlots, setShowAdvancedSlots] = useState(false);
+  /**
+   * Quante fasce erano CONFERMATE quando il drawer è stato aperto. Le fasce oltre
+   * questa soglia sono bozze aggiunte in questa sessione e vanno marcate "Da
+   * verificare": è una soglia di sola UI, non viene mai salvata nel PeriodSlot.
+   */
+  const [confirmedSlotCount, setConfirmedSlotCount] = useState(0);
+  /** Fasce pre-proposte in modalità automatica all'apertura del drawer (solo avviso). */
+  const [autoProposedSlots, setAutoProposedSlots] = useState(0);
 
   // Mobile selected day filter for compact view
   const [mobileSelectedDay, setMobileSelectedDay] = useState<number | "all">("all");
@@ -270,6 +388,86 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   const currentSlots =
     activeTab === "provvisorio" ? provisionalTimetable : definitiveTimetable;
 
+  /**
+   * ISTITUTI DEL DOCENTE.
+   *
+   * Sempre dal profilo NORMALIZZATO: un profilo legacy senza `schools[]` espone
+   * comunque la sua primaria, quindi l'elenco non è mai vuoto e la griglia non
+   * ha bisogno di una modalità "nessuna scuola".
+   */
+  const schools = useMemo(() => normalizeTeacherProfile(profile).schools ?? [], [profile]);
+  const primarySchool = useMemo(() => getPrimarySchool(profile), [profile]);
+  const isMultiSchool = schools.length > 1;
+
+  /**
+   * ISTITUTO MOSTRATO DALLA GRIGLIA.
+   *
+   * Stato EFFIMERO di sola visualizzazione: non è persistito e non finisce in
+   * nessuno slot. Default: la primaria (o la prima scuola normalizzata, che con
+   * `normalizeTeacherProfile` è comunque marcata primaria).
+   *
+   * È una dimensione INDIPENDENTE dal tab provvisorio/definitivo e dal filtro
+   * giorno del mobile: cambiare istituto non tocca né l'uno né l'altro.
+   */
+  const [activeSchoolId, setActiveSchoolId] = useState<string>(
+    () => getPrimarySchool(profile)?.id ?? normalizeTeacherProfile(profile).schools?.[0]?.id ?? ""
+  );
+
+  // Il profilo può cambiare mentre l'editor è montato (istituto rimosso o
+  // rinominato dal Profilo): se l'id selezionato non esiste più si torna a una
+  // scuola valida, così la griglia non resta senza istituto e nessuno slot
+  // diventa irraggiungibile.
+  useEffect(() => {
+    if (schools.some((school) => school.id === activeSchoolId)) return;
+    setActiveSchoolId(primarySchool?.id ?? schools[0]?.id ?? "");
+  }, [schools, activeSchoolId, primarySchool]);
+
+  const activeSchool = useMemo(
+    () => schools.find((school) => school.id === activeSchoolId) ?? primarySchool,
+    [schools, activeSchoolId, primarySchool]
+  );
+
+  /**
+   * FASCE ORARIE DELL'ISTITUTO MOSTRATO — unica derivazione della griglia.
+   *
+   * Le campane di quell'istituto se le ha, altrimenti quelle globali del
+   * docente (che restano il default finché non si personalizza). La coppia
+   * `activeSchool` + `activeTimeSlotConfig` va sempre usata INSIEME: leggere le
+   * ore di un istituto con gli orari di un altro produrrebbe righe e marcature
+   * che non appartengono a nessuno dei due.
+   */
+  const activeTimeSlotConfig = useMemo(
+    () => timeSlotConfigForSchool(activeSchool, timeSlotConfig),
+    [activeSchool, timeSlotConfig]
+  );
+
+  /**
+   * GRIGLIA IN CUI COMPARE UNA LEZIONE.
+   *
+   * Stessa risoluzione usata da Oggi e Settimana per dire "di quale istituto è
+   * questa lezione": identità canonica più il recupero degli `schoolId` orfani
+   * sulla primaria. Sta nel dominio, non qui, perché le tre viste non possono
+   * permettersi di rispondere in modo diverso sullo stesso slot.
+   *
+   * Sola lettura: nessun dato viene corretto o riscritto.
+   */
+  const gridSchoolIdOf = (slot: TimetableSlot): string =>
+    effectiveSchoolForSlot(slot, schools)?.id ?? slotSchoolKey(slot, profile);
+
+  /**
+   * LEZIONI DELL'ISTITUTO MOSTRATO — unico array su cui lavora la griglia.
+   *
+   * È solo una VISTA: nessuna cancellazione, nessuna deduplica, nessun
+   * riordino, nessuna scrittura. Due lezioni sulla stessa coordinata ma di
+   * istituti diversi non si nascondono più a vicenda perché non si trovano
+   * mai nello stesso array.
+   */
+  const schoolSlots = useMemo(
+    () => currentSlots.filter((slot) => gridSchoolIdOf(slot) === activeSchoolId),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [currentSlots, profile, schools, primarySchool, activeSchoolId]
+  );
+
   // Il modale sta modificando una lezione ESISTENTE dell'orario mostrato
   // (stesso criterio di titolo ed "Elimina ora" del modale). Mentre è aperta,
   // cambiare tab cambierebbe la destinazione di Salva/Elimina: i tab restano
@@ -282,8 +480,8 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
 
   // Effective period slots calculated from config
   const periods = useMemo(
-    () => getEffectivePeriodSlots(timeSlotConfig),
-    [timeSlotConfig]
+    () => getEffectivePeriodSlots(activeTimeSlotConfig),
+    [activeTimeSlotConfig]
   );
 
   const days: { day: 1 | 2 | 3 | 4 | 5 | 6; label: string; short: string }[] = [
@@ -296,6 +494,138 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
       ? [{ day: 6 as const, label: "Sabato", short: "Sab" }]
       : []),
   ];
+
+  /**
+   * FABBISOGNO DI FASCE della settimana scolastica.
+   *
+   * Quante fasce servono perché il giorno più lungo dell'istituto sia coprribile:
+   * con 6 ore ordinarie e il giovedì a 7, servono 7 fasce. Il conto passa dalle
+   * utility di schoolDayPeriods (nessuna somma locale) e usa i giorni STABILI
+   * della settimana scolastica — mai `mobileSelectedDay`, che è solo un filtro di
+   * visualizzazione e non può cambiare quante fasce servono.
+   *
+   * Configurazione presa dall'istituto MOSTRATO dalla griglia: il fabbisogno di
+   * fasce è quello del suo giorno più lungo, quindi cambia col selettore.
+   *
+   * ATTENZIONE: `activeSchool` descrive QUANTE ore ha ogni giorno (`dayPeriods`),
+   * NON a che ora suonano le campane. Gli orari restano quelli di
+   * `timeSlotConfig`, che è unico per il docente: due istituti con giornate di
+   * lunghezza diversa condividono ancora la stessa scansione oraria.
+   */
+  const schoolWeekDays = days.map(d => d.day) as SchoolWeekday[];
+  const requiredPeriods = maxPeriodsInWeek(schoolWeekDays, activeSchool, activeTimeSlotConfig);
+  /** Fasce ancora da aggiungere al draft del drawer per coprire il fabbisogno. */
+  const missingSlotCount = Math.max(0, requiredPeriods - customSlotsDraft.length);
+
+  /**
+   * RIGHE DELLA GRIGLIA.
+   *
+   * Le fasce (`periods`) restano l'unica fonte degli ORARI REALI, ma non sono
+   * più da sole il numero di righe. Il conto è il massimo fra tre esigenze:
+   *
+   *  - `requiredPeriods`: quante ore prevede il giorno più lungo dell'istituto
+   *    (6/6/6/7/6 → 7). Serve a mostrare la riga del giovedì anche quando le
+   *    fasce configurate sono ancora 6.
+   *  - `periods.length`: le fasce realmente configurate. Se sono PIÙ del
+   *    fabbisogno (configurazioni custom preesistenti) devono restare tutte
+   *    visibili: nessuna regressione rispetto a prima.
+   *  - `legacyRowCount`: il periodo più alto fra le lezioni GIÀ SALVATE
+   *    DELL'ISTITUTO MOSTRATO. Conta solo quelle: un'8ª ora della scuola B non
+   *    deve far comparire una riga 8 nella griglia della scuola A. Una
+   *    lezione esistente non può sparire dalla UI solo perché la configurazione
+   *    della scuola è cambiata: resta visibile, modificabile ed eliminabile.
+   *
+   * Tutto è calcolato sui giorni STABILI della settimana: il filtro giorno del
+   * mobile non può cambiare quante righe ha la griglia.
+   */
+  const legacyRowCount = useMemo(
+    () => schoolSlots.reduce((max, s) => (s.periodNumber > max ? s.periodNumber : max), 0),
+    [schoolSlots]
+  );
+  const rowCount = Math.max(requiredPeriods, periods.length, legacyRowCount);
+
+  /**
+   * Righe VIRTUALI: `slot` è la fascia reale quando esiste, `undefined` quando
+   * la riga è prevista ma la fascia oraria non è ancora stata configurata.
+   * Nessun PeriodSlot finto viene creato qui e nulla finisce in `customSlots`:
+   * gli orari mancanti si aggiungono solo dal drawer delle fasce.
+   */
+  const gridRows = useMemo(
+    () =>
+      Array.from({ length: rowCount }, (_, index) => {
+        const periodNumber = index + 1;
+        return { periodNumber, slot: periods.find(p => p.periodNumber === periodNumber) };
+      }),
+    [rowCount, periods]
+  );
+
+  /**
+   * Ore ammesse da ciascun giorno secondo l'istituto MOSTRATO dalla griglia.
+   * Con la scuola A selezionata la 7ª è fuori configurazione, con la B — che
+   * arriva all'8ª — è una cella normale.
+   */
+  const allowedPeriodsByDay = useMemo(() => {
+    const map = new Map<number, number>();
+    for (const day of schoolWeekDays) {
+      map.set(day, periodsForDay(day, activeSchool, activeTimeSlotConfig));
+    }
+    return map;
+  }, [schoolWeekDays.join(","), activeSchool, activeTimeSlotConfig]);
+
+  /**
+   * Ore ammesse da un giorno. Senza `school` vale l'istituto MOSTRATO (è il caso
+   * della griglia); il modale passa invece l'istituto REALE della lezione che si
+   * sta modificando, che può differire se la si è aperta da Oggi/Settimana.
+   */
+  const allowedPeriodsFor = (day: number, school: SchoolProfile | undefined = activeSchool): number =>
+    school === activeSchool
+      ? allowedPeriodsByDay.get(day) ?? periodsForDay(day as SchoolWeekday, school, activeTimeSlotConfig)
+      : periodsForDay(day as SchoolWeekday, school, timeSlotConfigForSchool(school, timeSlotConfig));
+
+  /**
+   * ISTITUTO REALE DELLA LEZIONE APERTA NEL MODALE.
+   *
+   * Normalmente coincide con quello mostrato dalla griglia, ma non si dà per
+   * scontato: la stessa identità canonica degli slot (`slotSchoolKey`) risolve
+   * anche una lezione aperta da Oggi/Settimana, così le ore selezionabili e il
+   * clamp del cambio giorno seguono la SUA scuola e non quella visualizzata.
+   * Una nuova lezione non ha ancora un istituto: vale quello mostrato.
+   */
+  const editingSchool = useMemo(() => {
+    if (!editingSlot) return activeSchool;
+    const key = gridSchoolIdOf(editingSlot);
+    return schools.find((school) => school.id === key) ?? activeSchool;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingSlot?.id, editingSlot?.schoolId, profile, schools, activeSchool]);
+
+  /**
+   * Fasce orarie dell'istituto REALE della lezione aperta nel modale. Di norma
+   * coincidono con quelle mostrate dalla griglia, ma non si dà per scontato:
+   * una lezione aperta da Oggi/Settimana può appartenere a un altro istituto,
+   * e le sue ore devono restare le sue.
+   */
+  const editingTimeSlotConfig = useMemo(
+    () => timeSlotConfigForSchool(editingSchool, timeSlotConfig),
+    [editingSchool, timeSlotConfig]
+  );
+
+  /**
+   * Ore selezionabili nel modale: dipendono dal GIORNO scelto, non dall'intera
+   * configurazione. Solo fasce realmente configurate — nessun periodo virtuale.
+   * L'ora attualmente selezionata resta comunque nell'elenco anche se il giorno
+   * non la prevede più (lezione legacy fuori configurazione): toglierla
+   * lascerebbe il select senza opzione corrispondente al proprio valore.
+   */
+  const modalAvailablePeriods = useMemo(() => {
+    const periods = getEffectivePeriodSlots(editingTimeSlotConfig);
+    if (!editingSlot) return periods;
+    const allowed = allowedPeriodsFor(editingSlot.dayOfWeek, editingSchool);
+    const available = periods.filter(p => p.periodNumber <= allowed);
+    if (available.some(p => p.periodNumber === editingSlot.periodNumber)) return available;
+    const current = periods.find(p => p.periodNumber === editingSlot.periodNumber);
+    return current ? [...available, current] : available;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingSlot?.dayOfWeek, editingSlot?.periodNumber, editingTimeSlotConfig, allowedPeriodsByDay, editingSchool]);
 
   // On phones the timetable matrix opens on the current weekday by default (one day per
   // screen, no horizontal scrolling); the day chips let the teacher switch day or see the
@@ -367,20 +697,41 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
     daySwipeStartRef.current = null;
   };
 
-  // Open Add slot modal prefilled with the selected day and period
+  /**
+   * Nuova lezione: modale precompilato con giorno, ora e ISTITUTO.
+   *
+   * L'istituto è quello della griglia da cui si è premuto "+", ed è catturato
+   * QUI, all'apertura — non riletto al salvataggio. Il draft in composizione
+   * non deve poter cambiare significato sotto le mani dell'utente se lo stato
+   * del selettore cambia mentre il modale è aperto.
+   *
+   * Si passa da `activeSchool`, non dall'id grezzo: così una nuova lezione
+   * riceve sempre l'id di una scuola REALE del profilo normalizzato e non può
+   * nascere già orfana (la rete di F2 esiste per leggere i dati vecchi, non per
+   * coprire dati che stiamo scrivendo adesso).
+   *
+   * Vale anche con un istituto solo: il campo diventa esplicito e i nuovi dati
+   * smettono di dipendere dal fallback legacy, senza che l'UX cambi di una
+   * virgola. Gli slot già salvati non vengono toccati: nessuna migrazione.
+   */
   const handleOpenAdd = (day: 1 | 2 | 3 | 4 | 5 | 6, periodNum: number) => {
+    setSlotConflictError(null);
+    // `periods` sono già quelle dell'istituto mostrato: la nuova lezione nasce
+    // con i SUOI orari, non con quelli globali o di un'altra scuola.
     const periodConf = periods.find((p) => p.periodNumber === periodNum) || periods[0] || {
       periodNumber: 1,
       startTime: "07:50",
       endTime: "08:50",
     };
     editBaseline.current = undefined;
+    setPeriodClampNotice(null);
     setIsAddingNewClass(false);
     setNewClassNameInput("");
     setClassAddError(null);
 
     const initialClass =
       profile.classes && profile.classes.length > 0 ? profile.classes[0] : "";
+    const creationSchoolId = activeSchool?.id ?? activeSchoolId;
 
     setEditingSlot({
       id: `tt-${Date.now()}`,
@@ -393,12 +744,15 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
       classroom: "",
       campus: (profile.campuses && profile.campuses[0]) || "",
       isProvisional: activeTab === "provvisorio",
+      ...(creationSchoolId ? { schoolId: creationSchoolId } : {}),
     });
     setIsModalOpen(true);
   };
 
   const handleEditSlot = (slot: TimetableSlot) => {
+    setSlotConflictError(null);
     editBaseline.current = slot;
+    setPeriodClampNotice(null);
     setIsAddingNewClass(false);
     setNewClassNameInput("");
     setClassAddError(null);
@@ -430,7 +784,11 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
       );
       return;
     }
+    // Griglia e modale devono raccontare la stessa cosa: se la lezione arrivata
+    // dal Planning è di un altro istituto, la griglia passa al suo — altrimenti
+    // chiudendo il modale si tornerebbe a una griglia che non la contiene.
     setActiveTab(request.type);
+    setActiveSchoolId(gridSchoolIdOf(liveSlot));
     handleEditSlot(liveSlot);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -448,10 +806,83 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
     setIsModalOpen(false);
   };
 
+  /**
+   * Cambio GIORNO nel modale.
+   *
+   * Il cambio giorno non viene mai bloccato. Se però il nuovo giorno prevede
+   * meno ore di quella attualmente selezionata, lasciare l'ora com'è
+   * produrrebbe una lezione fuori configurazione creata di nascosto: l'ora
+   * viene quindi riportata all'ULTIMA ammessa dal nuovo giorno, con gli orari
+   * riallineati dalla stessa logica di `handlePeriodChange`, e l'utente ne è
+   * informato da un avviso inline esplicito. Se l'ora corrente è già valida
+   * cambia solo il giorno, senza avvisi.
+   */
+  const handleDayOfWeekChange = (newDay: number) => {
+    if (!editingSlot) return;
+    const dayInfo = days.find((d) => d.day === newDay);
+    // Istituto della LEZIONE, non della griglia: una lezione della scuola B
+    // aperta da Oggi non deve essere riportata alle ore della primaria.
+    const allowed = allowedPeriodsFor(newDay, editingSchool);
+    // Si può retrocedere solo su una fascia REALMENTE configurata: mai inventare
+    // orari. Se la fascia ammessa non esiste ancora si resta sull'ultima reale.
+    const reachable = getEffectivePeriodSlots(editingTimeSlotConfig).filter((p) => p.periodNumber <= allowed);
+    const fallback = reachable[reachable.length - 1];
+
+    if (editingSlot.periodNumber <= allowed || !fallback || fallback.periodNumber >= editingSlot.periodNumber) {
+      setPeriodClampNotice(null);
+      setEditingSlot({ ...editingSlot, dayOfWeek: newDay as 1 | 2 | 3 | 4 | 5 | 6 });
+      return;
+    }
+
+    setEditingSlot({
+      ...editingSlot,
+      dayOfWeek: newDay as 1 | 2 | 3 | 4 | 5 | 6,
+      periodNumber: fallback.periodNumber,
+      startTime: fallback.startTime,
+      endTime: fallback.endTime,
+    });
+    setPeriodClampNotice(
+      `Il ${(dayInfo?.label ?? "giorno").toLowerCase()} prevede ${allowed} ore: la lezione è stata spostata alla ${fallback.periodNumber}ª.`
+    );
+  };
+
+  /**
+   * Cambio ISTITUTO della lezione in modifica.
+   *
+   * La nuova scuola porta con sé le proprie regole: quante ore ha quel giorno
+   * e a che ora suonano. Il draft viene quindi riadattato subito — ora e
+   * orari cambiano sotto gli occhi dell'utente, che vede l'effetto prima di
+   * salvare — e l'eventuale arretramento è spiegato con lo stesso avviso
+   * inline del cambio giorno, non con un nuovo sistema di messaggi.
+   *
+   * La configurazione è quella della scuola SCELTA, non di quella mostrata
+   * dalla griglia: le due possono differire se la lezione è stata aperta da
+   * Oggi/Settimana.
+   */
+  const handleSlotSchoolChange = (nextSchoolId: string) => {
+    if (!editingSlot) return;
+    const nextSchool = schools.find((school) => school.id === nextSchoolId);
+    if (!nextSchool) return;
+
+    const outcome = reassignTimetableSlotSchool(
+      editingSlot,
+      nextSchool,
+      timeSlotConfigForSchool(nextSchool, timeSlotConfig)
+    );
+    setEditingSlot(outcome.slot);
+    setPeriodClampNotice(
+      outcome.wasClamped
+        ? `${outcome.previousPeriod}ª ora non prevista da ${nextSchool.name} in questo giorno (${outcome.allowed} ore): la lezione è stata spostata alla ${outcome.nextPeriod}ª.`
+        : null
+    );
+  };
+
   // When changing period number in modal, automatically update start & end times
   const handlePeriodChange = (newPeriodNum: number) => {
+    // Scelta esplicita dell'utente: l'avviso di clamp non è più pertinente.
+    setPeriodClampNotice(null);
     if (!editingSlot) return;
-    const periodConf = periods.find((p) => p.periodNumber === newPeriodNum);
+    const periodConf = getEffectivePeriodSlots(editingTimeSlotConfig).find((p) => p.periodNumber === newPeriodNum);
     if (periodConf) {
       setEditingSlot({
         ...editingSlot,
@@ -520,33 +951,137 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
       setClassAddError("Seleziona o aggiungi una classe.");
       return;
     }
+    /**
+     * UNA SOLA LEZIONE PER COORDINATA, DENTRO LO STESSO ISTITUTO.
+     *
+     * La griglia mostra una cella per giorno/ora, quindi due lezioni della
+     * stessa scuola sulla stessa coordinata sono di fatto una sola visibile e
+     * l'altra irraggiungibile. Il controllo sta QUI, al salvataggio, e non nei
+     * singoli handler: cambio giorno, cambio ora e cambio istituto possono
+     * portarci, e presidiare il punto di uscita li copre tutti e tre senza
+     * impedire all'utente di comporre liberamente il draft.
+     *
+     * L'identità dell'istituto passa da `effectiveSchoolForSlot`, mai da
+     * `schoolId` grezzo: una lezione legacy (senza istituto) e una esplicita
+     * della primaria occupano la STESSA coordinata, mentre due istituti
+     * diversi restano legittimamente sovrapponibili.
+     *
+     * Il confronto esclude la lezione stessa per `id`: risalvarla senza
+     * spostarla non è un conflitto con sé stessa. L'ambito è l'orario che si
+     * sta modificando — provvisorio e definitivo sono pianificazioni
+     * alternative e non si bloccano a vicenda.
+     */
+    const draftSchoolId = gridSchoolIdOf(editingSlot);
+    const occupied = currentSlots.some(
+      (other) =>
+        other.id !== editingSlot.id &&
+        other.dayOfWeek === editingSlot.dayOfWeek &&
+        other.periodNumber === editingSlot.periodNumber &&
+        gridSchoolIdOf(other) === draftSchoolId
+    );
+    if (occupied) {
+      setSlotConflictError(DUPLICATE_SLOT_ERROR);
+      return;
+    }
+    setSlotConflictError(null);
+
     // Co-teaching fields are optional: drop the empty ones so saved slots stay clean.
     const slot = pruneCoTeachingFields(editingSlot);
     // Su fallimento (CAS/persistenza) si resta nell'editor con l'errore mostrato:
     // nessun ritorno automatico al Planning.
     if (!await save.run(() => onSaveSlot(slot, activeTab, editBaseline.current))) return;
+    // Lezione spostata in un altro istituto: la griglia lo segue, altrimenti
+    // l'utente resterebbe davanti alla scuola di partenza convinto che la
+    // lezione sia sparita.
+    if (slot.schoolId && slot.schoolId !== activeSchoolId && schools.some((school) => school.id === slot.schoolId)) {
+      setActiveSchoolId(slot.schoolId);
+    }
     setEditingSlot(null);
     closeSlotModal();
   };
 
-  // Open config drawer and sync draft state
+  /** Nome dell'istituto a cui appartiene il draft di fasce attualmente aperto. */
+  const slotConfigSchoolName = useMemo(
+    () => schools.find((school) => school.id === slotConfigSchoolId)?.name ?? activeSchool?.name,
+    [schools, slotConfigSchoolId, activeSchool]
+  );
+
+  /**
+   * Il drawer delle fasce è aperto: il selettore istituto resta BLOCCATO.
+   *
+   * Stesso principio dei tab provvisorio/definitivo durante la modifica di una
+   * lezione: finché c'è un draft che appartiene a un istituto, cambiare
+   * istituto renderebbe ambiguo dove finiranno le modifiche. Il drawer non
+   * viene chiuso e non si chiede conferma: semplicemente non si cambia scuola.
+   */
+  const isEditingTimeSlots = isSlotConfigOpen;
+
+  /** Chiude il drawer senza salvare: il draft e l'istituto catturato decadono. */
+  const closeSlotConfig = () => {
+    setIsSlotConfigOpen(false);
+    setSlotConfigSchoolId(undefined);
+  };
+
+  /**
+   * Apre il drawer delle fasce PER L'ISTITUTO MOSTRATO.
+   *
+   * Il draft parte dalla configurazione EFFETTIVA di quella scuola: la sua se
+   * ce l'ha, altrimenti quella globale come punto di partenza. Aprire il
+   * drawer non crea nulla nel profilo — la configurazione diventa davvero
+   * dell'istituto solo con "Salva".
+   */
   const handleOpenSlotConfig = () => {
-    const effective = getEffectivePeriodSlots(timeSlotConfig);
-    const start = timeSlotConfig?.firstHourStartTime || effective[0]?.startTime || "07:50";
-    const count = timeSlotConfig?.periodsPerDay || effective.length || 6;
-    const duration = timeSlotConfig?.standardDurationMinutes || 60;
+    const config = activeTimeSlotConfig;
+    setSlotConfigSchoolId(activeSchool?.id);
+    const effective = getEffectivePeriodSlots(config);
+    const start = config?.firstHourStartTime || effective[0]?.startTime || "07:50";
+    const count = config?.periodsPerDay || effective.length || 6;
+    const duration = config?.standardDurationMinutes || 60;
     const hasCustomSlots = Boolean(
-      timeSlotConfig?.customSlots &&
-      timeSlotConfig.customSlots.length > 0 &&
-      !areSlotsMatchingAuto(timeSlotConfig.customSlots, start, count, duration)
+      config?.customSlots &&
+      config.customSlots.length > 0 &&
+      !areSlotsMatchingAuto(config.customSlots, start, count, duration)
     );
 
     setFirstHourTime(start);
-    setPeriodsCount(count);
     setPeriodDuration(duration);
-    setCustomSlotsDraft(effective);
     setIsCustomMode(hasCustomSlots);
+    setConfirmedSlotCount(effective.length);
+
+    // AUTO: le fasce mancanti sono PRE-PROPOSTE subito, continuando la scansione
+    // automatica con la durata standard (comportamento prevedibile, nessun orario
+    // inventato). CUSTOM: non si tocca nulla, l'utente riceve solo l'avviso e
+    // decide lui. In entrambi i casi si scrive SOLO il draft locale: la
+    // persistenza resta il bottone "Salva".
+    const proposed = !hasCustomSlots && requiredPeriods > effective.length ? requiredPeriods : 0;
+    if (proposed) {
+      setPeriodsCount(proposed);
+      setCustomSlotsDraft(generateDefaultPeriodSlots(start, proposed, duration));
+      setAutoProposedSlots(proposed - effective.length);
+    } else {
+      setPeriodsCount(count);
+      setCustomSlotsDraft(effective);
+      setAutoProposedSlots(0);
+    }
     setIsSlotConfigOpen(true);
+  };
+
+  /**
+   * Completa le fasce mancanti nel DRAFT locale, senza salvare.
+   * In modalità personalizzata continua dall'ultima fascia reale (vedi
+   * `resizePeriodSlotsDraft`); in automatica rigenera la scansione col numero
+   * richiesto. Le nuove fasce restano modificabili fino a "Salva".
+   */
+  const handleCompleteMissingSlots = () => {
+    setPeriodsCount(requiredPeriods);
+    // Le bozze devono essere subito visibili e modificabili, non nascoste
+    // dietro il pannello avanzato richiuso.
+    if (isCustomMode) setShowAdvancedSlots(true);
+    setCustomSlotsDraft(prev =>
+      isCustomMode
+        ? resizePeriodSlotsDraft(prev, requiredPeriods, periodDuration)
+        : generateDefaultPeriodSlots(firstHourTime, requiredPeriods, periodDuration)
+    );
   };
 
   // Automatically regenerate slots when base parameters change (if in auto mode)
@@ -559,12 +1094,18 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   };
 
   const handlePeriodsCountChange = (newCount: number) => {
-    const safeCount = Math.max(1, Math.min(12, newCount || 1));
+    const safeCount = Math.max(1, Math.min(MAX_PERIODS_PER_DAY, newCount || 1));
     setPeriodsCount(safeCount);
     if (!isCustomMode) {
       const generated = generateDefaultPeriodSlots(firstHourTime, safeCount, periodDuration);
       setCustomSlotsDraft(generated);
+      return;
     }
+    // In modalità personalizzata il campo era INERTE: il valore cambiava a schermo
+    // ma il draft restava com'era, quindi "Salva" riscriveva il vecchio numero di
+    // fasce. Ora il draft viene davvero esteso (continuando dall'ultima fascia) o
+    // troncato; la persistenza resta comunque legata a "Salva".
+    setCustomSlotsDraft(prev => resizePeriodSlotsDraft(prev, safeCount, periodDuration));
   };
 
   const handleDurationChange = (newDuration: number) => {
@@ -596,16 +1137,68 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
       customSlots: effectiveSlots,
     };
 
+    // Le fasce appartengono all'ISTITUTO per cui il drawer è stato aperto. La
+    // configurazione globale NON viene toccata: resta il default ereditato
+    // dalle scuole che non si sono ancora personalizzate.
+    const targetSchoolId = slotConfigSchoolId ?? activeSchool?.id;
+
+    // Lezioni già salvate che, con le nuove campane, resterebbero su orari
+    // diversi. Se ce ne sono, NON si scrive nulla adesso: prima si chiede.
+    // Gli orari sono dati dell'utente — alcuni potrebbero essere stati messi a
+    // mano — e non si sovrascrivono di nascosto.
+    if (targetSchoolId && onSaveSchoolTimeSlotConfig) {
+      const school = schools.find(s => s.id === targetSchoolId);
+      const provisionalPlan = planTimeSlotRealignment(provisionalTimetable, school, schools, newConfig);
+      const definitivePlan = planTimeSlotRealignment(definitiveTimetable, school, schools, newConfig);
+      const count = provisionalPlan.affected.length + definitivePlan.affected.length;
+      if (count > 0) {
+        setRealignmentPrompt({
+          schoolId: targetSchoolId,
+          schoolName: school?.name ?? "",
+          config: newConfig,
+          count,
+          provisional: provisionalPlan.updated,
+          definitive: definitivePlan.updated,
+        });
+        return;
+      }
+    }
+
+    await persistSlotConfig(newConfig, targetSchoolId);
+  };
+
+  /**
+   * Scrive le fasce (e, se passate, le lezioni riallineate).
+   *
+   * Il drawer si chiude SOLO se la persistenza è andata a buon fine: su errore
+   * si resta qui con il messaggio, senza dichiarare un salvataggio che non c'è
+   * stato.
+   */
+  const persistSlotConfig = async (
+    config: TimeSlotConfig,
+    targetSchoolId: string | undefined,
+    realignment?: { provisional: TimetableSlot[]; definitive: TimetableSlot[] }
+  ) => {
     const ok = await slotConfigSave.run(async (): Promise<false | void> => {
+      if (targetSchoolId && onSaveSchoolTimeSlotConfig) {
+        const res = await onSaveSchoolTimeSlotConfig(targetSchoolId, config, realignment);
+        if (res === false) return false;
+        return;
+      }
+      // Nessun istituto risolvibile (profilo anomalo): si conserva il
+      // comportamento storico invece di perdere la modifica dell'utente.
       if (onSaveTimeSlotConfig) {
-        const res = await onSaveTimeSlotConfig(newConfig);
+        const res = await onSaveTimeSlotConfig(config);
         if (res === false) return false;
       }
     });
 
     if (ok) {
+      setRealignmentPrompt(null);
       setIsSlotConfigOpen(false);
+      setSlotConfigSchoolId(undefined);
     }
+    return ok;
   };
 
   // Handle first-time setup confirmation
@@ -656,7 +1249,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                 Configura la scansione oraria della tua scuola
               </h1>
               <p className="text-xs sm:text-sm text-stone-600 mt-1">
-                Imposta l'ora di inizio della prima ora, il numero di ore al giorno e la durata standard. Le fasce generate verranno applicate alla griglia dell'orario.
+                Imposta l'ora di inizio della prima ora, quante fasce orarie prevede la scansione della tua scuola e la durata standard. Le fasce generate verranno applicate alla griglia dell'orario.
               </p>
             </div>
           </div>
@@ -682,16 +1275,19 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
 
             <div>
               <label className="block font-bold text-stone-800 text-xs mb-1.5">
-                Nº Ore Giornaliere
+                Nº fasce orarie
               </label>
               <input
                 type="number"
                 min="1"
-                max="10"
+                max={MAX_PERIODS_PER_DAY}
                 value={initPeriodsCount}
-                onChange={(e) => setInitPeriodsCount(Math.max(1, Math.min(10, Number(e.target.value) || 1)))}
+                onChange={(e) => setInitPeriodsCount(Math.max(1, Math.min(MAX_PERIODS_PER_DAY, Number(e.target.value) || 1)))}
                 className="w-full p-2.5 border border-stone-300 rounded-lg text-xs bg-white text-stone-900 min-h-[42px]"
               />
+              <p className="text-[10px] text-stone-500 mt-1 leading-relaxed">
+                Quante fasce orarie prevede la scansione della tua scuola. Se alcuni giorni hanno un'ora in più, lo imposti nel Profilo dell'istituto.
+              </p>
             </div>
 
             <div>
@@ -974,13 +1570,37 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
 
       {/* Grid Action Toolbar */}
       <div className="bg-white rounded-xl p-4 border border-stone-200 shadow-xs flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-        <div className="flex items-center space-x-2">
-          <span className="font-bold text-sm text-stone-900">
-            {activeTab === "provvisorio" ? "Griglia Provvisorio" : "Griglia Definitivo"}
-          </span>
-          <span className="text-xs font-semibold px-2 py-0.5 bg-stone-100 text-stone-700 rounded-full">
-            {currentSlots.length} {currentSlots.length === 1 ? "ora" : "ore"}
-          </span>
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
+          <div className="flex items-center space-x-2">
+            <span className="font-bold text-sm text-stone-900">
+              {activeTab === "provvisorio" ? "Griglia Provvisorio" : "Griglia Definitivo"}
+            </span>
+            <span className="text-xs font-semibold px-2 py-0.5 bg-stone-100 text-stone-700 rounded-full">
+              {schoolSlots.length} {schoolSlots.length === 1 ? "ora" : "ore"}
+            </span>
+          </div>
+
+          {/* Istituto mostrato dalla griglia. Compare SOLO con più scuole: con
+              un istituto solo la barra resta identica a prima. Stessa forma del
+              selettore già usato nello scanner (etichetta + select nativa), che
+              su mobile apre il picker di sistema. */}
+          {isMultiSchool && (
+            <label className="flex items-center gap-2 text-xs font-medium text-stone-700">
+              <span className="shrink-0">Istituto</span>
+              <select
+                id="timetable-school-select"
+                aria-label="Istituto"
+                value={activeSchoolId}
+                disabled={isEditingTimeSlots}
+                onChange={(e) => setActiveSchoolId(e.target.value)}
+                className="min-w-0 border border-stone-300 rounded-lg p-1.5 bg-white text-xs font-semibold text-stone-800"
+              >
+                {schools.map((school) => (
+                  <option key={school.id} value={school.id}>{school.name}</option>
+                ))}
+              </select>
+            </label>
+          )}
         </div>
 
         <div className="flex items-center space-x-3 flex-wrap gap-2 justify-between sm:justify-end">
@@ -1100,23 +1720,78 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
             </tr>
           </thead>
           <tbody className="divide-y divide-stone-100 text-xs">
-            {periods.map((p) => (
-              <tr key={p.periodNumber} className="hover:bg-stone-50/50 transition-colors">
+            {gridRows.map((row) => {
+              /*
+               * La riga senza fascia oraria va descritta per quello che E':
+               *  - VUOTA -> manca davvero un orario da configurare, e si offre
+               *    la scorciatoia al drawer;
+               *  - con almeno una LEZIONE salvata -> non e una fascia "da
+               *    creare": e una fascia che non c'e piu in configurazione.
+               *    Invitare a configurarla accanto a una lezione esistente
+               *    sarebbe ambiguo, quindi si resta su una nota discreta.
+               * Il conto guarda TUTTA la riga (non la singola cella) e ignora
+               * il filtro giorno del mobile.
+               */
+              const rowHasLesson = schoolSlots.some((s) => s.periodNumber === row.periodNumber);
+              return (
+              <tr key={row.periodNumber} className="hover:bg-stone-50/50 transition-colors">
                 <td className="p-2 sm:p-3 text-center border-r border-stone-200 bg-stone-50/80 sticky left-0 z-10 shadow-2xs">
-                  <div className="font-bold text-stone-900">{p.label || `${p.periodNumber}ª Ora`}</div>
-                  <div className="text-[10px] text-stone-500 mt-0.5 font-mono">
-                    {p.startTime} – {p.endTime}
+                  <div className="font-bold text-stone-900">
+                    {row.slot?.label || `${row.periodNumber}ª Ora`}
                   </div>
+                  {row.slot ? (
+                    <div className="text-[10px] text-stone-500 mt-0.5 font-mono">
+                      {row.slot.startTime} – {row.slot.endTime}
+                    </div>
+                  ) : (
+                    /* Riga prevista dalla scuola ma senza fascia oraria: nessun
+                       orario viene inventato, si offre solo la strada per
+                       configurarlo nel drawer delle fasce. */
+                    <div className="mt-0.5 space-y-1">
+                      {rowHasLesson ? (
+                        <div
+                          className="text-[10px] font-semibold text-amber-700 leading-tight"
+                          title="La lezione resta salvata: la sua fascia oraria non e piu nella configurazione corrente."
+                        >
+                          Fascia oraria non piu configurata
+                        </div>
+                      ) : (
+                        <>
+                          <div className="text-[10px] font-semibold text-amber-700 leading-tight">
+                            Orario da configurare
+                          </div>
+                          <button
+                            type="button"
+                            onClick={handleOpenSlotConfig}
+                            className="text-[10px] font-semibold text-emerald-700 underline underline-offset-2 hover:text-emerald-800"
+                          >
+                            {`Configura ${row.periodNumber}ª ora`}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  )}
                 </td>
 
                 {days
                   .filter((d) => mobileSelectedDay === "all" || mobileSelectedDay === d.day)
                   .map((d) => {
-                    const slot = currentSlots.find(
+                    // `schoolSlots` è già filtrato per istituto: qui basta la
+                    // coordinata, e il rendering resta quello di sempre. Il
+                    // lookup NON deve tornare sull'array aggregato, o due
+                    // lezioni di scuole diverse si nasconderebbero a vicenda.
+                    const slot = schoolSlots.find(
                       (s) =>
                         s.dayOfWeek === d.day &&
-                        s.periodNumber === p.periodNumber
+                        s.periodNumber === row.periodNumber
                     );
+                    const allowed = allowedPeriodsFor(d.day);
+                    // Fuori configurazione: il giorno non prevede quest'ora.
+                    const outOfConfig = row.periodNumber > allowed;
+                    // Si aggiunge SOLO dove il giorno lo prevede E la fascia
+                    // oraria reale esiste già: fuori configurazione si conserva
+                    // ciò che c'è, non si crea niente di nuovo.
+                    const canAdd = !outOfConfig && Boolean(row.slot);
 
                     return (
                       <td
@@ -1129,8 +1804,15 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                               if (consumeSwipeClickSuppression()) return;
                               handleEditSlot(slot);
                             }}
+                            title={
+                              outOfConfig
+                                ? "Ora non prevista dalla configurazione della scuola"
+                                : undefined
+                            }
                             className={`h-full w-full p-2 rounded-lg border cursor-pointer transition-all flex flex-col justify-between shadow-2xs hover:shadow-xs ${
-                              activeTab === "provvisorio"
+                              outOfConfig
+                                ? "border-amber-400 border-dashed bg-amber-50/70 hover:bg-amber-100"
+                                : activeTab === "provvisorio"
                                 ? "border-amber-300 bg-amber-50/80 hover:bg-amber-100"
                                 : "border-emerald-200 bg-emerald-50/70 hover:bg-emerald-100"
                             }`}
@@ -1169,25 +1851,42 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                               </span>
                             </div>
                           </div>
-                        ) : (
+                        ) : canAdd ? (
                           <button
                             type="button"
                             data-slot-cell="empty"
                             onClick={() => {
                               if (consumeSwipeClickSuppression()) return;
-                              handleOpenAdd(d.day, p.periodNumber);
+                              handleOpenAdd(d.day, row.periodNumber);
                             }}
                             className="w-full h-full min-h-[44px] rounded-lg border border-dashed border-stone-200 hover:border-emerald-400 hover:bg-emerald-50/40 text-stone-400 hover:text-emerald-700 transition-colors flex items-center justify-center text-xs"
-                            title={`Aggiungi lezione ${d.label} ${p.label || `${p.periodNumber}ª ora`}`}
+                            title={`Aggiungi lezione ${d.label} ${row.slot?.label || `${row.periodNumber}ª ora`}`}
                           >
                             <Plus className="w-4 h-4 opacity-40 group-hover:opacity-100 transition-opacity" />
                           </button>
+                        ) : (
+                          /* Cella non aggiungibile: giorno che non prevede
+                             quest'ora, oppure fascia oraria non ancora
+                             configurata. Nessun "+", nessun handler e
+                             soprattutto NESSUN data-slot-cell="empty": quel
+                             marcatore è la superficie di swipe delle celle
+                             libere e qui non c'è nulla da aggiungere. */
+                          <div
+                            aria-disabled="true"
+                            title={
+                              outOfConfig
+                                ? `Questo giorno prevede ${allowed} ore`
+                                : `Fascia oraria della ${row.periodNumber}ª ora da configurare`
+                            }
+                            className="w-full h-full min-h-[44px] rounded-lg bg-stone-50/60 border border-stone-100"
+                          />
                         )}
                       </td>
                     );
                   })}
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -1233,6 +1932,39 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                 </p>
               )}
 
+              {slotConflictError && (
+                <p
+                  id="slot-conflict-error"
+                  role="alert"
+                  className="text-sm text-rose-700 bg-rose-50 p-2 rounded-lg"
+                >
+                  {slotConflictError}
+                </p>
+              )}
+
+              {/* Istituto della lezione. Solo in MODIFICA e solo con più
+                  scuole: in creazione la sede è già quella della griglia da
+                  cui si è premuto "+" (F3), e chiederla di nuovo sarebbe una
+                  domanda a cui l'utente ha già risposto. */}
+              {isMultiSchool && currentSlots.some((s) => s.id === editingSlot.id) && (
+                <div>
+                  <label htmlFor="slot-school" className="block font-medium text-stone-700 mb-1">
+                    Istituto
+                  </label>
+                  <select
+                    id="slot-school"
+                    aria-label="Istituto della lezione"
+                    value={editingSchool?.id ?? ""}
+                    onChange={(e) => handleSlotSchoolChange(e.target.value)}
+                    className="w-full p-2.5 border border-stone-300 rounded-lg text-xs bg-white text-stone-900 min-h-[42px]"
+                  >
+                    {schools.map((school) => (
+                      <option key={school.id} value={school.id}>{school.name}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
               {/* Day & Period Selection (Primary Mental Model) */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
@@ -1240,13 +1972,9 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                     Giorno della settimana
                   </label>
                   <select
+                    id="slot-day"
                     value={editingSlot.dayOfWeek}
-                    onChange={(e) =>
-                      setEditingSlot({
-                        ...editingSlot,
-                        dayOfWeek: Number(e.target.value) as any,
-                      })
-                    }
+                    onChange={(e) => handleDayOfWeekChange(Number(e.target.value))}
                     className="w-full p-2.5 border border-stone-300 rounded-lg text-xs bg-white text-stone-900 min-h-[42px]"
                   >
                     {days.map((d) => (
@@ -1262,11 +1990,12 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                     Numero dell'ora
                   </label>
                   <select
+                    id="slot-period"
                     value={editingSlot.periodNumber}
                     onChange={(e) => handlePeriodChange(Number(e.target.value))}
                     className="w-full p-2.5 border border-stone-300 rounded-lg text-xs bg-white text-stone-900 min-h-[42px]"
                   >
-                    {periods.map((p) => (
+                    {modalAvailablePeriods.map((p) => (
                       <option key={p.periodNumber} value={p.periodNumber}>
                         {p.label || `${p.periodNumber}ª Ora`} ({p.startTime} – {p.endTime})
                       </option>
@@ -1274,6 +2003,15 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                   </select>
                 </div>
               </div>
+
+              {periodClampNotice && (
+                <p
+                  role="status"
+                  className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2"
+                >
+                  {periodClampNotice}
+                </p>
+              )}
 
               {/* Class Selection via Dropdown (with + Aggiungi classe) */}
               <div className="space-y-2">
@@ -1601,19 +2339,100 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
       )}
 
       {/* Time Slot Configuration Drawer / Modal */}
+      {/* Conferma del riallineamento. Compare SOPRA il drawer, che resta
+          aperto: l'istituto è ancora congelato e il selettore bloccato, così
+          la scuola non può cambiare a metà operazione. Nessuna scrittura è
+          avvenuta: da qui si esce annullando, salvando le sole fasce, oppure
+          salvando fasce e lezioni insieme. */}
+      {realignmentPrompt && (
+        <div className="fixed inset-0 z-[60] bg-black/40 flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div
+            id="realign-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="realign-title"
+            className="bg-white w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl p-5 space-y-4 shadow-xl"
+          >
+            <h3 id="realign-title" className="text-base font-bold text-stone-900">
+              Aggiornare gli orari delle lezioni?
+            </h3>
+            <p id="realign-message" className="text-xs text-stone-700 leading-relaxed">
+              {realignmentPrompt.count === 1 ? "1 lezione" : `${realignmentPrompt.count} lezioni`}
+              {realignmentPrompt.schoolName ? ` di ${realignmentPrompt.schoolName}` : ""}
+              {" "}
+              {realignmentPrompt.count === 1 ? "ha" : "hanno"} orari diversi dalle nuove fasce.
+            </p>
+            <p className="text-xs text-stone-600 leading-relaxed">
+              Se aggiorni, i loro orari seguiranno la nuova campanella. Eventuali orari
+              modificati a mano verranno sostituiti.
+            </p>
+
+            {slotConfigSave.error && (
+              <p role="alert" className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg p-2">
+                {slotConfigSave.error}
+              </p>
+            )}
+
+            <div className="flex flex-col sm:flex-row sm:justify-end gap-2 pt-1">
+              <button
+                type="button"
+                id="realign-cancel"
+                disabled={slotConfigSave.pending}
+                onClick={() => setRealignmentPrompt(null)}
+                className="px-4 py-2 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-lg min-h-[42px]"
+              >
+                Annulla
+              </button>
+              <button
+                type="button"
+                id="realign-config-only"
+                disabled={slotConfigSave.pending}
+                onClick={() => void persistSlotConfig(realignmentPrompt.config, realignmentPrompt.schoolId)}
+                className="px-4 py-2 text-xs font-semibold text-stone-700 border border-stone-300 hover:bg-stone-100 rounded-lg min-h-[42px]"
+              >
+                Salva solo le fasce
+              </button>
+              <button
+                type="button"
+                id="realign-confirm"
+                disabled={slotConfigSave.pending}
+                onClick={() => void persistSlotConfig(
+                  realignmentPrompt.config,
+                  realignmentPrompt.schoolId,
+                  { provisional: realignmentPrompt.provisional, definitive: realignmentPrompt.definitive },
+                )}
+                className="px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold rounded-lg min-h-[42px]"
+              >
+                Salva e aggiorna
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {isSlotConfigOpen && (
         <div className="app-modal app-modal-scroll fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-stone-900/40 backdrop-blur-xs">
           <div className="app-modal-panel bg-white rounded-2xl max-w-lg w-full p-4 sm:p-6 shadow-xl border border-stone-200 animate-in fade-in zoom-in-95 my-auto max-h-[92vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-stone-100">
               <div className="flex items-center space-x-2">
                 <Sliders className="w-5 h-5 text-emerald-700" />
-                <h3 className="text-base font-bold text-stone-900">
-                  Configurazione Fasce Orarie
-                </h3>
+                <div>
+                  <h3 className="text-base font-bold text-stone-900">
+                    Configurazione Fasce Orarie
+                  </h3>
+                  {/* A quale istituto appartengono queste campane. Solo con più
+                      scuole: con una sola sarebbe rumore, e salvarle sulla
+                      scuola sbagliata è un errore silenzioso e costoso. */}
+                  {isMultiSchool && slotConfigSchoolName && (
+                    <p id="slot-config-school" className="text-xs font-semibold text-emerald-800">
+                      {slotConfigSchoolName}
+                    </p>
+                  )}
+                </div>
               </div>
               <button
                 type="button"
-                onClick={() => setIsSlotConfigOpen(false)}
+                onClick={closeSlotConfig}
                 className="p-1.5 rounded-lg text-stone-400 hover:text-stone-700 hover:bg-stone-100"
               >
                 <X className="w-5 h-5" />
@@ -1631,6 +2450,36 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                 Modifica i parametri base per rigenerare all'istante le fasce delle lezioni, oppure personalizza singolarmente gli orari.
               </p>
 
+              {/* Fabbisogno dell'istituto non ancora coperto dalle fasce configurate.
+                  L'avviso non salva nulla da solo: propone, l'utente conferma con Salva. */}
+              {missingSlotCount > 0 && (
+                <div role="status" className="p-3 rounded-xl border border-amber-300 bg-amber-50 space-y-2">
+                  <p className="text-[11px] text-amber-900 leading-relaxed">
+                    La tua scuola prevede {requiredPeriods} ore in almeno un giorno:{" "}
+                    {missingSlotCount === 1 ? "manca 1 fascia oraria" : `mancano ${missingSlotCount} fasce orarie`}.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleCompleteMissingSlots}
+                    className="px-3 py-2 min-h-[42px] bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-bold rounded-lg inline-flex items-center space-x-1.5"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>
+                      {missingSlotCount === 1 ? "Completa la fascia mancante" : "Completa le fasce mancanti"}
+                    </span>
+                  </button>
+                </div>
+              )}
+
+              {autoProposedSlots > 0 && missingSlotCount === 0 && (
+                <p role="status" className="p-3 text-[11px] text-amber-900 bg-amber-50 rounded-xl border border-amber-300 leading-relaxed">
+                  {autoProposedSlots === 1
+                    ? "Abbiamo proposto 1 fascia in più"
+                    : `Abbiamo proposto ${autoProposedSlots} fasce in più`}{" "}
+                  per coprire le {requiredPeriods} ore previste dalla tua scuola: controlla gli orari e premi Salva per confermarli.
+                </p>
+              )}
+
               {/* Generator Parameters */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-3.5 bg-stone-50 rounded-xl border border-stone-200">
                 <div>
@@ -1647,12 +2496,12 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
 
                 <div>
                   <label className="block font-medium text-stone-700 mb-1">
-                    Nº Ore Giornaliere
+                    Nº fasce orarie
                   </label>
                   <input
                     type="number"
                     min="1"
-                    max="10"
+                    max={MAX_PERIODS_PER_DAY}
                     value={periodsCount}
                     onChange={(e) => handlePeriodsCountChange(Number(e.target.value))}
                     className="w-full p-2 border border-stone-300 rounded-lg text-xs bg-white text-stone-900"
@@ -1728,10 +2577,19 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                     {customSlotsDraft.map((slot, index) => (
                       <div
                         key={slot.periodNumber}
-                        className="flex items-center gap-2 p-2 bg-stone-50 rounded-lg border border-stone-200"
+                        className={`flex items-center gap-2 p-2 rounded-lg border ${
+                          isCustomMode && index >= confirmedSlotCount
+                            ? "bg-amber-50 border-amber-300"
+                            : "bg-stone-50 border-stone-200"
+                        }`}
                       >
                         <span className="w-16 font-bold text-stone-700 shrink-0">
                           {slot.periodNumber}ª Ora
+                          {isCustomMode && index >= confirmedSlotCount && (
+                            <span className="block text-[9px] font-bold text-amber-700 uppercase tracking-wide">
+                              Da verificare
+                            </span>
+                          )}
                         </span>
                         <input
                           type="time"
@@ -1828,7 +2686,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
               <div className="modal-sticky-footer flex justify-end space-x-2 pt-3 border-t border-stone-100 bg-white">
                 <button
                   type="button"
-                  onClick={() => setIsSlotConfigOpen(false)}
+                  onClick={closeSlotConfig}
                   className="px-4 py-2 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-lg min-h-[42px]"
                 >
                   Annulla

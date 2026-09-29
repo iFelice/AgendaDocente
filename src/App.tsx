@@ -72,6 +72,7 @@ import {
   isGoogleSyncEnabled,
   syncOptedInGoogleEvents,
 } from "./services/googleCalendarService";
+import { normalizeTeacherProfile } from "./utils/multiSchool";
 import { accountSync } from "./services/sync/accountSync";
 import type { SyncStatus } from "./services/sync/types";
 import { usePWAUpdates } from "./hooks/usePWAUpdates";
@@ -366,6 +367,50 @@ export default function App({ initialData }: { initialData: LocalData }) {
   const handleSaveTimeSlotConfig = withPersistenceFeedback(async (config: TimeSlotConfig) => {
     await storage.saveTimeSlotConfig(config);
     showToast("Fasce orarie aggiornate.");
+  });
+
+  /**
+   * Fasce orarie di UN istituto.
+   *
+   * Scrive SOLO `schools[i].timeSlotConfig` della scuola indicata: gli altri
+   * istituti e la configurazione globale (che resta il default di chi non si è
+   * ancora personalizzato) non vengono toccati. Il profilo si aggiorna per
+   * spread, così nessun campo dell'istituto va perso.
+   *
+   * Si parte dal profilo NORMALIZZATO perché è lì che un profilo legacy espone
+   * la sua primaria: senza normalizzare, `schools` potrebbe non contenere
+   * ancora la scuola che l'utente sta configurando.
+   */
+  const handleSaveSchoolTimeSlotConfig = withPersistenceFeedback(async (
+    schoolId: string,
+    config: TimeSlotConfig,
+    realignment?: { provisional: TimetableSlot[]; definitive: TimetableSlot[] }
+  ) => {
+    const normalized = normalizeTeacherProfile(profile);
+    const schools = normalized.schools ?? [];
+    // Istituto inesistente: non si scrive nulla e non si mente all'utente con
+    // un messaggio di conferma.
+    if (!schools.some(school => school.id === schoolId)) {
+      throw new Error("Istituto non trovato nel profilo.");
+    }
+    const updatedProfile: TeacherProfile = {
+      ...normalized,
+      schools: schools.map(school =>
+        school.id === schoolId ? { ...school, timeSlotConfig: config } : school
+      ),
+    };
+
+    // Fasce e lezioni riallineate sono UNA sola operazione: se fallisse a metà
+    // resterebbero campane nuove e lezioni sui vecchi orari, cioè proprio
+    // l'incoerenza che questo passo elimina.
+    await database.atomic(async () => {
+      await storage.saveProfile(updatedProfile);
+      if (realignment) {
+        await storage.saveProvisionalTimetable(realignment.provisional);
+        await storage.saveDefinitiveTimetable(realignment.definitive);
+      }
+    });
+    showToast(realignment ? "Fasce orarie e lezioni aggiornate." : "Fasce orarie aggiornate.");
   });
 
   const handleDeleteTimetableSlot = withPersistenceFeedback(async (id: string, type: TimetableType) => {
@@ -761,6 +806,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
         {currentView === "oggi" && (
           <TodayView
             profile={profile}
+            timeSlotConfig={timeSlotConfig}
             timetable={timetable}
             events={events}
             scheduledAssessments={calendarScheduledAssessments}
@@ -784,6 +830,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
         {currentView === "settimana" && (
           <WeekView
             profile={profile}
+            timeSlotConfig={timeSlotConfig}
             timetable={timetable}
             events={events}
             scheduledAssessments={calendarScheduledAssessments}
@@ -881,6 +928,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
             onClearTimetable={handleClearTimetable}
             onSaveProfile={handleSaveProfile}
             onSaveTimeSlotConfig={handleSaveTimeSlotConfig}
+            onSaveSchoolTimeSlotConfig={handleSaveSchoolTimeSlotConfig}
             initialSlot={isSlotEditOpen(slotEditNav) ? slotEditNav.slot : null}
             initialSlotType={isSlotEditOpen(slotEditNav) ? slotEditNav.type : null}
             onBackToOrigin={isSlotEditOpen(slotEditNav) ? handleBackFromSlotEdit : undefined}
@@ -977,6 +1025,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
         isOpen={isProfileModalOpen}
         onClose={() => setIsProfileModalOpen(false)}
         profile={profile}
+        timeSlotConfig={timeSlotConfig}
         onSaveProfile={handleSaveProfile}
         onDataImported={refreshAllData}
         onOpenTutorial={() => setIsOnboardingOpen(true)}

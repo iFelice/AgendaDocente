@@ -157,7 +157,7 @@ test('analyze-timetable: il personale non restituisce coordinateScope e il curri
     imageBase64: validPdfBase64, mimeType: 'application/pdf',
     documentType: 'personal-support-timetable', periodsPerDay: 5, profile,
   });
-  assert.equal(personal.periodsPerDay, 5);
+  assert.deepEqual(personal.periodsByDay, [5, 5, 5, 5, 5]);
   assert.equal(personal.coordinateScope, undefined);
 
   const curricular = validateTimetableAnalysisPayload({
@@ -165,7 +165,7 @@ test('analyze-timetable: il personale non restituisce coordinateScope e il curri
     documentType: 'curricular-timetable', periodsPerDay: 5,
     coordinateScope: [{ dayOfWeek: 2, periodIndex: 1, classLabel: '3D' }], profile,
   });
-  assert.equal(curricular.periodsPerDay, undefined, 'le ore per giorno restano un dato del personale');
+  assert.equal(curricular.periodsByDay, undefined, 'la struttura della settimana resta un dato del personale');
   assert.equal(curricular.coordinateScope?.length, 1);
 });
 

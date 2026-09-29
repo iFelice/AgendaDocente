@@ -17,12 +17,14 @@ import {
   type DocumentFileMeta,
 } from "../utils/documentScanner";
 import {
-  periodTimesForIndex,
+  partitionReconstructedSlots,
+  rejectionReasonLabel,
   previewReconstruction,
   reconstructedToTimetableSlots,
   slotsInReplacementScope,
   type TimetableMergeMode,
 } from "../utils/reconstructTimetable";
+import { getEffectivePeriodSlots, timeSlotConfigForSchool } from "../utils/timeSlots";
 import { isSupportTeacherOf } from "../utils/teacherType";
 import { AnalysisProgressBar } from "./AnalysisProgressBar";
 import { RECON_NOTES, crossrefTimetables, reconSignal, type ReconstructedSlot } from "../utils/timetableCrossref";
@@ -33,12 +35,14 @@ import {
   curricularCellsToSlots,
   curricularScopeToRequestPayload,
   expectedPersonalCellCount,
+  normalizePersonalPeriodsByDay,
   personalCellsToCandidates,
   restrictCurricularSlotsToCoordinates,
   summarizeCurricularCoverage,
   validateStudentCommitmentsPayload,
   type CurricularRawRow,
   type PersonalCoordinate,
+  type PersonalTimetablePeriodsByDay,
   type CurricularTimetableSlot,
   type PersonalTimetableSlotCandidate,
   type SkippedCell,
@@ -47,7 +51,8 @@ import {
 } from "../utils/timetableAnalysis";
 import { DAY_LABELS } from "../utils/timetableTokens";
 import { matchStudentName, studentMatchLabel } from "../utils/studentMatcher";
-import { normalizeTeacherProfile } from "../utils/multiSchool";
+import { getPrimarySchool, normalizeTeacherProfile, schoolByIdOrPrimary } from "../utils/multiSchool";
+import { derivePersonalScannerPeriodsByDay } from "../utils/scannerWeekGeometry";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
@@ -117,8 +122,8 @@ interface PersonalReviewState {
    * sono stati derivati dal server dalla posizione, non dal modello.
    */
   cells: TimetableRawCell[];
-  /** Ore per giorno dichiarate dall'utente per questa analisi. */
-  periodsPerDay: number;
+  /** Struttura della settimana dichiarata dall'utente per questa analisi. */
+  periodsByDay: PersonalTimetablePeriodsByDay;
 }
 
 /**
@@ -142,6 +147,49 @@ export const PERIODS_PER_DAY_CONFIRM_ERROR =
 /** Messaggio quando il valore non è (ancora) utilizzabile. */
 export const PERIODS_PER_DAY_QUESTION_ERROR =
   `Indica quante ore ci sono in ogni giornata scolastica (numero intero da 1 a ${MAX_GRID_PERIODS}).`;
+
+/**
+ * Domanda sulla STRUTTURA DELLA SETTIMANA (orario personale).
+ *
+ * Sostituisce la vecchia domanda scalare «quante ore in ogni giornata»: la
+ * settimana scolastica non è per forza rettangolare (6/6/6/7/6) e una domanda
+ * con una sola risposta costringeva a mentire su almeno un giorno.
+ */
+export const WEEK_STRUCTURE_QUESTION = "Struttura della settimana";
+/** Etichette dei cinque giorni, nell'ordine dei blocchi chiesti al modello. */
+export const WEEK_STRUCTURE_DAY_LABELS = ["Lun", "Mar", "Mer", "Gio", "Ven"] as const;
+export const WEEK_STRUCTURE_EDIT_LABEL = "Modifica";
+export const WEEK_STRUCTURE_DONE_LABEL = "Fatto";
+export const WEEK_STRUCTURE_CONFIRM_ERROR =
+  "Conferma la struttura della settimana prima di avviare l'analisi.";
+export const WEEK_STRUCTURE_QUESTION_ERROR =
+  `Indica quante ore ha ciascun giorno, da 1 a ${MAX_GRID_PERIODS}.`;
+
+/**
+ * Riepilogo leggibile della struttura: «Lun 6 · Mar 6 · Mer 6 · Gio 7 · Ven 6».
+ * Un'unica stringa (non figli JSX affiancati) così il testo letto dall'utente e
+ * quello asserito dai test coincidono carattere per carattere.
+ */
+export function formatWeekStructureSummary(periodsByDay: readonly number[]): string {
+  return periodsByDay.map((periods, index) => `${WEEK_STRUCTURE_DAY_LABELS[index] ?? index + 1} ${periods}`).join(" · ");
+}
+
+/**
+ * Avviso PRE-SCANSIONE: la settimana arriva più in là delle fasce orarie
+ * configurate (es. struttura fino alla 7ª ora ma solo 6 fasce). Non blocca
+ * nulla — la scansione parte lo stesso e D1 scarterà in preview le ore prive di
+ * fascia — ma dirlo prima evita la sorpresa dopo l'analisi.
+ *
+ * @returns il messaggio, oppure `null` se le fasce bastano.
+ */
+export function missingTimeSlotsWarning(
+  periodsByDay: readonly number[],
+  configuredSlots: number,
+): string | null {
+  const longestDay = periodsByDay.reduce((max, periods) => (periods > max ? periods : max), 0);
+  if (longestDay <= configuredSlots) return null;
+  return `La struttura della settimana prevede fino alla ${longestDay}ª ora, ma sono configurate solo ${configuredSlots} fasce orarie. Le lezioni oltre le fasce configurate non potranno essere importate.`;
+}
 
 /**
  * Messaggio quando l'orario curricolare viene chiesto senza alcuna coordinata.
@@ -267,11 +315,35 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
    * scavalcata perché il campo era già compilato.
    */
   const [periodsPerDayConfirmed, setPeriodsPerDayConfirmed] = useState<boolean>(false);
+  /**
+   * STRUTTURA DELLA SETTIMANA dell'orario personale: le ore di ciascun giorno,
+   * lunedì → venerdì, come valori di input (stringhe). È l'unico ingresso della
+   * geometria dell'analisi personale e sostituisce il vecchio numero unico:
+   * determina quante celle deve avere OGNI blocco giornaliero e quindi il
+   * giorno e il periodo di ogni cella.
+   *
+   * Stato EFFIMERO: nasce derivato dal Profilo alla riapertura del modale, vive
+   * per la singola scansione e non viene mai persistito. Il Profilo resta
+   * l'unica fonte durevole della struttura della settimana.
+   */
+  const [periodsByDayInput, setPeriodsByDayInput] = useState<string[]>([]);
+  /** La struttura è aperta in modifica (cinque campi) invece che in riepilogo. */
+  const [weekStructureEditing, setWeekStructureEditing] = useState(false);
   const [personal, setPersonal] = useState<PersonalReviewState | null>(null);
   /** Ore curricolari GIÀ limitate alle mie coordinate: `droppedCount` è quanto è stato scartato. */
   const [curricular, setCurricular] = useState<{ rows: CurricularRawRow[]; slots: CurricularTimetableSlot[]; skipped: SkippedCell[]; droppedCount: number } | null>(null);
   const [studentCandidates, setStudentCandidates] = useState<StudentCommitmentCandidate[] | null>(null);
   const [reconSlots, setReconSlots] = useState<ReconEditSlot[] | null>(null);
+  /**
+   * ISTITUTO DELLA SCANSIONE, scelto PRIMA di analizzare il documento.
+   *
+   * Da lui dipende la struttura della settimana proposta, quindi la lunghezza
+   * attesa di ogni blocco giornaliero nel prompt: sceglierlo dopo l'analisi
+   * significherebbe aver già letto il documento con la geometria sbagliata.
+   * Una volta avviata la ricostruzione resta CONGELATO in `reconSchoolId`, così
+   * fra analisi e salvataggio la destinazione non può cambiare sotto silenzio.
+   */
+  const [scanSchoolId, setScanSchoolId] = useState<string | undefined>(undefined);
   const [reconSchoolId, setReconSchoolId] = useState<string | undefined>(undefined);
   /**
    * Archivio di destinazione. `null` = non ancora scelto: succede solo quando
@@ -312,6 +384,35 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
    * vuoto, quindi la domanda si vede; ma resta solo una proposta, e il valore
    * usato è quello che l'utente conferma esplicitamente.
    */
+  /**
+   * Proposta iniziale della struttura della settimana: le ore che la SCUOLA
+   * dichiara per ciascun giorno (6/6/6/7/6 se il Profilo ha un giovedì lungo),
+   * o lo stesso numero per tutti i giorni se il Profilo non ha `dayPeriods`.
+   *
+   * La derivazione è centralizzata in `derivePersonalScannerPeriodsByDay`, che
+   * resta indifferente a profili e id: la scuola giusta la sceglie QUI il
+   * chiamante, ed è quella selezionata per la scansione (la primaria finché non
+   * se ne sceglie un'altra, o se l'id non corrisponde a nessun istituto).
+   */
+  const scanSchool = useMemo(
+    () => schoolByIdOrPrimary(scanSchoolId, normalizeTeacherProfile(profile).schools),
+    [scanSchoolId, profile],
+  );
+  /**
+   * FASCE ORARIE dell'istituto della scansione: le sue se le ha, altrimenti
+   * quelle globali. Unica derivazione per tutto il percorso — geometria
+   * proposta, avviso sulle fasce mancanti e orari degli slot importati devono
+   * parlare della stessa scuola.
+   */
+  const scanTimeSlotConfig = useMemo(
+    () => timeSlotConfigForSchool(scanSchool, timeSlotConfig),
+    [scanSchool, timeSlotConfig],
+  );
+  const periodsByDayPrefill = useMemo(
+    () => derivePersonalScannerPeriodsByDay(scanSchool, scanTimeSlotConfig),
+    [scanSchool, scanTimeSlotConfig],
+  );
+
   const periodsPerDayPrefill =
     typeof timeSlotConfig?.periodsPerDay === "number"
     && Number.isInteger(timeSlotConfig.periodsPerDay)
@@ -330,14 +431,56 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
   }, [periodsPerDayInput]);
   const periodsPerDayValid = periodsPerDay > 0;
   /**
+   * Struttura della settimana dichiarata: `null` finché uno qualsiasi dei
+   * cinque valori non è un intero utilizzabile. Nessuna correzione silenziosa:
+   * una geometria attesa sbagliata farebbe passare o rifiutare un'analisi
+   * intera, quindi o è valida tutta o non si parte.
+   */
+  const periodsByDay = useMemo<PersonalTimetablePeriodsByDay | null>(() => {
+    const parsed = periodsByDayInput.map(value => {
+      const trimmed = value.trim();
+      // Solo cifre: niente decimali, niente segni, niente testo.
+      return /^\d+$/.test(trimmed) ? Number(trimmed) : Number.NaN;
+    });
+    return normalizePersonalPeriodsByDay(parsed);
+  }, [periodsByDayInput]);
+  const periodsByDayValid = periodsByDay !== null;
+  /**
    * La domanda sulle ore per giorno riguarda sia l'orario personale (fissa la
    * lunghezza attesa della sequenza) sia quello curricolare (fissa il numero di
    * colonne orarie da cui derivare la geometria del crop). In entrambi i casi il
    * numero è dichiarato dall'utente e MAI dedotto dall'immagine.
    */
-  const requiresPeriodsPerDay = captureFor === "personal" || captureFor === "curricular";
-  /** Celle attese nella sequenza: ore per giorno x giorni scolastici (lun-ven). */
-  const expectedCellCount = expectedPersonalCellCount(periodsPerDay);
+  const requiresPeriodsPerDay = captureFor === "curricular";
+  /**
+   * L'orario personale non chiede più un numero unico: chiede la struttura
+   * della settimana, giorno per giorno. Il curricolare resta sulla domanda
+   * scalare (lì il numero serve alle colonne della griglia d'istituto, che è
+   * rettangolare per costruzione): le due domande non appaiono mai insieme,
+   * perché `captureFor` è uno solo.
+   */
+  const requiresWeekStructure = captureFor === "personal";
+  /** Celle attese: la SOMMA delle ore dei giorni (6+6+6+7+6 = 31). Informativa. */
+  const expectedCellCount = periodsByDay ? expectedPersonalCellCount(periodsByDay) : 0;
+  /** Riepilogo «Lun 6 · Mar 6 · Mer 6 · Gio 7 · Ven 6» dei valori inseriti ora. */
+  const weekStructureSummary = periodsByDay ? formatWeekStructureSummary(periodsByDay) : "";
+  /**
+   * Avviso non bloccante: la struttura supera le fasce orarie configurate.
+   * Calcolato prima della scansione; D1 resta comunque la rete finale in
+   * preview.
+   */
+  const weekStructureSlotsWarning = useMemo(
+    () => (periodsByDay ? missingTimeSlotsWarning(periodsByDay, getEffectivePeriodSlots(scanTimeSlotConfig).length) : null),
+    [periodsByDay, scanTimeSlotConfig],
+  );
+  /**
+   * Cambio di uno qualsiasi dei cinque valori: aggiorna quel giorno e azzera la
+   * conferma. Il valore confermato è sempre quello che l'utente sta guardando.
+   */
+  const setDayPeriodsInput = (dayIndex: number, value: string): void => {
+    setPeriodsByDayInput(current => current.map((day, index) => (index === dayIndex ? value : day)));
+    setPeriodsPerDayConfirmed(false);
+  };
 
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -366,6 +509,28 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
   const natureLabel = support ? "sostegno" : "materia";
   const schools = useMemo(() => normalizeTeacherProfile(profile).schools ?? [], [profile]);
   const multiSchool = schools.length > 1;
+
+  /**
+   * Cambio dell'istituto prima della scansione.
+   *
+   * La struttura della settimana torna alla proposta della NUOVA scuola e la
+   * conferma si azzera: una conferma data sulla geometria di un istituto non
+   * può valere per un altro. Anche le eventuali modifiche manuali vengono
+   * scartate — sono state fatte per descrivere un'altra scuola, e tenerle
+   * mescolate al prefill del nuovo istituto darebbe una geometria che non
+   * appartiene a nessuno dei due.
+   *
+   * La geometria NON viene ricalcolata qui: si aggiorna solo l'istituto e la
+   * proposta arriva da `periodsByDayPrefill`, che resta l'unica derivazione.
+   */
+  const lastScanSchoolId = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (lastScanSchoolId.current === scanSchoolId) return;
+    lastScanSchoolId.current = scanSchoolId;
+    setPeriodsByDayInput(periodsByDayPrefill.map(String));
+    setWeekStructureEditing(false);
+    setPeriodsPerDayConfirmed(false);
+  }, [scanSchoolId, periodsByDayPrefill]);
   /** Archivio su cui si sta per scrivere: vuoto finché l'utente non lo sceglie. */
   const existingTarget = reconTarget === "provvisorio"
     ? provisionalTimetable
@@ -379,11 +544,29 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
    * unico sia dell'anteprima sia del rilevamento del vecchio orario, così la
    * domanda e la scrittura non possono divergere.
    */
-  const saveableSlots = useMemo<TimetableSlot[]>(() => {
+  const savePartition = useMemo(() => {
     const selected = (reconSlots ?? []).filter(s => s.selected !== false);
     const toSave = selected.filter(s => (s.correctedClass ?? s.classLabel ?? "").trim());
-    return reconstructedToTimetableSlots(toSave, { profile, timeSlotConfig, schoolId: reconSchoolId });
+    return partitionReconstructedSlots(toSave, { profile, timeSlotConfig, schoolId: reconSchoolId });
   }, [reconSlots, profile, timeSlotConfig, reconSchoolId]);
+  const saveableSlots = savePartition.slots;
+
+  /**
+   * Fasce orarie REALI dell'istituto di destinazione: unica fonte degli orari
+   * mostrati in anteprima, e le stesse con cui D1 costruisce gli slot salvati.
+   */
+  const effectivePeriodSlots = useMemo(() => getEffectivePeriodSlots(scanTimeSlotConfig), [scanTimeSlotConfig]);
+
+  /**
+   * Elementi che NON verranno importati, indicizzati per id: l'anteprima deve
+   * spiegarli uno per uno, non farli sparire in silenzio. Stessa partizione del
+   * salvataggio, quindi cio che l'utente vede escluso e esattamente cio che
+   * resta fuori dall'archivio.
+   */
+  const rejectedById = useMemo(
+    () => new Map(savePartition.rejected.map(r => [r.item.id, r.reason])),
+    [savePartition]
+  );
 
   /**
    * Vecchie ore PERTINENTI nei due archivi, con la STESSA regola della
@@ -497,11 +680,14 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     setIsReading(false);
     setConsentGiven(false);
     setPeriodsPerDayInput(periodsPerDayPrefill);
+    setPeriodsByDayInput(periodsByDayPrefill.map(String));
+    setWeekStructureEditing(false);
     setPeriodsPerDayConfirmed(false);
     setPersonal(null);
     setCurricular(null);
     setStudentCandidates(null);
     setReconSlots(null);
+    setScanSchoolId(undefined);
     setReconSchoolId(undefined);
     setReconTarget("provvisorio");
     setMergeMode("missing-only");
@@ -643,6 +829,14 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
       setAnalysisError(periodsPerDayValid ? PERIODS_PER_DAY_CONFIRM_ERROR : PERIODS_PER_DAY_QUESTION_ERROR);
       return;
     }
+    // Orario personale: stessa regola, sulla struttura della settimana. Senza
+    // cinque valori validi non esiste una lunghezza attesa per ogni giorno, e
+    // senza conferma esplicita quella struttura è solo una proposta derivata
+    // dal Profilo.
+    if (requiresWeekStructure && (!periodsByDay || !periodsPerDayConfirmed)) {
+      setAnalysisError(periodsByDay ? WEEK_STRUCTURE_CONFIRM_ERROR : WEEK_STRUCTURE_QUESTION_ERROR);
+      return;
+    }
     // Orario curricolare: senza coordinate non c'è nulla da cercare, quindi
     // l'analisi non parte (stessa regola del server, difesa anche qui per non
     // spendere una richiesta destinata a un 400).
@@ -657,14 +851,18 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     startProgress();
     try {
       if (captureFor === "personal") {
+        // Guardia di tipo: il gate qui sopra ha già fermato il caso nullo, ma
+        // la geometria non viene mai inviata "a metà".
+        if (!periodsByDay) return;
         const result = await analyzeTimetableDocument({
           imageBase64: fileBase64,
           mimeType: file.type,
           documentType: "personal-support-timetable",
           profile,
-          // Geometria dichiarata dall'utente: il server la usa per verificare la
-          // lunghezza della sequenza e per derivare giorno/periodo.
-          periodsPerDay,
+          // Geometria dichiarata dall'utente, giorno per giorno: il server la
+          // usa per verificare la lunghezza di ogni blocco giornaliero e per
+          // derivare giorno/periodo.
+          periodsByDay,
         });
         if (revision !== readingRevision.current) return;
         // La riga è già stata identificata dal modello e verificata sul server
@@ -672,7 +870,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
         const reviewState: PersonalReviewState = {
           rowLabel: result.rowLabel ?? "",
           cells: result.cells ?? [],
-          periodsPerDay,
+          periodsByDay,
         };
         completeProgress(() => {
           if (revision !== readingRevision.current) return; // modale chiuso o analisi annullata: nulla da mostrare
@@ -806,7 +1004,10 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
       correctedSubject: slot.coTeachingSubjects.length === 1 ? slot.coTeachingSubjects[0] : "",
     }));
     setReconSlots(reconstruction);
-    const nextSchoolId = multiSchool ? schools.find(s => s.isPrimary)?.id : undefined;
+    // Istituto CONGELATO: è quello scelto prima dell'analisi, cioè lo stesso
+    // con cui è stata dichiarata la struttura della settimana e costruito il
+    // prompt. Da qui in poi non cambia più per questa ricostruzione.
+    const nextSchoolId = multiSchool ? scanSchool?.id : undefined;
     setReconSchoolId(nextSchoolId);
     // Archivio di destinazione: lo decide la posizione del vecchio orario
     // pertinente, non un default fisso. Gli slot in arrivo sono calcolati con la
@@ -1190,10 +1391,113 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                 <p className="text-amber-800">Dopo l&apos;analisi il file viene scartato dall&apos;app: nessun backup, nessuna copia sul server.</p>
               </div>
 
-              {/* Orario personale: la geometria della griglia è dichiarata
-                  dall'utente PRIMA dell'analisi. Da questo numero dipendono la
-                  lunghezza attesa della sequenza e il giorno/periodo di ogni
-                  cella: senza un valore valido l'analisi non parte. */}
+              {/* Orario personale: la STRUTTURA DELLA SETTIMANA è dichiarata
+                  dall'utente PRIMA dell'analisi. Da quanti sono i periodi di
+                  ogni giorno dipendono la lunghezza attesa di ogni blocco
+                  giornaliero e quindi il giorno/periodo di ogni cella: senza
+                  cinque valori validi e confermati l'analisi non parte.
+                  Non è la configurazione delle FASCE ORARIE (a che ora suona la
+                  campana): quella si modifica dalla griglia dell'orario. */}
+              {/* Istituto della scansione. Sta PRIMA della struttura della
+                  settimana perché è lui a determinarla: le ore di ogni giorno
+                  sono quelle dichiarate da questa scuola. Compare solo con più
+                  istituti; con uno solo il percorso resta quello di D3. */}
+              {requiresWeekStructure && multiSchool && (
+                <label className="flex items-center gap-2 text-xs font-medium text-stone-700">
+                  <span className="shrink-0">Istituto</span>
+                  <select
+                    id="scan-school-select"
+                    aria-label="Istituto della scansione"
+                    value={scanSchool?.id ?? ""}
+                    onChange={e => setScanSchoolId(e.target.value)}
+                    className="flex-1 min-w-0 border border-stone-300 rounded-lg p-2 bg-white"
+                  >
+                    {schools.map(school => (
+                      <option key={school.id} value={school.id}>{school.name}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
+
+              {requiresWeekStructure && (
+                <div className="p-3 rounded-xl border border-stone-200 bg-white space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="block text-xs font-semibold text-stone-900">{WEEK_STRUCTURE_QUESTION}</span>
+                    <button
+                      type="button"
+                      id="scan-week-structure-edit"
+                      onClick={() => setWeekStructureEditing(editing => !editing)}
+                      className="text-xs font-semibold text-emerald-800 underline min-h-[44px] px-2"
+                    >
+                      {weekStructureEditing ? WEEK_STRUCTURE_DONE_LABEL : WEEK_STRUCTURE_EDIT_LABEL}
+                    </button>
+                  </div>
+                  <p id="scan-week-structure-summary" className="text-sm text-stone-900">
+                    {periodsByDayValid ? weekStructureSummary : WEEK_STRUCTURE_QUESTION_ERROR}
+                  </p>
+                  {weekStructureEditing && (
+                    <div id="scan-week-structure-fields" className="flex flex-wrap gap-2">
+                      {WEEK_STRUCTURE_DAY_LABELS.map((label, dayIndex) => (
+                        <div key={label} className="flex flex-col gap-1">
+                          <label htmlFor={`scan-week-periods-${dayIndex}`} className="text-[11px] font-semibold text-stone-700">
+                            {label}
+                          </label>
+                          <input
+                            id={`scan-week-periods-${dayIndex}`}
+                            type="number"
+                            inputMode="numeric"
+                            min={1}
+                            max={MAX_GRID_PERIODS}
+                            step={1}
+                            value={periodsByDayInput[dayIndex] ?? ""}
+                            onChange={event => setDayPeriodsInput(dayIndex, event.target.value)}
+                            className="w-16 min-h-[44px] px-2 rounded-lg border border-stone-300 text-sm text-stone-900"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <p id="scan-week-structure-help" className="text-[11px] text-stone-500">
+                    {periodsByDayValid
+                      ? `La tua riga sarà letta come ${expectedCellCount} posizioni (lunedì-venerdì), celle libere incluse.`
+                      : WEEK_STRUCTURE_QUESTION_ERROR}
+                  </p>
+                  {/* Avviso NON bloccante: la settimana supera le fasce orarie
+                      configurate. La scansione parte lo stesso; le ore senza
+                      fascia verranno scartate in preview. */}
+                  {weekStructureSlotsWarning && (
+                    <p id="scan-week-structure-slots-warning" className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2">
+                      {weekStructureSlotsWarning}
+                    </p>
+                  )}
+                  {/* Conferma esplicita: senza di questa l'analisi non parte, e
+                      ogni modifica di un giorno la azzera. */}
+                  <label
+                    htmlFor="scan-week-structure-confirm"
+                    className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer ${periodsByDayValid ? "border-stone-200 bg-stone-50" : "border-stone-200 bg-stone-100 opacity-60"}`}
+                  >
+                    <input
+                      type="checkbox"
+                      id="scan-week-structure-confirm"
+                      checked={periodsPerDayConfirmed && periodsByDayValid}
+                      disabled={!periodsByDayValid}
+                      onChange={event => setPeriodsPerDayConfirmed(event.target.checked)}
+                      className="mt-0.5 w-5 h-5 accent-emerald-700"
+                    />
+                    <span className="text-xs text-stone-700">
+                      {periodsByDayValid
+                        ? `Confermo che il mio orario segue questa struttura: ${weekStructureSummary} (${expectedCellCount} posizioni complessive).`
+                        : "Indica prima le ore di ogni giorno per poter confermare."}
+                    </span>
+                  </label>
+                </div>
+              )}
+
+              {/* Orario CURRICOLARE: la griglia d'istituto è rettangolare per
+                  costruzione, quindi qui resta la domanda con un numero unico —
+                  fissa le colonne orarie da cui deriva la geometria del crop.
+                  Non compare mai insieme alla struttura della settimana qui
+                  sopra: `captureFor` è uno solo. */}
               {requiresPeriodsPerDay && (
                 <div className="p-3 rounded-xl border border-stone-200 bg-white space-y-2">
                   <label htmlFor="scan-periods-per-day" className="block text-xs font-semibold text-stone-900">
@@ -1280,6 +1584,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                     // Orario personale: senza un numero di ore valido E confermato
                     // non esiste una lunghezza attesa certa, quindi non si parte.
                     || (requiresPeriodsPerDay && (!periodsPerDayValid || !periodsPerDayConfirmed))
+                    || (requiresWeekStructure && (!periodsByDayValid || !periodsPerDayConfirmed))
                   }
                   className="min-h-[44px] px-5 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white text-sm font-bold shadow-xs flex items-center gap-2"
                 >
@@ -1312,7 +1617,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                   Riga letta nel documento: <strong>{personal.rowLabel || "etichetta non leggibile"}</strong>
                 </p>
                 <p id="scan-personal-sequence-count">
-                  {personal.cells.length} posizioni ({personal.periodsPerDay} {personal.periodsPerDay === 1 ? "ora" : "ore"} x {PERSONAL_SCHOOL_DAYS} giorni):{" "}
+                  {`${personal.cells.length} posizioni (${formatWeekStructureSummary(personal.periodsByDay)}): `}
                   {personal.cells.filter(cell => cell.raw.trim()).length} occupate,{" "}
                   {personal.cells.filter(cell => !cell.raw.trim()).length} vuote.
                 </p>
@@ -1648,20 +1953,17 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                 </div>
               </div>
 
+              {/* Istituto: scelto prima della scansione e ormai congelato. Qui
+                  si LEGGE soltanto — cambiarlo adesso significherebbe aver
+                  letto il documento con la geometria di un'altra scuola e aver
+                  già scartato ore che quella nuova ammetterebbe. */}
               {multiSchool && (
-                <label className="flex items-center gap-2 text-xs font-medium text-stone-700">
-                  <span className="shrink-0">Istituto:</span>
-                  <select
-                    aria-label="Istituto"
-                    value={reconSchoolId ?? schools[0]?.id ?? ""}
-                    onChange={e => setReconSchoolId(e.target.value)}
-                    className="flex-1 min-w-0 border border-stone-300 rounded-lg p-2 bg-white"
-                  >
-                    {schools.map(school => (
-                      <option key={school.id} value={school.id}>{school.name}</option>
-                    ))}
-                  </select>
-                </label>
+                <p id="recon-school" className="text-xs font-medium text-stone-700">
+                  <span>Istituto: </span>
+                  <span className="font-semibold text-stone-900">
+                    {schoolByIdOrPrimary(reconSchoolId, schools)?.name ?? ""}
+                  </span>
+                </p>
               )}
 
               <label className="flex items-center gap-2 text-xs font-medium text-stone-700">
@@ -1748,15 +2050,53 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                 </p>
               ) : (
                 <div className="space-y-3">
+                  {savePartition.rejected.length > 0 && (
+                    <div
+                      role="status"
+                      data-recon-rejected-summary={savePartition.rejected.length}
+                      className="p-3 rounded-xl border border-amber-300 bg-amber-50 text-[11px] text-amber-900 space-y-1"
+                    >
+                      <p className="font-semibold">
+                        {`${savePartition.rejected.length} ${savePartition.rejected.length === 1 ? "ora non verra importata" : "ore non verranno importate"}.`}
+                      </p>
+                      <ul className="space-y-0.5">
+                        {savePartition.rejected.map(({ item, reason }) => (
+                          <li key={item.id}>
+                            {`${DAY_LABELS[item.dayOfWeek]} · ${item.periodIndex}ª ora`}
+                            {(item.correctedClass ?? item.classLabel ?? "").trim()
+                              ? ` · ${(item.correctedClass ?? item.classLabel ?? "").trim()}`
+                              : ""}
+                            {item.correctedSubject?.trim() || item.coTeachingSubjects[0]
+                              ? ` · ${item.correctedSubject?.trim() || item.coTeachingSubjects[0]}`
+                              : ""}
+                            {` — ${rejectionReasonLabel(reason)}`}
+                          </li>
+                        ))}
+                      </ul>
+                      <p>
+                        Le altre ore vengono importate normalmente. Per recuperare queste, configura le
+                        fasce orarie o la struttura della giornata nel Profilo e ripeti l'import.
+                      </p>
+                    </div>
+                  )}
                   {reconSlots.map(slot => {
                     const signal = reconSignal(slot);
-                    const times = periodTimesForIndex(timeSlotConfig, slot.periodIndex);
+                    // Orari SOLO dalla fascia reale: se non esiste, l'elemento e
+                    // escluso e non si mostra nessun orario sintetizzato.
+                    const period = effectivePeriodSlots.find(p => p.periodNumber === slot.periodIndex);
+                    const rejectedReason = rejectedById.get(slot.id);
                     const hasClass = !!(slot.correctedClass ?? slot.classLabel ?? "").trim();
                     return (
                       <div
                         key={slot.id}
                         id={`recon-slot-${slot.id}`}
-                        className={`p-3 rounded-xl border space-y-2 ${slot.selected === false ? "border-stone-200 opacity-70" : "border-stone-300 bg-white"}`}
+                        className={`p-3 rounded-xl border space-y-2 ${
+                          rejectedReason
+                            ? "border-amber-400 bg-amber-50/70"
+                            : slot.selected === false
+                              ? "border-stone-200 opacity-70"
+                              : "border-stone-300 bg-white"
+                        }`}
                       >
                         <div className="flex items-center gap-2">
                           <input
@@ -1790,8 +2130,20 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                               <option key={p} value={p}>{`${p}ª ora`}</option>
                             ))}
                           </select>
-                          <span className="text-[11px] text-stone-500 ml-auto">{`${times.startTime}–${times.endTime}`}</span>
+                          <span className="text-[11px] text-stone-500 ml-auto">
+                            {period ? `${period.startTime}–${period.endTime}` : "Orario non configurato"}
+                          </span>
                         </div>
+
+                        {rejectedReason && (
+                          <p
+                            role="status"
+                            data-recon-rejected={rejectedReason}
+                            className="text-[11px] font-semibold text-amber-900 bg-amber-100/70 border border-amber-300 rounded-lg p-2"
+                          >
+                            {`Non verra importata · ${DAY_LABELS[slot.dayOfWeek]} · ${slot.periodIndex}ª ora — ${rejectionReasonLabel(rejectedReason)}`}
+                          </p>
+                        )}
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                           <label className="flex items-center gap-2 text-xs">

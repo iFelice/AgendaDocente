@@ -27,6 +27,17 @@ import {
 } from '../server/timetableAnalysis';
 
 /**
+ * Settimana RETTANGOLARE di comodo: `week(6)` = `[6, 6, 6, 6, 6]`.
+ *
+ * La geometria dello scanner è per giorno (`periodsByDay`); questi test
+ * descrivono il caso legacy in cui tutti i giorni hanno le stesse ore, e lo
+ * dicono esplicitamente invece di nasconderlo dietro un numero. Valori non
+ * ammessi (0, 13, decimali) restano tali: servono ai casi di rifiuto.
+ */
+const week = (periods: number): number[] => [periods, periods, periods, periods, periods];
+
+
+/**
  * Fallback Groq Vision su /api/analyze-timetable.
  *
  * Nessuna chiamata reale a Gemini o a Groq: `runGroqJson` riceve un `fetch`
@@ -389,7 +400,7 @@ test('runGroqJson: errore di rete e timeout del tentativo sono classificati, non
 
 test('validatore condiviso: il JSON di Groq passa nello STESSO parseTimetableAiResponse', () => {
   // Curricolare: la risposta di Groq produce le stesse righe/celle di Gemini.
-  const outcome = parseTimetableAiResponse('curricular-timetable', JSON.parse(groqCurricularText), '', undefined, CURRICULAR_SCOPE);
+  const outcome = parseTimetableAiResponse('curricular-timetable', JSON.parse(groqCurricularText), '', week(undefined), CURRICULAR_SCOPE);
   assert.equal(outcome.curricularRows.length, 1, 'solo la coordinata con una materia');
   assert.equal(outcome.cells.length, 1);
   assert.deepEqual(
@@ -401,7 +412,7 @@ test('validatore condiviso: il JSON di Groq passa nello STESSO parseTimetableAiR
     'curricular-timetable',
     { targets: [{ dayOfWeek: 1, periodIndex: 1, classLabel: '1A', matches: [{ cellText: '1A', subject: 'Matematica' }, { cellText: '1A 1B', subject: 'Scienze' }] }] },
     '',
-    undefined,
+    week(undefined),
     [CURRICULAR_SCOPE[0]],
   );
   assert.equal(coTeaching.cells.length, 2, 'due materie -> due celle sulla stessa coordinata');
@@ -410,13 +421,13 @@ test('validatore condiviso: il JSON di Groq passa nello STESSO parseTimetableAiR
     'curricular-timetable',
     { targets: [{ dayOfWeek: 5, periodIndex: 5, classLabel: '2B', matches: [{ cellText: '2B', subject: 'Arte' }] }] },
     '',
-    undefined,
+    week(undefined),
     CURRICULAR_SCOPE,
   );
   assert.equal(notRequested.cells.length, 0, 'nessuna materia per coordinate fuori elenco');
   // Personale: la geometria a blocchi è verificata esattamente come per Gemini.
   assert.throws(
-    () => parseTimetableAiResponse('personal-support-timetable', { rowLabel: 'Rossi M.', days: [{ cells: ['', ''] }] }, 'rossi matteo', 5, undefined),
+    () => parseTimetableAiResponse('personal-support-timetable', { rowLabel: 'Rossi M.', days: [{ cells: ['', ''] }] }, 'rossi matteo', week(5), undefined),
     /non valid|giorni|blocc|celle|forma/i,
     'un payload personale con 1 blocco invece di 5 è rifiutato anche se arriva da Groq',
   );
@@ -434,7 +445,7 @@ test('validatore condiviso: JSON o schema non validi da Groq sono rifiutati, non
   ];
   for (const value of invalid) {
     assert.throws(
-      () => parseTimetableAiResponse('curricular-timetable', value, '', undefined, CURRICULAR_SCOPE),
+      () => parseTimetableAiResponse('curricular-timetable', value, '', week(undefined), CURRICULAR_SCOPE),
       /./,
       `rifiutato: ${JSON.stringify(value)}`,
     );

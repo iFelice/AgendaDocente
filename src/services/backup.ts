@@ -28,6 +28,26 @@ function timetable(v: unknown): boolean {
     && ['classroom','campus','color'].every(k => optional(s[k], text)) && optional(s.isProvisional, bool)
     && ['coTeachingSubjects','coSupportTeachers','supportTeachers'].every(k => optional(s[k], strings)));
 }
+/**
+ * Struttura della giornata scolastica dell'istituto (SchoolProfile.dayPeriods).
+ * Campo opzionale e additivo: un backup legacy che non lo contiene resta valido.
+ *
+ * I limiti sono gli STESSI della validazione remota (src/services/sync/remoteSchema.ts):
+ * ordinario 1..12, ore aggiuntive 0..11 sui soli giorni 1..6, cioe il tetto di 12 ore
+ * al giorno gia in vigore nell'app. Un contratto piu permissivo qui farebbe passare in
+ * un backup un profilo che la sincronizzazione poi rifiuta, lasciando dati importabili
+ * ma non sincronizzabili. I due validatori restano duplicati e indipendenti di proposito
+ * (nessuna dipendenza fra il servizio backup e quello di sync): a tenerli allineati sono
+ * i test, che esercitano le stesse soglie su entrambi.
+ */
+const dayPeriodsInt = (v: unknown, min: number, max: number): boolean =>
+  Number.isInteger(v) && (v as number) >= min && (v as number) <= max;
+function dayPeriodsValidator(v: unknown): boolean {
+  if (!record(v)) return false;
+  return optional(v.ordinaryPeriodsPerDay, n => dayPeriodsInt(n, 1, 12))
+    && optional(v.extraPeriodsByDay, map => record(map) && Object.entries(map).every(([day, extra]) =>
+      /^[1-6]$/.test(day) && dayPeriodsInt(extra, 0, 11)));
+}
 function periodSlotValidator(v: unknown): boolean {
   return record(v) && Number.isInteger(v.periodNumber) && v.periodNumber > 0
     && isValidTime(v.startTime) && isValidTime(v.endTime) && v.endTime > v.startTime
@@ -87,7 +107,7 @@ export function validateBackup(data: unknown): asserts data is Record<string, an
     || !optional(p.assignedStudents,strings) || !optional(p.isSupportTeacher,bool)
     || !optional(p.googleCalendarLinked,bool) || !optional(p.email,text) || !optional(p.googleCalendarAccount,text)
     || !optional(p.schoolLevel,v => ['infanzia','primaria','ssig','ssiig'].includes(v as string))
-    || !optional(p.schools, v => Array.isArray(v) && v.every(s => record(s) && required(s.id) && text(s.name) && optional(s.institutionalEmail,text) && optional(s.campuses,strings) && optional(s.schoolLevel,l => ['infanzia','primaria','ssig','ssiig'].includes(l as string)) && optional(s.weeklyHours,number) && optional(s.isPrimary,bool) && optional(s.active,bool)))) throw new Error('Profilo nel backup non valido.');
+    || !optional(p.schools, v => Array.isArray(v) && v.every(s => record(s) && required(s.id) && text(s.name) && optional(s.institutionalEmail,text) && optional(s.campuses,strings) && optional(s.schoolLevel,l => ['infanzia','primaria','ssig','ssiig'].includes(l as string)) && optional(s.weeklyHours,number) && optional(s.isPrimary,bool) && optional(s.active,bool) && optional(s.dayPeriods,dayPeriodsValidator) && optional(s.timeSlotConfig,timeSlotConfigValidator)))) throw new Error('Profilo nel backup non valido.');
   if (!list(data.events, e => required(e.title) && isValidDate(e.date) && bool(e.isAllDay) && eventDateError({ date: e.date, isAllDay: e.isAllDay, startTime: e.startTime, endTime: e.endTime }) === null && categories.includes(e.category)
     && ['manuale','circolare','orario','google_calendar','registro'].includes(e.sourceType)
     && ['startTime','endTime','className','subject','location','notes','sourceCircularTitle','sourceCircularId','sourceItemId','googleEventId','updatedAt','schoolId'].every(k => optional(e[k],text))

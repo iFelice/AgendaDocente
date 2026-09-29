@@ -27,6 +27,17 @@ import {
 import { SCAN_REQUEST_TIMEOUT_MS } from '../src/services/scanService';
 
 /**
+ * Settimana RETTANGOLARE di comodo: `week(6)` = `[6, 6, 6, 6, 6]`.
+ *
+ * La geometria dello scanner è per giorno (`periodsByDay`); questi test
+ * descrivono il caso legacy in cui tutti i giorni hanno le stesse ore, e lo
+ * dicono esplicitamente invece di nasconderlo dietro un numero. Valori non
+ * ammessi (0, 13, decimali) restano tali: servono ai casi di rifiuto.
+ */
+const week = (periods: number): number[] => [periods, periods, periods, periods, periods];
+
+
+/**
  * Causa REALE del 503 "Il documento non è stato elaborato. Riprova più tardi."
  * su /api/analyze-timetable dopo la PR #14 (iPhone/PWA, PNG 636 KB).
  *
@@ -508,7 +519,7 @@ test('diagnostica validazione: esito controllato e log privacy-safe (solo tipi e
   const shapePayload = { rowLabel: 'Rossi Matteo', days: [{ cells: [{ raw: '3D' }] }, { cells: [''] }, { cells: [''] }, { cells: [''] }, { cells: [''] }] };
   let shapeError: unknown = null;
   try {
-    parseTimetableAiResponse('personal-support-timetable', shapePayload, 'rossi', 1);
+    parseTimetableAiResponse('personal-support-timetable', shapePayload, 'rossi', week(1));
     assert.fail('la forma errata deve essere rifiutata');
   } catch (error) {
     shapeError = error;
@@ -524,7 +535,7 @@ test('diagnostica validazione: esito controllato e log privacy-safe (solo tipi e
   // Un blocco giornaliero in meno: stesso rifiuto controllato (422), nessun log di contenuto.
   const shortPayload = { rowLabel: 'Rossi Matteo', days: [{ cells: ['3D'] }, { cells: [''] }, { cells: [''] }, { cells: [''] }] };
   assert.throws(
-    () => parseTimetableAiResponse('personal-support-timetable', shortPayload, 'rossi', 1),
+    () => parseTimetableAiResponse('personal-support-timetable', shortPayload, 'rossi', week(1)),
     /Numero di giorni dell'orario non valido/,
   );
   assert.match(
@@ -543,7 +554,7 @@ test('diagnostica validazione: esito controllato e log privacy-safe (solo tipi e
   };
   let internalError: unknown = null;
   try {
-    parseTimetableAiResponse('personal-support-timetable', exploding, 'rossi', 1);
+    parseTimetableAiResponse('personal-support-timetable', exploding, 'rossi', week(1));
     assert.fail('l\u2019errore interno deve propagarsi al catch dell\u2019endpoint');
   } catch (error) {
     internalError = error;
