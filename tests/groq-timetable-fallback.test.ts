@@ -2,7 +2,7 @@ import express from 'express';
 import { once } from 'node:events';
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { app, geminiCandidateModels, isTransientGeminiCategory } from '../server';
+import { app, geminiCandidateModels, isTransientGeminiCategory, timetableGeminiBudgetMs } from '../server';
 import {
   GROQ_CHAT_COMPLETIONS_URL,
   GROQ_IMAGE_MIME_TYPES,
@@ -11,24 +11,41 @@ import {
   GROQ_REASONING_FORMAT,
   GROQ_RESPONSE_RESERVE_MS,
   GROQ_TEMPERATURE,
+  GROQ_TIMETABLE_RESERVED_MS,
+  GROQ_TWO_PASS_A_SHARE,
+  GROQ_TWO_PASS_MIN_ATTEMPT_MS,
   GROQ_VISION_MODEL_DEFAULT,
   classifyGroqHttpStatus,
   groqAttemptTimeoutMs,
   groqConfigured,
   groqFallbackDecision,
   groqJsonSchemaFrom,
+  groqPassBBudget,
   groqSemanticFallbackDecision,
   groqSupportsMimeType,
+  groqTwoPassBudgets,
   groqVisionModel,
   runGroqJson,
 } from '../server/groqAnalysis';
 import {
+  TIMETABLE_ANALYSIS_TIMEOUT_MS,
   buildCurricularTimetablePrompt,
+  buildTeacherRowDetectionPrompt,
+  buildPersonalRowTranscriptionPrompt,
   curricularTimetableSchema,
   parseTimetableAiResponse,
   personalTimetableSchema,
+  teacherRowDetectionSchema,
+  TEACHER_ROW_NOT_RECOGNIZED_MESSAGE,
+  TEACHER_ROW_AMBIGUOUS_MESSAGE,
 } from '../server/timetableAnalysis';
-import { TEACHER_ROW_NOT_RECOGNIZED } from '../src/utils/timetableAnalysis';
+import {
+  MAX_TEACHER_ROW_LABELS,
+  MAX_TEACHER_ROW_LABEL_LENGTH,
+  TEACHER_ROW_NOT_RECOGNIZED,
+  validateTeacherRowLabelsPayload,
+  matchTeacherRowLabel,
+} from '../src/utils/timetableAnalysis';
 
 /**
  * Settimana RETTANGOLARE di comodo: `week(6)` = `[6, 6, 6, 6, 6]`.
@@ -529,11 +546,15 @@ const geminiJsonResponse = (text: string) => ({
  * Sostituisce `globalThis.fetch`: le chiamate al server locale passano davvero,
  * quelle verso Gemini e Groq sono simulate. Nessuna richiesta esce dal test.
  */
+/** Fase Groq di ogni chiamata intercettata, nell'ordine: 'detection' (Passo A) o 'transcription' (Passo B/one-shot). */
+let groqPhases: Array<'detection' | 'transcription'> = [];
+
 function stubProviders(handlers: {
   gemini: () => { status: number; body: unknown };
-  groq?: () => { status: number; body: unknown };
+  groq?: (req: { phase: 'detection' | 'transcription'; body: any }) => { status: number; body: unknown };
 }) {
   intercepted = [];
+  groqPhases = [];
   globalThis.fetch = (async (input: any, init?: any) => {
     const url = String(input?.url ?? input);
     if (url.startsWith(baseUrl)) return realFetch(input, init);
@@ -544,12 +565,34 @@ function stubProviders(handlers: {
     }
     if (url.includes(GROQ_HOST)) {
       intercepted.push('groq');
-      const outcome = handlers.groq?.() ?? { status: 503, body: {} };
+      // Il Passo A dichiara lo Structured Output `teacher_rows`; ogni altra chiamata
+      // (Passo B a due passaggi o one-shot curricolare) usa `timetable_analysis`.
+      const body = JSON.parse(String(init?.body ?? '{}'));
+      const phase: 'detection' | 'transcription' =
+        body?.response_format?.json_schema?.name === 'teacher_rows' ? 'detection' : 'transcription';
+      groqPhases.push(phase);
+      const outcome = handlers.groq?.({ phase, body }) ?? { status: 503, body: {} };
       return new Response(JSON.stringify(outcome.body), { status: outcome.status, headers: { 'Content-Type': 'application/json' } });
     }
     throw new Error(`chiamata di rete inattesa: ${url}`);
   }) as unknown as typeof fetch;
 }
+
+/** Risposta del Passo A: elenco etichette docenti (dati sintetici). */
+const detectionOk = (labels: string[]) => ({
+  status: 200,
+  body: { choices: [{ message: { content: JSON.stringify({ rowLabels: labels }) }, finish_reason: 'stop' }] },
+});
+
+/**
+ * Handler Groq a DUE PASSAGGI: Passo A restituisce `labels`, Passo B restituisce
+ * `transcription` (testo del contratto personale). Salvo override per HTTP/errori.
+ */
+const groqTwoPass = (labels: string[], transcription: string) =>
+  (req: { phase: 'detection' | 'transcription' }) =>
+    req.phase === 'detection'
+      ? detectionOk(labels)
+      : { status: 200, body: { choices: [{ message: { content: transcription }, finish_reason: 'stop' }] } };
 
 function captureLogs() {
   logLines = [];
@@ -761,11 +804,12 @@ test('endpoint: testo di Groq non interpretabile -> 503, nessun dettaglio tecnic
 test('endpoint: orario personale con Groq -> la geometria a blocchi è verificata come per Gemini', async () => {
   process.env.GROQ_API_KEY = TEST_GROQ_KEY;
   // Un solo blocco invece di cinque: il validatore personale deve rifiutarlo
-  // anche quando arriva dal provider di fallback.
+  // anche quando arriva dal Passo B del percorso a due passaggi.
   const wrongGeometry = JSON.stringify({ rowLabel: 'Rossi M.', days: [{ cells: ['', '', '', '', ''] }] });
   stubProviders({
     gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
-    groq: () => ({ status: 200, body: { choices: [{ message: { content: wrongGeometry }, finish_reason: 'stop' }] } }),
+    // Passo A trova la riga (identità ok), il Passo B sbaglia la GEOMETRIA.
+    groq: groqTwoPass(['Rossi M.'], wrongGeometry),
   });
   const restore = captureLogs();
   try {
@@ -778,8 +822,8 @@ test('endpoint: orario personale con Groq -> la geometria a blocchi è verificat
       // (un blocco invece di cinque), non la guardia d'identità.
       profile: { ...profile, fullName: 'Rossi Matteo' },
     });
-    assert.equal(res.status, 422, 'validatePersonalSequencePayload si applica anche a Groq');
-    assert.deepEqual(intercepted.filter((h) => h === 'groq'), ['groq'], 'il fallback vale per entrambi i tipi di orario');
+    assert.equal(res.status, 422, 'validatePersonalSequencePayload si applica anche al Passo B di Groq');
+    assert.deepEqual(groqPhases, ['detection', 'transcription'], 'due passaggi: identificazione poi trascrizione');
   } finally {
     restore();
   }
@@ -864,16 +908,20 @@ const groqOk = (text: string) => () => ({ status: 200, body: { choices: [{ messa
 /** Quante volte ogni provider è stato chiamato in un test d'endpoint. */
 const calls = (host: 'gemini' | 'groq') => intercepted.filter((h) => h === host).length;
 
-test('caso reale: Gemini legge "Mangianello", Groq legge "Manganiello" -> 200 senza toccare la geometria', async () => {
+/** Lista docenti del caso reale (sezione 10): sintetica, nessun dato vero. */
+const REAL_TEACHER_LABELS = ['Camilli', 'Costantini', 'Della Gatta', 'Manganiello', 'Mangraviti'];
+
+test('caso reale: Gemini legge "Mangianello", il Passo A trova "Manganiello" e il Passo B lo trascrive -> 200 senza toccare la geometria', async () => {
   process.env.GROQ_API_KEY = TEST_GROQ_KEY;
   stubProviders({
     gemini: geminiOk(personalPayload('Mangianello')),
-    groq: groqOk(personalPayload('Manganiello')),
+    // Passo A: elenco etichette (una sola combacia); Passo B: trascrizione corretta.
+    groq: groqTwoPass(REAL_TEACHER_LABELS, personalPayload('Manganiello')),
   });
   const restore = captureLogs();
   try {
     const res = await postTimetable(personalBody);
-    assert.equal(res.status, 200, 'il secondo parere salva una scansione corretta');
+    assert.equal(res.status, 200, 'il secondo parere a due passaggi salva una scansione corretta');
     const data = await res.json();
     assert.equal(data.success, true);
     assert.equal(data.rowLabel, 'Manganiello', 'vince la riga riconosciuta, non quella di Gemini');
@@ -892,33 +940,37 @@ test('caso reale: Gemini legge "Mangianello", Groq legge "Manganiello" -> 200 se
     );
 
     assert.equal(calls('gemini'), 1, 'Gemini ha risposto al primo colpo: nessun retry tecnico');
-    assert.equal(calls('groq'), 1, 'un solo secondo parere');
+    assert.deepEqual(groqPhases, ['detection', 'transcription'], 'due passaggi distinti');
     assert.match(logLines.join('\n'), /fallback=groq motivo=row-docente-non-riconosciuta/, 'motivo semantico tracciato');
+    assert.match(logLines.join('\n'), /fase=identificazione-riga esito=ok righe=5/, 'log del Passo A con conteggio righe');
+    assert.match(logLines.join('\n'), /fase=trascrizione-riga esito=ok/, 'log del Passo B');
   } finally {
     restore();
   }
 });
 
-test('fallback semantico: Groq sbaglia ancora la riga -> 422 col messaggio attuale', async () => {
+test('fallback semantico: Passo A trova la riga ma il Passo B la sbaglia -> H3 rifiuta (422)', async () => {
   process.env.GROQ_API_KEY = TEST_GROQ_KEY;
   stubProviders({
     gemini: geminiOk(personalPayload('Mangianello')),
-    groq: groqOk(personalPayload('Manganiell')),
+    // Passo A individua "Manganiello", ma il Passo B trascrive "Manganiell":
+    // H3 lo ricontrolla e rifiuta. Il Passo A NON basta a bypassare H3.
+    groq: groqTwoPass(REAL_TEACHER_LABELS, personalPayload('Manganiell')),
   });
   const restore = captureLogs();
   try {
     const res = await postTimetable(personalBody);
-    assert.equal(res.status, 422, 'il secondo parere non abbassa la guardia d identità');
+    assert.equal(res.status, 422, 'H3 resta la guardia definitiva del Passo B');
     const data = await res.json();
     assert.equal(data.success, false);
     assert.match(data.error, /Non ho riconosciuto la riga del tuo orario/i, 'messaggio utente invariato');
-    assert.equal(calls('groq'), 1, 'un solo tentativo: il fallback non ritenta in ciclo');
+    assert.deepEqual(groqPhases, ['detection', 'transcription'], 'i due passaggi partono, ma H3 rifiuta il Passo B');
   } finally {
     restore();
   }
 });
 
-test('fallback semantico: Groq fallisce HTTP -> 422 attuale, nessun 503 e nessun crash', async () => {
+test('fallback semantico: il Passo A fallisce HTTP -> 422 attuale, nessun 503 e nessun crash', async () => {
   process.env.GROQ_API_KEY = TEST_GROQ_KEY;
   stubProviders({
     gemini: geminiOk(personalPayload('Mangianello')),
@@ -929,8 +981,9 @@ test('fallback semantico: Groq fallisce HTTP -> 422 attuale, nessun 503 e nessun
     const res = await postTimetable(personalBody);
     assert.equal(res.status, 422, 'il payload di Gemini era decodificabile: resta il rifiuto di forma');
     assert.match((await res.json()).error, /Non ho riconosciuto la riga del tuo orario/i);
-    assert.equal(calls('groq'), 1);
-    assert.match(logLines.join('\n'), /provider=groq .* esito=fallito categoria=sovraccarico/);
+    // Solo il Passo A parte: il suo fallimento HTTP non fa proseguire al Passo B.
+    assert.deepEqual(groqPhases, ['detection'], 'il Passo B non parte dopo un Passo A fallito');
+    assert.match(logLines.join('\n'), /provider=groq fase=identificazione-riga .* esito=fallito categoria=sovraccarico/);
   } finally {
     restore();
   }
@@ -1056,32 +1109,32 @@ test('fallback semantico: Gemini riconosce la riga -> Groq NON viene chiamato', 
   }
 });
 
-test('fallback tecnico: 503 di Gemini -> Groq, e la riga sbagliata di Groq NON provoca una terza chiamata', async () => {
+test('fallback tecnico: 503 di Gemini -> Groq a due passaggi, e un Passo B sbagliato NON avvia un secondo parere', async () => {
   process.env.GROQ_API_KEY = TEST_GROQ_KEY;
   stubProviders({
     gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
-    groq: groqOk(personalPayload('Manganiello')),
+    groq: groqTwoPass(REAL_TEACHER_LABELS, personalPayload('Manganiello')),
   });
   const restore = captureLogs();
   try {
-    // Il percorso tecnico resta quello di prima: Gemini esaurisce i tentativi,
-    // Groq risponde e il payload passa nello stesso validatore.
+    // Fallback TECNICO ora a due passaggi: Gemini esaurisce i tentativi, il
+    // Passo A individua la riga e il Passo B la trascrive; passa lo stesso validatore.
     const ok = await postTimetable(personalBody);
-    assert.equal(ok.status, 200, 'fallback tecnico invariato');
+    assert.equal(ok.status, 200, 'fallback tecnico a due passaggi');
     assert.equal((await ok.json()).source, GROQ_VISION_MODEL_DEFAULT);
-    assert.equal(calls('groq'), 1);
-    assert.match(logLines.join('\n'), /fallback=groq motivo=sovraccarico/);
+    assert.deepEqual(groqPhases, ['detection', 'transcription']);
+    assert.match(logLines.join('\n'), /fallback=groq motivo=sovraccarico .* percorso=due-passaggi/);
 
-    // Se è GROQ a sbagliare la riga, richiamarlo ripeterebbe la stessa lettura:
-    // il secondo parere non parte e resta il 422.
+    // Se il Passo B sbaglia la riga, il fallback semantico non riparte (Gemini non
+    // ha prodotto nulla): niente terza chiamata, resta il 422.
     stubProviders({
       gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
-      groq: groqOk(personalPayload('Mangianello')),
+      groq: groqTwoPass(REAL_TEACHER_LABELS, personalPayload('Mangianello')),
     });
     const rejected = await postTimetable(personalBody);
     assert.equal(rejected.status, 422);
     assert.match((await rejected.json()).error, /Non ho riconosciuto la riga del tuo orario/i);
-    assert.equal(calls('groq'), 1, 'una sola chiamata a Groq, non due');
+    assert.deepEqual(groqPhases, ['detection', 'transcription'], 'solo i due passaggi tecnici, nessun terzo tentativo');
     assert.match(logLines.join('\n'), /fallback=groq saltato motivo=gemini-non-ok/);
   } finally {
     restore();
@@ -1110,11 +1163,12 @@ function totalsDays(dHours: number, eHours = 6, cHours = 2) {
   });
 }
 
-test('H4 endpoint: Gemini 11/6/2 incoerente -> Groq 10/6/2 coerente -> 200', async () => {
+test('H4 endpoint: Gemini 11/6/2 incoerente -> Passo A + Passo B 10/6/2 coerente -> 200', async () => {
   process.env.GROQ_API_KEY = TEST_GROQ_KEY;
   stubProviders({
     gemini: geminiOk(personalPayload('Manganiello', totalsDays(11), REAL_DECLARED_TOTALS)),
-    groq: groqOk(personalPayload('Manganiello', totalsDays(10), REAL_DECLARED_TOTALS)),
+    // Passo A trova la riga; Passo B produce la trascrizione coerente (10/6/2).
+    groq: groqTwoPass(REAL_TEACHER_LABELS, personalPayload('Manganiello', totalsDays(10), REAL_DECLARED_TOTALS)),
   });
   const restore = captureLogs();
   try {
@@ -1124,7 +1178,7 @@ test('H4 endpoint: Gemini 11/6/2 incoerente -> Groq 10/6/2 coerente -> 200', asy
     assert.equal(data.source, GROQ_VISION_MODEL_DEFAULT);
     assert.equal(data.cells.filter((cell: any) => cell.raw === '3D').length, 10, 'vince solo la trascrizione coerente');
     assert.equal(calls('gemini'), 1);
-    assert.equal(calls('groq'), 1);
+    assert.deepEqual(groqPhases, ['detection', 'transcription'], 'anche H4 usa il percorso a due passaggi');
     const dump = logLines.join('\n');
     assert.match(dump, /fase=validazione-totali esito=incoerente classiDichiarate=3 classiLette=3/);
     assert.match(dump, /fallback=groq motivo=totali-classi-incoerenti/);
@@ -1134,11 +1188,12 @@ test('H4 endpoint: Gemini 11/6/2 incoerente -> Groq 10/6/2 coerente -> 200', asy
   }
 });
 
-test('H4 endpoint: Gemini mismatch e Groq mismatch -> 422 controllato con controllo manuale', async () => {
+test('H4 endpoint: Gemini mismatch e Passo B mismatch -> 422 controllato con controllo manuale', async () => {
   process.env.GROQ_API_KEY = TEST_GROQ_KEY;
   stubProviders({
     gemini: geminiOk(personalPayload('Manganiello', totalsDays(11), REAL_DECLARED_TOTALS)),
-    groq: groqOk(personalPayload('Manganiello', totalsDays(9, 7, 2), REAL_DECLARED_TOTALS)),
+    // Passo A trova la riga, ma il Passo B resta incoerente (9/7/2): H4 rifiuta.
+    groq: groqTwoPass(REAL_TEACHER_LABELS, personalPayload('Manganiello', totalsDays(9, 7, 2), REAL_DECLARED_TOTALS)),
   });
   const restore = captureLogs();
   try {
@@ -1148,7 +1203,7 @@ test('H4 endpoint: Gemini mismatch e Groq mismatch -> 422 controllato con contro
     assert.equal(data.success, false);
     assert.match(data.error, /riepilogo|ore per classe/i);
     assert.match(data.error, /Riprova|manualmente/i);
-    assert.equal(calls('groq'), 1, 'nessun loop sul secondo provider');
+    assert.deepEqual(groqPhases, ['detection', 'transcription'], 'i due passaggi partono, ma H4 rifiuta il Passo B');
   } finally {
     restore();
   }
@@ -1239,23 +1294,381 @@ test('decisione semantica: pura, e stretta su ogni condizione', () => {
   assert.equal(semantic({ remainingBudgetMs: GROQ_MIN_ATTEMPT_MS + GROQ_RESPONSE_RESERVE_MS - 1 }).proceed, false);
 });
 
-test('privacy: il fallback semantico non logga riga, nome del profilo, OCR né JSON', async () => {
+test('privacy: il percorso a due passaggi non logga riga, nome del profilo, OCR né JSON', async () => {
   process.env.GROQ_API_KEY = TEST_GROQ_KEY;
   stubProviders({
     gemini: geminiOk(personalPayload('Mangianello')),
-    groq: groqOk(personalPayload('Manganiello')),
+    groq: groqTwoPass(REAL_TEACHER_LABELS, personalPayload('Manganiello')),
   });
   const restore = captureLogs();
   try {
     assert.equal((await postTimetable(personalBody)).status, 200);
     const dump = logLines.join('\n');
     assert.match(dump, /fallback=groq motivo=row-docente-non-riconosciuta/, 'il motivo è un codice, non un contenuto');
+    // Il Passo A logga solo il CONTEGGio delle righe, mai le etichette lette.
+    assert.match(dump, /fase=identificazione-riga esito=ok righe=\d+/, 'solo conteggio righe');
+    assert.match(dump, /fase=trascrizione-riga esito=ok/);
     assert.doesNotMatch(dump, /Manganiello|Mangianello/, 'mai la riga letta né il cognome del profilo');
+    assert.doesNotMatch(dump, /Camilli|Costantini|Mangraviti|Della Gatta/, 'mai le etichette del Passo A');
     assert.doesNotMatch(dump, /Felice/, 'mai il nome del profilo');
-    assert.doesNotMatch(dump, /rowLabel|"days"/, 'mai il JSON del modello');
+    assert.doesNotMatch(dump, /rowLabel|"days"|rowLabels/, 'mai il JSON del modello');
     assert.doesNotMatch(dump, /1A|2B/, 'mai le classi');
     assert.doesNotMatch(dump, new RegExp(pngBase64.slice(0, 24)), 'nessun frammento di base64');
     assert.doesNotMatch(dump, new RegExp(TEST_GROQ_KEY), 'nessuna chiave');
+  } finally {
+    restore();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 8. H5 — PERCORSO GROQ A DUE PASSAGGI (orario personale)
+//
+// Passo A (identificazione riga) -> matching server-side rigoroso -> Passo B
+// (trascrizione della sola riga). Il Passo A aiuta solo a focalizzare: H3/H4
+// restano la guardia definitiva sul Passo B. Tutti i dati sono sintetici.
+// ---------------------------------------------------------------------------
+
+// --- 8a. Validatore del Passo A (allow-list chiusa) --------------------------
+
+test('H5 Passo A validator: accetta il contratto e applica la allow-list chiusa', () => {
+  // Caso valido: le etichette tornano identiche, nell'ordine.
+  assert.deepEqual(
+    validateTeacherRowLabelsPayload({ rowLabels: ['Camilli', 'Costantini', 'Manganiello'] }),
+    ['Camilli', 'Costantini', 'Manganiello'],
+  );
+  // Politica DETERMINISTICA: le stringhe vuote/di soli spazi sono ELIMINATE.
+  assert.deepEqual(
+    validateTeacherRowLabelsPayload({ rowLabels: ['Camilli', '', '   ', 'Manganiello'] }),
+    ['Camilli', 'Manganiello'],
+  );
+  // Il trim non altera il contenuto significativo.
+  assert.deepEqual(validateTeacherRowLabelsPayload({ rowLabels: ['  Manganiello  '] }), ['Manganiello']);
+  // Al tetto massimo: ancora valido.
+  const atCap = Array.from({ length: MAX_TEACHER_ROW_LABELS }, (_, i) => `Docente${i}`);
+  assert.equal(validateTeacherRowLabelsPayload({ rowLabels: atCap }).length, MAX_TEACHER_ROW_LABELS);
+});
+
+test('H5 Passo A validator: rifiuta campi extra, non-array, numeri, oggetti, stringhe lunghe e oltre il tetto', () => {
+  const rejected: unknown[] = [
+    null,
+    'testo',
+    ['Manganiello'],
+    { rowLabels: 'non-un-array' },
+    { rowLabels: {} },
+    { rowLabels: 42 },
+    { rowLabels: ['Camilli'], extra: 1 },
+    { rowLabels: [1, 2, 3] },
+    { rowLabels: [{ nome: 'Camilli' }] },
+    { rowLabels: [['Camilli']] },
+    { rowLabels: ['x'.repeat(MAX_TEACHER_ROW_LABEL_LENGTH + 1)] },
+    { rowLabels: Array.from({ length: MAX_TEACHER_ROW_LABELS + 1 }, () => 'Docente') },
+  ];
+  for (const value of rejected) {
+    assert.throws(() => validateTeacherRowLabelsPayload(value), (error: any) => {
+      assert.equal(error.name, 'TimetableShapeError', `rifiutato: ${JSON.stringify(value).slice(0, 40)}`);
+      return true;
+    }, `deve rifiutare: ${JSON.stringify(value).slice(0, 40)}`);
+  }
+});
+
+// --- 8b. Matching server-side (strict, findTeacherRows) ----------------------
+
+test('H5 matching: una sola corrispondenza esatta -> matched (mutation A: fuzzy -> fallisce)', () => {
+  // Caso reale (sezione 2): lista Qwen con esattamente una riga compatibile.
+  const labels = ['Camilli', 'Costantini', 'Della Gatta', 'Manganiello', 'Mangraviti'];
+  assert.deepEqual(matchTeacherRowLabel(labels, 'Felice Manganiello'), { status: 'matched', label: 'Manganiello' });
+  // Il cognome può comparire come "COGNOME N." o esteso: resta una sola riga.
+  assert.deepEqual(matchTeacherRowLabel(['Manganiello F.'], 'Felice Manganiello'), { status: 'matched', label: 'Manganiello F.' });
+});
+
+test('H5 matching: zero corrispondenze -> none (refuso o cognome diverso, mai un quasi-uguale)', () => {
+  // Refuso del Passo A: "Mangianello" NON combacia con il profilo "Manganiello".
+  assert.deepEqual(matchTeacherRowLabel(['Camilli', 'Mangianello', 'Costantini'], 'Felice Manganiello'), { status: 'none' });
+  // Sottostringa/troncatura: mai una corrispondenza (parola intera).
+  assert.deepEqual(matchTeacherRowLabel(['Mangraviti', 'Manganiell', 'Mangan'], 'Felice Manganiello'), { status: 'none' });
+  // Lista senza il docente.
+  assert.deepEqual(matchTeacherRowLabel(['Camilli', 'Costantini'], 'Felice Manganiello'), { status: 'none' });
+});
+
+test('H5 matching: più di una corrispondenza -> ambiguous (nessuna scelta arbitraria)', () => {
+  assert.deepEqual(
+    matchTeacherRowLabel(['Manganiello F.', 'Manganiello G.'], 'Felice Manganiello'),
+    { status: 'ambiguous' },
+  );
+});
+
+// --- 8c. Prompt e schema dei due passaggi ------------------------------------
+
+test('H5 prompt: il Passo A guarda SOLO i nomi dei docenti e non riceve il target', () => {
+  const promptA = buildTeacherRowDetectionPrompt();
+  assert.match(promptA, /NOMI DEI DOCENTI/i);
+  assert.match(promptA, /rowLabels/);
+  assert.match(promptA, /NON leggere classi, materie, giorni/i);
+  // È statico: non contiene alcun cognome target del profilo.
+  assert.doesNotMatch(promptA, /Manganiello/);
+  // Schema convertibile nello Structured Output strict, con il solo campo rowLabels.
+  const converted = groqJsonSchemaFrom(teacherRowDetectionSchema) as Record<string, any>;
+  assert.deepEqual(Object.keys(converted.properties), ['rowLabels']);
+  assert.equal(converted.properties.rowLabels.type, 'array');
+  assert.equal(converted.properties.rowLabels.items.type, 'string');
+  assert.equal(converted.additionalProperties, false);
+});
+
+test('H5 prompt: il Passo B riprende il contratto H4 e nomina l etichetta individuata', () => {
+  const promptB = buildPersonalRowTranscriptionPrompt('felice manganiello', REAL_WEEK, 'Manganiello');
+  // Contratto personale completo (P-rules) ereditato dal prompt base.
+  assert.match(promptB, /rowLabel/);
+  assert.match(promptB, /declaredClassTotals/);
+  assert.match(promptB, /RIGA GIÀ INDIVIDUATA DAL SERVER/i);
+  // L'etichetta individuata è nel prompt (solo per il provider).
+  assert.match(promptB, /"Manganiello"/);
+});
+
+// --- 8d. Budget riservato e divisione fra i due passaggi ---------------------
+
+test('H5 budget: Gemini non consuma la finestra riservata a Groq (mutation D: senza riserva -> fallisce)', () => {
+  // Immagine + Groq configurato: Gemini riceve MENO del deadline totale.
+  const geminiBudget = timetableGeminiBudgetMs('image/png', true);
+  const reservedForGroq = TIMETABLE_ANALYSIS_TIMEOUT_MS - geminiBudget;
+  assert.ok(reservedForGroq >= GROQ_TIMETABLE_RESERVED_MS, 'almeno 10 s riservati a Groq');
+  assert.equal(geminiBudget, TIMETABLE_ANALYSIS_TIMEOUT_MS - GROQ_TIMETABLE_RESERVED_MS);
+  // Il deadline TOTALE non cambia: senza Groq (PDF o chiave assente) budget pieno.
+  assert.equal(timetableGeminiBudgetMs('application/pdf', true), TIMETABLE_ANALYSIS_TIMEOUT_MS, 'PDF: nessuna riserva');
+  assert.equal(timetableGeminiBudgetMs('image/png', false), TIMETABLE_ANALYSIS_TIMEOUT_MS, 'Groq non configurato: nessuna riserva');
+  // La finestra riservata basta a un percorso a due passaggi.
+  const budgets = groqTwoPassBudgets(reservedForGroq);
+  assert.ok(budgets.passA > 0 && budgets.passB > 0, 'Passo A parte e Passo B può partire');
+});
+
+test('H5 budget: bug reale "budget-esaurito" — Gemini lento non brucia gli ultimi 10 s', () => {
+  // Simulazione del bug: deadline 45 s, Gemini ~41 s. La riserva impone che al
+  // percorso Groq restino comunque >= 10 s. Mutation D (riserva rimossa) -> il
+  // budget di Gemini sarebbe l'intero deadline e questa soglia salterebbe.
+  const geminiBudget = timetableGeminiBudgetMs('image/png', true);
+  const remainingForGroqWorstCase = TIMETABLE_ANALYSIS_TIMEOUT_MS - geminiBudget;
+  assert.ok(remainingForGroqWorstCase >= GROQ_TIMETABLE_RESERVED_MS);
+  const budgets = groqTwoPassBudgets(remainingForGroqWorstCase);
+  assert.ok(budgets.passA >= GROQ_TWO_PASS_MIN_ATTEMPT_MS, 'Passo A ha budget');
+  assert.ok(budgets.passB >= GROQ_TWO_PASS_MIN_ATTEMPT_MS, 'Passo B ha budget');
+});
+
+test('H5 budget: divisione deterministica ~40/60 e infattibilità sotto soglia', () => {
+  const budgets = groqTwoPassBudgets(10_000);
+  const usable = 10_000 - GROQ_RESPONSE_RESERVE_MS;
+  assert.equal(budgets.passA, Math.floor(usable * GROQ_TWO_PASS_A_SHARE));
+  assert.equal(budgets.passB, usable - budgets.passA);
+  assert.ok(budgets.passA < budgets.passB, 'Passo A prende meno del Passo B');
+  // Sotto la soglia dei due passaggi: nessun percorso (0/0), errore controllato a monte.
+  assert.deepEqual(groqTwoPassBudgets(GROQ_RESPONSE_RESERVE_MS + GROQ_TWO_PASS_MIN_ATTEMPT_MS), { passA: 0, passB: 0 });
+});
+
+test('H5 budget: il Passo B non parte se dopo il Passo A non resta tempo (requisito 15)', () => {
+  // Tempo sufficiente: il Passo B ottiene la sua quota (capata dal residuo).
+  assert.equal(groqPassBBudget(8_000, 4_800), 4_800);
+  assert.equal(groqPassBBudget(5_000, 4_800), 5_000 - GROQ_RESPONSE_RESERVE_MS);
+  // Tempo insufficiente dopo il Passo A: budget 0 -> Passo B non parte.
+  assert.equal(groqPassBBudget(GROQ_RESPONSE_RESERVE_MS + GROQ_TWO_PASS_MIN_ATTEMPT_MS - 1, 4_800), 0);
+  assert.equal(groqPassBBudget(2_000, 4_800), 0);
+});
+
+// --- 8e. Endpoint: casi del percorso a due passaggi --------------------------
+
+test('H5 endpoint (caso reale sezione 10): fallback tecnico -> Passo A + Passo B -> 200 con 18 ore', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  // Passo B: 3D×10, 3E×6, 1C×2 su geometria [6,6,6,7,6]; riepilogo coerente (H4).
+  stubProviders({
+    gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
+    groq: groqTwoPass(REAL_TEACHER_LABELS, personalPayload('Manganiello', totalsDays(10), REAL_DECLARED_TOTALS)),
+  });
+  const restore = captureLogs();
+  try {
+    const res = await postTimetable(personalBody);
+    assert.equal(res.status, 200);
+    const data = await res.json();
+    assert.equal(data.rowLabel, 'Manganiello');
+    assert.equal(data.source, GROQ_VISION_MODEL_DEFAULT);
+    // 18 ore occupate (10+6+2), il resto vuoto; geometria [6,6,6,7,6] intatta.
+    const occupied = data.cells.filter((c: any) => c.raw !== '');
+    assert.equal(occupied.length, 18, '18 ore occupate');
+    const perDay = REAL_WEEK.map((_, dayIndex) => data.cells.filter((c: any) => c.dayOfWeek === dayIndex + 1).length);
+    assert.deepEqual(perDay, REAL_WEEK, 'ogni giorno conserva le proprie ore');
+    assert.deepEqual(groqPhases, ['detection', 'transcription']);
+  } finally {
+    restore();
+  }
+});
+
+test('H5 endpoint: Passo A zero match -> Passo B NON parte -> H3 (mutation B: parte -> fallisce)', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  stubProviders({
+    gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
+    // Lista senza la riga del docente: nessuna corrispondenza rigorosa.
+    groq: groqTwoPass(['Camilli', 'Costantini', 'Della Gatta'], personalPayload('Manganiello')),
+  });
+  const restore = captureLogs();
+  try {
+    const res = await postTimetable(personalBody);
+    assert.equal(res.status, 422);
+    assert.equal((await res.json()).error, TEACHER_ROW_NOT_RECOGNIZED_MESSAGE);
+    assert.deepEqual(groqPhases, ['detection'], 'il Passo B non parte senza corrispondenza');
+    assert.match(logLines.join('\n'), /fase=identificazione-riga esito=nessuna-corrispondenza/);
+  } finally {
+    restore();
+  }
+});
+
+test('H5 endpoint: Passo A refuso "Mangianello" con profilo "Manganiello" -> zero match (requisito 4)', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  stubProviders({
+    gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
+    groq: groqTwoPass(['Camilli', 'Mangianello', 'Costantini'], personalPayload('Manganiello')),
+  });
+  const restore = captureLogs();
+  try {
+    const res = await postTimetable(personalBody);
+    assert.equal(res.status, 422, 'un quasi-uguale non è una corrispondenza');
+    assert.equal((await res.json()).error, TEACHER_ROW_NOT_RECOGNIZED_MESSAGE);
+    assert.deepEqual(groqPhases, ['detection']);
+  } finally {
+    restore();
+  }
+});
+
+test('H5 endpoint: Passo A più corrispondenze -> rifiuto conservativo (requisito 3)', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  stubProviders({
+    gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
+    // Due righe compatibili col cognome: il server NON sceglie.
+    groq: groqTwoPass(['Manganiello F.', 'Manganiello G.'], personalPayload('Manganiello')),
+  });
+  const restore = captureLogs();
+  try {
+    const res = await postTimetable(personalBody);
+    assert.equal(res.status, 422);
+    assert.equal((await res.json()).error, TEACHER_ROW_AMBIGUOUS_MESSAGE);
+    assert.deepEqual(groqPhases, ['detection'], 'nessuna trascrizione su corrispondenze multiple');
+    assert.match(logLines.join('\n'), /fase=identificazione-riga esito=corrispondenze-multiple/);
+  } finally {
+    restore();
+  }
+});
+
+test('H5 endpoint: Passo A fallisce HTTP 429/500 -> errore controllato (requisito 16)', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  for (const status of [429, 500]) {
+    stubProviders({
+      gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
+      groq: (req) => (req.phase === 'detection' ? { status, body: { error: { message: 'ko' } } } : detectionOk([])),
+    });
+    const restore = captureLogs();
+    try {
+      const res = await postTimetable(personalBody);
+      assert.equal(res.status, 503, `Passo A ${status}: 503 controllato`);
+      assert.match((await res.json()).error, /non è stato elaborato/i);
+      assert.deepEqual(groqPhases, ['detection'], `Passo A ${status}: nessun Passo B`);
+    } finally {
+      restore();
+    }
+  }
+});
+
+test('H5 endpoint: Passo B fallisce HTTP 429/500 -> errore controllato (requisito 17)', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  for (const status of [429, 500]) {
+    stubProviders({
+      gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
+      groq: (req) => (req.phase === 'detection' ? detectionOk(REAL_TEACHER_LABELS) : { status, body: { error: { message: 'ko' } } }),
+    });
+    const restore = captureLogs();
+    try {
+      const res = await postTimetable(personalBody);
+      assert.equal(res.status, 503, `Passo B ${status}: 503 controllato`);
+      assert.match((await res.json()).error, /non è stato elaborato/i);
+      assert.deepEqual(groqPhases, ['detection', 'transcription'], `Passo B ${status}: il Passo A era riuscito`);
+    } finally {
+      restore();
+    }
+  }
+});
+
+test('H5 endpoint: PDF nel fallback tecnico personale -> Groq NON chiamato (requisito 12)', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  stubProviders({
+    gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
+    groq: groqTwoPass(REAL_TEACHER_LABELS, personalPayload('Manganiello')),
+  });
+  const restore = captureLogs();
+  try {
+    const res = await postTimetable({ ...personalBody, imageBase64: pdfBase64, mimeType: 'application/pdf' });
+    assert.equal(res.status, 503, 'PDF: nessuna conversione, resta Gemini-only');
+    assert.deepEqual(groqPhases, [], 'Groq Vision non prende PDF: nessun passaggio');
+    assert.match(logLines.join('\n'), /fallback=groq saltato motivo=mime-non-supportato/);
+  } finally {
+    restore();
+  }
+});
+
+test('H5 endpoint: Groq non configurato nel fallback tecnico personale -> 503 attuale (requisito 13)', async () => {
+  delete process.env.GROQ_API_KEY;
+  stubProviders({
+    gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
+    groq: groqTwoPass(REAL_TEACHER_LABELS, personalPayload('Manganiello')),
+  });
+  const restore = captureLogs();
+  try {
+    const res = await postTimetable(personalBody);
+    assert.equal(res.status, 503);
+    assert.deepEqual(groqPhases, [], 'senza chiave nessun passaggio');
+    assert.match(logLines.join('\n'), /fallback=groq saltato motivo=non-configurato/);
+  } finally {
+    restore();
+  }
+});
+
+test('H5 endpoint: forma delle richieste dei due passaggi, etichetta solo nel prompt del Passo B', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  const bodies: any[] = [];
+  stubProviders({
+    gemini: geminiOk(personalPayload('Mangianello')),
+    groq: (req) => {
+      bodies.push(req.body);
+      return req.phase === 'detection'
+        ? detectionOk(REAL_TEACHER_LABELS)
+        : { status: 200, body: { choices: [{ message: { content: personalPayload('Manganiello') }, finish_reason: 'stop' }] } };
+    },
+  });
+  const restore = captureLogs();
+  try {
+    const res = await postTimetable(personalBody);
+    assert.equal(res.status, 200);
+    assert.equal(bodies.length, 2, 'due richieste distinte a Groq');
+    const [a, b] = bodies;
+    // Passo A: contratto dedicato (solo etichette), nessun nome target.
+    assert.equal(a.response_format.json_schema.name, 'teacher_rows');
+    assert.deepEqual(Object.keys(a.response_format.json_schema.schema.properties), ['rowLabels']);
+    assert.doesNotMatch(a.messages[0].content, /Manganiello/, 'il Passo A non riceve il target');
+    // Passo B: contratto completo dell orario, con l etichetta individuata nel prompt.
+    assert.equal(b.response_format.json_schema.name, 'timetable_analysis');
+    assert.match(b.messages[0].content, /"Manganiello"/, 'l etichetta viaggia SOLO nel prompt del provider');
+    // ...ma NON nei log, non come diagnostica.
+    assert.doesNotMatch(logLines.join('\n'), /Manganiello/, 'l etichetta individuata non finisce nei log');
+  } finally {
+    restore();
+  }
+});
+
+test('H5 endpoint: Gemini coerente -> nessun passaggio Groq (requisito 11, mutation E)', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  stubProviders({
+    gemini: geminiOk(personalPayload('Manganiello')),
+    groq: groqTwoPass(REAL_TEACHER_LABELS, personalPayload('Manganiello')),
+  });
+  const restore = captureLogs();
+  try {
+    const res = await postTimetable(personalBody);
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).source, geminiCandidateModels()[0]);
+    assert.deepEqual(groqPhases, [], 'niente da correggere: nessun passaggio Groq');
   } finally {
     restore();
   }

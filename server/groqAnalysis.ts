@@ -65,6 +65,66 @@ export const GROQ_RESPONSE_RESERVE_MS = 2_000;
 export const GROQ_MIN_ATTEMPT_MS = 5_000;
 
 /**
+ * H5 — Budget RISERVATO al percorso Groq a due passaggi dell'orario personale.
+ *
+ * Problema reale osservato su Render: `gemini-3.7-flash` ha consumato ~41 s e
+ * Groq è stato saltato per `budget-esaurito`, pur rispondendo nei test reali in
+ * 0.4–0.9 s. Quando il documento è un'immagine e `GROQ_API_KEY` è configurata,
+ * Gemini NON deve poter consumare tutto `TIMETABLE_ANALYSIS_TIMEOUT_MS`: si
+ * riserva a Groq questa finestra complessiva. Il deadline TOTALE dell'endpoint
+ * NON cambia — cambia solo il budget concesso a Gemini.
+ */
+export const GROQ_TIMETABLE_RESERVED_MS = 10_000;
+
+/**
+ * Quota del budget Groq residuo destinata al Passo A (identificazione riga). Il
+ * resto (60%) va al Passo B (trascrizione). Divisione deterministica: nessun
+ * timeout indipendente che possa superare il deadline.
+ */
+export const GROQ_TWO_PASS_A_SHARE = 0.4;
+
+/**
+ * Un passaggio del percorso a due fasi è leggero (0.4–0.9 s nei tentativi reali):
+ * la soglia minima è molto più bassa di quella della lettura monolitica
+ * (`GROQ_MIN_ATTEMPT_MS`), altrimenti la finestra riservata di 10 s non basterebbe
+ * mai a due chiamate. Sotto questa soglia un passaggio non può partire.
+ */
+export const GROQ_TWO_PASS_MIN_ATTEMPT_MS = 1_500;
+
+/**
+ * Divide il budget Groq RESIDUO fra Passo A e Passo B, restituendo i due timeout
+ * di rete effettivi. È deterministica e pura:
+ *  - si sottrae UNA volta il margine di scrittura della risposta finale;
+ *  - il tempo utile è diviso `GROQ_TWO_PASS_A_SHARE` (Passo A) / resto (Passo B);
+ *  - se anche uno solo dei due passaggi non raggiunge `GROQ_TWO_PASS_MIN_ATTEMPT_MS`,
+ *    il percorso non è fattibile e si torna `{ passA: 0, passB: 0 }` (errore
+ *    controllato a monte, mai due timeout che sommati sforino il deadline).
+ */
+export function groqTwoPassBudgets(remainingMs: number): { passA: number; passB: number } {
+  const usable = Math.floor(remainingMs) - GROQ_RESPONSE_RESERVE_MS;
+  if (usable < GROQ_TWO_PASS_MIN_ATTEMPT_MS * 2) return { passA: 0, passB: 0 };
+  const passA = Math.floor(usable * GROQ_TWO_PASS_A_SHARE);
+  const passB = usable - passA;
+  if (passA < GROQ_TWO_PASS_MIN_ATTEMPT_MS || passB < GROQ_TWO_PASS_MIN_ATTEMPT_MS) {
+    return { passA: 0, passB: 0 };
+  }
+  return { passA, passB };
+}
+
+/**
+ * Budget effettivo del Passo B calcolato DOPO il Passo A, sul tempo davvero
+ * rimasto: mai più della quota pianificata (`plannedPassB`) e mai più del tempo
+ * residuo meno il margine di risposta. Se scende sotto la soglia minima torna 0,
+ * e il chiamante ferma il percorso con un errore controllato invece di avviare
+ * un Passo B che sforerebbe il deadline.
+ */
+export function groqPassBBudget(remainingAfterPassAMs: number, plannedPassB: number): number {
+  const available = Math.floor(remainingAfterPassAMs) - GROQ_RESPONSE_RESERVE_MS;
+  const budget = Math.min(Math.floor(plannedPassB), available);
+  return budget >= GROQ_TWO_PASS_MIN_ATTEMPT_MS ? budget : 0;
+}
+
+/**
  * MIME che Groq Vision accetta come immagine. È `supportedFiles` dei guard meno
  * `application/pdf`: Groq non prende un PDF in `image_url`, e convertire un PDF
  * in pagine raster è una pipeline nuova che questo task non introduce. Per il
@@ -286,6 +346,16 @@ export interface RunGroqJsonOptions {
   label: string;
   /** Tempo ancora disponibile dentro il deadline dell'endpoint. */
   budgetMs: number;
+  /**
+   * Timeout di rete GIÀ CALCOLATO (percorso a due passaggi): quando presente ha
+   * la precedenza su `budgetMs` e non viene ridotto di nuovo del margine di
+   * risposta (il chiamante l'ha già scalato). `<= 0` significa budget esaurito.
+   */
+  attemptTimeoutMs?: number;
+  /** Nome dello Structured Output (default `timetable_analysis`; il Passo A usa `teacher_rows`). */
+  schemaName?: string;
+  /** Fase del percorso a due passaggi, solo per i log privacy-safe (es. `identificazione-riga`). */
+  phase?: string;
   /** Iniezioni per i test. */
   apiKey?: string;
   model?: string;
@@ -314,14 +384,19 @@ export async function runGroqJson(opts: RunGroqJsonOptions): Promise<GroqJsonRun
   const fetchImpl = opts.fetchImpl ?? ((input: RequestInfo | URL, init?: RequestInit) => fetch(input, init));
   const apiKey = (opts.apiKey ?? process.env.GROQ_API_KEY ?? "").trim();
   const model = opts.model ?? groqVisionModel();
+  const phaseTag = opts.phase ? ` fase=${opts.phase}` : "";
   const failed = (category: GroqFailureCategory, durationMs = 0, note?: string): GroqJsonRunResult => {
-    log(`[${opts.label}] provider=groq modello=${model} esito=fallito categoria=${category} durataMs=${durationMs}${note ? ` nota=${note}` : ""} (nessun contenuto nel log)`);
+    log(`[${opts.label}] provider=groq${phaseTag} modello=${model} esito=fallito categoria=${category} durataMs=${durationMs}${note ? ` nota=${note}` : ""} (nessun contenuto nel log)`);
     return { ok: false, text: "", source: "", category, durationMs };
   };
 
   if (!apiKey) return failed("non-configurato", 0, "GROQ_API_KEY assente o vuota");
   if (!groqSupportsMimeType(opts.mimeType)) return failed("mime-non-supportato");
-  const timeoutMs = groqAttemptTimeoutMs(opts.budgetMs);
+  // Percorso a due passaggi: timeout già calcolato dal chiamante; altrimenti il
+  // budget rimasto meno il margine di risposta (percorso monolitico storico).
+  const timeoutMs = opts.attemptTimeoutMs !== undefined
+    ? (Math.floor(opts.attemptTimeoutMs) > 0 ? Math.floor(opts.attemptTimeoutMs) : 0)
+    : groqAttemptTimeoutMs(opts.budgetMs);
   if (timeoutMs === 0) return failed("budget-esaurito", 0, "tempo insufficiente per il fallback");
 
   let responseSchema: Record<string, unknown>;
@@ -358,7 +433,7 @@ export async function runGroqJson(opts: RunGroqJsonOptions): Promise<GroqJsonRun
         temperature: GROQ_TEMPERATURE,
         response_format: {
           type: "json_schema",
-          json_schema: { name: "timetable_analysis", strict: true, schema: responseSchema },
+          json_schema: { name: opts.schemaName ?? "timetable_analysis", strict: true, schema: responseSchema },
         },
         reasoning_effort: GROQ_REASONING_EFFORT,
         reasoning_format: GROQ_REASONING_FORMAT,
@@ -376,7 +451,7 @@ export async function runGroqJson(opts: RunGroqJsonOptions): Promise<GroqJsonRun
     if (!text) return failed("output-vuoto", durationMs);
     if (finishReason === "length") return failed("output-troncato", durationMs);
 
-    log(`[${opts.label}] provider=groq modello=${model} esito=ok durataMs=${durationMs} (nessun contenuto nel log)`);
+    log(`[${opts.label}] provider=groq${phaseTag} modello=${model} esito=ok durataMs=${durationMs} (nessun contenuto nel log)`);
     return { ok: true, text, source: model, category: "ok", durationMs };
   } catch (error: unknown) {
     const durationMs = now() - startedAt;

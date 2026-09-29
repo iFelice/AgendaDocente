@@ -823,6 +823,101 @@ export function findTeacherRows(rowLabels: string[], profileName: unknown): Teac
 }
 
 // ---------------------------------------------------------------------------
+// H5 — Passo A: elenco delle sole etichette della colonna docenti
+//
+// Il primo passaggio Groq/Qwen NON legge l'intero documento: legge SOLO la
+// colonna/area con i nomi dei docenti e restituisce le etichette candidate
+// (`{ rowLabels: string[] }`). Il server poi le confronta con il profilo tramite
+// il matcher rigoroso già esistente (`findTeacherRows`) e chiede la trascrizione
+// della sola riga (Passo B). Questa parte contiene:
+//   - il validatore chiuso del payload del Passo A;
+//   - il matching server-side (una corrispondenza esatta, zero -> H3,
+//     più di una -> rifiuto conservativo).
+// Nessuna deduzione, nessun fuzzy, nessuna correzione ortografica: il matcher
+// resta quello di sempre e H3 rimane la guardia definitiva del Passo B.
+// ---------------------------------------------------------------------------
+
+/**
+ * Tetto ragionevole di righe leggibili nella colonna docenti. Un documento con
+ * più di 100 righe di docenti non è un orario personale: un array più lungo è
+ * output AI fuori scala (o ostile) e viene rifiutato invece di essere elaborato.
+ */
+export const MAX_TEACHER_ROW_LABELS = 100;
+
+/**
+ * Lunghezza massima di una singola etichetta. Coincide con il tetto di
+ * `normalizeRowLabel` (80) per non rifiutare al Passo A un'etichetta che il
+ * Passo B accetterebbe; oltre questa soglia non è un cognome ma testo libero.
+ */
+export const MAX_TEACHER_ROW_LABEL_LENGTH = 80;
+
+/**
+ * Rifiuto conservativo del Passo A: il matcher ha trovato PIÙ di una riga
+ * compatibile col profilo. Non si sceglie arbitrariamente e non si trascrive
+ * nulla; è un codice stabile, mai riconosciuto dal testo del messaggio.
+ */
+export const TEACHER_ROW_AMBIGUOUS = "riga-docente-ambigua";
+
+/**
+ * Valida il payload del Passo A: `{ rowLabels: string[] }` e NULLA altro.
+ *
+ * Allow-list chiusa e conservativa, perché queste etichette pilotano il
+ * matching server-side:
+ *  - l'oggetto deve avere ESATTAMENTE la chiave `rowLabels` (nessun campo extra);
+ *  - `rowLabels` deve essere un array (mai un oggetto, un numero o una stringa);
+ *  - ogni elemento deve essere una STRINGA (numeri e oggetti sono rifiutati);
+ *  - nessuna stringa può superare `MAX_TEACHER_ROW_LABEL_LENGTH`;
+ *  - l'array non può superare `MAX_TEACHER_ROW_LABELS` elementi.
+ *
+ * Politica DETERMINISTICA sulle stringhe vuote: le stringhe vuote o di soli
+ * spazi vengono ELIMINATE (non identificano nessuna riga e il prompt chiede di
+ * omettere le righe illeggibili), mentre ogni altra violazione RIFIUTA l'intero
+ * payload. Le etichette restano non normalizzate: il matcher piega da sé
+ * maiuscole/accenti/punteggiatura, e correggere qui introdurrebbe proprio il
+ * fuzzy che il Passo A vieta.
+ */
+export function validateTeacherRowLabelsPayload(raw: unknown): string[] {
+  if (!record(raw)) invalidShape("Risposta identificazione riga non valida.");
+  if (Object.keys(raw).some((key) => key !== "rowLabels")) {
+    invalidShape("Campo non previsto nell'identificazione della riga.");
+  }
+  if (!Array.isArray(raw.rowLabels)) invalidShape("Elenco etichette docenti non valido.");
+  if (raw.rowLabels.length > MAX_TEACHER_ROW_LABELS) {
+    invalidShape("Troppe righe nell'identificazione della riga.");
+  }
+  const labels: string[] = [];
+  raw.rowLabels.forEach((entry, index) => {
+    if (typeof entry !== "string") invalidShape(`Etichetta docente non valida (#${index}).`);
+    if (entry.length > MAX_TEACHER_ROW_LABEL_LENGTH) invalidShape(`Etichetta docente troppo lunga (#${index}).`);
+    const trimmed = entry.trim();
+    // Stringa vuota / soli spazi: riga illeggibile, eliminata (non rifiutata).
+    if (trimmed) labels.push(trimmed);
+  });
+  return labels;
+}
+
+/** Esito del matching server-side del Passo A: mai una scelta arbitraria. */
+export type TeacherRowLabelMatch =
+  | { status: "matched"; label: string }
+  | { status: "none" }
+  | { status: "ambiguous" };
+
+/**
+ * Confronta le etichette del Passo A col profilo usando ESCLUSIVAMENTE il
+ * matcher rigoroso già esistente (`findTeacherRows`, parola intera, nessun
+ * fuzzy/Levenshtein/sottostringa/correzione). Non deduplica e non sceglie:
+ *  - esattamente una riga compatibile -> `matched` con la SUA etichetta;
+ *  - zero righe compatibili           -> `none` (il Passo B non parte, resta H3);
+ *  - più di una riga compatibile      -> `ambiguous` (rifiuto conservativo).
+ */
+export function matchTeacherRowLabel(rowLabels: string[], profileName: unknown): TeacherRowLabelMatch {
+  const matches = findTeacherRows(rowLabels, profileName);
+  if (matches.length === 0) return { status: "none" };
+  if (matches.length > 1) return { status: "ambiguous" };
+  return { status: "matched", label: matches[0].rowLabel };
+}
+
+// ---------------------------------------------------------------------------
 // Conversione celle -> candidati (mai inventare)
 // ---------------------------------------------------------------------------
 
