@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 import { CalendarEvent, TeacherProfile, TimeSlotConfig, TimetableSlot, TimetableType } from "../types";
 import { coTeachingSummary } from "../utils/coTeaching";
-import { getPrimarySchool } from "../utils/multiSchool";
+import { effectiveSchoolForSlot, normalizeTeacherProfile } from "../utils/multiSchool";
 import {
   isSlotOutOfConfiguredDay,
   OUT_OF_CONFIG_SLOT_BADGE,
@@ -81,8 +81,16 @@ export const WeekView: React.FC<WeekViewProps> = ({
   
   // Per i docenti del SSIG (Scuola Secondaria di I Grado), la settimana corta è lo standard:
   // "inclusi sabato" viene impostato di default SENZA spunta (false).
-  /** Configurazione di riferimento: scuola PRIMARIA, come in Oggi e nella griglia. */
-  const primarySchool = React.useMemo(() => (profile ? getPrimarySchool(profile) : undefined), [profile]);
+  /**
+   * Istituti del docente, elenco normalizzato: stessa fonte di Oggi. Risolve sia
+   * il nome da mostrare sia i `dayPeriods` con cui valutare ogni lezione.
+   */
+  const schools = React.useMemo(
+    () => (profile ? normalizeTeacherProfile(profile).schools ?? [] : []),
+    [profile]
+  );
+  /** Il badge istituto ha senso solo se ce n'è più di uno da distinguere. */
+  const showSchoolBadge = schools.length > 1;
   const isSsig = profile?.schoolLevel === "ssig";
   const [includeSaturday, setIncludeSaturday] = useState<boolean>(!isSsig);
   const [filterMode, setFilterMode] = useState<"ALL" | "CIRCULARS">("ALL");
@@ -363,8 +371,11 @@ export const WeekView: React.FC<WeekViewProps> = ({
                     <div className="space-y-1.5">
                       {dayLessons.map((slot) => {
                         const summary = coTeachingSummary(slot);
-                        // Stesso criterio di Oggi: si marca, non si filtra.
-                        const outOfConfig = isSlotOutOfConfiguredDay(slot, primarySchool, timeSlotConfig);
+                        // Stesso criterio di Oggi: istituto EFFETTIVO della
+                        // lezione per il badge E per le ore ammesse, e si
+                        // marca senza mai filtrare.
+                        const school = effectiveSchoolForSlot(slot, schools);
+                        const outOfConfig = isSlotOutOfConfiguredDay(slot, school, timeSlotConfig);
                         const lessonBody = (
                             <div className="min-w-0">
                               <div className="flex items-center gap-1.5 flex-wrap">
@@ -375,6 +386,18 @@ export const WeekView: React.FC<WeekViewProps> = ({
                                 <span className="text-[10px] font-semibold px-1 py-0.5 rounded bg-white text-stone-600 border border-stone-200 shrink-0">
                                   {slot.className}
                                 </span>
+                                {/* Istituto: stesso ruolo secondario di Oggi.
+                                    Le lezioni restano nella colonna del loro
+                                    giorno, nello stesso ordine: qui cambia
+                                    solo la loro leggibilità. */}
+                                {showSchoolBadge && school?.name && (
+                                  <span
+                                    data-slot-school={school.id}
+                                    className="text-[10px] font-medium px-1 py-0.5 rounded bg-sky-50 text-sky-900 border border-sky-200 shrink-0 truncate max-w-[9rem]"
+                                  >
+                                    {school.name}
+                                  </span>
+                                )}
                                 {outOfConfig && (
                                   <span
                                     data-slot-out-of-config="true"

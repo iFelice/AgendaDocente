@@ -147,10 +147,13 @@ export const OUT_OF_CONFIG_SLOT_BADGE = "Ora non prevista";
  * colonna Campana della griglia — e non viene marcata da qui.
  *
  * Nessuna validazione e nessuna scrittura: è solo un predicato di
- * presentazione. La configurazione usata è quella della scuola PRIMARIA, come
- * nel resto dell'app: una lezione di un istituto secondario può quindi
- * risultare marcata rispetto alla primaria (limite noto, multi-istituto
- * deliberatamente rimandato).
+ * presentazione.
+ *
+ * La scuola la sceglie il CHIAMANTE e deve essere quella EFFETTIVA della
+ * lezione (`effectiveSchoolForSlot`), non una scuola qualsiasi: valutare una
+ * lezione di un istituto con le ore di un altro produce marcature false in
+ * entrambe le direzioni. Qui dentro resta solo la regola `dayPeriods`: la
+ * risoluzione dell'identità non è responsabilità di questo modulo.
  */
 export function isSlotOutOfConfiguredDay(
   slot: { dayOfWeek: number; periodNumber: number },

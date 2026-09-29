@@ -21,7 +21,7 @@ import type { ScheduledAssessmentCalendarItem } from "../utils/scheduledAssessme
 import { scheduledAssessmentTypeLabel } from "../utils/scheduledAssessmentCalendar";
 import { readDailyCollapse, writeDailyCollapse, type CollapseGroup } from "../utils/collapsePreferences";
 import { coTeachingSummary } from "../utils/coTeaching";
-import { getPrimarySchool } from "../utils/multiSchool";
+import { effectiveSchoolForSlot, normalizeTeacherProfile } from "../utils/multiSchool";
 import {
   isSlotOutOfConfiguredDay,
   OUT_OF_CONFIG_SLOT_BADGE,
@@ -140,7 +140,14 @@ export const TodayView: React.FC<TodayViewProps> = ({
   onSelectedDateChange,
 }) => {
   /** Configurazione di riferimento: scuola PRIMARIA, come nel resto dell'app. */
-  const primarySchool = React.useMemo(() => getPrimarySchool(profile), [profile]);
+  /**
+   * Istituti del docente (elenco normalizzato: espone sempre una primaria).
+   * Serve a due cose, e sono la STESSA cosa: dire a quale scuola appartiene una
+   * lezione e con quali `dayPeriods` va valutata.
+   */
+  const schools = React.useMemo(() => normalizeTeacherProfile(profile).schools ?? [], [profile]);
+  /** Il badge istituto ha senso solo se ce n'è più di uno da distinguere. */
+  const showSchoolBadge = schools.length > 1;
   const [confirmingDeleteEventId, setConfirmingDeleteEventId] = React.useState<string | null>(null);
   // Selected civil date (defaults to the real today, or to initialDateIso when
   // the parent restores a previously viewed context). Navigation is day-by-day
@@ -503,9 +510,14 @@ export const TodayView: React.FC<TodayViewProps> = ({
                 <div className="space-y-2.5">
                   {todayLessons.map((slot) => {
                     const summary = coTeachingSummary(slot);
+                    // Istituto EFFETTIVO della lezione: uno solo, e lo stesso
+                    // sia per il badge sia per le ore ammesse dal giorno. Una
+                    // lezione della secondaria non va più letta con la
+                    // configurazione della primaria.
+                    const school = effectiveSchoolForSlot(slot, schools);
                     // Lezione salvata in un'ora che il giorno non prevede: si
                     // marca, non si nasconde e non si tocca il dato.
-                    const outOfConfig = isSlotOutOfConfiguredDay(slot, primarySchool, timeSlotConfig);
+                    const outOfConfig = isSlotOutOfConfiguredDay(slot, school, timeSlotConfig);
                     const lessonBody = (
                         <div className="flex items-start gap-3">
                           {/* Ora & periodo: blocco verticale compatto */}
@@ -531,6 +543,18 @@ export const TodayView: React.FC<TodayViewProps> = ({
                               <span className="text-[11px] font-semibold px-1.5 py-0.5 rounded-md bg-stone-100 text-stone-700 border border-stone-200 whitespace-nowrap">
                                 {slot.className}
                               </span>
+                              {/* Istituto: metadato secondario accanto agli
+                                  altri, mai una riga propria. È l'unico modo
+                                  per distinguere due lezioni che occupano la
+                                  stessa ora in scuole diverse. */}
+                              {showSchoolBadge && school?.name && (
+                                <span
+                                  data-slot-school={school.id}
+                                  className="text-[11px] font-medium px-1.5 py-0.5 rounded-md bg-sky-50 text-sky-900 border border-sky-200 whitespace-nowrap"
+                                >
+                                  {school.name}
+                                </span>
+                              )}
                               {outOfConfig && (
                                 <span
                                   data-slot-out-of-config="true"

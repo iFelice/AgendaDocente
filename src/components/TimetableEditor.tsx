@@ -39,7 +39,7 @@ import { MultiChipInput } from "./MultiChipInput";
 import { collectKnownTeacherNames, coTeachingSummary, coTeachingSubjectsOf, pruneCoTeachingFields } from "../utils/coTeaching";
 import { isSupportTeacherOf } from "../utils/teacherType";
 import { DEFAULT_SUBJECTS, mergeSubjectSuggestions, normalizeSubjectName } from "../utils/subjects";
-import { getPrimarySchool, normalizeTeacherProfile } from "../utils/multiSchool";
+import { effectiveSchoolForSlot, getPrimarySchool, normalizeTeacherProfile } from "../utils/multiSchool";
 import { slotSchoolKey } from "../utils/reconstructTimetable";
 import { MAX_PERIODS_PER_DAY, maxPeriodsInWeek, periodsForDay } from "../utils/schoolDayPeriods";
 import {
@@ -369,22 +369,15 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   /**
    * GRIGLIA IN CUI COMPARE UNA LEZIONE.
    *
-   * Parte dall'identità canonica `slotSchoolKey` — mai da `slot.schoolId`
-   * grezzo, che farebbe sparire gli slot legacy da ogni istituto — e aggiunge
-   * l'unica regola che la sola identità non può dare: se quell'istituto NON
-   * esiste (più) nel profilo, la lezione finisce nella primaria.
+   * Stessa risoluzione usata da Oggi e Settimana per dire "di quale istituto è
+   * questa lezione": identità canonica più il recupero degli `schoolId` orfani
+   * sulla primaria. Sta nel dominio, non qui, perché le tre viste non possono
+   * permettersi di rispondere in modo diverso sullo stesso slot.
    *
-   * Senza questa rete un `schoolId` orfano — backup di un profilo con un
-   * istituto poi rimosso, dato scritto da una versione precedente — renderebbe
-   * la lezione irraggiungibile da OGNI griglia: esattamente il difetto che
-   * questo passo deve eliminare, non introdurre. Nessun dato viene corretto o
-   * riscritto: la regola vale in sola lettura.
+   * Sola lettura: nessun dato viene corretto o riscritto.
    */
-  const gridSchoolIdOf = (slot: TimetableSlot): string => {
-    const key = slotSchoolKey(slot, profile);
-    if (schools.some((school) => school.id === key)) return key;
-    return primarySchool?.id ?? schools[0]?.id ?? key;
-  };
+  const gridSchoolIdOf = (slot: TimetableSlot): string =>
+    effectiveSchoolForSlot(slot, schools)?.id ?? slotSchoolKey(slot, profile);
 
   /**
    * LEZIONI DELL'ISTITUTO MOSTRATO — unico array su cui lavora la griglia.
