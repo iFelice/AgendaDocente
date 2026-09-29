@@ -17,13 +17,20 @@ import {
   groqConfigured,
   groqFallbackDecision,
   groqSemanticFallbackDecision,
+  groqSupportsMimeType,
+  groqTwoPassBudgets,
+  groqPassBBudget,
   runGroqJson,
+  GROQ_TIMETABLE_RESERVED_MS,
   type GroqFallbackDecision,
 } from "./server/groqAnalysis";
 import {
   STUDENT_DOCUMENT_PROMPT,
   buildCurricularTimetablePrompt,
   buildPersonalTimetablePrompt,
+  buildTeacherRowDetectionPrompt,
+  buildPersonalRowTranscriptionPrompt,
+  teacherRowDetectionSchema,
   personalTargetSurname,
   STUDENT_DOCUMENT_TIMEOUT_MS,
   TIMETABLE_ANALYSIS_TIMEOUT_MS,
@@ -31,6 +38,8 @@ import {
   isTeacherRowNotRecognized,
   isTimetableClassTotalsMismatch,
   timetableRejectionMessage,
+  TEACHER_ROW_NOT_RECOGNIZED_MESSAGE,
+  TEACHER_ROW_AMBIGUOUS_MESSAGE,
   parseStudentDocumentAiResponse,
   parseTimetableAiResponse,
   type TimetableAnalysisOutcome,
@@ -41,6 +50,11 @@ import {
   validateTimetableAnalysisPayload,
 } from "./server/timetableAnalysis";
 import express from "express";
+import {
+  validateTeacherRowLabelsPayload,
+  matchTeacherRowLabel,
+  type TeacherRowLabelMatch,
+} from "./src/utils/timetableAnalysis";
 import { parseCircularText, normalizeExtractedItems } from "./src/utils/circularParser";
 import http from "http";
 import path from "path";
@@ -955,15 +969,16 @@ interface TimetableDecodeResult {
 /**
  * Groq Vision entra in gioco per DUE motivi distinti, che non vanno confusi:
  *
- *  - fallback TECNICO (`runGroqTimetableFallback`): Gemini ha esaurito i
- *    tentativi e il fallimento è transitorio. Il provider non risponde.
- *  - fallback SEMANTICO (`runGroqTimetableRowRetry`): Gemini HA risposto e il
- *    JSON è valido, ma fallisce una guardia di lettura H3/H4 (riga o totali).
+ *  - fallback TECNICO: Gemini ha esaurito i tentativi e il fallimento è
+ *    transitorio. Il provider non risponde.
+ *  - fallback SEMANTICO: Gemini HA risposto e il JSON è valido, ma fallisce una
+ *    guardia di lettura H3/H4 (riga o totali).
  *
- * Entrambi condividono ingredienti ed esecuzione (`runGroqTimetableAttempt`) e
- * differiscono solo nella decisione di partenza.
+ * ORARIO CURRICOLARE: entrambi passano da `runGroqTimetableFallback` (one-shot),
+ * pipeline invariata. ORARIO PERSONALE: entrambi passano dal percorso a DUE
+ * passaggi (`runGroqPersonalTwoPass`, H5) — un solo comportamento Groq.
  */
-/** Ingredienti della chiamata: IDENTICI per Gemini e per entrambi i fallback Groq. */
+/** Ingredienti della chiamata: IDENTICI per Gemini e per il fallback Groq curricolare. */
 interface GroqTimetableAttemptInput {
   systemInstruction: string;
   imageBase64: string;
@@ -1062,19 +1077,239 @@ const GROQ_SEMANTIC_FALLBACK_REASON = "row-docente-non-riconosciuta";
  * risultato torna nello STESSO validatore, senza allentare né correggere alcuna
  * guardia. Se non parte, fallisce o resta incoerente, rimane il 422 di Gemini.
  */
-async function runGroqTimetableRowRetry(
-  input: GroqTimetableAttemptInput & {
-    geminiOk: boolean;
-    personalDocument: boolean;
-    rowNotRecognized: boolean;
-    classTotalsMismatch: boolean;
-  },
-): Promise<{ ok: true; text: string; source: string } | { ok: false }> {
-  return runGroqTimetableAttempt({
+// ---------------------------------------------------------------------------
+// H5 — Percorso Groq a DUE PASSAGGI per l'orario personale
+//
+// Per l'orario personale Groq/Qwen NON legge più il documento in una sola
+// chiamata (trovare il docente + riepilogo + 5 blocchi + tutte le celle). La
+// lettura monolitica sbagliava la riga (`rowLabel`) e H3 rifiutava. Il percorso
+// a due passaggi separa il problema e vale per ENTRAMBI gli ingressi Groq
+// (fallback tecnico e fallback semantico H3/H4): un solo comportamento Groq.
+//
+//   Passo A — `runGroqTeacherRowDetection`: Qwen legge SOLO la colonna dei
+//             docenti e torna le etichette candidate.
+//   Matching server-side — `matchTeacherRowLabel` (strict, `findTeacherRows`):
+//             una sola corrispondenza -> Passo B; zero -> H3; più di una ->
+//             rifiuto conservativo.
+//   Passo B — `runGroqPersonalRowTranscription`: Qwen rilegge la stessa immagine
+//             e trascrive SOLO la riga individuata, con lo stesso contratto H4.
+//
+// H3 e H4 restano obbligatori sul Passo B: il Passo A aiuta solo a focalizzare,
+// non bypassa la guardia d'identità.
+// ---------------------------------------------------------------------------
+
+/** Testo utente del Passo A: nessun nome, nessuna coordinata. */
+const TEACHER_ROW_DETECTION_USER_TEXT = "Leggi la colonna dei nomi dei docenti nella foto/PDF allegata e restituisci le etichette leggibili.";
+
+/**
+ * Esito del percorso a due passaggi.
+ *
+ * Campi tutti sempre presenti (niente union discriminata) perché senza
+ * `strictNullChecks` il narrowing sul letterale `ok` non è disponibile — stessa
+ * scelta di `TimetableDecodeResult`. `kind`:
+ *  - `ok`               -> Passo B riuscito, `text`/`source` valorizzati;
+ *  - `technical`        -> rete/HTTP/budget/payload del provider (fallimento tecnico);
+ *  - `row-not-recognized` / `ambiguous` -> esiti del matching server-side;
+ *  - `skipped`          -> la decisione a monte non attiva Groq.
+ */
+interface GroqTwoPassResult {
+  ok: boolean;
+  text: string;
+  source: string;
+  kind: "ok" | "skipped" | "technical" | "row-not-recognized" | "ambiguous";
+}
+
+/** Passo A: identificazione della riga docente. Contratto DEDICATO (solo etichette). */
+export async function runGroqTeacherRowDetection(input: {
+  imageBase64: string;
+  mimeType: string;
+  signal: AbortSignal;
+  attemptTimeoutMs: number;
+  label?: string;
+}): Promise<{ ok: true; text: string; source: string } | { ok: false }> {
+  const result = await runGroqJson({
+    systemInstruction: buildTeacherRowDetectionPrompt(),
+    userText: TEACHER_ROW_DETECTION_USER_TEXT,
+    imageBase64: input.imageBase64,
+    mimeType: input.mimeType,
+    responseSchema: teacherRowDetectionSchema,
+    signal: input.signal,
+    label: input.label ?? "AI Orari",
+    budgetMs: 0,
+    attemptTimeoutMs: input.attemptTimeoutMs,
+    schemaName: "teacher_rows",
+    phase: "identificazione-riga",
+  });
+  return result.ok ? { ok: true, text: result.text, source: result.source } : { ok: false };
+}
+
+/** Passo B: trascrizione della SOLA riga individuata. Contratto H4 completo. */
+export async function runGroqPersonalRowTranscription(input: {
+  imageBase64: string;
+  mimeType: string;
+  signal: AbortSignal;
+  attemptTimeoutMs: number;
+  targetSurname: string;
+  periodsByDay: readonly number[];
+  identifiedRowLabel: string;
+  label?: string;
+}): Promise<{ ok: true; text: string; source: string } | { ok: false }> {
+  const result = await runGroqJson({
+    // L'etichetta individuata entra SOLO nel prompt del provider, mai nei log.
+    systemInstruction: buildPersonalRowTranscriptionPrompt(input.targetSurname, input.periodsByDay, input.identifiedRowLabel),
+    userText: TIMETABLE_USER_TEXT,
+    imageBase64: input.imageBase64,
+    mimeType: input.mimeType,
+    responseSchema: personalTimetableSchema,
+    signal: input.signal,
+    label: input.label ?? "AI Orari",
+    budgetMs: 0,
+    attemptTimeoutMs: input.attemptTimeoutMs,
+    phase: "trascrizione-riga",
+  });
+  return result.ok ? { ok: true, text: result.text, source: result.source } : { ok: false };
+}
+
+/** Ingredienti comuni ai due ingressi (tecnico e semantico) del percorso a due passaggi. */
+interface GroqPersonalTwoPassInput {
+  imageBase64: string;
+  mimeType: string;
+  signal: AbortSignal;
+  /** Tempo già consumato dentro il deadline dell'endpoint (mai azzerato). */
+  elapsedMs: number;
+  /** Cognome target: STESSO valore usato dal prompt e dalla guardia H3. */
+  targetSurname: string;
+  periodsByDay: readonly number[];
+  label?: string;
+  /** Iniezione per i test del budget del Passo B. */
+  now?: () => number;
+}
+
+/**
+ * Orchestrazione del percorso a due passaggi.
+ *
+ * La `decision` (tecnica o semantica) è già stata presa dal chiamante. Il budget
+ * Groq residuo viene diviso in modo deterministico (Passo A 40% / Passo B 60%);
+ * se dopo il Passo A non resta abbastanza tempo, il Passo B non parte (errore
+ * controllato). Il testo del Passo B torna al chiamante e prosegue nello STESSO
+ * `decodeAndValidateTimetable`: H3/H4 lo ricontrollano sempre.
+ */
+async function runGroqPersonalTwoPass(
+  input: GroqPersonalTwoPassInput & { decision: GroqFallbackDecision; reason: string; silentReasons: readonly string[] },
+): Promise<GroqTwoPassResult> {
+  const label = input.label ?? "AI Orari";
+  const now = input.now ?? Date.now;
+  const remainingBudgetMs = TIMETABLE_ANALYSIS_TIMEOUT_MS - input.elapsedMs;
+
+  if (!input.decision.proceed) {
+    if (!input.silentReasons.includes(input.decision.reason)) {
+      console.log(`[${label}] fallback=groq saltato motivo=${input.decision.reason}`);
+    }
+    return { ok: false, text: "", source: "", kind: "skipped" };
+  }
+
+  // Divisione deterministica del budget residuo: mai due timeout indipendenti
+  // che sommati sforino il deadline dell'endpoint.
+  const budgets = groqTwoPassBudgets(remainingBudgetMs);
+  if (budgets.passA === 0) {
+    console.log(`[${label}] provider=groq fase=identificazione-riga esito=fallito categoria=budget-esaurito`);
+    return { ok: false, text: "", source: "", kind: "technical" };
+  }
+
+  // Solo motivo, MIME e budget: mai etichette di riga, nomi, OCR, JSON o classi.
+  console.log(`[${label}] fallback=groq motivo=${input.reason} mime=${input.mimeType} budgetMs=${remainingBudgetMs} percorso=due-passaggi`);
+
+  const startedAt = now();
+  // PASSO A — identificazione della riga docente (solo etichette).
+  const detection = await runGroqTeacherRowDetection({
+    imageBase64: input.imageBase64,
+    mimeType: input.mimeType,
+    signal: input.signal,
+    attemptTimeoutMs: budgets.passA,
+    label,
+  });
+  if (!detection.ok) return { ok: false, text: "", source: "", kind: "technical" }; // categoria già loggata da runGroqJson
+
+  // Validatore rigoroso del Passo A: allow-list chiusa, nessun contenuto nei log.
+  let rowLabels: string[];
+  const decoded = parseGeminiJson(detection.text, label);
+  if (!decoded.ok) {
+    console.log(`[${label}] provider=groq fase=identificazione-riga esito=fallito categoria=output-non-interpretabile`);
+    return { ok: false, text: "", source: "", kind: "technical" };
+  }
+  try {
+    rowLabels = validateTeacherRowLabelsPayload(decoded.value);
+  } catch {
+    console.log(`[${label}] provider=groq fase=identificazione-riga esito=fallito categoria=payload-non-valido`);
+    return { ok: false, text: "", source: "", kind: "technical" };
+  }
+  // Solo il CONTEGGio delle righe lette, mai le etichette (variabile a parte per
+  // non interpolare `rowLabels` nella riga di log — resta privacy-safe).
+  const righeLette = rowLabels.length;
+  console.log(`[${label}] provider=groq fase=identificazione-riga esito=ok righe=${righeLette}`);
+
+  // MATCHING SERVER-SIDE — matcher rigoroso già esistente, nessun fuzzy.
+  const match: TeacherRowLabelMatch = matchTeacherRowLabel(rowLabels, input.targetSurname);
+  if (match.status === "none") {
+    console.log(`[${label}] provider=groq fase=identificazione-riga esito=nessuna-corrispondenza`);
+    return { ok: false, text: "", source: "", kind: "row-not-recognized" };
+  }
+  if (match.status === "ambiguous") {
+    console.log(`[${label}] provider=groq fase=identificazione-riga esito=corrispondenze-multiple`);
+    return { ok: false, text: "", source: "", kind: "ambiguous" };
+  }
+
+  // Budget del Passo B ricalcolato sul tempo davvero rimasto dopo il Passo A.
+  const remainingAfterPassA = remainingBudgetMs - (now() - startedAt);
+  const passBTimeout = groqPassBBudget(remainingAfterPassA, budgets.passB);
+  if (passBTimeout === 0) {
+    console.log(`[${label}] provider=groq fase=trascrizione-riga esito=fallito categoria=budget-esaurito`);
+    return { ok: false, text: "", source: "", kind: "technical" };
+  }
+
+  // PASSO B — trascrizione della SOLA riga individuata (stesso contratto H4).
+  const transcription = await runGroqPersonalRowTranscription({
+    imageBase64: input.imageBase64,
+    mimeType: input.mimeType,
+    signal: input.signal,
+    attemptTimeoutMs: passBTimeout,
+    targetSurname: input.targetSurname,
+    periodsByDay: input.periodsByDay,
+    identifiedRowLabel: match.label,
+    label,
+  });
+  if (!transcription.ok) return { ok: false, text: "", source: "", kind: "technical" };
+  console.log(`[${label}] provider=groq fase=trascrizione-riga esito=ok`);
+  return { ok: true, text: transcription.text, source: transcription.source, kind: "ok" };
+}
+
+/** Ingresso TECNICO del percorso a due passaggi: Gemini ha esaurito i tentativi transitori. */
+async function runGroqPersonalTwoPassTechnical(
+  input: GroqPersonalTwoPassInput & { run: GeminiJsonRunResult },
+): Promise<GroqTwoPassResult> {
+  return runGroqPersonalTwoPass({
+    ...input,
+    decision: groqFallbackDecision({
+      geminiOk: input.run.ok,
+      geminiTransient: input.run.category !== "ok" && isTransientGeminiCategory(input.run.category),
+      groqConfigured: groqConfigured(),
+      mimeType: input.mimeType,
+      remainingBudgetMs: TIMETABLE_ANALYSIS_TIMEOUT_MS - input.elapsedMs,
+    }),
+    reason: input.run.category,
+    silentReasons: ["gemini-ok"],
+  });
+}
+
+/** Ingresso SEMANTICO del percorso a due passaggi: Gemini ha risposto ma H3/H4 rifiuta. */
+async function runGroqPersonalTwoPassSemantic(
+  input: GroqPersonalTwoPassInput & { geminiOk: boolean; rowNotRecognized: boolean; classTotalsMismatch: boolean },
+): Promise<GroqTwoPassResult> {
+  return runGroqPersonalTwoPass({
     ...input,
     decision: groqSemanticFallbackDecision({
       geminiOk: input.geminiOk,
-      personalDocument: input.personalDocument,
+      personalDocument: true,
       rowNotRecognized: input.rowNotRecognized,
       classTotalsMismatch: input.classTotalsMismatch,
       groqConfigured: groqConfigured(),
@@ -1082,9 +1317,24 @@ async function runGroqTimetableRowRetry(
       remainingBudgetMs: TIMETABLE_ANALYSIS_TIMEOUT_MS - input.elapsedMs,
     }),
     reason: input.classTotalsMismatch ? "totali-classi-incoerenti" : GROQ_SEMANTIC_FALLBACK_REASON,
-    // Non sono eventi: descrivono una richiesta che non è il caso previsto.
     silentReasons: ["documento-non-personale", "errore-non-semantico"],
   });
+}
+
+/**
+ * Budget concesso a Gemini per l'analisi dell'orario.
+ *
+ * Quando il documento è un'immagine supportata da Groq e `GROQ_API_KEY` è
+ * configurata, Gemini NON può consumare tutto `TIMETABLE_ANALYSIS_TIMEOUT_MS`:
+ * si riserva `GROQ_TIMETABLE_RESERVED_MS` al percorso Groq a due passaggi, così
+ * un Gemini lento non brucia più la finestra del fallback (`budget-esaurito`).
+ * Il deadline TOTALE dell'endpoint resta invariato: cambia solo il budget di
+ * Gemini. PDF e assenza di chiave -> nessuna riserva, budget pieno come prima.
+ */
+export function timetableGeminiBudgetMs(mimeType: string, groqAvailable: boolean): number {
+  return groqAvailable && groqSupportsMimeType(mimeType)
+    ? TIMETABLE_ANALYSIS_TIMEOUT_MS - GROQ_TIMETABLE_RESERVED_MS
+    : TIMETABLE_ANALYSIS_TIMEOUT_MS;
 }
 
 app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnalysisPayload), async (req, res) => {
@@ -1151,6 +1401,13 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
         };
       }
     };
+    // H5 — Budget RISERVATO a Groq: se il documento è un'immagine e Groq è
+    // configurato, Gemini non può consumare tutto il deadline. Il deadline TOTALE
+    // dell'endpoint (`controller`/`TIMETABLE_ANALYSIS_TIMEOUT_MS`) resta invariato:
+    // cambia solo il budget passato a Gemini, così resta la finestra a due passaggi.
+    const groqAvailableForReserve = groqConfigured() && groqSupportsMimeType(mimeType);
+    const geminiBudgetMs = timetableGeminiBudgetMs(mimeType, groqAvailableForReserve);
+    console.log(`[AI Orari] provider=gemini budgetMs=${geminiBudgetMs} groqRiservatoMs=${TIMETABLE_ANALYSIS_TIMEOUT_MS - geminiBudgetMs}`);
     const analysisStartedAt = Date.now();
     const run = await runGeminiJson({
       systemInstruction,
@@ -1161,7 +1418,7 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
       responseSchema,
       signal: controller.signal,
       label: "AI Orari",
-      budgetMs: TIMETABLE_ANALYSIS_TIMEOUT_MS,
+      budgetMs: geminiBudgetMs,
       thinkingLevel: "low",
     });
     console.log(`[AI Orari] provider=gemini esito=${run.ok ? "ok" : "fallito"} categoria=${run.category} tentativi=${run.attempts.length}`);
@@ -1170,20 +1427,47 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
     let text = run.text;
     let source = run.source;
     if (!run.ok) {
-      const fallback = await runGroqTimetableFallback({
-        run,
-        systemInstruction,
-        imageBase64,
-        mimeType,
-        responseSchema,
-        signal: controller.signal,
-        elapsedMs: Date.now() - analysisStartedAt,
-      });
-      if (!fallback.ok) {
-        return res.status(503).json({ success: false, error: "Il documento non è stato elaborato. Riprova più tardi." });
+      if (isPersonal) {
+        // FALLBACK TECNICO personale: percorso Groq a DUE PASSAGGI (H5). Un esito
+        // di matching (riga non riconosciuta / ambigua) è un 422 conservativo; un
+        // fallimento tecnico o saltato resta il 503 di prima.
+        const two = await runGroqPersonalTwoPassTechnical({
+          run,
+          imageBase64,
+          mimeType,
+          signal: controller.signal,
+          elapsedMs: Date.now() - analysisStartedAt,
+          targetSurname,
+          periodsByDay,
+        });
+        if (!two.ok) {
+          if (two.kind === "row-not-recognized") {
+            return res.status(422).json({ success: false, error: TEACHER_ROW_NOT_RECOGNIZED_MESSAGE });
+          }
+          if (two.kind === "ambiguous") {
+            return res.status(422).json({ success: false, error: TEACHER_ROW_AMBIGUOUS_MESSAGE });
+          }
+          return res.status(503).json({ success: false, error: "Il documento non è stato elaborato. Riprova più tardi." });
+        }
+        text = two.text;
+        source = two.source;
+      } else {
+        // Orario curricolare: pipeline INVARIATA (fallback Groq one-shot).
+        const fallback = await runGroqTimetableFallback({
+          run,
+          systemInstruction,
+          imageBase64,
+          mimeType,
+          responseSchema,
+          signal: controller.signal,
+          elapsedMs: Date.now() - analysisStartedAt,
+        });
+        if (!fallback.ok) {
+          return res.status(503).json({ success: false, error: "Il documento non è stato elaborato. Riprova più tardi." });
+        }
+        text = fallback.text;
+        source = fallback.source;
       }
-      text = fallback.text;
-      source = fallback.source;
     }
     // Runtime validation obbligatoria: il JSON del modello è sempre verificato,
     // qualunque sia il provider che lo ha prodotto. Un solo percorso, usato sia
@@ -1208,29 +1492,32 @@ app.post("/api/analyze-timetable", ...createAnalysisGuards(validateTimetableAnal
       // modello può rileggere la STESSA immagine; geometria, schema, coordinate
       // e payload troncato restano il 422/503 di prima.
       //
-      // La condizione NON è duplicata qui: decide `groqSemanticFallbackDecision`
-      // e basta. Un secondo controllo in questo punto renderebbe i due presidi
-      // reciprocamente mascheranti — allentarne uno non farebbe fallire nulla.
-      const retry = await runGroqTimetableRowRetry({
+      // Per l'orario personale il secondo parere usa lo STESSO percorso a due
+      // passaggi del fallback tecnico (H5): nessun comportamento Groq diverso. La
+      // condizione NON è duplicata qui: decide `groqSemanticFallbackDecision`. Il
+      // curricolare non ha una riga docente da riconoscere e resta col 422 attuale.
+      if (!isPersonal) return rejected();
+      const two = await runGroqPersonalTwoPassSemantic({
         geminiOk: run.ok,
-        personalDocument: isPersonal,
         rowNotRecognized: validated.rowNotRecognized,
         classTotalsMismatch: validated.classTotalsMismatch,
-        systemInstruction,
         imageBase64,
         mimeType,
-        responseSchema,
         signal: controller.signal,
         // Budget RESIDUO dell'endpoint: il deadline non viene rimesso a nuovo.
         elapsedMs: Date.now() - analysisStartedAt,
+        targetSurname,
+        periodsByDay,
       });
-      if (!retry.ok) return rejected();
-      // Il secondo tentativo è puramente additivo: vale solo se produce un
-      // payload che supera lo STESSO validatore, guardia d'identità inclusa.
-      const retryValidated = decodeAndValidateTimetable(retry.text);
+      // Qualunque esito che non sia un Passo B riuscito conserva il 422 di Gemini:
+      // il secondo parere può solo AGGIUNGERE un successo, mai cambiare il rifiuto.
+      if (!two.ok) return rejected();
+      // Il secondo parere è puramente additivo: vale solo se produce un payload
+      // che supera lo STESSO validatore, guardia d'identità H3 e H4 incluse.
+      const retryValidated = decodeAndValidateTimetable(two.text);
       if (!retryValidated.ok) return rejected();
       outcome = retryValidated.outcome;
-      source = retry.source;
+      source = two.source;
     }
     if (!isPersonal) {
       // Diagnostica privacy-safe: SOLO conteggi. Mai classi, coordinate, materie,
