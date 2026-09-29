@@ -54,6 +54,16 @@ import {
 } from "../utils/daySwipe";
 
 /**
+ * Coordinata già occupata da un'altra lezione dello STESSO istituto.
+ *
+ * Non è un conflitto di orario in senso lato (due istituti possono benissimo
+ * sovrapporsi): è il fatto che la griglia ha una sola cella per giorno/ora e
+ * la seconda lezione resterebbe invisibile.
+ */
+export const DUPLICATE_SLOT_ERROR =
+  "Esiste già una lezione di questo istituto in questo giorno e in quest'ora. Cambia giorno, ora o istituto.";
+
+/**
  * Porta una lista di fasce ORARIE al numero richiesto, restando nel draft locale.
  *
  * Estensione: ogni nuova fascia parte dall'`endTime` di quella precedente e dura
@@ -286,6 +296,11 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   const [isAddingNewClass, setIsAddingNewClass] = useState(false);
   const [newClassNameInput, setNewClassNameInput] = useState("");
   const [classAddError, setClassAddError] = useState<string | null>(null);
+  /**
+   * Coordinata già occupata nello stesso istituto: si blocca al salvataggio,
+   * non mentre l'utente compone il draft.
+   */
+  const [slotConflictError, setSlotConflictError] = useState<string | null>(null);
 
   // First-use setup state (when timeSlotConfig is not configured)
   const [initFirstHour, setInitFirstHour] = useState("07:50");
@@ -700,6 +715,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
    * virgola. Gli slot già salvati non vengono toccati: nessuna migrazione.
    */
   const handleOpenAdd = (day: 1 | 2 | 3 | 4 | 5 | 6, periodNum: number) => {
+    setSlotConflictError(null);
     // `periods` sono già quelle dell'istituto mostrato: la nuova lezione nasce
     // con i SUOI orari, non con quelli globali o di un'altra scuola.
     const periodConf = periods.find((p) => p.periodNumber === periodNum) || periods[0] || {
@@ -734,6 +750,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   };
 
   const handleEditSlot = (slot: TimetableSlot) => {
+    setSlotConflictError(null);
     editBaseline.current = slot;
     setPeriodClampNotice(null);
     setIsAddingNewClass(false);
@@ -934,6 +951,40 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
       setClassAddError("Seleziona o aggiungi una classe.");
       return;
     }
+    /**
+     * UNA SOLA LEZIONE PER COORDINATA, DENTRO LO STESSO ISTITUTO.
+     *
+     * La griglia mostra una cella per giorno/ora, quindi due lezioni della
+     * stessa scuola sulla stessa coordinata sono di fatto una sola visibile e
+     * l'altra irraggiungibile. Il controllo sta QUI, al salvataggio, e non nei
+     * singoli handler: cambio giorno, cambio ora e cambio istituto possono
+     * portarci, e presidiare il punto di uscita li copre tutti e tre senza
+     * impedire all'utente di comporre liberamente il draft.
+     *
+     * L'identità dell'istituto passa da `effectiveSchoolForSlot`, mai da
+     * `schoolId` grezzo: una lezione legacy (senza istituto) e una esplicita
+     * della primaria occupano la STESSA coordinata, mentre due istituti
+     * diversi restano legittimamente sovrapponibili.
+     *
+     * Il confronto esclude la lezione stessa per `id`: risalvarla senza
+     * spostarla non è un conflitto con sé stessa. L'ambito è l'orario che si
+     * sta modificando — provvisorio e definitivo sono pianificazioni
+     * alternative e non si bloccano a vicenda.
+     */
+    const draftSchoolId = gridSchoolIdOf(editingSlot);
+    const occupied = currentSlots.some(
+      (other) =>
+        other.id !== editingSlot.id &&
+        other.dayOfWeek === editingSlot.dayOfWeek &&
+        other.periodNumber === editingSlot.periodNumber &&
+        gridSchoolIdOf(other) === draftSchoolId
+    );
+    if (occupied) {
+      setSlotConflictError(DUPLICATE_SLOT_ERROR);
+      return;
+    }
+    setSlotConflictError(null);
+
     // Co-teaching fields are optional: drop the empty ones so saved slots stay clean.
     const slot = pruneCoTeachingFields(editingSlot);
     // Su fallimento (CAS/persistenza) si resta nell'editor con l'errore mostrato:
@@ -1878,6 +1929,16 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
               {save.error && (
                 <p role="alert" className="text-sm text-rose-700 bg-rose-50 p-2 rounded-lg">
                   {save.error}
+                </p>
+              )}
+
+              {slotConflictError && (
+                <p
+                  id="slot-conflict-error"
+                  role="alert"
+                  className="text-sm text-rose-700 bg-rose-50 p-2 rounded-lg"
+                >
+                  {slotConflictError}
                 </p>
               )}
 
