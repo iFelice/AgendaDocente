@@ -1,9 +1,10 @@
 import React from "react";
-import { CalendarClock, ListTodo, MapPin, Users } from "lucide-react";
+import { CalendarClock, ChevronDown, ChevronRight, ListTodo, MapPin, Users } from "lucide-react";
 import type { CalendarEvent, Student, StudentScheduledAssessment } from "../types";
 import { formatCivilDateIt, localDateISO } from "../utils/dates";
 import {
   deriveFutureCommitments,
+  derivePastCommitments,
   groupFutureCommitments,
   FUTURE_COMMITMENT_SOURCE_LABELS,
   type FutureCommitmentItem,
@@ -11,9 +12,9 @@ import {
 } from "../utils/futureCommitments";
 
 /**
- * "Note e impegni": proiezione read-only di tutto ciò che il docente deve
- * ricordare da oggi in avanti. Non è un secondo calendario e non possiede
- * archivi propri: tutto è derivato da `events` + `scheduledAssessments`.
+ * "Note e impegni": proiezione read-only degli impegni operativi, con storico
+ * consultabile a scomparsa. Non è un secondo calendario e non possiede archivi
+ * propri: tutto è derivato da `events` + `scheduledAssessments`.
  */
 
 export interface FutureCommitmentsViewProps {
@@ -94,8 +95,10 @@ export const FutureCommitmentsView: React.FC<FutureCommitmentsViewProps> = ({
   onEditEvent,
   todayIso = localDateISO(),
 }) => {
+  const [showPast, setShowPast] = React.useState(false);
   const items = deriveFutureCommitments({ events, scheduledAssessments, students, todayIso });
   const groups = groupFutureCommitments(items, todayIso);
+  const pastItems = derivePastCommitments({ events, scheduledAssessments, students, todayIso });
 
   return (
     <div className="space-y-6" data-view="impegni">
@@ -127,6 +130,33 @@ export const FutureCommitmentsView: React.FC<FutureCommitmentsViewProps> = ({
             </div>
           </section>
         ))
+      )}
+
+      {pastItems.length > 0 && (
+        <section data-past-commitments className="border-t border-stone-200 pt-3">
+          <button
+            type="button"
+            data-past-commitments-toggle
+            aria-expanded={showPast}
+            aria-controls="past-commitments-list"
+            onClick={() => setShowPast(current => !current)}
+            className="flex min-h-[48px] w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-left text-sm font-semibold text-stone-700 hover:bg-stone-100 active:bg-stone-200 transition-colors"
+          >
+            <span className="inline-flex items-center gap-2">
+              {showPast ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+              Note e impegni passati ({pastItems.length})
+            </span>
+            <span className="text-xs font-medium text-stone-500">{showPast ? "Nascondi" : "Mostra"}</span>
+          </button>
+
+          {showPast && (
+            <div id="past-commitments-list" data-past-commitments-list className="mt-2 space-y-2">
+              {pastItems.map(item => (
+                <CommitmentRow key={item.id} item={item} onEditEvent={onEditEvent} />
+              ))}
+            </div>
+          )}
+        </section>
       )}
     </div>
   );
