@@ -15,6 +15,7 @@ import {
   Users,
   BookOpen,
   Bell,
+  ListTodo,
 } from "lucide-react";
 import { TeacherProfile, ViewMode } from "../types";
 import { isSupportTeacherOf } from "../utils/teacherType";
@@ -65,6 +66,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     { id: "oggi", label: "Oggi", icon: Clock },
     { id: "settimana", label: "Settimana", icon: CalendarDays },
     { id: "mese", label: "Mese", icon: Calendar },
+    { id: "impegni", label: "Note e impegni", icon: ListTodo },
     { id: "scadenze", label: "Scadenze & PEI", icon: CheckSquare },
     { id: "classi", label: "Classi & Alunni", icon: Users },
     { id: "registro", label: "Registro", icon: BookOpen },

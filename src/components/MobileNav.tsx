@@ -6,6 +6,7 @@ import {
   Clock,
   FileSearch,
   Grid,
+  ListTodo,
   HelpCircle,
   MoreHorizontal,
   Plus,
@@ -49,6 +50,7 @@ export const MOBILE_NAV_ITEMS: { id: ViewMode | "altro"; label: string; icon: Ic
 
 /** Secondary destinations that live inside the "Altro" sheet. */
 export const MOBILE_MORE_VIEWS: { id: ViewMode; label: string; icon: IconType }[] = [
+  { id: "impegni", label: "Note e impegni", icon: ListTodo },
   { id: "orario", label: "Orario Lezioni", icon: Grid },
   { id: "classi", label: "Classi & Alunni", icon: Users },
   { id: "registro", label: "Registro", icon: BookOpen },
