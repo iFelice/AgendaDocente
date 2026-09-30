@@ -29,15 +29,19 @@ import {
   TimetableType,
 } from "../types";
 import {
-  DEFAULT_PERIOD_SLOTS,
   generateDefaultPeriodSlots,
   getEffectivePeriodSlots,
   planTimeSlotRealignment,
   timeSlotConfigForSchool,
   normalizeClassName,
-  areSlotsMatchingAuto,
 } from "../utils/timeSlots";
 import { MultiChipInput } from "./MultiChipInput";
+import {
+  TimeSlotConfigEditor,
+  createTimeSlotConfigDraft,
+  finalizedTimeSlotConfigDraft,
+  timeSlotConfigEditorMode,
+} from "./TimeSlotConfigEditor";
 import { collectKnownTeacherNames, coTeachingSummary, coTeachingSubjectsOf, pruneCoTeachingFields } from "../utils/coTeaching";
 import { isSupportTeacherOf } from "../utils/teacherType";
 import { DEFAULT_SUBJECTS, mergeSubjectSuggestions, normalizeSubjectName } from "../utils/subjects";
@@ -64,42 +68,9 @@ import {
 export const DUPLICATE_SLOT_ERROR =
   "Esiste già una lezione di questo istituto in questo giorno e in quest'ora. Cambia giorno, ora o istituto.";
 
-/**
- * Porta una lista di fasce ORARIE al numero richiesto, restando nel draft locale.
- *
- * Estensione: ogni nuova fascia parte dall'`endTime` di quella precedente e dura
- * `durationMinutes` — la STESSA regola dell'azione "Aggiungi ulteriore ora", così
- * una scansione personalizzata (con intervalli, ore da 55 minuti, ecc.) viene
- * continuata e non ricalcolata da zero. Per questo NON si usa
- * `periodTimesForIndex`: quella funzione rigenera una scala automatica dalla prima
- * ora e, su fasce personalizzate, produrrebbe orari inventati.
- *
- * Riduzione: si tronca in coda, senza rinumerare le fasce superstiti.
- * Funzione pura: nessuna persistenza, il salvataggio resta il bottone "Salva".
- */
-export function resizePeriodSlotsDraft(
-  slots: PeriodSlot[],
-  targetCount: number,
-  durationMinutes: number
-): PeriodSlot[] {
-  const target = Math.max(1, Math.min(MAX_PERIODS_PER_DAY, Math.floor(targetCount) || 1));
-  if (slots.length === target) return slots;
-  if (slots.length > target) return slots.slice(0, target);
-
-  const extended = [...slots];
-  while (extended.length < target) {
-    const last = extended[extended.length - 1];
-    const startTime = last ? last.endTime : "08:00";
-    const periodNumber = extended.length + 1;
-    extended.push({
-      periodNumber,
-      label: `${periodNumber}ª Ora`,
-      startTime,
-      endTime: generateDefaultPeriodSlots(startTime, 1, durationMinutes)[0].endTime,
-    });
-  }
-  return extended;
-}
+// Il componente condiviso è l'unica fonte della UI/draft delle fasce. Il
+// ri-export conserva la compatibilità degli import pubblici e dei test H7.
+export { resizePeriodSlotsDraft } from "./TimeSlotConfigEditor";
 
 // ---------------------------------------------------------------------------
 // Swipe fra i giorni dell'orario (scorciatoia mobile: i chip restano il controllo
@@ -337,28 +308,13 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
     provisional: TimetableSlot[];
     definitive: TimetableSlot[];
   } | null>(null);
-  const [firstHourTime, setFirstHourTime] = useState(
-    timeSlotConfig?.firstHourStartTime || "07:50"
-  );
-  const [periodsCount, setPeriodsCount] = useState(
-    timeSlotConfig?.periodsPerDay || 6
-  );
-  const [periodDuration, setPeriodDuration] = useState(
-    timeSlotConfig?.standardDurationMinutes || 60
-  );
-  const [customSlotsDraft, setCustomSlotsDraft] = useState(
-    () => getEffectivePeriodSlots(timeSlotConfig)
-  );
-  const [isCustomMode, setIsCustomMode] = useState(false);
-  const [showAdvancedSlots, setShowAdvancedSlots] = useState(false);
-  /**
-   * Quante fasce erano CONFERMATE quando il drawer è stato aperto. Le fasce oltre
-   * questa soglia sono bozze aggiunte in questa sessione e vanno marcate "Da
-   * verificare": è una soglia di sola UI, non viene mai salvata nel PeriodSlot.
-   */
+  /** Draft controllato dal TimeSlotConfigEditor condiviso: mai persistito al cambio campo. */
+  const [slotConfigDraft, setSlotConfigDraft] = useState(() => createTimeSlotConfigDraft(timeSlotConfig));
+  const [slotConfigMode, setSlotConfigMode] = useState(() => timeSlotConfigEditorMode(timeSlotConfig));
+  /** Fasce confermate all'apertura: le successive sono evidenziate come bozze. */
   const [confirmedSlotCount, setConfirmedSlotCount] = useState(0);
-  /** Fasce pre-proposte in modalità automatica all'apertura del drawer (solo avviso). */
-  const [autoProposedSlots, setAutoProposedSlots] = useState(0);
+  /** Il drawer conserva il comportamento H7: auto completa, custom richiede l'azione esplicita. */
+  const [autoCompleteRequiredPeriods, setAutoCompleteRequiredPeriods] = useState(false);
 
   // Mobile selected day filter for compact view
   const [mobileSelectedDay, setMobileSelectedDay] = useState<number | "all">("all");
@@ -515,15 +471,12 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
    * fasce è quello del suo giorno più lungo, quindi cambia col selettore.
    *
    * ATTENZIONE: `activeSchool` descrive QUANTE ore ha ogni giorno (`dayPeriods`),
-   * NON a che ora suonano le campane. Gli orari restano quelli di
-   * `timeSlotConfig`, che è unico per il docente: due istituti con giornate di
-   * lunghezza diversa condividono ancora la stessa scansione oraria.
+   * NON a che ora suonano le campane. Gli orari arrivano da
+   * `activeTimeSlotConfig`: quella school-specific se esiste, altrimenti dal
+   * fallback globale legacy del docente.
    */
   const schoolWeekDays = days.map(d => d.day) as SchoolWeekday[];
   const requiredPeriods = maxPeriodsInWeek(schoolWeekDays, activeSchool, activeTimeSlotConfig);
-  /** Fasce ancora da aggiungere al draft del drawer per coprire il fabbisogno. */
-  const missingSlotCount = Math.max(0, requiredPeriods - customSlotsDraft.length);
-
   /**
    * RIGHE DELLA GRIGLIA.
    *
@@ -1030,46 +983,22 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   };
 
   /**
-   * Apre il drawer delle fasce PER L'ISTITUTO MOSTRATO.
-   *
-   * Il draft parte dalla configurazione EFFETTIVA di quella scuola: la sua se
-   * ce l'ha, altrimenti quella globale come punto di partenza. Aprire il
-   * drawer non crea nulla nel profilo — la configurazione diventa davvero
-   * dell'istituto solo con "Salva".
+   * Apre il drawer delle fasce PER L'ISTITUTO MOSTRATO. Il componente
+   * condiviso riceve un draft locale: aprire non crea alcuna config nella
+   * scuola, nemmeno quando la sorgente è la fallback globale legacy.
    */
   const handleOpenSlotConfig = () => {
     const config = activeTimeSlotConfig;
+    const draft = createTimeSlotConfigDraft(config);
+    const mode = timeSlotConfigEditorMode(config);
     setSlotConfigSchoolId(activeSchool?.id);
-    const effective = getEffectivePeriodSlots(config);
-    const start = config?.firstHourStartTime || effective[0]?.startTime || "07:50";
-    const count = config?.periodsPerDay || effective.length || 6;
-    const duration = config?.standardDurationMinutes || 60;
-    const hasCustomSlots = Boolean(
-      config?.customSlots &&
-      config.customSlots.length > 0 &&
-      !areSlotsMatchingAuto(config.customSlots, start, count, duration)
-    );
-
-    setFirstHourTime(start);
-    setPeriodDuration(duration);
-    setIsCustomMode(hasCustomSlots);
-    setConfirmedSlotCount(effective.length);
-
-    // AUTO: le fasce mancanti sono PRE-PROPOSTE subito, continuando la scansione
-    // automatica con la durata standard (comportamento prevedibile, nessun orario
-    // inventato). CUSTOM: non si tocca nulla, l'utente riceve solo l'avviso e
-    // decide lui. In entrambi i casi si scrive SOLO il draft locale: la
-    // persistenza resta il bottone "Salva".
-    const proposed = !hasCustomSlots && requiredPeriods > effective.length ? requiredPeriods : 0;
-    if (proposed) {
-      setPeriodsCount(proposed);
-      setCustomSlotsDraft(generateDefaultPeriodSlots(start, proposed, duration));
-      setAutoProposedSlots(proposed - effective.length);
-    } else {
-      setPeriodsCount(count);
-      setCustomSlotsDraft(effective);
-      setAutoProposedSlots(0);
-    }
+    setSlotConfigDraft(draft);
+    setSlotConfigMode(mode);
+    setConfirmedSlotCount(getEffectivePeriodSlots(config).length);
+    // H7: per il drawer AUTO si propone subito, CUSTOM conserva il pulsante
+    // esplicito di completamento. La UI e la logica restano comunque quelle del
+    // medesimo TimeSlotConfigEditor usato dal Profilo.
+    setAutoCompleteRequiredPeriods(mode === "auto");
     setIsSlotConfigOpen(true);
   };
 
@@ -1096,76 +1025,9 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [timeSlotConfigOpenRequest?.requestId, timeSlotConfigOpenRequest?.schoolId, activeSchoolId, schools]);
 
-  /**
-   * Completa le fasce mancanti nel DRAFT locale, senza salvare.
-   * In modalità personalizzata continua dall'ultima fascia reale (vedi
-   * `resizePeriodSlotsDraft`); in automatica rigenera la scansione col numero
-   * richiesto. Le nuove fasce restano modificabili fino a "Salva".
-   */
-  const handleCompleteMissingSlots = () => {
-    setPeriodsCount(requiredPeriods);
-    // Le bozze devono essere subito visibili e modificabili, non nascoste
-    // dietro il pannello avanzato richiuso.
-    if (isCustomMode) setShowAdvancedSlots(true);
-    setCustomSlotsDraft(prev =>
-      isCustomMode
-        ? resizePeriodSlotsDraft(prev, requiredPeriods, periodDuration)
-        : generateDefaultPeriodSlots(firstHourTime, requiredPeriods, periodDuration)
-    );
-  };
-
-  // Automatically regenerate slots when base parameters change (if in auto mode)
-  const handleFirstHourChange = (newStart: string) => {
-    setFirstHourTime(newStart);
-    if (!isCustomMode) {
-      const generated = generateDefaultPeriodSlots(newStart, periodsCount, periodDuration);
-      setCustomSlotsDraft(generated);
-    }
-  };
-
-  const handlePeriodsCountChange = (newCount: number) => {
-    const safeCount = Math.max(1, Math.min(MAX_PERIODS_PER_DAY, newCount || 1));
-    setPeriodsCount(safeCount);
-    if (!isCustomMode) {
-      const generated = generateDefaultPeriodSlots(firstHourTime, safeCount, periodDuration);
-      setCustomSlotsDraft(generated);
-      return;
-    }
-    // In modalità personalizzata il campo era INERTE: il valore cambiava a schermo
-    // ma il draft restava com'era, quindi "Salva" riscriveva il vecchio numero di
-    // fasce. Ora il draft viene davvero esteso (continuando dall'ultima fascia) o
-    // troncato; la persistenza resta comunque legata a "Salva".
-    setCustomSlotsDraft(prev => resizePeriodSlotsDraft(prev, safeCount, periodDuration));
-  };
-
-  const handleDurationChange = (newDuration: number) => {
-    const safeDuration = Math.max(15, Math.min(180, newDuration || 60));
-    setPeriodDuration(safeDuration);
-    if (!isCustomMode) {
-      const generated = generateDefaultPeriodSlots(firstHourTime, periodsCount, safeDuration);
-      setCustomSlotsDraft(generated);
-    }
-  };
-
-  // Reset to auto generation from base parameters
-  const handleResetToAuto = () => {
-    const generated = generateDefaultPeriodSlots(firstHourTime, periodsCount, periodDuration);
-    setCustomSlotsDraft(generated);
-    setIsCustomMode(false);
-  };
-
   // Save the new slot config with persistence action
   const handleSaveSlotConfig = async () => {
-    const effectiveSlots = isCustomMode
-      ? customSlotsDraft
-      : generateDefaultPeriodSlots(firstHourTime, periodsCount, periodDuration);
-
-    const newConfig: TimeSlotConfig = {
-      firstHourStartTime: firstHourTime,
-      periodsPerDay: effectiveSlots.length,
-      standardDurationMinutes: periodDuration,
-      customSlots: effectiveSlots,
-    };
+    const newConfig = finalizedTimeSlotConfigDraft(slotConfigDraft, slotConfigMode);
 
     // Le fasce appartengono all'ISTITUTO per cui il drawer è stato aperto. La
     // configurazione globale NON viene toccata: resta il default ereditato
@@ -1255,9 +1117,12 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   };
 
   // =========================================================================
-  // FIRST ACCESS SETUP WIZARD (When timeSlotConfig is not yet configured)
+  // FIRST ACCESS SETUP WIZARD
+  // Una config school-specific salvata dal Profilo è già una scansione valida:
+  // il wizard globale serve solo quando la scuola attiva non ne ha una (né
+  // propria né ereditata dalla globale legacy).
   // =========================================================================
-  if (!timeSlotConfig) {
+  if (!activeTimeSlotConfig) {
     const initialPreviewSlots = generateDefaultPeriodSlots(
       initFirstHour,
       initPeriodsCount,
@@ -2476,241 +2341,16 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
                 </p>
               )}
 
-              <p className="text-stone-600 leading-relaxed">
-                Modifica i parametri base per rigenerare all'istante le fasce delle lezioni, oppure personalizza singolarmente gli orari.
-              </p>
-
-              {/* Fabbisogno dell'istituto non ancora coperto dalle fasce configurate.
-                  L'avviso non salva nulla da solo: propone, l'utente conferma con Salva. */}
-              {missingSlotCount > 0 && (
-                <div role="status" className="p-3 rounded-xl border border-amber-300 bg-amber-50 space-y-2">
-                  <p className="text-[11px] text-amber-900 leading-relaxed">
-                    La tua scuola prevede {requiredPeriods} ore in almeno un giorno:{" "}
-                    {missingSlotCount === 1 ? "manca 1 fascia oraria" : `mancano ${missingSlotCount} fasce orarie`}.
-                  </p>
-                  <button
-                    type="button"
-                    onClick={handleCompleteMissingSlots}
-                    className="px-3 py-2 min-h-[42px] bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-bold rounded-lg inline-flex items-center space-x-1.5"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    <span>
-                      {missingSlotCount === 1 ? "Completa la fascia mancante" : "Completa le fasce mancanti"}
-                    </span>
-                  </button>
-                </div>
-              )}
-
-              {autoProposedSlots > 0 && missingSlotCount === 0 && (
-                <p role="status" className="p-3 text-[11px] text-amber-900 bg-amber-50 rounded-xl border border-amber-300 leading-relaxed">
-                  {autoProposedSlots === 1
-                    ? "Abbiamo proposto 1 fascia in più"
-                    : `Abbiamo proposto ${autoProposedSlots} fasce in più`}{" "}
-                  per coprire le {requiredPeriods} ore previste dalla tua scuola: controlla gli orari e premi Salva per confermarli.
-                </p>
-              )}
-
-              {/* Generator Parameters */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-3.5 bg-stone-50 rounded-xl border border-stone-200">
-                <div>
-                  <label className="block font-medium text-stone-700 mb-1">
-                    Inizio 1ª Ora
-                  </label>
-                  <input
-                    type="time"
-                    value={firstHourTime}
-                    onChange={(e) => handleFirstHourChange(e.target.value)}
-                    className="w-full p-2 border border-stone-300 rounded-lg text-xs font-mono bg-white text-stone-900"
-                  />
-                </div>
-
-                <div>
-                  <label className="block font-medium text-stone-700 mb-1">
-                    Nº fasce orarie
-                  </label>
-                  <input
-                    type="number"
-                    min="1"
-                    max={MAX_PERIODS_PER_DAY}
-                    value={periodsCount}
-                    onChange={(e) => handlePeriodsCountChange(Number(e.target.value))}
-                    className="w-full p-2 border border-stone-300 rounded-lg text-xs bg-white text-stone-900"
-                  />
-                </div>
-
-                <div>
-                  <label className="block font-medium text-stone-700 mb-1">
-                    Durata (minuti)
-                  </label>
-                  <input
-                    type="number"
-                    min="30"
-                    max="120"
-                    step="5"
-                    value={periodDuration}
-                    onChange={(e) => handleDurationChange(Number(e.target.value))}
-                    className="w-full p-2 border border-stone-300 rounded-lg text-xs bg-white text-stone-900"
-                  />
-                </div>
-              </div>
-
-              {/* Mode Status Pill */}
-              <div className="flex items-center justify-between p-2 bg-stone-50 rounded-lg border border-stone-200">
-                <div className="flex items-center space-x-2">
-                  <span
-                    className={`w-2 h-2 rounded-full ${
-                      isCustomMode ? "bg-amber-500" : "bg-emerald-500"
-                    }`}
-                  />
-                  <span className="font-semibold text-stone-700 text-[11px]">
-                    Modalità:{" "}
-                    <strong>
-                      {isCustomMode
-                        ? "Personalizzata (modifiche manuali attive)"
-                        : "Automatica (aggiornamento istantaneo)"}
-                    </strong>
-                  </span>
-                </div>
-                {isCustomMode && (
-                  <button
-                    type="button"
-                    onClick={handleResetToAuto}
-                    className="px-2 py-1 bg-white hover:bg-stone-100 text-stone-700 border border-stone-200 rounded text-[11px] font-semibold flex items-center space-x-1"
-                    title="Rigenera da parametri base"
-                  >
-                    <RotateCcw className="w-3 h-3 text-emerald-700" />
-                    <span>Reimposta Auto</span>
-                  </button>
-                )}
-              </div>
-
-              {/* Advanced Customization Toggle */}
-              <div className="border-t border-stone-100 pt-3">
-                <button
-                  type="button"
-                  onClick={() => setShowAdvancedSlots(!showAdvancedSlots)}
-                  className="flex items-center justify-between w-full py-1 text-xs font-bold text-stone-700 hover:text-stone-900"
-                >
-                  <span>Personalizzazione avanzata singole fasce</span>
-                  {showAdvancedSlots ? (
-                    <ChevronUp className="w-4 h-4 text-stone-500" />
-                  ) : (
-                    <ChevronDown className="w-4 h-4 text-stone-500" />
-                  )}
-                </button>
-
-                {showAdvancedSlots && (
-                  <div className="mt-2 space-y-2 max-h-56 overflow-y-auto pr-1">
-                    <p className="text-[11px] text-stone-500 mb-2">
-                      Modificando una singola ora passerai in modalità personalizzata per gestire intervalli o orari non uniformi.
-                    </p>
-                    {customSlotsDraft.map((slot, index) => (
-                      <div
-                        key={slot.periodNumber}
-                        className={`flex items-center gap-2 p-2 rounded-lg border ${
-                          isCustomMode && index >= confirmedSlotCount
-                            ? "bg-amber-50 border-amber-300"
-                            : "bg-stone-50 border-stone-200"
-                        }`}
-                      >
-                        <span className="w-16 font-bold text-stone-700 shrink-0">
-                          {slot.periodNumber}ª Ora
-                          {isCustomMode && index >= confirmedSlotCount && (
-                            <span className="block text-[9px] font-bold text-amber-700 uppercase tracking-wide">
-                              Da verificare
-                            </span>
-                          )}
-                        </span>
-                        <input
-                          type="time"
-                          value={slot.startTime}
-                          onChange={(e) => {
-                            const val = e.target.value;
-                            setIsCustomMode(true);
-                            setCustomSlotsDraft((prev) =>
-                              prev.map((s, i) =>
-                                i === index ? { ...s, startTime: val } : s
-                              )
-                            );
-                          }}
-                          className="p-1.5 border border-stone-300 rounded text-xs font-mono bg-white w-24"
-                        />
-                        <span className="text-stone-400">–</span>
-                        <input
-                          type="time"
-                          value={slot.endTime}
-                          onChange={(e) => {
-                            const val = e.target.value;
-                            setIsCustomMode(true);
-                            setCustomSlotsDraft((prev) =>
-                              prev.map((s, i) =>
-                                i === index ? { ...s, endTime: val } : s
-                              )
-                            );
-                          }}
-                          className="p-1.5 border border-stone-300 rounded text-xs font-mono bg-white w-24"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setIsCustomMode(true);
-                            setCustomSlotsDraft((prev) =>
-                              prev
-                                .filter((_, i) => i !== index)
-                                .map((s, i) => ({ ...s, periodNumber: i + 1, label: `${i + 1}ª Ora` }))
-                            );
-                          }}
-                          className="p-1 text-stone-400 hover:text-rose-600 ml-auto"
-                          title="Rimuovi questa ora"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    ))}
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsCustomMode(true);
-                        const nextNum = customSlotsDraft.length + 1;
-                        const lastSlot = customSlotsDraft[customSlotsDraft.length - 1];
-                        const start = lastSlot ? lastSlot.endTime : "08:00";
-                        const end = generateDefaultPeriodSlots(start, 1, periodDuration)[0].endTime;
-                        setCustomSlotsDraft((prev) => [
-                          ...prev,
-                          {
-                            periodNumber: nextNum,
-                            label: `${nextNum}ª Ora`,
-                            startTime: start,
-                            endTime: end,
-                          },
-                        ]);
-                      }}
-                      className="inline-flex items-center text-xs font-semibold text-emerald-700 hover:text-emerald-800 p-1"
-                    >
-                      <Plus className="w-3.5 h-3.5 mr-1" />
-                      Aggiungi ulteriore ora
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {/* Preview of Effective Slots */}
-              <div className="bg-emerald-50/50 rounded-xl p-3 border border-emerald-200 text-xs">
-                <span className="font-bold text-emerald-950 block mb-1">
-                  Anteprima scansione oraria ({customSlotsDraft.length} {customSlotsDraft.length === 1 ? "ora" : "ore"}):
-                </span>
-                <div className="flex flex-wrap gap-1.5">
-                  {customSlotsDraft.map((s) => (
-                    <span
-                      key={s.periodNumber}
-                      className="px-2 py-0.5 bg-white border border-emerald-300 text-emerald-900 rounded font-medium text-[11px]"
-                    >
-                      {s.periodNumber}ª: {s.startTime}–{s.endTime}
-                    </span>
-                  ))}
-                </div>
-              </div>
+              <TimeSlotConfigEditor
+                config={slotConfigDraft}
+                requiredPeriods={requiredPeriods}
+                confirmedSlotCount={confirmedSlotCount}
+                mode={slotConfigMode}
+                onModeChange={setSlotConfigMode}
+                onChange={setSlotConfigDraft}
+                autoCompleteRequiredPeriods={autoCompleteRequiredPeriods}
+                context="drawer orario"
+              />
 
               {/* Drawer Footer (sticky on mobile) */}
               <div className="modal-sticky-footer flex justify-end space-x-2 pt-3 border-t border-stone-100 bg-white">

@@ -1,7 +1,7 @@
 import { restoreAndRefresh } from "../services/restoreWorkflow";
 import { usePersistenceAction } from "../hooks/usePersistenceAction";
 import { localDateISO } from "../utils/dates";
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   Download,
   Save,
@@ -23,7 +23,7 @@ import {
   TriangleAlert,
 } from "lucide-react";
 import { User as FirebaseUser } from "firebase/auth";
-import { TeacherProfile, TeacherRole, TeacherRoleKind, TEACHER_ROLE_KINDS, SchoolLevel, CalendarEvent, SchoolProfile, SchoolDayPeriodsConfig, TimeSlotConfig } from "../types";
+import { TeacherProfile, TeacherRole, TeacherRoleKind, TEACHER_ROLE_KINDS, SchoolLevel, CalendarEvent, SchoolProfile, SchoolDayPeriodsConfig, TimeSlotConfig, TimetableSlot } from "../types";
 import { ROLE_LABELS, roleDisplayName } from "../utils/teacherRoles";
 import { formatPersonDisplayName } from "../utils/names";
 import { storage } from "../services/storage";
@@ -37,14 +37,34 @@ import { useManualSync } from "../hooks/useManualSync";
 import { hasActiveSecondarySchool, normalizeTeacherProfile } from "../utils/multiSchool";
 import { DEFAULT_SCHOOL_DAYS, SchoolDayPeriodsEditor } from "./SchoolDayPeriodsEditor";
 import { isSupportTeacherOf } from "../utils/teacherType";
-import { timeSlotConfigForSchool } from "../utils/timeSlots";
+import { planTimeSlotRealignment, timeSlotConfigForSchool } from "../utils/timeSlots";
 import { findMissingTimeSlotCoverage, type MissingTimeSlotCoverage } from "../utils/timeSlotCoverage";
+import { maxPeriodsInWeek } from "../utils/schoolDayPeriods";
+import {
+  TimeSlotConfigEditor,
+  createTimeSlotConfigDraft,
+  finalizedTimeSlotConfigDraft,
+  timeSlotConfigEditorMode,
+  type TimeSlotConfigEditorMode,
+} from "./TimeSlotConfigEditor";
+
+export interface ProfileTimeSlotRealignment {
+  provisional: TimetableSlot[];
+  definitive: TimetableSlot[];
+}
 
 interface ProfileModalProps {
   isOpen: boolean;
   onClose: () => void;
   profile: TeacherProfile;
-  onSaveProfile: (updatedProfile: TeacherProfile, expected?: TeacherProfile) => void | false | Promise<void | false>;
+  /** Saves profile fields and, when confirmed, both timetable archives atomically. */
+  onSaveProfile: (
+    updatedProfile: TeacherProfile,
+    expected?: TeacherProfile,
+    realignment?: ProfileTimeSlotRealignment,
+  ) => void | false | Promise<void | false>;
+  provisionalTimetable?: TimetableSlot[];
+  definitiveTimetable?: TimetableSlot[];
   /** Reports, after a successful save, schools whose longest day still lacks a real bell slot. */
   onMissingTimeSlotCoverage?: (missing: MissingTimeSlotCoverage[]) => void;
   onDataImported: () => void | false | Promise<void | false>;
@@ -62,10 +82,9 @@ interface ProfileModalProps {
   /** Device connectivity, forwarded to the account-sync card (offline message + badge). */
   online?: boolean;
   /**
-   * Fasce orarie del docente. Serve SOLO a dedurre l'ordinario legacy della
-   * struttura giornaliera quando un istituto non l'ha mai configurata
-   * (getEffectivePeriodSlots().length tramite le utility): non e una
-   * configurazione della scuola e non viene mai scritta da questa modale.
+   * Config globale legacy: è solo il punto di partenza per una scuola senza
+   * campane proprie. Il Profilo non la modifica; al Salva materializza invece
+   * una copia coerente in `SchoolProfile.timeSlotConfig`.
    */
   timeSlotConfig?: TimeSlotConfig;
   initialTab?: "profilo" | "backup" | "google";
@@ -101,11 +120,31 @@ export function withPrimaryDayPeriods(profile: TeacherProfile, dayPeriods?: Scho
   };
 }
 
+/**
+ * La config delle campane e la struttura giornata sono due campi della STESSA
+ * SchoolProfile primaria. Tenerli in questo helper rende esplicito che il
+ * salvataggio Profilo non scrive mai la configurazione globale legacy.
+ */
+export function withPrimaryTimeSlotConfig(profile: TeacherProfile, timeSlotConfig: TimeSlotConfig): TeacherProfile {
+  const schools = profile.schools ?? [];
+  const primaryIndex = schools.findIndex(s => s.isPrimary);
+  const targetIndex = primaryIndex >= 0 ? primaryIndex : 0;
+  if (schools.length === 0) return profile;
+  return {
+    ...profile,
+    schools: schools.map((school, index) =>
+      index === targetIndex ? { ...school, timeSlotConfig } : school
+    ),
+  };
+}
+
 export const ProfileModal: React.FC<ProfileModalProps> = ({
   isOpen,
   onClose,
   profile,
   onSaveProfile,
+  provisionalTimetable = [],
+  definitiveTimetable = [],
   onMissingTimeSlotCoverage,
   onDataImported,
   onOpenTutorial,
@@ -147,12 +186,19 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
       setMultiSchoolEnabled(hasActiveSecondarySchool(profile));
       const secondary = (profile.schools ?? []).find(s => !s.isPrimary);
       if (secondary) setSecondarySchool(secondary);
-      // Struttura giornaliera ri-derivata a ogni apertura, come il flag multi-istituto:
-      // dopo un salvataggio o una sincronizzazione account la modale non deve mostrare
-      // lo stato della prima renderizzazione.
-      setPrimaryDayPeriods(primarySchoolOf(profile)?.dayPeriods);
+      // Struttura giornaliera e campane sono ri-derivate a ogni apertura: dopo
+      // un salvataggio/sync la modale non deve mostrare un draft stale. Per i
+      // legacy si legge solo il fallback globale, senza modificarlo.
+      const primary = primarySchoolOf(profile);
+      const sourceConfig = timeSlotConfigForSchool(primary, timeSlotConfig);
+      const draft = createTimeSlotConfigDraft(sourceConfig);
+      setPrimaryDayPeriods(primary?.dayPeriods);
+      setPrimaryTimeSlotDraft(draft);
+      setPrimaryTimeSlotMode(timeSlotConfigEditorMode(sourceConfig));
+      setPrimaryConfirmedSlotCount(draft.customSlots?.length ?? 0);
+      setProfileRealignmentPrompt(null);
     }
-  }, [isOpen, initialTab, profile]);
+  }, [isOpen, initialTab, profile, timeSlotConfig]);
   const [schoolName, setSchoolName] = useState(profile.schoolName);
   const [schoolLevel, setSchoolLevel] = useState<SchoolLevel>(profile.schoolLevel || "ssig");
   const [schoolYear, setSchoolYear] = useState(profile.schoolYear);
@@ -166,6 +212,25 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   const [primaryDayPeriods, setPrimaryDayPeriods] = useState<SchoolDayPeriodsConfig | undefined>(
     () => primarySchoolOf(profile)?.dayPeriods
   );
+  /**
+   * Draft delle campane della primaria. Parte dalla sua config, o dal fallback
+   * globale per i profili legacy, ma viene copiato nella scuola solo al Salva.
+   */
+  const [primaryTimeSlotDraft, setPrimaryTimeSlotDraft] = useState<TimeSlotConfig>(() =>
+    createTimeSlotConfigDraft(timeSlotConfigForSchool(primarySchoolOf(profile), timeSlotConfig))
+  );
+  const [primaryTimeSlotMode, setPrimaryTimeSlotMode] = useState<TimeSlotConfigEditorMode>(() =>
+    timeSlotConfigEditorMode(timeSlotConfigForSchool(primarySchoolOf(profile), timeSlotConfig))
+  );
+  const [primaryConfirmedSlotCount, setPrimaryConfirmedSlotCount] = useState(() =>
+    createTimeSlotConfigDraft(timeSlotConfigForSchool(primarySchoolOf(profile), timeSlotConfig)).customSlots?.length ?? 0
+  );
+  const [profileRealignmentPrompt, setProfileRealignmentPrompt] = useState<{
+    profile: TeacherProfile;
+    count: number;
+    provisional: TimetableSlot[];
+    definitive: TimetableSlot[];
+  } | null>(null);
   const [multiSchoolEnabled, setMultiSchoolEnabled] = useState(hasActiveSecondarySchool(profile));
   const [secondarySchool, setSecondarySchool] = useState<SchoolProfile>(existingSecondary ?? { id: `school-secondary-${profile.id}`, name: "", institutionalEmail: "", campuses: [], schoolLevel: profile.schoolLevel, weeklyHours: undefined, active: true, isPrimary: false });
   const [secondaryCampusInput, setSecondaryCampusInput] = useState("");
@@ -194,11 +259,19 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   // guard, same transient feedback. No second sync engine is ever created here.
   const manualSync = useManualSync({ status: accountSyncStatus, onSyncNow });
 
-  // Each day-period editor must use the bells of its own school (or the global
-  // fallback), otherwise a multi-school profile can display the wrong legacy
-  // ordinary count before the user changes it.
-  const primaryEffectiveTimeSlots = timeSlotConfigForSchool(primarySchoolOf(profile), timeSlotConfig);
+  // L'editor primaria vede il SUO draft di campane in tempo reale; il secondo
+  // istituto conserva per H8 lo scope corrente e usa ancora il proprio fallback.
+  const primaryEffectiveTimeSlots = primaryTimeSlotDraft;
   const secondaryEffectiveTimeSlots = timeSlotConfigForSchool(secondarySchool, timeSlotConfig);
+  const primaryDraftSchool = useMemo(() => {
+    const primary = primarySchoolOf(profile);
+    return primary ? { ...primary, dayPeriods: primaryDayPeriods } : undefined;
+  }, [profile, primaryDayPeriods]);
+  const primaryRequiredPeriods = maxPeriodsInWeek(
+    DEFAULT_SCHOOL_DAYS,
+    primaryDraftSchool,
+    primaryTimeSlotDraft,
+  );
 
   if (!isOpen) return null;
 
@@ -265,6 +338,26 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
     setRoles(roles.filter((_, i) => i !== index));
   };
 
+  /**
+   * Persistenza unica del Profilo: dayPeriods e timeSlotConfig sono già nello
+   * stesso SchoolProfile. L'App può aggiungere al medesimo commit gli archivi
+   * orario quando l'utente conferma il riallineamento.
+   */
+  const persistProfile = async (
+    updatedProfile: TeacherProfile,
+    realignment?: ProfileTimeSlotRealignment,
+  ) => {
+    if (!await save.run(() => onSaveProfile(updatedProfile, editBaseline.current, realignment))) return false;
+    // Normalmente e []: il salvataggio Profilo crea la config school-specific
+    // coerente. Il banner H7 resta una rete di sicurezza per dati esterni.
+    onMissingTimeSlotCoverage?.(
+      findMissingTimeSlotCoverage(updatedProfile, timeSlotConfig, DEFAULT_SCHOOL_DAYS)
+    );
+    setProfileRealignmentPrompt(null);
+    onClose();
+    return true;
+  };
+
   // Save profile
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -290,18 +383,44 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
           (profile.schools ?? []).filter(s => !s.isPrimary).map(s => ({ ...s, active: false }))),
       ],
     };
-    // La primaria puo essere creata/riproiettata dalla normalizzazione (profili legacy):
-    // la struttura giornaliera viene scritta DOPO, sulla primaria definitiva.
-    const normalizedUpdated = withPrimaryDayPeriods(normalizeTeacherProfile(updated), primaryDayPeriods);
-    if (!await save.run(() => onSaveProfile(normalizedUpdated, editBaseline.current))) return;
 
-    // Save dayPeriods exactly as chosen, without inventing bell times. Once the
-    // profile is safely persisted, tell App whether an explicit follow-up in
-    // the existing timetable drawer is needed.
-    onMissingTimeSlotCoverage?.(
-      findMissingTimeSlotCoverage(normalizedUpdated, timeSlotConfig, DEFAULT_SCHOOL_DAYS)
+    // La primaria può essere creata dalla normalizzazione dei profili legacy:
+    // si assegnano poi INSIEME struttura giorno e campane alla primaria finale.
+    const finalizedTimeSlots = finalizedTimeSlotConfigDraft(primaryTimeSlotDraft, primaryTimeSlotMode);
+    const normalizedUpdated = withPrimaryTimeSlotConfig(
+      withPrimaryDayPeriods(normalizeTeacherProfile(updated), primaryDayPeriods),
+      finalizedTimeSlots,
     );
-    onClose();
+    const primary = primarySchoolOf(normalizedUpdated);
+    const schools = normalizedUpdated.schools ?? [];
+    const provisionalPlan = planTimeSlotRealignment(
+      provisionalTimetable,
+      primary,
+      schools,
+      finalizedTimeSlots,
+    );
+    const definitivePlan = planTimeSlotRealignment(
+      definitiveTimetable,
+      primary,
+      schools,
+      finalizedTimeSlots,
+    );
+    const count = provisionalPlan.affected.length + definitivePlan.affected.length;
+
+    // Aggiungere solo la 7ª fascia non tocca 1ª–6ª e quindi non apre questa
+    // conferma; modificare orari già in uso conserva invece la protezione del
+    // drawer Orario, con la stessa scelta esplicita dell'utente.
+    if (count > 0) {
+      setProfileRealignmentPrompt({
+        profile: normalizedUpdated,
+        count,
+        provisional: provisionalPlan.updated,
+        definitive: definitivePlan.updated,
+      });
+      return;
+    }
+
+    await persistProfile(normalizedUpdated);
   };
 
   // Backup Export
@@ -703,6 +822,20 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                 value={primaryDayPeriods}
                 timeSlotConfig={primaryEffectiveTimeSlots}
                 onChange={setPrimaryDayPeriods}
+              />
+
+              {/* Stesso editor controllato del drawer Orario: mentre dayPeriods
+                  cambia, requiredPeriods aggiorna soltanto il draft locale. */}
+              <TimeSlotConfigEditor
+                heading="Fasce orarie"
+                context="istituto principale"
+                config={primaryTimeSlotDraft}
+                requiredPeriods={primaryRequiredPeriods}
+                confirmedSlotCount={primaryConfirmedSlotCount}
+                mode={primaryTimeSlotMode}
+                onModeChange={setPrimaryTimeSlotMode}
+                onChange={setPrimaryTimeSlotDraft}
+                autoCompleteRequiredPeriods
               />
 
               <div className="rounded-xl border border-stone-200 bg-white p-3.5 space-y-3">
@@ -1341,6 +1474,54 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
           )}
         </div>
       </div>
+
+      {/* Stessa protezione del drawer Orario, applicata al salvataggio unico
+          Profilo: le fasce non vengono scritte finché l'utente non decide. */}
+      {profileRealignmentPrompt && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-stone-900/50 backdrop-blur-xs">
+          <div id="profile-realign-dialog" role="dialog" aria-modal="true" aria-labelledby="profile-realign-title" className="w-full max-w-md rounded-2xl border border-stone-200 bg-white p-5 shadow-xl space-y-4">
+            <div>
+              <h3 id="profile-realign-title" className="text-base font-bold text-stone-900">Aggiornare anche le lezioni?</h3>
+              <p id="profile-realign-message" className="mt-1.5 text-xs leading-relaxed text-stone-600">
+                {profileRealignmentPrompt.count === 1 ? "1 lezione ha" : `${profileRealignmentPrompt.count} lezioni hanno`} orari diversi dalle nuove fasce. Gli orari modificati a mano verranno sostituiti solo se scegli di aggiornarli.
+              </p>
+            </div>
+            {save.error && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700">{save.error}</p>}
+            <div className="flex flex-wrap justify-end gap-2">
+              <button
+                id="profile-realign-cancel"
+                type="button"
+                disabled={save.pending}
+                onClick={() => setProfileRealignmentPrompt(null)}
+                className="px-3 py-2 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-lg min-h-[42px]"
+              >
+                Annulla
+              </button>
+              <button
+                id="profile-realign-config-only"
+                type="button"
+                disabled={save.pending}
+                onClick={() => void persistProfile(profileRealignmentPrompt.profile)}
+                className="px-3 py-2 text-xs font-semibold text-stone-700 border border-stone-300 hover:bg-stone-100 rounded-lg min-h-[42px]"
+              >
+                Salva solo le fasce
+              </button>
+              <button
+                id="profile-realign-confirm"
+                type="button"
+                disabled={save.pending}
+                onClick={() => void persistProfile(profileRealignmentPrompt.profile, {
+                  provisional: profileRealignmentPrompt.provisional,
+                  definitive: profileRealignmentPrompt.definitive,
+                })}
+                className="px-3 py-2 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold rounded-lg min-h-[42px]"
+              >
+                Salva e aggiorna
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
