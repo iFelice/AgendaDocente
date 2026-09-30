@@ -7,6 +7,7 @@ import React from 'react';
 import { create, act } from 'react-test-renderer';
 import {
   deriveFutureCommitments,
+  derivePastCommitments,
   groupFutureCommitments,
   civilWeekMonday,
   futureCommitmentGroupFor,
@@ -52,6 +53,10 @@ function assessment(partial: Partial<StudentScheduledAssessment> & { id: string;
 
 function derive(events: CalendarEvent[], assessments: StudentScheduledAssessment[] = []) {
   return deriveFutureCommitments({ events, scheduledAssessments: assessments, students, todayIso: TODAY });
+}
+
+function derivePast(events: CalendarEvent[], assessments: StudentScheduledAssessment[] = []) {
+  return derivePastCommitments({ events, scheduledAssessments: assessments, students, todayIso: TODAY });
 }
 
 function groupOf(items: ReturnType<typeof derive>, id: string) {
@@ -249,5 +254,177 @@ test('click su CalendarEvent riusa EventModal esistente (nessuna seconda UI)', a
   const row = renderer.root.findAll((el: any) => el.props?.['data-commitment-id'] === 'event:a')[0];
   await act(async () => row.props.onClick());
   assert.deepEqual(opened, [target]);
+  await act(async () => renderer.unmount());
+});
+
+// --- N1.1: storico a scomparsa --------------------------------------------
+
+test('storico include ieri ma esclude oggi e futuro', () => {
+  const items = derivePast([
+    event({ id: 'yesterday', date: addDaysISO(TODAY, -1) }),
+    event({ id: 'today', date: TODAY }),
+    event({ id: 'future', date: addDaysISO(TODAY, 1) }),
+  ]);
+  assert.deepEqual(items.map(item => item.id), ['event:yesterday']);
+});
+
+test('storico include CalendarEvent passati sia completati sia non completati', () => {
+  const items = derivePast([
+    event({ id: 'done', date: addDaysISO(TODAY, -1), completed: true }),
+    event({ id: 'open', date: addDaysISO(TODAY, -2), completed: false }),
+  ]);
+  assert.deepEqual(items.map(item => item.id), ['event:done', 'event:open']);
+});
+
+test('storico esclude lezioni passate per categoria o sourceType orario', () => {
+  const items = derivePast([
+    event({ id: 'lesson', date: addDaysISO(TODAY, -1), category: 'lezione' }),
+    event({ id: 'timetable', date: addDaysISO(TODAY, -1), sourceType: 'orario' }),
+    event({ id: 'meeting', date: addDaysISO(TODAY, -1), category: 'riunione' }),
+  ]);
+  assert.deepEqual(items.map(item => item.id), ['event:meeting']);
+});
+
+test('storico mantiene una sola circolare e i badge Circolare, Google e Registro', () => {
+  const circular = event({ id: 'circular', date: addDaysISO(TODAY, -1), sourceType: 'circolare' });
+  const items = derivePast([
+    circular,
+    circular,
+    event({ id: 'google', date: addDaysISO(TODAY, -2), sourceType: 'google_calendar' }),
+    event({ id: 'register', date: addDaysISO(TODAY, -3), sourceType: 'registro' }),
+  ]);
+  assert.deepEqual(items.map(item => [item.id, item.source]), [
+    ['event:circular', 'circolare'],
+    ['event:google', 'google'],
+    ['event:register', 'registro'],
+  ]);
+});
+
+test('storico verifiche include scheduled e completed passate ma esclude cancelled', () => {
+  const items = derivePast([], [
+    assessment({ id: 'scheduled', date: addDaysISO(TODAY, -1), status: 'scheduled' }),
+    assessment({ id: 'completed', date: addDaysISO(TODAY, -2), status: 'completed' }),
+    assessment({ id: 'cancelled', date: addDaysISO(TODAY, -3), status: 'cancelled' }),
+    assessment({ id: 'today', date: TODAY, status: 'scheduled' }),
+  ]);
+  assert.deepEqual(items.map(item => item.id), ['assessment:scheduled', 'assessment:completed']);
+  assert.ok(items.every(item => item.kind === 'scheduled-assessment' && item.source === 'verifica'));
+});
+
+test('storico è ordinato dal più recente al più vecchio e deterministicamente nello stesso giorno', () => {
+  const yesterday = addDaysISO(TODAY, -1);
+  const items = derivePast([
+    event({ id: 'old', date: addDaysISO(TODAY, -4), startTime: '18:00', title: 'Vecchio' }),
+    event({ id: 'late-b', date: yesterday, startTime: '15:00', title: 'B' }),
+    event({ id: 'late-z', date: yesterday, startTime: '15:00', title: 'A' }),
+    event({ id: 'late-a', date: yesterday, startTime: '15:00', title: 'A' }),
+    event({ id: 'early', date: yesterday, startTime: '09:00', title: 'A' }),
+  ]);
+  assert.deepEqual(items.map(item => item.id), [
+    'event:late-a',
+    'event:late-z',
+    'event:late-b',
+    'event:early',
+    'event:old',
+  ]);
+});
+
+test('derivePastCommitments non muta gli array di input e non introduce persistenza', () => {
+  const events = [event({ id: 'b', date: addDaysISO(TODAY, -2) }), event({ id: 'a', date: addDaysISO(TODAY, -1) })];
+  const assessments = [assessment({ id: 'as', date: addDaysISO(TODAY, -3), status: 'completed' })];
+  const before = JSON.stringify({ events, assessments, students });
+  derivePastCommitments({ events, scheduledAssessments: assessments, students, todayIso: TODAY });
+  assert.equal(JSON.stringify({ events, assessments, students }), before);
+  assert.ok(!/db\.|indexedDB|saveEvent|CircularDocument|extractedItems/.test(utilSource));
+});
+
+test('deriveFutureCommitments conserva il contratto N1', () => {
+  const items = derive([
+    event({ id: 'past', date: addDaysISO(TODAY, -1) }),
+    event({ id: 'today', date: TODAY }),
+    event({ id: 'done', date: addDaysISO(TODAY, 1), completed: true }),
+    event({ id: 'lesson', date: addDaysISO(TODAY, 1), category: 'lezione' }),
+    event({ id: 'future', date: addDaysISO(TODAY, 2) }),
+  ], [
+    assessment({ id: 'scheduled-future', date: addDaysISO(TODAY, 1), status: 'scheduled' }),
+    assessment({ id: 'completed-future', date: addDaysISO(TODAY, 1), status: 'completed' }),
+    assessment({ id: 'scheduled-past', date: addDaysISO(TODAY, -1), status: 'scheduled' }),
+  ]);
+  assert.deepEqual(items.map(item => item.id), [
+    'event:today',
+    'assessment:scheduled-future',
+    'event:future',
+  ]);
+});
+
+test('pannello storico è chiuso di default e il click lo apre e lo richiude', async () => {
+  const pastTitle = 'Collegio docenti passato';
+  let renderer: any;
+  await act(async () => {
+    renderer = create(
+      React.createElement(FutureCommitmentsView, {
+        events: [event({ id: 'past', date: addDaysISO(TODAY, -1), title: pastTitle })],
+        scheduledAssessments: [],
+        students,
+        todayIso: TODAY,
+      }),
+    );
+  });
+
+  let toggle = renderer.root.findByProps({ 'data-past-commitments-toggle': true });
+  assert.equal(toggle.props['aria-expanded'], false);
+  assert.ok(!JSON.stringify(renderer.toJSON()).includes(pastTitle));
+  assert.equal(renderer.root.findAllByProps({ 'data-past-commitments-list': true }).length, 0);
+
+  await act(async () => toggle.props.onClick());
+  toggle = renderer.root.findByProps({ 'data-past-commitments-toggle': true });
+  assert.equal(toggle.props['aria-expanded'], true);
+  assert.ok(JSON.stringify(renderer.toJSON()).includes(pastTitle));
+  assert.equal(renderer.root.findAllByProps({ 'data-past-commitments-list': true }).length, 1);
+
+  await act(async () => toggle.props.onClick());
+  assert.equal(renderer.root.findByProps({ 'data-past-commitments-toggle': true }).props['aria-expanded'], false);
+  assert.ok(!JSON.stringify(renderer.toJSON()).includes(pastTitle));
+  await act(async () => renderer.unmount());
+});
+
+test('gruppo storico non viene mostrato quando è vuoto', async () => {
+  let renderer: any;
+  await act(async () => {
+    renderer = create(
+      React.createElement(FutureCommitmentsView, {
+        events: [event({ id: 'today', date: TODAY })],
+        scheduledAssessments: [],
+        students,
+        todayIso: TODAY,
+      }),
+    );
+  });
+  assert.equal(renderer.root.findAllByProps({ 'data-past-commitments': true }).length, 0);
+  assert.ok(!JSON.stringify(renderer.toJSON()).includes('Note e impegni passati'));
+  await act(async () => renderer.unmount());
+});
+
+test('click su CalendarEvent storico riusa onEditEvent; le verifiche restano read-only', async () => {
+  const target = event({ id: 'past', date: addDaysISO(TODAY, -1), title: 'Ultimo collegio' });
+  const opened: CalendarEvent[] = [];
+  let renderer: any;
+  await act(async () => {
+    renderer = create(
+      React.createElement(FutureCommitmentsView, {
+        events: [target],
+        scheduledAssessments: [assessment({ id: 'past-assessment', date: addDaysISO(TODAY, -2), status: 'completed' })],
+        students,
+        todayIso: TODAY,
+        onEditEvent: (item: CalendarEvent) => opened.push(item),
+      }),
+    );
+  });
+  await act(async () => renderer.root.findByProps({ 'data-past-commitments-toggle': true }).props.onClick());
+  const eventRow = renderer.root.findByProps({ 'data-commitment-id': 'event:past' });
+  const assessmentRow = renderer.root.findByProps({ 'data-commitment-id': 'assessment:past-assessment' });
+  await act(async () => eventRow.props.onClick());
+  assert.deepEqual(opened, [target]);
+  assert.equal(assessmentRow.props.onClick, undefined);
   await act(async () => renderer.unmount());
 });

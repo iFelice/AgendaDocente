@@ -3,12 +3,12 @@ import { addDaysISO, civilDayOfWeek, isValidDate, localDateISO } from "./dates";
 import { deriveScheduledAssessmentCalendarItems, scheduledAssessmentTypeLabel } from "./scheduledAssessmentCalendar";
 
 /**
- * "Note e impegni" — proiezione read-only del futuro.
+ * "Note e impegni" — proiezioni read-only operative e storiche.
  *
- * Questa utility NON crea, copia o persiste nulla: deriva a runtime una lista
- * cronologica unica a partire dagli archivi già esistenti (`events`,
- * `scheduledAssessments`, `students`). Un consiglio di classe resta un solo
- * `CalendarEvent`: qui viene soltanto mostrato.
+ * Questa utility NON crea, copia o persiste nulla: deriva a runtime le liste
+ * a partire dagli archivi già esistenti (`events`, `scheduledAssessments`,
+ * `students`). Un consiglio di classe resta un solo `CalendarEvent`: qui viene
+ * soltanto mostrato.
  */
 
 export type FutureCommitmentSource = "agenda" | "circolare" | "verifica" | "google" | "registro";
@@ -88,6 +88,33 @@ export function compareFutureCommitments(a: FutureCommitmentItem, b: FutureCommi
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
+/** Storico: data e ora decrescenti, poi titolo e id come tie-breaker stabili. */
+export function comparePastCommitments(a: FutureCommitmentItem, b: FutureCommitmentItem): number {
+  if (a.date !== b.date) return a.date > b.date ? -1 : 1;
+  const at = a.startTime ?? "";
+  const bt = b.startTime ?? "";
+  if (at !== bt) return at > bt ? -1 : 1;
+  if (a.title !== b.title) return a.title < b.title ? -1 : 1;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+function calendarEventCommitment(event: CalendarEvent): FutureCommitmentItem {
+  return {
+    id: `event:${event.id}`,
+    kind: "calendar-event",
+    date: event.date,
+    ...(event.isAllDay ? {} : event.startTime ? { startTime: event.startTime } : {}),
+    title: event.title,
+    ...(event.notes ? { details: event.notes } : {}),
+    ...(event.className ? { className: event.className } : {}),
+    ...(event.subject ? { subject: event.subject } : {}),
+    ...(event.location ? { location: event.location } : {}),
+    ...(event.schoolId ? { schoolId: event.schoolId } : {}),
+    source: sourceOf(event),
+    originalEvent: event,
+  };
+}
+
 export function futureCommitmentGroupFor(dateIso: string, todayIso: string): FutureCommitmentGroupId {
   if (dateIso === todayIso) return "oggi";
   if (dateIso === addDaysISO(todayIso, 1)) return "domani";
@@ -123,20 +150,7 @@ export function deriveFutureCommitments({
     if (isRoutineLesson(event)) continue;
     if (seenEventIds.has(event.id)) continue;
     seenEventIds.add(event.id);
-    items.push({
-      id: `event:${event.id}`,
-      kind: "calendar-event",
-      date: event.date,
-      ...(event.isAllDay ? {} : event.startTime ? { startTime: event.startTime } : {}),
-      title: event.title,
-      ...(event.notes ? { details: event.notes } : {}),
-      ...(event.className ? { className: event.className } : {}),
-      ...(event.subject ? { subject: event.subject } : {}),
-      ...(event.location ? { location: event.location } : {}),
-      ...(event.schoolId ? { schoolId: event.schoolId } : {}),
-      source: sourceOf(event),
-      originalEvent: event,
-    });
+    items.push(calendarEventCommitment(event));
   }
 
   const seenAssessmentIds = new Set<string>();
@@ -160,6 +174,54 @@ export function deriveFutureCommitments({
   }
 
   return items.sort(compareFutureCommitments);
+}
+
+/**
+ * Derivazione read-only dello storico. I CalendarEvent completati restano
+ * visibili; per le verifiche sono storici sia "scheduled" sia "completed".
+ */
+export function derivePastCommitments({
+  events,
+  scheduledAssessments,
+  students,
+  todayIso = localDateISO(),
+}: DeriveFutureCommitmentsInput): FutureCommitmentItem[] {
+  const items: FutureCommitmentItem[] = [];
+  const seenEventIds = new Set<string>();
+
+  for (const event of events) {
+    if (!event || !isValidDate(event.date)) continue;
+    if (event.date >= todayIso) continue;
+    if (isRoutineLesson(event)) continue;
+    if (seenEventIds.has(event.id)) continue;
+    seenEventIds.add(event.id);
+    items.push(calendarEventCommitment(event));
+  }
+
+  const studentsById = new Map(students.map(student => [student.id, student]));
+  const seenAssessmentIds = new Set<string>();
+  for (const assessment of scheduledAssessments) {
+    if (!assessment || !isValidDate(assessment.date)) continue;
+    if (assessment.date >= todayIso) continue;
+    if (assessment.status !== "scheduled" && assessment.status !== "completed") continue;
+    if (seenAssessmentIds.has(assessment.id)) continue;
+    seenAssessmentIds.add(assessment.id);
+    const student = studentsById.get(assessment.studentId);
+    const typeLabel = scheduledAssessmentTypeLabel[assessment.assessmentType];
+    items.push({
+      id: `assessment:${assessment.id}`,
+      kind: "scheduled-assessment",
+      date: assessment.date,
+      title: `${typeLabel} — ${student?.fullName || "Studente non disponibile"}`,
+      ...(assessment.topic ? { details: assessment.topic } : {}),
+      ...(student?.className ? { className: student.className } : {}),
+      ...(assessment.subject ? { subject: assessment.subject } : {}),
+      source: "verifica",
+      assessmentId: assessment.id,
+    });
+  }
+
+  return items.sort(comparePastCommitments);
 }
 
 /** Gruppi non vuoti, nell'ordine di lettura della schermata. */
