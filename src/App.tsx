@@ -47,6 +47,7 @@ import { TodayView } from "./components/TodayView";
 import { WeekView } from "./components/WeekView";
 import { MonthView } from "./components/MonthView";
 import { DeadlinesView } from "./components/DeadlinesView";
+import { FutureCommitmentsView } from "./components/FutureCommitmentsView";
 const TimetableEditor = lazy(() => import("./components/TimetableEditor").then(module => ({default: module.TimetableEditor})));
 const CircularsArchiveView = lazy(() => import("./components/CircularsArchiveView").then(module => ({default: module.CircularsArchiveView})));
 const ClassesView = lazy(() => import("./components/ClassesView").then(module => ({default: module.ClassesView})));
@@ -893,6 +894,15 @@ export default function App({ initialData }: { initialData: LocalData }) {
             onDeleteEvent={handleDeleteEvent}
             onNavigateToPlanning={handleNavigateToPlanning}
             targetDateIso={planningTargetDate}
+          />
+        )}
+
+        {currentView === "impegni" && (
+          <FutureCommitmentsView
+            events={events}
+            scheduledAssessments={scheduledAssessments}
+            students={students}
+            onEditEvent={handleEditEvent}
           />
         )}
 

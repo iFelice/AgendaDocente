@@ -338,6 +338,7 @@ export type ViewMode =
   | "oggi"
   | "settimana"
   | "mese"
+  | "impegni"
   | "scadenze"
   | "orario"
   | "classi"

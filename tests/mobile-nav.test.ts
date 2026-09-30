@@ -315,10 +315,10 @@ test('"Altro" opens an accessible sheet with the secondary destinations', async 
   assert.equal(byId(renderer, 'mobile-nav-altro').props['aria-expanded'], true);
 
   const sheetText = flatText(dialog);
-  for (const label of ['Orario Lezioni', 'Classi & Alunni', 'Archivio Circolari', 'Analizza Circolare', 'Profilo / Impostazioni', 'Accedi con Google', 'Guida rapida', 'Installa App']) {
+  for (const label of ['Note e impegni', 'Orario Lezioni', 'Classi & Alunni', 'Archivio Circolari', 'Analizza Circolare', 'Profilo / Impostazioni', 'Accedi con Google', 'Guida rapida', 'Installa App']) {
     assert.ok(sheetText.includes(label), `"${label}" must be reachable from Altro`);
   }
-  assert.deepEqual(MOBILE_MORE_VIEWS.map((item) => item.id), ['orario', 'classi', 'registro', 'circolari']);
+  assert.deepEqual(MOBILE_MORE_VIEWS.map((item) => item.id), ['impegni', 'orario', 'classi', 'registro', 'circolari']);
 
   // Choosing a destination closes the sheet and navigates.
   await act(async () => { byId(renderer, 'mobile-more-orario').props.onClick(); });

@@ -1,0 +1,176 @@
+import type { CalendarEvent, Student, StudentScheduledAssessment } from "../types";
+import { addDaysISO, civilDayOfWeek, isValidDate, localDateISO } from "./dates";
+import { deriveScheduledAssessmentCalendarItems, scheduledAssessmentTypeLabel } from "./scheduledAssessmentCalendar";
+
+/**
+ * "Note e impegni" — proiezione read-only del futuro.
+ *
+ * Questa utility NON crea, copia o persiste nulla: deriva a runtime una lista
+ * cronologica unica a partire dagli archivi già esistenti (`events`,
+ * `scheduledAssessments`, `students`). Un consiglio di classe resta un solo
+ * `CalendarEvent`: qui viene soltanto mostrato.
+ */
+
+export type FutureCommitmentSource = "agenda" | "circolare" | "verifica" | "google" | "registro";
+
+export interface FutureCommitmentItem {
+  id: string;
+  kind: "calendar-event" | "scheduled-assessment";
+  date: string;
+  startTime?: string;
+  title: string;
+  details?: string;
+  className?: string;
+  subject?: string;
+  location?: string;
+  schoolId?: string;
+  source: FutureCommitmentSource;
+  originalEvent?: CalendarEvent;
+  assessmentId?: string;
+}
+
+export type FutureCommitmentGroupId = "oggi" | "domani" | "questa-settimana" | "prossima-settimana" | "piu-avanti";
+
+export interface FutureCommitmentGroup {
+  id: FutureCommitmentGroupId;
+  label: string;
+  items: FutureCommitmentItem[];
+}
+
+export const FUTURE_COMMITMENT_GROUP_LABELS: Record<FutureCommitmentGroupId, string> = {
+  oggi: "Oggi",
+  domani: "Domani",
+  "questa-settimana": "Questa settimana",
+  "prossima-settimana": "Prossima settimana",
+  "piu-avanti": "Più avanti",
+};
+
+export const FUTURE_COMMITMENT_SOURCE_LABELS: Record<FutureCommitmentSource, string> = {
+  agenda: "Agenda",
+  circolare: "Circolare",
+  verifica: "Verifica",
+  google: "Google",
+  registro: "Registro",
+};
+
+/** Le normali lezioni dell'orario non sono "impegni": inquinerebbero la lista. */
+function isRoutineLesson(event: CalendarEvent): boolean {
+  return event.category === "lezione" || event.sourceType === "orario";
+}
+
+function sourceOf(event: CalendarEvent): FutureCommitmentSource {
+  switch (event.sourceType) {
+    case "circolare":
+      return "circolare";
+    case "google_calendar":
+      return "google";
+    case "registro":
+      return "registro";
+    default:
+      return "agenda";
+  }
+}
+
+/** Lunedì (civile) della settimana che contiene `iso`; settimana italiana lunedì → domenica. */
+export function civilWeekMonday(iso: string): string {
+  const day = civilDayOfWeek(iso); // 0 = domenica
+  const delta = day === 0 ? -6 : 1 - day;
+  return addDaysISO(iso, delta);
+}
+
+/** Ordine: data, poi ora (gli eventi senza ora precedono), poi titolo, poi id. */
+export function compareFutureCommitments(a: FutureCommitmentItem, b: FutureCommitmentItem): number {
+  if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+  const at = a.startTime ?? "";
+  const bt = b.startTime ?? "";
+  if (at !== bt) return at < bt ? -1 : 1;
+  if (a.title !== b.title) return a.title < b.title ? -1 : 1;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+export function futureCommitmentGroupFor(dateIso: string, todayIso: string): FutureCommitmentGroupId {
+  if (dateIso === todayIso) return "oggi";
+  if (dateIso === addDaysISO(todayIso, 1)) return "domani";
+  const thisMonday = civilWeekMonday(todayIso);
+  const nextMonday = addDaysISO(thisMonday, 7);
+  const weekAfterMonday = addDaysISO(nextMonday, 7);
+  if (dateIso < nextMonday) return "questa-settimana";
+  if (dateIso < weekAfterMonday) return "prossima-settimana";
+  return "piu-avanti";
+}
+
+export interface DeriveFutureCommitmentsInput {
+  events: CalendarEvent[];
+  scheduledAssessments: StudentScheduledAssessment[];
+  students: Student[];
+  todayIso?: string;
+}
+
+/** Derivazione pura: nessuna scrittura, nessuna conversione persistente. */
+export function deriveFutureCommitments({
+  events,
+  scheduledAssessments,
+  students,
+  todayIso = localDateISO(),
+}: DeriveFutureCommitmentsInput): FutureCommitmentItem[] {
+  const items: FutureCommitmentItem[] = [];
+  const seenEventIds = new Set<string>();
+
+  for (const event of events) {
+    if (!event || !isValidDate(event.date)) continue;
+    if (event.date < todayIso) continue;
+    if (event.completed) continue;
+    if (isRoutineLesson(event)) continue;
+    if (seenEventIds.has(event.id)) continue;
+    seenEventIds.add(event.id);
+    items.push({
+      id: `event:${event.id}`,
+      kind: "calendar-event",
+      date: event.date,
+      ...(event.isAllDay ? {} : event.startTime ? { startTime: event.startTime } : {}),
+      title: event.title,
+      ...(event.notes ? { details: event.notes } : {}),
+      ...(event.className ? { className: event.className } : {}),
+      ...(event.subject ? { subject: event.subject } : {}),
+      ...(event.location ? { location: event.location } : {}),
+      ...(event.schoolId ? { schoolId: event.schoolId } : {}),
+      source: sourceOf(event),
+      originalEvent: event,
+    });
+  }
+
+  const seenAssessmentIds = new Set<string>();
+  for (const assessment of deriveScheduledAssessmentCalendarItems(scheduledAssessments, students)) {
+    if (!isValidDate(assessment.date)) continue;
+    if (assessment.date < todayIso) continue;
+    if (seenAssessmentIds.has(assessment.id)) continue;
+    seenAssessmentIds.add(assessment.id);
+    const typeLabel = scheduledAssessmentTypeLabel[assessment.assessmentType];
+    items.push({
+      id: `assessment:${assessment.id}`,
+      kind: "scheduled-assessment",
+      date: assessment.date,
+      title: `${typeLabel} — ${assessment.studentName}`,
+      ...(assessment.topic ? { details: assessment.topic } : {}),
+      ...(assessment.className ? { className: assessment.className } : {}),
+      ...(assessment.subject ? { subject: assessment.subject } : {}),
+      source: "verifica",
+      assessmentId: assessment.id,
+    });
+  }
+
+  return items.sort(compareFutureCommitments);
+}
+
+/** Gruppi non vuoti, nell'ordine di lettura della schermata. */
+export function groupFutureCommitments(
+  items: FutureCommitmentItem[],
+  todayIso: string = localDateISO(),
+): FutureCommitmentGroup[] {
+  const order: FutureCommitmentGroupId[] = ["oggi", "domani", "questa-settimana", "prossima-settimana", "piu-avanti"];
+  const buckets = new Map<FutureCommitmentGroupId, FutureCommitmentItem[]>(order.map(id => [id, []]));
+  for (const item of items) buckets.get(futureCommitmentGroupFor(item.date, todayIso))!.push(item);
+  return order
+    .map(id => ({ id, label: FUTURE_COMMITMENT_GROUP_LABELS[id], items: buckets.get(id)!.slice().sort(compareFutureCommitments) }))
+    .filter(group => group.items.length > 0);
+}
