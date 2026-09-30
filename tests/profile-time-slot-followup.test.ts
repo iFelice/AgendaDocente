@@ -101,28 +101,36 @@ async function saveProfileModal(profile: TeacherProfile, globalConfig: TimeSlotC
   return { renderer, saved, reported };
 }
 
-test('H7 follow-up/1+7: Profilo salva dayPeriods, segnala il mismatch e non crea timeSlotConfig', async () => {
+test('H8/legacy profile: Salva materializza una config school-specific coerente senza toccare la globale', async () => {
   const profile = { ...base, schools: [school('a', 'Scuola A', 7)] } as TeacherProfile;
   const global = config(6);
   const before = structuredClone(global);
   const result = await saveProfileModal(profile, global);
   assert.equal(result.saved.length, 1);
   assert.deepEqual(result.saved[0].schools?.[0].dayPeriods, profile.schools?.[0].dayPeriods);
-  assert.equal(result.saved[0].schools?.[0].timeSlotConfig, undefined);
-  assert.deepEqual(global, before, 'neppure la config globale viene mutata');
-  assert.deepEqual(result.reported[0], [{ schoolId: 'a', schoolName: 'Scuola A', requiredPeriods: 7, effectivePeriods: 6 }]);
+  const schoolConfig = result.saved[0].schools?.[0].timeSlotConfig;
+  assert.equal(schoolConfig?.periodsPerDay, 7);
+  assert.equal(schoolConfig?.customSlots?.length, 7);
+  assert.deepEqual(schoolConfig?.customSlots?.[6], { periodNumber: 7, label: '7ª Ora', startTime: '13:50', endTime: '14:50' });
+  assert.deepEqual(global, before, 'la config globale legacy non viene mutata');
+  assert.deepEqual(result.reported[0], [], 'il flusso Profilo normale non attiva il banner H7');
   result.renderer.unmount();
 });
 
-test('H7 follow-up/10: config custom incompleta resta identica dopo il salvataggio Profilo', async () => {
+test('H8/custom legacy: Salva estende localmente la 7ª fascia e non modifica la globale', async () => {
   const profile = {
     ...base,
     schools: [school('a', 'Scuola A', 7, { timeSlotConfig: custom6 })],
   } as TeacherProfile;
-  const before = structuredClone(custom6);
-  const result = await saveProfileModal(profile, config(6));
-  assert.deepEqual(result.saved[0].schools?.[0].timeSlotConfig, before);
-  assert.equal(result.reported[0][0].schoolId, 'a');
+  const global = config(6);
+  const before = structuredClone(global);
+  const result = await saveProfileModal(profile, global);
+  const saved = result.saved[0].schools?.[0].timeSlotConfig;
+  assert.equal(saved?.periodsPerDay, 7);
+  assert.equal(saved?.customSlots?.length, 7);
+  assert.deepEqual(saved?.customSlots?.[6], { periodNumber: 7, label: '7ª Ora', startTime: '14:00', endTime: '15:00' });
+  assert.deepEqual(global, before, 'la globale resta intatta');
+  assert.deepEqual(result.reported[0], []);
   result.renderer.unmount();
 });
 

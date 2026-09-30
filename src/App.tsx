@@ -79,6 +79,7 @@ import { usePWAUpdates } from "./hooks/usePWAUpdates";
 import type { MissingTimeSlotCoverage, TimeSlotConfigOpenRequest } from "./utils/timeSlotCoverage";
 import { getEffectivePeriodSlots } from "./utils/timeSlots";
 import { MissingTimeSlotCoverageBanner } from "./components/MissingTimeSlotCoverageBanner";
+import type { ProfileTimeSlotRealignment } from "./components/ProfileModal";
 
 export default function App({ initialData }: { initialData: LocalData }) {
   const [profile, setProfile] = useState<TeacherProfile>(() => initialData.profile);
@@ -336,10 +337,24 @@ export default function App({ initialData }: { initialData: LocalData }) {
     applySnapshot(data);
   });
 
-  // Profile Save
-  const handleSaveProfile = withPersistenceFeedback(async (updated: TeacherProfile, expected?: TeacherProfile) => {
-    await storage.saveProfile(updated, expected);
-    showToast("Profilo docente aggiornato con successo.");
+  // Profile Save. Quando il Profilo conferma il riallineamento, profilo
+  // (dayPeriods + campane school-specific) e i due archivi orario condividono
+  // una sola transazione: nessuno stato intermedio può arrivare al sync.
+  const handleSaveProfile = withPersistenceFeedback(async (
+    updated: TeacherProfile,
+    expected?: TeacherProfile,
+    realignment?: ProfileTimeSlotRealignment,
+  ) => {
+    await database.atomic(async () => {
+      await storage.saveProfile(updated, expected);
+      if (realignment) {
+        await storage.saveProvisionalTimetable(realignment.provisional);
+        await storage.saveDefinitiveTimetable(realignment.definitive);
+      }
+    });
+    showToast(realignment
+      ? "Profilo, fasce orarie e lezioni aggiornati con successo."
+      : "Profilo docente aggiornato con successo.");
   });
 
   const handleFinishOnboarding = withPersistenceFeedback(async (
@@ -1050,6 +1065,8 @@ export default function App({ initialData }: { initialData: LocalData }) {
         onClose={() => setIsProfileModalOpen(false)}
         profile={profile}
         timeSlotConfig={timeSlotConfig}
+        provisionalTimetable={provisionalTimetable}
+        definitiveTimetable={definitiveTimetable}
         onSaveProfile={handleSaveProfile}
         onMissingTimeSlotCoverage={setMissingTimeSlotCoverage}
         onDataImported={refreshAllData}
