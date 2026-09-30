@@ -25,6 +25,7 @@ import {
   type TimetableMergeMode,
 } from "../utils/reconstructTimetable";
 import { getEffectivePeriodSlots, timeSlotConfigForSchool } from "../utils/timeSlots";
+import { appendProfileClasses, importedClassesMissingFromProfile } from "../utils/profileClasses";
 import { isSupportTeacherOf } from "../utils/teacherType";
 import { AnalysisProgressBar } from "./AnalysisProgressBar";
 import { RECON_NOTES, crossrefTimetables, reconSignal, type ReconstructedSlot } from "../utils/timetableCrossref";
@@ -266,6 +267,8 @@ export interface DocumentScannerModalProps {
   onOpenCircularWithFile: (info: CircularFileInfo) => void;
   /** Salvataggio confermato dell'orario ricostruito (modello timetable esistente). */
   onSaveReconstructedTimetable: (slots: TimetableSlot[], target: TimetableType, mode: TimetableMergeMode) => void | false | Promise<void | false>;
+  /** Aggiornamento del Profilo tramite il normale flusso di persistenza dell'app. */
+  onSaveProfile?: (profile: TeacherProfile, expected?: TeacherProfile) => void | false | Promise<void | false>;
   /** Salvataggio confermato degli impegni alunni estratti dal registro. */
   onImportStudentCommitments: (events: CalendarEvent[]) => void | false | Promise<void | false>;
 }
@@ -286,6 +289,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
   definitiveTimetable,
   onOpenCircularWithFile,
   onSaveReconstructedTimetable,
+  onSaveProfile,
   onImportStudentCommitments,
 }) => {
   const save = usePersistenceAction();
@@ -375,6 +379,8 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     replaced: number;
     removed: number;
   } | null>(null);
+  /** Classi importate ma ancora assenti dal Profilo: suggerimento post-import, non bloccante. */
+  const [missingProfileClasses, setMissingProfileClasses] = useState<string[]>([]);
   const [savedDirty, setSavedDirty] = useState(false);
 
   /**
@@ -625,6 +631,17 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     scrollModalBodyToTop(node as ScrollableNode | null);
   }, [phaseASaved]);
 
+  useEffect(() => {
+    if (missingProfileClasses.length === 0) return;
+    const stillMissing = importedClassesMissingFromProfile(
+      profile,
+      missingProfileClasses.map(className => ({ className })),
+    );
+    const unchanged = stillMissing.length === missingProfileClasses.length
+      && stillMissing.every((value, index) => value === missingProfileClasses[index]);
+    if (!unchanged) setMissingProfileClasses(stillMissing);
+  }, [profile, missingProfileClasses]);
+
   /**
    * Review personale pronta: la sezione con la scelta «Mantieni e aggiungi /
    * Sovrascrivi orario esistente» viene portata in vista, perché su mobile resta
@@ -694,6 +711,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     setMergeChoice(null);
     setReconWarning(null);
     setPhaseASaved(null);
+    setMissingProfileClasses([]);
     setSavedDirty(false);
     mergeChoiceScrolled.current = false;
   }, [isOpen]);
@@ -1048,6 +1066,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     // viene mai ereditata né pre-selezionata.
     setMergeChoice(null);
     setReconWarning(null);
+    setMissingProfileClasses([]);
     setStep("reconstruct");
   };
 
@@ -1098,10 +1117,28 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
       replaced: preview.replacedCount,
       removed: preview.removedCount,
     });
+    setMissingProfileClasses(importedClassesMissingFromProfile(profile, slots));
     setSavedDirty(false);
     if (withoutClass.length > 0) {
       setReconWarning(`${withoutClass.length} slot senza classe non salvati: completali e salva di nuovo.`);
     }
+  };
+
+  const handleAddMissingProfileClasses = async () => {
+    if (!onSaveProfile || missingProfileClasses.length === 0) return;
+    const updatedClasses = appendProfileClasses(profile.classes ?? [], missingProfileClasses);
+    const unchanged = updatedClasses.length === (profile.classes ?? []).length
+      && updatedClasses.every((value, index) => value === (profile.classes ?? [])[index]);
+    if (unchanged) {
+      setMissingProfileClasses([]);
+      return;
+    }
+    const updatedProfile: TeacherProfile = {
+      ...profile,
+      classes: updatedClasses,
+    };
+    if (!await save.run(() => onSaveProfile(updatedProfile, profile))) return;
+    setMissingProfileClasses([]);
   };
 
   // ---------------------------------------------------------------------------
@@ -1940,6 +1977,49 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                   </p>
                 </div>
               )}
+
+              {phaseASaved && missingProfileClasses.length > 0 && (
+                <div
+                  id="scan-profile-class-suggestion"
+                  role="status"
+                  className="p-3 rounded-xl border border-sky-300 bg-sky-50 text-sky-950 space-y-2"
+                >
+                  <p className="text-sm font-bold">
+                    {missingProfileClasses.length === 1
+                      ? "Nuova classe rilevata nell'orario"
+                      : "Nuove classi rilevate nell'orario"}
+                  </p>
+                  <p className="text-xs">
+                    {missingProfileClasses.length === 1
+                      ? `L'orario contiene la classe ${missingProfileClasses[0]}, che non è ancora presente nel tuo Profilo.`
+                      : `L'orario contiene classi non ancora presenti nel tuo Profilo: ${missingProfileClasses.join(" · ")}.`}
+                  </p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {onSaveProfile && (
+                      <button
+                        type="button"
+                        id="scan-profile-classes-add"
+                        onClick={() => void handleAddMissingProfileClasses()}
+                        disabled={save.pending}
+                        className="min-h-[40px] px-3 rounded-lg bg-sky-700 hover:bg-sky-800 disabled:opacity-50 text-white text-xs font-bold shadow-xs"
+                      >
+                        {missingProfileClasses.length === 1
+                          ? `Aggiungi ${missingProfileClasses[0]} alle mie classi`
+                          : "Aggiungi alle mie classi"}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      id="scan-profile-classes-dismiss"
+                      onClick={() => setMissingProfileClasses([])}
+                      className="min-h-[40px] px-3 rounded-lg text-xs font-semibold text-sky-900 hover:bg-sky-100"
+                    >
+                      Non ora
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 text-xs text-stone-600 space-y-2">
                 <p>
                   Per ogni slot: giorno, ora, classe e materia di compresenza.
