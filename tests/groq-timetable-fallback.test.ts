@@ -2,14 +2,16 @@ import express from 'express';
 import { once } from 'node:events';
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { app, geminiCandidateModels, isTransientGeminiCategory, timetableGeminiBudgetMs } from '../server';
+import { app, geminiCandidateModels, isTransientGeminiCategory, reconstructPersonalRowPayload, timetableGeminiBudgetMs } from '../server';
 import {
   GROQ_CHAT_COMPLETIONS_URL,
   GROQ_IMAGE_MIME_TYPES,
+  GROQ_MAX_CALLS_PER_PHASE,
   GROQ_MIN_ATTEMPT_MS,
   GROQ_REASONING_EFFORT,
   GROQ_REASONING_FORMAT,
   GROQ_RESPONSE_RESERVE_MS,
+  GROQ_RETRY_MIN_ATTEMPT_MS,
   GROQ_TEMPERATURE,
   GROQ_TIMETABLE_RESERVED_MS,
   GROQ_TWO_PASS_A_SHARE,
@@ -21,19 +23,24 @@ import {
   groqFallbackDecision,
   groqJsonSchemaFrom,
   groqPassBBudget,
+  groqRetryAttemptTimeoutMs,
+  groqRetryableCategory,
   groqSemanticFallbackDecision,
   groqSupportsMimeType,
   groqTwoPassBudgets,
   groqVisionModel,
   runGroqJson,
+  runGroqJsonWithTransientRetry,
 } from '../server/groqAnalysis';
 import {
   TIMETABLE_ANALYSIS_TIMEOUT_MS,
   buildCurricularTimetablePrompt,
+  buildPersonalTimetablePrompt,
   buildTeacherRowDetectionPrompt,
   buildPersonalRowTranscriptionPrompt,
   curricularTimetableSchema,
   parseTimetableAiResponse,
+  personalRowTranscriptionSchema,
   personalTimetableSchema,
   teacherRowDetectionSchema,
   TEACHER_ROW_NOT_RECOGNIZED_MESSAGE,
@@ -804,8 +811,9 @@ test('endpoint: testo di Groq non interpretabile -> 503, nessun dettaglio tecnic
 test('endpoint: orario personale con Groq -> la geometria a blocchi è verificata come per Gemini', async () => {
   process.env.GROQ_API_KEY = TEST_GROQ_KEY;
   // Un solo blocco invece di cinque: il validatore personale deve rifiutarlo
-  // anche quando arriva dal Passo B del percorso a due passaggi.
-  const wrongGeometry = JSON.stringify({ rowLabel: 'Rossi M.', days: [{ cells: ['', '', '', '', ''] }] });
+  // anche quando arriva dal Passo B del percorso a due passaggi (H6: senza
+  // rowLabel, che il server ricostruisce dal Passo A).
+  const wrongGeometry = passBPayload([{ cells: ['', '', '', '', ''] }]);
   stubProviders({
     gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
     // Passo A trova la riga (identità ok), il Passo B sbaglia la GEOMETRIA.
@@ -894,6 +902,16 @@ const personalPayload = (rowLabel: string, days: unknown = realDays, declaredCla
   days,
 });
 
+/**
+ * H6 — Payload del PASSO B Groq/Qwen: il modello NON dichiara più la riga, solo
+ * `declaredClassTotals` e `days`. Il server ricostruirà `rowLabel` dal match
+ * certificato del Passo A prima del validatore condiviso.
+ */
+const passBPayload = (days: unknown = realDays, declaredClassTotals?: unknown) => JSON.stringify({
+  ...(declaredClassTotals === undefined ? {} : { declaredClassTotals }),
+  days,
+});
+
 const personalBody = {
   imageBase64: pngBase64,
   mimeType: 'image/png',
@@ -911,12 +929,12 @@ const calls = (host: 'gemini' | 'groq') => intercepted.filter((h) => h === host)
 /** Lista docenti del caso reale (sezione 10): sintetica, nessun dato vero. */
 const REAL_TEACHER_LABELS = ['Camilli', 'Costantini', 'Della Gatta', 'Manganiello', 'Mangraviti'];
 
-test('caso reale: Gemini legge "Mangianello", il Passo A trova "Manganiello" e il Passo B lo trascrive -> 200 senza toccare la geometria', async () => {
+test('caso reale: Gemini legge "Mangianello", il Passo A trova "Manganiello" (riga 4) e il Passo B lo trascrive SENZA rowLabel -> 200 senza toccare la geometria', async () => {
   process.env.GROQ_API_KEY = TEST_GROQ_KEY;
   stubProviders({
     gemini: geminiOk(personalPayload('Mangianello')),
-    // Passo A: elenco etichette (una sola combacia); Passo B: trascrizione corretta.
-    groq: groqTwoPass(REAL_TEACHER_LABELS, personalPayload('Manganiello')),
+    // Passo A: elenco etichette (una sola combacia); Passo B: solo days (H6).
+    groq: groqTwoPass(REAL_TEACHER_LABELS, passBPayload()),
   });
   const restore = captureLogs();
   try {
@@ -949,28 +967,30 @@ test('caso reale: Gemini legge "Mangianello", il Passo A trova "Manganiello" e i
   }
 });
 
-test('fallback semantico: Passo A trova la riga ma il Passo B la sbaglia -> H3 rifiuta (422)', async () => {
+test('H6: un rowLabel sbagliato nel testo del Passo B viene SCARTATO — vince solo il match del Passo A (200)', async () => {
   process.env.GROQ_API_KEY = TEST_GROQ_KEY;
   stubProviders({
     gemini: geminiOk(personalPayload('Mangianello')),
-    // Passo A individua "Manganiello", ma il Passo B trascrive "Manganiell":
-    // H3 lo ricontrolla e rifiuta. Il Passo A NON basta a bypassare H3.
+    // H6: il Passo B non dichiara più la riga. Anche se nel suo testo comparisse
+    // un rowLabel sbagliato ("Manganiell"), il server lo scarta e usa
+    // ESCLUSIVAMENTE il match certificato del Passo A ("Manganiello").
     groq: groqTwoPass(REAL_TEACHER_LABELS, personalPayload('Manganiell')),
   });
   const restore = captureLogs();
   try {
     const res = await postTimetable(personalBody);
-    assert.equal(res.status, 422, 'H3 resta la guardia definitiva del Passo B');
+    assert.equal(res.status, 200, 'il rowLabel finale viene solo dal Passo A, mai dal testo del Passo B');
     const data = await res.json();
-    assert.equal(data.success, false);
-    assert.match(data.error, /Non ho riconosciuto la riga del tuo orario/i, 'messaggio utente invariato');
-    assert.deepEqual(groqPhases, ['detection', 'transcription'], 'i due passaggi partono, ma H3 rifiuta il Passo B');
+    assert.equal(data.success, true);
+    assert.equal(data.rowLabel, 'Manganiello', 'vince il match certificato del Passo A');
+    assert.equal(data.cells.length, REAL_WEEK.reduce((a, b) => a + b, 0), 'geometria e celle invariate');
+    assert.deepEqual(groqPhases, ['detection', 'transcription']);
   } finally {
     restore();
   }
 });
 
-test('fallback semantico: il Passo A fallisce HTTP -> 422 attuale, nessun 503 e nessun crash', async () => {
+test('fallback semantico: il Passo A fallisce HTTP (503, un solo retry) -> 422 attuale, nessun 503 e nessun crash', async () => {
   process.env.GROQ_API_KEY = TEST_GROQ_KEY;
   stubProviders({
     gemini: geminiOk(personalPayload('Mangianello')),
@@ -981,9 +1001,11 @@ test('fallback semantico: il Passo A fallisce HTTP -> 422 attuale, nessun 503 e 
     const res = await postTimetable(personalBody);
     assert.equal(res.status, 422, 'il payload di Gemini era decodificabile: resta il rifiuto di forma');
     assert.match((await res.json()).error, /Non ho riconosciuto la riga del tuo orario/i);
-    // Solo il Passo A parte: il suo fallimento HTTP non fa proseguire al Passo B.
-    assert.deepEqual(groqPhases, ['detection'], 'il Passo B non parte dopo un Passo A fallito');
+    // H6: il 503 del Passo A è transitorio -> UN solo retry, poi ci si ferma.
+    // Il Passo B non parte dopo un Passo A fallito.
+    assert.deepEqual(groqPhases, ['detection', 'detection'], 'un tentativo + un retry del Passo A, mai il Passo B');
     assert.match(logLines.join('\n'), /provider=groq fase=identificazione-riga .* esito=fallito categoria=sovraccarico/);
+    assert.match(logLines.join('\n'), /esito=retry categoria=sovraccarico tentativo=2\/2/);
   } finally {
     restore();
   }
@@ -1109,31 +1131,33 @@ test('fallback semantico: Gemini riconosce la riga -> Groq NON viene chiamato', 
   }
 });
 
-test('fallback tecnico: 503 di Gemini -> Groq a due passaggi, e un Passo B sbagliato NON avvia un secondo parere', async () => {
+test('fallback tecnico: 503 di Gemini -> Groq a due passaggi, e un Passo B fuori forma NON avvia un secondo parere', async () => {
   process.env.GROQ_API_KEY = TEST_GROQ_KEY;
   stubProviders({
     gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
-    groq: groqTwoPass(REAL_TEACHER_LABELS, personalPayload('Manganiello')),
+    groq: groqTwoPass(REAL_TEACHER_LABELS, passBPayload()),
   });
   const restore = captureLogs();
   try {
     // Fallback TECNICO ora a due passaggi: Gemini esaurisce i tentativi, il
-    // Passo A individua la riga e il Passo B la trascrive; passa lo stesso validatore.
+    // Passo A individua la riga e il Passo B la trascrive; il payload
+    // ricostruito dal server (rowLabel dal Passo A) passa lo stesso validatore.
     const ok = await postTimetable(personalBody);
     assert.equal(ok.status, 200, 'fallback tecnico a due passaggi');
     assert.equal((await ok.json()).source, GROQ_VISION_MODEL_DEFAULT);
     assert.deepEqual(groqPhases, ['detection', 'transcription']);
     assert.match(logLines.join('\n'), /fallback=groq motivo=sovraccarico .* percorso=due-passaggi/);
 
-    // Se il Passo B sbaglia la riga, il fallback semantico non riparte (Gemini non
-    // ha prodotto nulla): niente terza chiamata, resta il 422.
+    // Se il Passo B produce un payload fuori forma (un blocco invece di cinque),
+    // il fallback semantico non riparte (Gemini non ha prodotto nulla):
+    // niente terza chiamata, resta il 422 generico.
     stubProviders({
       gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
-      groq: groqTwoPass(REAL_TEACHER_LABELS, personalPayload('Mangianello')),
+      groq: groqTwoPass(REAL_TEACHER_LABELS, passBPayload([{ cells: ['', '', '', '', ''] }])),
     });
     const rejected = await postTimetable(personalBody);
     assert.equal(rejected.status, 422);
-    assert.match((await rejected.json()).error, /Non ho riconosciuto la riga del tuo orario/i);
+    assert.match((await rejected.json()).error, /Analisi non riuscita/i, 'errore di forma: messaggio generico');
     assert.deepEqual(groqPhases, ['detection', 'transcription'], 'solo i due passaggi tecnici, nessun terzo tentativo');
     assert.match(logLines.join('\n'), /fallback=groq saltato motivo=gemini-non-ok/);
   } finally {
@@ -1163,12 +1187,12 @@ function totalsDays(dHours: number, eHours = 6, cHours = 2) {
   });
 }
 
-test('H4 endpoint: Gemini 11/6/2 incoerente -> Passo A + Passo B 10/6/2 coerente -> 200', async () => {
+test('H4 endpoint: Gemini 11/6/2 incoerente -> Passo A + Passo B (senza rowLabel) 10/6/2 coerente -> 200', async () => {
   process.env.GROQ_API_KEY = TEST_GROQ_KEY;
   stubProviders({
     gemini: geminiOk(personalPayload('Manganiello', totalsDays(11), REAL_DECLARED_TOTALS)),
-    // Passo A trova la riga; Passo B produce la trascrizione coerente (10/6/2).
-    groq: groqTwoPass(REAL_TEACHER_LABELS, personalPayload('Manganiello', totalsDays(10), REAL_DECLARED_TOTALS)),
+    // Passo A trova la riga; Passo B (solo declaredClassTotals+days) coerente (10/6/2).
+    groq: groqTwoPass(REAL_TEACHER_LABELS, passBPayload(totalsDays(10), REAL_DECLARED_TOTALS)),
   });
   const restore = captureLogs();
   try {
@@ -1193,7 +1217,7 @@ test('H4 endpoint: Gemini mismatch e Passo B mismatch -> 422 controllato con con
   stubProviders({
     gemini: geminiOk(personalPayload('Manganiello', totalsDays(11), REAL_DECLARED_TOTALS)),
     // Passo A trova la riga, ma il Passo B resta incoerente (9/7/2): H4 rifiuta.
-    groq: groqTwoPass(REAL_TEACHER_LABELS, personalPayload('Manganiello', totalsDays(9, 7, 2), REAL_DECLARED_TOTALS)),
+    groq: groqTwoPass(REAL_TEACHER_LABELS, passBPayload(totalsDays(9, 7, 2), REAL_DECLARED_TOTALS)),
   });
   const restore = captureLogs();
   try {
@@ -1298,7 +1322,7 @@ test('privacy: il percorso a due passaggi non logga riga, nome del profilo, OCR 
   process.env.GROQ_API_KEY = TEST_GROQ_KEY;
   stubProviders({
     gemini: geminiOk(personalPayload('Mangianello')),
-    groq: groqTwoPass(REAL_TEACHER_LABELS, personalPayload('Manganiello')),
+    groq: groqTwoPass(REAL_TEACHER_LABELS, passBPayload()),
   });
   const restore = captureLogs();
   try {
@@ -1321,11 +1345,13 @@ test('privacy: il percorso a due passaggi non logga riga, nome del profilo, OCR 
 });
 
 // ---------------------------------------------------------------------------
-// 8. H5 — PERCORSO GROQ A DUE PASSAGGI (orario personale)
+// 8. H5/H6 — PERCORSO GROQ A DUE PASSAGGI (orario personale)
 //
-// Passo A (identificazione riga) -> matching server-side rigoroso -> Passo B
-// (trascrizione della sola riga). Il Passo A aiuta solo a focalizzare: H3/H4
-// restano la guardia definitiva sul Passo B. Tutti i dati sono sintetici.
+// Passo A (identificazione riga) -> matching server-side rigoroso (strict, mai
+// fuzzy) -> Passo B (trascrizione della sola riga). H6: il Passo B non dichiara
+// più `rowLabel` (schema con solo `declaredClassTotals`+`days`) e il server lo
+// ricostruisce dal match certificato; H3/H4 e il validatore condiviso restano
+// invariati. Tutti i dati sono sintetici.
 // ---------------------------------------------------------------------------
 
 // --- 8a. Validatore del Passo A (allow-list chiusa) --------------------------
@@ -1373,24 +1399,29 @@ test('H5 Passo A validator: rifiuta campi extra, non-array, numeri, oggetti, str
 
 // --- 8b. Matching server-side (strict, findTeacherRows) ----------------------
 
-test('H5 matching: una sola corrispondenza esatta -> matched (mutation A: fuzzy -> fallisce)', () => {
+test('H5/H6 matching: una sola corrispondenza esatta -> matched CON rowIndex (mutation A: fuzzy -> fallisce)', () => {
   // Caso reale (sezione 2): lista Qwen con esattamente una riga compatibile.
   const labels = ['Camilli', 'Costantini', 'Della Gatta', 'Manganiello', 'Mangraviti'];
-  assert.deepEqual(matchTeacherRowLabel(labels, 'Felice Manganiello'), { status: 'matched', label: 'Manganiello' });
+  // H6: il match certifica etichetta E posizione (base 0) dentro la lista validata.
+  assert.deepEqual(matchTeacherRowLabel(labels, 'Felice Manganiello'), { status: 'matched', label: 'Manganiello', rowIndex: 3 });
   // Il cognome può comparire come "COGNOME N." o esteso: resta una sola riga.
-  assert.deepEqual(matchTeacherRowLabel(['Manganiello F.'], 'Felice Manganiello'), { status: 'matched', label: 'Manganiello F.' });
+  assert.deepEqual(matchTeacherRowLabel(['Manganiello F.'], 'Felice Manganiello'), { status: 'matched', label: 'Manganiello F.', rowIndex: 0 });
+  // La posizione segue la riga anche quando non è né la prima né l'ultima.
+  assert.deepEqual(matchTeacherRowLabel(['Camilli', 'Manganiello', 'Mangraviti'], 'Felice Manganiello'), { status: 'matched', label: 'Manganiello', rowIndex: 1 });
 });
 
-test('H5 matching: zero corrispondenze -> none (refuso o cognome diverso, mai un quasi-uguale)', () => {
+test('H5/H6 matching: zero corrispondenze -> none (refuso o cognome diverso, mai un quasi-uguale)', () => {
   // Refuso del Passo A: "Mangianello" NON combacia con il profilo "Manganiello".
   assert.deepEqual(matchTeacherRowLabel(['Camilli', 'Mangianello', 'Costantini'], 'Felice Manganiello'), { status: 'none' });
   // Sottostringa/troncatura: mai una corrispondenza (parola intera).
   assert.deepEqual(matchTeacherRowLabel(['Mangraviti', 'Manganiell', 'Mangan'], 'Felice Manganiello'), { status: 'none' });
   // Lista senza il docente.
   assert.deepEqual(matchTeacherRowLabel(['Camilli', 'Costantini'], 'Felice Manganiello'), { status: 'none' });
+  // Zero match: nessun rowIndex plausibile da propagare.
+  assert.equal(matchTeacherRowLabel(['Mangianello'], 'Felice Manganiello').status, 'none');
 });
 
-test('H5 matching: più di una corrispondenza -> ambiguous (nessuna scelta arbitraria)', () => {
+test('H5/H6 matching: più di una corrispondenza -> ambiguous (nessuna scelta arbitraria)', () => {
   assert.deepEqual(
     matchTeacherRowLabel(['Manganiello F.', 'Manganiello G.'], 'Felice Manganiello'),
     { status: 'ambiguous' },
@@ -1414,14 +1445,59 @@ test('H5 prompt: il Passo A guarda SOLO i nomi dei docenti e non riceve il targe
   assert.equal(converted.additionalProperties, false);
 });
 
-test('H5 prompt: il Passo B riprende il contratto H4 e nomina l etichetta individuata', () => {
-  const promptB = buildPersonalRowTranscriptionPrompt('felice manganiello', REAL_WEEK, 'Manganiello');
-  // Contratto personale completo (P-rules) ereditato dal prompt base.
-  assert.match(promptB, /rowLabel/);
+test('H6 prompt: il Passo B riceve ETICHETTA E POSIZIONE, e NON chiede più rowLabel (mutation: rowLabel reintrodotto o posizione rimossa -> fallisce)', () => {
+  // 'Manganiello' era la riga numero 4 (base 1) della lista del Passo A.
+  const promptB = buildPersonalRowTranscriptionPrompt('felice manganiello', REAL_WEEK, 'Manganiello', 3);
+  // Contratto H4 invariato: riepilogo separato e blocchi giornalieri restano.
   assert.match(promptB, /declaredClassTotals/);
+  assert.match(promptB, /"days"/);
   assert.match(promptB, /RIGA GIÀ INDIVIDUATA DAL SERVER/i);
-  // L'etichetta individuata è nel prompt (solo per il provider).
+  // H6: il prompt riceve l'etichetta E la posizione certificata (base 1).
   assert.match(promptB, /"Manganiello"/);
+  assert.match(promptB, /riga numero 4\b/, 'la posizione (base 1) della riga è nel prompt');
+  assert.match(promptB, /PRIMA riga dei docenti è la numero 1/, 'la convenzione di conteggio è dichiarata');
+  // ...e NON chiede più al modello di dichiarare la riga: nessun rowLabel.
+  assert.doesNotMatch(promptB, /rowLabel/, 'il Passo B non conosce alcun campo rowLabel');
+  assert.match(promptB, /il server associa LUI la trascrizione/i, 'il modello sa che la riga la associa il server');
+  // La posizione segue l'indice: base 0 -> base 1, nessun fuori-scala.
+  assert.match(buildPersonalRowTranscriptionPrompt('felice manganiello', REAL_WEEK, 'Camilli', 0), /riga numero 1\b/);
+});
+
+test('H6 prompt: il prompt di Gemini (percorso monolitico) resta invariato, rowLabel inclusa', () => {
+  // H3 resta invariato per Gemini: stesso prompt con la regola P7 e il campo rowLabel.
+  const geminiPrompt = buildPersonalTimetablePrompt('felice manganiello', REAL_WEEK);
+  assert.match(geminiPrompt, /P7\. In "rowLabel" riporta l'etichetta ESATTA/);
+  assert.match(geminiPrompt, /\{ "rowLabel": "Cognome N\.", "declaredClassTotals":/);
+  assert.match(geminiPrompt, /Riepilogo: "rowLabel" = etichetta della riga letta;/);
+  assert.equal(
+    buildPersonalTimetablePrompt('felice manganiello', REAL_WEEK, { includeRowLabel: true }),
+    geminiPrompt,
+    'il default non cambia di una virgola',
+  );
+  // La variante del Passo B (base del prompt H6) omette SOLO la parte rowLabel.
+  const passBBase = buildPersonalTimetablePrompt('felice manganiello', REAL_WEEK, { includeRowLabel: false });
+  assert.doesNotMatch(passBBase, /rowLabel/);
+  assert.match(passBBase, /P7a\./, 'il riepilogo separato (H4) resta nel prompt');
+  assert.match(passBBase, /P7b\./, 'il divieto di ricalcolo (H4) resta nel prompt');
+});
+
+test('H6 schema: il Passo B contiene SOLO declaredClassTotals e days (mutation: rowLabel reintrodotto -> fallisce)', () => {
+  // Contratto dedicato del Passo B: nessun rowLabel, nessun altro campo.
+  assert.deepEqual(Object.keys(personalRowTranscriptionSchema.properties).sort(), ['days', 'declaredClassTotals']);
+  assert.deepEqual([...personalRowTranscriptionSchema.required].sort(), ['days', 'declaredClassTotals']);
+  assert.equal(JSON.stringify(personalRowTranscriptionSchema).includes('rowLabel'), false, 'rowLabel non compare nello schema');
+  // I sotto-schemi sono gli STESSI OGGETTI del contratto Gemini: geometria e
+  // riepilogo separato non possono divergere fra i due percorsi.
+  assert.equal((personalRowTranscriptionSchema.properties as any).days, (personalTimetableSchema.properties as any).days);
+  assert.equal((personalRowTranscriptionSchema.properties as any).declaredClassTotals, (personalTimetableSchema.properties as any).declaredClassTotals);
+  // Lo Structured Output strict di Groq NON contiene rowLabel.
+  const converted = groqJsonSchemaFrom(personalRowTranscriptionSchema) as Record<string, any>;
+  assert.deepEqual([...converted.required].sort(), ['days', 'declaredClassTotals']);
+  assert.deepEqual(Object.keys(converted.properties).sort(), ['days', 'declaredClassTotals']);
+  assert.equal(converted.additionalProperties, false, 'strict: il provider non può aggiungere campi');
+  // ...e il percorso Gemini resta INVARIATO: rowLabel ancora richiesto (H3).
+  assert.deepEqual(Object.keys(personalTimetableSchema.properties).sort(), ['days', 'declaredClassTotals', 'rowLabel']);
+  assert.deepEqual([...personalTimetableSchema.required].sort(), ['days', 'declaredClassTotals', 'rowLabel']);
 });
 
 // --- 8d. Budget riservato e divisione fra i due passaggi ---------------------
@@ -1473,12 +1549,13 @@ test('H5 budget: il Passo B non parte se dopo il Passo A non resta tempo (requis
 
 // --- 8e. Endpoint: casi del percorso a due passaggi --------------------------
 
-test('H5 endpoint (caso reale sezione 10): fallback tecnico -> Passo A + Passo B -> 200 con 18 ore', async () => {
+test('H6 endpoint (caso reale): fallback tecnico -> Passo A trova la riga + Passo B (senza rowLabel) -> 200 con 18 ore', async () => {
   process.env.GROQ_API_KEY = TEST_GROQ_KEY;
   // Passo B: 3D×10, 3E×6, 1C×2 su geometria [6,6,6,7,6]; riepilogo coerente (H4).
+  // H6: il Passo B NON restituisce rowLabel; il server lo ricostruisce dal Passo A.
   stubProviders({
     gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
-    groq: groqTwoPass(REAL_TEACHER_LABELS, personalPayload('Manganiello', totalsDays(10), REAL_DECLARED_TOTALS)),
+    groq: groqTwoPass(REAL_TEACHER_LABELS, passBPayload(totalsDays(10), REAL_DECLARED_TOTALS)),
   });
   const restore = captureLogs();
   try {
@@ -1503,7 +1580,7 @@ test('H5 endpoint: Passo A zero match -> Passo B NON parte -> H3 (mutation B: pa
   stubProviders({
     gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
     // Lista senza la riga del docente: nessuna corrispondenza rigorosa.
-    groq: groqTwoPass(['Camilli', 'Costantini', 'Della Gatta'], personalPayload('Manganiello')),
+    groq: groqTwoPass(['Camilli', 'Costantini', 'Della Gatta'], passBPayload()),
   });
   const restore = captureLogs();
   try {
@@ -1521,7 +1598,7 @@ test('H5 endpoint: Passo A refuso "Mangianello" con profilo "Manganiello" -> zer
   process.env.GROQ_API_KEY = TEST_GROQ_KEY;
   stubProviders({
     gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
-    groq: groqTwoPass(['Camilli', 'Mangianello', 'Costantini'], personalPayload('Manganiello')),
+    groq: groqTwoPass(['Camilli', 'Mangianello', 'Costantini'], passBPayload()),
   });
   const restore = captureLogs();
   try {
@@ -1539,7 +1616,7 @@ test('H5 endpoint: Passo A più corrispondenze -> rifiuto conservativo (requisit
   stubProviders({
     gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
     // Due righe compatibili col cognome: il server NON sceglie.
-    groq: groqTwoPass(['Manganiello F.', 'Manganiello G.'], personalPayload('Manganiello')),
+    groq: groqTwoPass(['Manganiello F.', 'Manganiello G.'], passBPayload()),
   });
   const restore = captureLogs();
   try {
@@ -1553,9 +1630,9 @@ test('H5 endpoint: Passo A più corrispondenze -> rifiuto conservativo (requisit
   }
 });
 
-test('H5 endpoint: Passo A fallisce HTTP 429/500 -> errore controllato (requisito 16)', async () => {
+test('H6 endpoint: Passo A fallisce HTTP 429/500 -> UN solo retry, poi errore controllato (requisito 16)', async () => {
   process.env.GROQ_API_KEY = TEST_GROQ_KEY;
-  for (const status of [429, 500]) {
+  for (const [status, category] of [[429, 'quota'], [500, 'sovraccarico']] as const) {
     stubProviders({
       gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
       groq: (req) => (req.phase === 'detection' ? { status, body: { error: { message: 'ko' } } } : detectionOk([])),
@@ -1565,16 +1642,18 @@ test('H5 endpoint: Passo A fallisce HTTP 429/500 -> errore controllato (requisit
       const res = await postTimetable(personalBody);
       assert.equal(res.status, 503, `Passo A ${status}: 503 controllato`);
       assert.match((await res.json()).error, /non è stato elaborato/i);
-      assert.deepEqual(groqPhases, ['detection'], `Passo A ${status}: nessun Passo B`);
+      // H6: errore transitorio -> esattamente UN retry (max due chiamate per fase).
+      assert.deepEqual(groqPhases, ['detection', 'detection'], `Passo A ${status}: un tentativo + un retry, nessun Passo B`);
+      assert.match(logLines.join('\n'), new RegExp(`esito=retry categoria=${category} tentativo=2/2`), `Passo A ${status}: retry tracciato`);
     } finally {
       restore();
     }
   }
 });
 
-test('H5 endpoint: Passo B fallisce HTTP 429/500 -> errore controllato (requisito 17)', async () => {
+test('H6 endpoint: Passo B fallisce HTTP 429/500 -> UN solo retry, poi errore controllato (requisito 17)', async () => {
   process.env.GROQ_API_KEY = TEST_GROQ_KEY;
-  for (const status of [429, 500]) {
+  for (const [status, category] of [[429, 'quota'], [500, 'sovraccarico']] as const) {
     stubProviders({
       gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
       groq: (req) => (req.phase === 'detection' ? detectionOk(REAL_TEACHER_LABELS) : { status, body: { error: { message: 'ko' } } }),
@@ -1584,10 +1663,137 @@ test('H5 endpoint: Passo B fallisce HTTP 429/500 -> errore controllato (requisit
       const res = await postTimetable(personalBody);
       assert.equal(res.status, 503, `Passo B ${status}: 503 controllato`);
       assert.match((await res.json()).error, /non è stato elaborato/i);
-      assert.deepEqual(groqPhases, ['detection', 'transcription'], `Passo B ${status}: il Passo A era riuscito`);
+      // H6: il Passo A era riuscito; il Passo B fa un tentativo + UN retry.
+      assert.deepEqual(groqPhases, ['detection', 'transcription', 'transcription'], `Passo B ${status}: un tentativo + un retry`);
+      assert.match(logLines.join('\n'), new RegExp(`esito=retry categoria=${category} tentativo=2/2`), `Passo B ${status}: retry tracciato`);
     } finally {
       restore();
     }
+  }
+});
+
+test('H6 endpoint: Passo A 429 poi OK -> il retry SALVA la fase e il percorso conclude (429/503/rete con un retry)', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  let detectionCalls = 0;
+  let transcriptionCalls = 0;
+  stubProviders({
+    gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
+    groq: (req) => {
+      if (req.phase === 'detection') {
+        detectionCalls += 1;
+        return detectionCalls === 1 ? { status: 429, body: { error: { message: 'rate limit' } } } : detectionOk(REAL_TEACHER_LABELS);
+      }
+      transcriptionCalls += 1;
+      // Passo B: prima un 503 transitorio, poi la trascrizione coerente.
+      return transcriptionCalls === 1
+        ? { status: 503, body: { error: { message: 'overloaded' } } }
+        : { status: 200, body: { choices: [{ message: { content: passBPayload(totalsDays(10), REAL_DECLARED_TOTALS) }, finish_reason: 'stop' }] } };
+    },
+  });
+  const restore = captureLogs();
+  try {
+    const res = await postTimetable(personalBody);
+    assert.equal(res.status, 200, 'un retry per fase salva entrambe le fasi transitorie');
+    const data = await res.json();
+    assert.equal(data.rowLabel, 'Manganiello');
+    assert.equal(data.cells.filter((c: any) => c.raw !== '').length, 18, '18 ore, H4 coerente');
+    assert.deepEqual(groqPhases, ['detection', 'detection', 'transcription', 'transcription']);
+    assert.equal(detectionCalls, 2);
+    assert.equal(transcriptionCalls, 2);
+  } finally {
+    restore();
+  }
+});
+
+test('H6 endpoint: Passo A 400 / 401 / 404 -> NESSUN retry (errori non transitori)', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  for (const status of [400, 401, 404]) {
+    stubProviders({
+      gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
+      groq: (req) => (req.phase === 'detection' ? { status, body: { error: { message: 'ko' } } } : detectionOk(REAL_TEACHER_LABELS)),
+    });
+    const restore = captureLogs();
+    try {
+      const res = await postTimetable(personalBody);
+      assert.equal(res.status, 503, `Passo A ${status}: 503 controllato`);
+      // Mutation "retry su 400": una sola chiamata per fase, nessun retry.
+      assert.deepEqual(groqPhases, ['detection'], `Passo A ${status}: nessun retry`);
+      assert.doesNotMatch(logLines.join('\n'), /esito=retry/, `Passo A ${status}: nessun log di retry`);
+    } finally {
+      restore();
+    }
+  }
+});
+
+test('H6 endpoint: Passo B 400 -> NESSUN retry (errore non transitorio)', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  stubProviders({
+    gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
+    groq: (req) => (req.phase === 'detection' ? detectionOk(REAL_TEACHER_LABELS) : { status: 400, body: { error: { message: 'bad request' } } }),
+  });
+  const restore = captureLogs();
+  try {
+    const res = await postTimetable(personalBody);
+    assert.equal(res.status, 503, 'Passo B 400: 503 controllato');
+    assert.deepEqual(groqPhases, ['detection', 'transcription'], 'una sola chiamata al Passo B: nessun retry su 400');
+    assert.doesNotMatch(logLines.join('\n'), /esito=retry/);
+  } finally {
+    restore();
+  }
+});
+
+test('H6 endpoint: errori transitori PERSISTENTI -> al massimo due chiamate per fase (mutation: retry infinito -> fallisce)', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  // Passo A sempre 429: due chiamate totali, mai una terza.
+  stubProviders({
+    gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
+    groq: (req) => (req.phase === 'detection' ? { status: 429, body: { error: { message: 'rate limit' } } } : detectionOk(REAL_TEACHER_LABELS)),
+  });
+  const restore = captureLogs();
+  try {
+    const res = await postTimetable(personalBody);
+    assert.equal(res.status, 503);
+    assert.deepEqual(groqPhases, ['detection', 'detection'], `max ${GROQ_MAX_CALLS_PER_PHASE} chiamate al Passo A, poi stop`);
+  } finally {
+    restore();
+  }
+  // Passo B sempre 503: una detection + due transcription, mai una terza trascrizione.
+  stubProviders({
+    gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
+    groq: (req) => (req.phase === 'detection' ? detectionOk(REAL_TEACHER_LABELS) : { status: 503, body: { error: { message: 'overloaded' } } }),
+  });
+  const restore2 = captureLogs();
+  try {
+    const res = await postTimetable(personalBody);
+    assert.equal(res.status, 503);
+    assert.deepEqual(groqPhases, ['detection', 'transcription', 'transcription'], `max ${GROQ_MAX_CALLS_PER_PHASE} chiamate al Passo B, poi stop`);
+  } finally {
+    restore2();
+  }
+});
+
+test('H6 endpoint: errore di RETE del Passo B -> UN retry; rete persistente -> due chiamate e stop', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  let transcriptionCalls = 0;
+  const networkFailure = () => { throw new TypeError('fetch failed'); };
+  stubProviders({
+    gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
+    groq: (req) => {
+      if (req.phase === 'detection') return detectionOk(REAL_TEACHER_LABELS);
+      transcriptionCalls += 1;
+      if (transcriptionCalls === 1) return networkFailure();
+      return { status: 200, body: { choices: [{ message: { content: passBPayload(totalsDays(10), REAL_DECLARED_TOTALS) }, finish_reason: 'stop' }] } };
+    },
+  });
+  const restore = captureLogs();
+  try {
+    const res = await postTimetable(personalBody);
+    assert.equal(res.status, 200, 'un errore di rete transitorio viene ritentato una volta');
+    assert.equal((await res.json()).rowLabel, 'Manganiello');
+    assert.deepEqual(groqPhases, ['detection', 'transcription', 'transcription']);
+    assert.match(logLines.join('\n'), /esito=retry categoria=rete tentativo=2\/2/);
+  } finally {
+    restore();
   }
 });
 
@@ -1625,7 +1831,7 @@ test('H5 endpoint: Groq non configurato nel fallback tecnico personale -> 503 at
   }
 });
 
-test('H5 endpoint: forma delle richieste dei due passaggi, etichetta solo nel prompt del Passo B', async () => {
+test('H6 endpoint: forma delle richieste — Passo B senza rowLabel, etichetta E posizione solo nel prompt (mutation: rowLabel reintrodotto o posizione rimossa -> fallisce)', async () => {
   process.env.GROQ_API_KEY = TEST_GROQ_KEY;
   const bodies: any[] = [];
   stubProviders({
@@ -1634,7 +1840,7 @@ test('H5 endpoint: forma delle richieste dei due passaggi, etichetta solo nel pr
       bodies.push(req.body);
       return req.phase === 'detection'
         ? detectionOk(REAL_TEACHER_LABELS)
-        : { status: 200, body: { choices: [{ message: { content: personalPayload('Manganiello') }, finish_reason: 'stop' }] } };
+        : { status: 200, body: { choices: [{ message: { content: passBPayload() }, finish_reason: 'stop' }] } };
     },
   });
   const restore = captureLogs();
@@ -1647,21 +1853,28 @@ test('H5 endpoint: forma delle richieste dei due passaggi, etichetta solo nel pr
     assert.equal(a.response_format.json_schema.name, 'teacher_rows');
     assert.deepEqual(Object.keys(a.response_format.json_schema.schema.properties), ['rowLabels']);
     assert.doesNotMatch(a.messages[0].content, /Manganiello/, 'il Passo A non riceve il target');
-    // Passo B: contratto completo dell orario, con l etichetta individuata nel prompt.
+    // Passo B: lo schema contiene SOLO declaredClassTotals e days (H6), nessun rowLabel.
     assert.equal(b.response_format.json_schema.name, 'timetable_analysis');
+    assert.deepEqual(Object.keys(b.response_format.json_schema.schema.properties).sort(), ['days', 'declaredClassTotals']);
+    assert.deepEqual([...b.response_format.json_schema.schema.required].sort(), ['days', 'declaredClassTotals']);
+    assert.doesNotMatch(JSON.stringify(b.response_format.json_schema.schema), /rowLabel/, 'lo schema del Passo B non chiede rowLabel');
+    // ...e il prompt riceve ETICHETTA ("Manganiello" = riga 4) E POSIZIONE.
     assert.match(b.messages[0].content, /"Manganiello"/, 'l etichetta viaggia SOLO nel prompt del provider');
-    // ...ma NON nei log, non come diagnostica.
+    assert.match(b.messages[0].content, /riga numero 4\b/, 'la posizione della riga (base 1) è nel prompt');
+    assert.doesNotMatch(b.messages[0].content, /rowLabel/, 'il prompt del Passo B non chiede rowLabel');
+    // ...ma NÉ etichetta NÉ posizione finiscono nei log, come sempre.
     assert.doesNotMatch(logLines.join('\n'), /Manganiello/, 'l etichetta individuata non finisce nei log');
+    assert.doesNotMatch(logLines.join('\n'), /riga numero/, 'la posizione non finisce nei log');
   } finally {
     restore();
   }
 });
 
-test('H5 endpoint: Gemini coerente -> nessun passaggio Groq (requisito 11, mutation E)', async () => {
+test('H5/H6 endpoint: Gemini coerente -> nessun passaggio Groq (requisito 11, mutation E)', async () => {
   process.env.GROQ_API_KEY = TEST_GROQ_KEY;
   stubProviders({
     gemini: geminiOk(personalPayload('Manganiello')),
-    groq: groqTwoPass(REAL_TEACHER_LABELS, personalPayload('Manganiello')),
+    groq: groqTwoPass(REAL_TEACHER_LABELS, passBPayload()),
   });
   const restore = captureLogs();
   try {
@@ -1669,6 +1882,243 @@ test('H5 endpoint: Gemini coerente -> nessun passaggio Groq (requisito 11, mutat
     assert.equal(res.status, 200);
     assert.equal((await res.json()).source, geminiCandidateModels()[0]);
     assert.deepEqual(groqPhases, [], 'niente da correggere: nessun passaggio Groq');
+  } finally {
+    restore();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 9. H6 — rowLabel RICOSTRUITO DAL SERVER + RETRY TRANSITORIO LIMITATO
+//
+// H6 bind la trascrizione Groq/Qwen alla riga CERTIFICATA dal match strict del
+// Passo A: il Passo B non dichiara più `rowLabel` e il server lo ricostruisce.
+// Inoltre ogni fase (Passo A / Passo B) ha AL PIÙ un retry, solo su errori
+// transitori (429/503/rete) e solo con budget residuo.
+// ---------------------------------------------------------------------------
+
+// --- 9a. Ricostruzione del payload (rowLabel SOLO dal match del Passo A) -----
+
+test('H6 ricostruzione: rowLabel viene ESCLUSIVAMENTE dal match, ogni altro campo del modello è scartato', () => {
+  // Il Passo B restituisce solo i due campi del contratto: il server aggiunge rowLabel.
+  assert.deepEqual(
+    JSON.parse(reconstructPersonalRowPayload({ declaredClassTotals: [{ classLabel: '3D', hours: 10 }], days: [{ cells: ['3D'] }] }, 'Manganiello')!),
+    { rowLabel: 'Manganiello', declaredClassTotals: [{ classLabel: '3D', hours: 10 }], days: [{ cells: ['3D'] }] },
+  );
+  // Mutation "rowLabel dal Passo B": anche un rowLabel nel testo del modello
+  // viene SCARTATO (nessuno lo legge), insieme a qualunque campo extra.
+  const tampered = reconstructPersonalRowPayload(
+    { rowLabel: 'AltroDocente', declaredClassTotals: [], days: [], cells: ['3D'], iniezione: 'testo' },
+    'Manganiello',
+  )!;
+  assert.deepEqual(JSON.parse(tampered), { rowLabel: 'Manganiello', declaredClassTotals: [], days: [] });
+  assert.equal(tampered.includes('AltroDocente'), false, 'il contenuto del modello non si propaga');
+  assert.equal(tampered.includes('cells'), false, 'i campi extra restano fuori');
+  assert.equal(tampered.includes('iniezione'), false, 'campi arbitrari scartati');
+  // Un valore non-oggetto è un errore controllato (null), mai un crash.
+  for (const invalid of [null, undefined, 'testo', 42, ['Manganiello'], true]) {
+    assert.equal(reconstructPersonalRowPayload(invalid, 'Manganiello'), null, `rifiutato: ${JSON.stringify(invalid)}`);
+  }
+  // Il payload ricostruito passa il validatore condiviso ESATTAMENTE come quello
+  // di Gemini: H3 (matcher strict) e geometria inclusi. Caso reale: 18 ore.
+  const reconstructed = JSON.parse(reconstructPersonalRowPayload(
+    { declaredClassTotals: REAL_DECLARED_TOTALS, days: totalsDays(10) },
+    'Manganiello',
+  )!);
+  const outcome = parseTimetableAiResponse('personal-support-timetable', reconstructed, 'Felice Manganiello', REAL_WEEK);
+  assert.equal(outcome.rowLabel, 'Manganiello');
+  assert.equal(outcome.cells.filter((c) => c.raw !== '').length, 18, '18 ore, H4 coerente');
+});
+
+// --- 9b. Retry: decisioni pure (transitorie vs non, con budget residuo) ------
+
+test('H6 retry: SOLO 429 (quota), 503 (sovraccarico) e rete sono ritentabili', () => {
+  for (const category of ['quota', 'sovraccarico', 'rete'] as const) {
+    assert.equal(groqRetryableCategory(category), true, `${category} è transitorio`);
+  }
+  // Tutto il resto non lo è: 400/richiesta-non-valida, autenticazione,
+  // modello-non-trovato, deadline, errori di forma/output, budget, abort, ok.
+  for (const category of [
+    'richiesta-non-valida',
+    'chiave-o-permessi',
+    'modello-non-trovato',
+    'deadline',
+    'output-vuoto',
+    'output-troncato',
+    'budget-esaurito',
+    'annullata',
+    'non-configurato',
+    'mime-non-supportato',
+    'sconosciuta',
+    'ok',
+  ] as const) {
+    assert.equal(groqRetryableCategory(category), false, `${category} NON si ritenta`);
+    assert.equal(groqRetryAttemptTimeoutMs(category, 30_000), 0, `${category}: nessun timeout di retry`);
+  }
+  // Classificazione HTTP coerente: 400 e 503 mappano dove devono.
+  assert.equal(classifyGroqHttpStatus(503), 'sovraccarico');
+  assert.equal(classifyGroqHttpStatus(400), 'richiesta-non-valida');
+  assert.equal(classifyGroqHttpStatus(422), 'richiesta-non-valida');
+  assert.equal(classifyGroqHttpStatus(404), 'modello-non-trovato');
+});
+
+test('H6 retry: massimo due chiamate per fase e solo con budget residuo', () => {
+  assert.equal(GROQ_MAX_CALLS_PER_PHASE, 2, 'un tentativo + UN retry per fase, mai di più');
+  assert.ok(GROQ_RETRY_MIN_ATTEMPT_MS >= GROQ_TWO_PASS_MIN_ATTEMPT_MS);
+  // Budget residuo sotto soglia -> nessun retry (decisione pura).
+  assert.equal(groqRetryAttemptTimeoutMs('quota', GROQ_RETRY_MIN_ATTEMPT_MS - 1), 0, 'budget insufficiente: no retry');
+  assert.equal(groqRetryAttemptTimeoutMs('quota', 0), 0);
+  assert.equal(groqRetryAttemptTimeoutMs('quota', -500), 0);
+  // Budget sufficiente -> si riprova con ESATTAMENTE il residuo.
+  assert.equal(groqRetryAttemptTimeoutMs('quota', GROQ_RETRY_MIN_ATTEMPT_MS), GROQ_RETRY_MIN_ATTEMPT_MS);
+  assert.equal(groqRetryAttemptTimeoutMs('rete', 2_200), 2_200);
+  assert.equal(groqRetryAttemptTimeoutMs('sovraccarico', 1_500.9), 1_500, 'il residuo è intero');
+});
+
+test('H6 retry (wrapper): 429 -> una seconda chiamata con esito del secondo tentativo', async () => {
+  let calls = 0;
+  const result = await runGroqJsonWithTransientRetry(groqOptions({
+    attemptTimeoutMs: 3_200,
+    log: () => {},
+    fetchImpl: (async () => {
+      calls += 1;
+      if (calls === 1) return new Response('errore', { status: 429 });
+      return new Response(JSON.stringify({ choices: [{ message: { content: groqCurricularText }, finish_reason: 'stop' }] }), { status: 200 });
+    }) as unknown as typeof fetch,
+  }));
+  assert.equal(calls, 2, 'primo tentativo + UN retry');
+  assert.equal(result.ok, true, 'il retry salva la chiamata');
+  assert.equal(result.text, groqCurricularText);
+});
+
+test('H6 retry (wrapper): 503 e rete ritentate UNA volta; 400/401/404/408 e output-vuoto MAI', async () => {
+  const cases: Array<[string, () => Promise<Response>, boolean]> = [
+    ['503', async () => new Response('ko', { status: 503 }), true],
+    ['rete', async () => { throw new TypeError('fetch failed'); }, true],
+    ['400', async () => new Response('ko', { status: 400 }), false],
+    ['401', async () => new Response('ko', { status: 401 }), false],
+    ['404', async () => new Response('ko', { status: 404 }), false],
+    ['408', async () => new Response('ko', { status: 408 }), false],
+    ['422 (shape)', async () => new Response('ko', { status: 422 }), false],
+    ['output-vuoto', async () => new Response(JSON.stringify({ choices: [{ message: { content: '  ' } }] }), { status: 200 }), false],
+    ['output-troncato', async () => new Response(JSON.stringify({ choices: [{ message: { content: '{"a":' }, finish_reason: 'length' }] }), { status: 200 }), false],
+  ];
+  for (const [name, respond, retried] of cases) {
+    let calls = 0;
+    await runGroqJsonWithTransientRetry(groqOptions({
+      attemptTimeoutMs: 4_000,
+      log: () => {},
+      fetchImpl: (async () => { calls += 1; return respond(); }) as unknown as typeof fetch,
+    }));
+    assert.equal(calls, retried ? 2 : 1, `${name}: ${retried ? 'un retry' : 'nessun retry'}`);
+  }
+});
+
+test('H6 retry (wrapper): budget residuo insufficiente dopo il primo tentativo -> UNA sola chiamata', async () => {
+  // Orologio iniettato: il primo tentativo lascia meno della soglia minima.
+  const clock = { t: 1_000_000 };
+  const now = () => clock.t;
+  let calls = 0;
+  const result = await runGroqJsonWithTransientRetry(groqOptions({
+    attemptTimeoutMs: 2_500,
+    now,
+    log: () => {},
+    fetchImpl: (async () => {
+      calls += 1;
+      clock.t += 2_000; // il tentativo transitorio consuma quasi tutto il budget di fase
+      return new Response('ko', { status: 429 });
+    }) as unknown as typeof fetch,
+  }));
+  assert.equal(result.category, 'quota');
+  assert.equal(calls, 1, 'residuo 500 ms < soglia: nessun retry');
+});
+
+test('H6 retry (wrapper): errori transitori PERSISTENTI -> esattamente due chiamate, mai una terza (mutation: retry infinito -> fallisce)', async () => {
+  for (const status of [429, 503]) {
+    let calls = 0;
+    const result = await runGroqJsonWithTransientRetry(groqOptions({
+      attemptTimeoutMs: 8_000,
+      log: () => {},
+      fetchImpl: (async () => { calls += 1; return new Response('ko', { status }); }) as unknown as typeof fetch,
+    }));
+    assert.equal(result.ok, false);
+    assert.equal(calls, 2, `${status}: al massimo due chiamate per fase`);
+  }
+  let networkCalls = 0;
+  await runGroqJsonWithTransientRetry(groqOptions({
+    attemptTimeoutMs: 8_000,
+    log: () => {},
+    fetchImpl: (async () => { networkCalls += 1; throw new TypeError('fetch failed'); }) as unknown as typeof fetch,
+  }));
+  assert.equal(networkCalls, 2, 'rete: al massimo due chiamate per fase');
+});
+
+test('H6 retry (wrapper): il log del retry è privacy-safe (solo categoria e tentativo)', async () => {
+  const lines: string[] = [];
+  await runGroqJsonWithTransientRetry(groqOptions({
+    attemptTimeoutMs: 4_000,
+    log: (line) => lines.push(line),
+    fetchImpl: (async () => new Response('ko', { status: 429 })) as unknown as typeof fetch,
+  }));
+  const dump = lines.join('\n');
+  assert.match(dump, /esito=retry categoria=quota tentativo=2\/2/);
+  assert.doesNotMatch(dump, new RegExp(TEST_GROQ_KEY), 'nessuna chiave');
+  assert.doesNotMatch(dump, new RegExp(pngBase64.slice(0, 24)), 'nessun base64');
+  assert.doesNotMatch(dump, /data:image|1A|2B|Matematica|Docente/, 'nessun contenuto');
+});
+
+// --- 9c. Endpoint: retry con budget residuo nel deadline dell'endpoint --------
+
+test('H6 endpoint: il retry del Passo B usa il budget RESIDUO (secondo tentativo dentro il deadline)', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  let transcriptionCalls = 0;
+  stubProviders({
+    gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
+    groq: (req) => {
+      if (req.phase === 'detection') return detectionOk(REAL_TEACHER_LABELS);
+      transcriptionCalls += 1;
+      return transcriptionCalls === 1
+        ? { status: 503, body: { error: { message: 'overloaded' } } }
+        : { status: 200, body: { choices: [{ message: { content: passBPayload(totalsDays(10), REAL_DECLARED_TOTALS) }, finish_reason: 'stop' }] } };
+    },
+  });
+  const restore = captureLogs();
+  try {
+    const res = await postTimetable(personalBody);
+    assert.equal(res.status, 200, 'il retry resta dentro il deadline: nessun timeout, nessun 503');
+    assert.equal((await res.json()).rowLabel, 'Manganiello');
+    assert.equal(transcriptionCalls, 2);
+  } finally {
+    restore();
+  }
+});
+
+// --- 9d. Endpoint: privacy dei log nel percorso H6 completo -------------------
+
+test('H6 endpoint: nemmeno con i retry i log contengono chiavi, immagini, nomi o classi', async () => {
+  process.env.GROQ_API_KEY = TEST_GROQ_KEY;
+  let detectionCalls = 0;
+  stubProviders({
+    gemini: () => ({ status: 503, body: { error: { code: 503, message: 'high demand' } } }),
+    groq: (req) => {
+      if (req.phase === 'detection') {
+        detectionCalls += 1;
+        return detectionCalls === 1 ? { status: 429, body: { error: { message: 'rate limit' } } } : detectionOk(REAL_TEACHER_LABELS);
+      }
+      return { status: 200, body: { choices: [{ message: { content: passBPayload(totalsDays(10), REAL_DECLARED_TOTALS) }, finish_reason: 'stop' }] } };
+    },
+  });
+  const restore = captureLogs();
+  try {
+    assert.equal((await postTimetable(personalBody)).status, 200);
+    const dump = logLines.join('\n');
+    assert.match(dump, /esito=retry categoria=quota tentativo=2\/2/, 'retry tracciato');
+    assert.doesNotMatch(dump, /Manganiello|Camilli|Costantini|Mangraviti|Della Gatta|Felice/, 'mai nomi o etichette');
+    assert.doesNotMatch(dump, /3D|3E|1C|1A|2B/, 'mai le classi');
+    assert.doesNotMatch(dump, /riga numero/, 'mai la posizione della riga');
+    assert.doesNotMatch(dump, /rowLabel|rowLabels|"days"|declaredClassTotals/, 'mai il JSON del modello');
+    assert.doesNotMatch(dump, new RegExp(TEST_GROQ_KEY), 'nessuna chiave Groq');
+    assert.doesNotMatch(dump, new RegExp(TEST_GEMINI_KEY), 'nessuna chiave Gemini');
+    assert.doesNotMatch(dump, new RegExp(pngBase64.slice(0, 24)), 'nessun frammento di base64');
   } finally {
     restore();
   }

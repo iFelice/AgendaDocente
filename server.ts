@@ -21,8 +21,10 @@ import {
   groqTwoPassBudgets,
   groqPassBBudget,
   runGroqJson,
+  runGroqJsonWithTransientRetry,
   GROQ_TIMETABLE_RESERVED_MS,
   type GroqFallbackDecision,
+  type GroqJsonRunResult,
 } from "./server/groqAnalysis";
 import {
   STUDENT_DOCUMENT_PROMPT,
@@ -46,6 +48,7 @@ import {
   studentDocumentSchema,
   curricularTimetableSchema,
   personalTimetableSchema,
+  personalRowTranscriptionSchema,
   validateStudentDocumentPayload,
   validateTimetableAnalysisPayload,
 } from "./server/timetableAnalysis";
@@ -1078,7 +1081,7 @@ const GROQ_SEMANTIC_FALLBACK_REASON = "row-docente-non-riconosciuta";
  * guardia. Se non parte, fallisce o resta incoerente, rimane il 422 di Gemini.
  */
 // ---------------------------------------------------------------------------
-// H5 — Percorso Groq a DUE PASSAGGI per l'orario personale
+// H5/H6 — Percorso Groq a DUE PASSAGGI per l'orario personale
 //
 // Per l'orario personale Groq/Qwen NON legge più il documento in una sola
 // chiamata (trovare il docente + riepilogo + 5 blocchi + tutte le celle). La
@@ -1088,14 +1091,20 @@ const GROQ_SEMANTIC_FALLBACK_REASON = "row-docente-non-riconosciuta";
 //
 //   Passo A — `runGroqTeacherRowDetection`: Qwen legge SOLO la colonna dei
 //             docenti e torna le etichette candidate.
-//   Matching server-side — `matchTeacherRowLabel` (strict, `findTeacherRows`):
-//             una sola corrispondenza -> Passo B; zero -> H3; più di una ->
-//             rifiuto conservativo.
-//   Passo B — `runGroqPersonalRowTranscription`: Qwen rilegge la stessa immagine
-//             e trascrive SOLO la riga individuata, con lo stesso contratto H4.
+//   Matching server-side — `matchTeacherRowLabel` (strict, `findTeacherRows`,
+//             mai fuzzy, nessuna autocorrezione): una sola corrispondenza ->
+//             Passo B con etichetta E posizione certificate; zero -> H3; più
+//             di una -> rifiuto conservativo.
+//   Passo B — `runGroqPersonalRowTranscription`: Qwen rilegge la stessa
+//             immagine e trascrive SOLO la riga individuata. H6: il suo schema
+//             contiene solo `declaredClassTotals` e `days` — la riga NON la
+//             dichiara più lui: il server ricostruisce `rowLabel`
+//             ESCLUSIVAMENTE dal match certificato del Passo A.
 //
-// H3 e H4 restano obbligatori sul Passo B: il Passo A aiuta solo a focalizzare,
-// non bypassa la guardia d'identità.
+// H3 e H4 restano invariati e obbligatori: H3 vale per Gemini (che dichiara
+// ancora `rowLabel`) e il match del Passo A è lo stesso matcher strict; il
+// payload ricostruito passa nello STESSO validatore condiviso, H4 compresa.
+// Ogni fase ha AL PIÙ un retry (solo 429/503/rete, con budget residuo).
 // ---------------------------------------------------------------------------
 
 /** Testo utente del Passo A: nessun nome, nessuna coordinata. */
@@ -1126,8 +1135,9 @@ export async function runGroqTeacherRowDetection(input: {
   signal: AbortSignal;
   attemptTimeoutMs: number;
   label?: string;
-}): Promise<{ ok: true; text: string; source: string } | { ok: false }> {
-  const result = await runGroqJson({
+}): Promise<GroqJsonRunResult> {
+  // H6: al più UN retry della stessa richiesta (solo 429/503/rete, budget residuo).
+  return runGroqJsonWithTransientRetry({
     systemInstruction: buildTeacherRowDetectionPrompt(),
     userText: TEACHER_ROW_DETECTION_USER_TEXT,
     imageBase64: input.imageBase64,
@@ -1140,10 +1150,14 @@ export async function runGroqTeacherRowDetection(input: {
     schemaName: "teacher_rows",
     phase: "identificazione-riga",
   });
-  return result.ok ? { ok: true, text: result.text, source: result.source } : { ok: false };
 }
 
-/** Passo B: trascrizione della SOLA riga individuata. Contratto H4 completo. */
+/**
+ * Passo B: trascrizione della SOLA riga individuata. Contratto H6: lo schema
+ * contiene SOLO `declaredClassTotals` e `days` — nessun `rowLabel` richiesto al
+ * modello. Il prompt riceve etichetta E posizione della riga (base 0 qui,
+ * presentata in base 1); l'associazione della riga resta al server.
+ */
 export async function runGroqPersonalRowTranscription(input: {
   imageBase64: string;
   mimeType: string;
@@ -1152,22 +1166,47 @@ export async function runGroqPersonalRowTranscription(input: {
   targetSurname: string;
   periodsByDay: readonly number[];
   identifiedRowLabel: string;
+  identifiedRowIndex: number;
   label?: string;
-}): Promise<{ ok: true; text: string; source: string } | { ok: false }> {
-  const result = await runGroqJson({
-    // L'etichetta individuata entra SOLO nel prompt del provider, mai nei log.
-    systemInstruction: buildPersonalRowTranscriptionPrompt(input.targetSurname, input.periodsByDay, input.identifiedRowLabel),
+}): Promise<GroqJsonRunResult> {
+  // H6: al più UN retry della stessa richiesta (solo 429/503/rete, budget residuo).
+  return runGroqJsonWithTransientRetry({
+    // Etichetta e posizione individuate entrano SOLO nel prompt del provider, mai nei log.
+    systemInstruction: buildPersonalRowTranscriptionPrompt(input.targetSurname, input.periodsByDay, input.identifiedRowLabel, input.identifiedRowIndex),
     userText: TIMETABLE_USER_TEXT,
     imageBase64: input.imageBase64,
     mimeType: input.mimeType,
-    responseSchema: personalTimetableSchema,
+    responseSchema: personalRowTranscriptionSchema,
     signal: input.signal,
     label: input.label ?? "AI Orari",
     budgetMs: 0,
     attemptTimeoutMs: input.attemptTimeoutMs,
     phase: "trascrizione-riga",
   });
-  return result.ok ? { ok: true, text: result.text, source: result.source } : { ok: false };
+}
+
+/**
+ * H6 — Ricostruzione del payload personale del Passo B.
+ *
+ * Il modello restituisce `{ declaredClassTotals, days }`; il server aggiunge
+ * `rowLabel` preso ESCLUSIVAMENTE dal match certificato del Passo A, scartando
+ * ogni altro campo che il modello avesse prodotto (un eventuale `rowLabel`
+ * incluso: non lo legge nessuno). Il JSON ricostruito passa poi nello STESSO
+ * validatore condiviso di Gemini (`parseTimetableAiResponse`), quindi H3/H4,
+ * i gate di geometria e i rifiuti di forma restano identici. Nessuna
+ * autocorrezione: i due campi del modello viaggiano al validatore come sono.
+ *
+ * Restituisce il testo JSON ricostruito, oppure `null` se il valore decodificato
+ * non è un oggetto (errore controllato a monte).
+ */
+export function reconstructPersonalRowPayload(value: unknown, matchedRowLabel: string): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  return JSON.stringify({
+    rowLabel: matchedRowLabel,
+    declaredClassTotals: source.declaredClassTotals,
+    days: source.days,
+  });
 }
 
 /** Ingredienti comuni ai due ingressi (tecnico e semantico) del percorso a due passaggi. */
@@ -1267,7 +1306,8 @@ async function runGroqPersonalTwoPass(
     return { ok: false, text: "", source: "", kind: "technical" };
   }
 
-  // PASSO B — trascrizione della SOLA riga individuata (stesso contratto H4).
+  // PASSO B — trascrizione della SOLA riga individuata (contratto H6 senza
+  // rowLabel: il prompt riceve etichetta E posizione certificate dal match).
   const transcription = await runGroqPersonalRowTranscription({
     imageBase64: input.imageBase64,
     mimeType: input.mimeType,
@@ -1276,11 +1316,26 @@ async function runGroqPersonalTwoPass(
     targetSurname: input.targetSurname,
     periodsByDay: input.periodsByDay,
     identifiedRowLabel: match.label,
+    identifiedRowIndex: match.rowIndex,
     label,
   });
   if (!transcription.ok) return { ok: false, text: "", source: "", kind: "technical" };
   console.log(`[${label}] provider=groq fase=trascrizione-riga esito=ok`);
-  return { ok: true, text: transcription.text, source: transcription.source, kind: "ok" };
+
+  // H6 — il rowLabel finale viene ESCLUSIVAMENTE dal match certificato del
+  // Passo A: il testo del Passo B viene decodificato e ricostruito qui, poi
+  // passa nello STESSO validatore condiviso (H3/H4 e geometria invariati).
+  const transcriptionDecoded = parseGeminiJson(transcription.text, label);
+  if (!transcriptionDecoded.ok) {
+    console.log(`[${label}] provider=groq fase=trascrizione-riga esito=fallito categoria=output-non-interpretabile`);
+    return { ok: false, text: "", source: "", kind: "technical" };
+  }
+  const reconstructedText = reconstructPersonalRowPayload(transcriptionDecoded.value, match.label);
+  if (reconstructedText === null) {
+    console.log(`[${label}] provider=groq fase=trascrizione-riga esito=fallito categoria=payload-non-valido`);
+    return { ok: false, text: "", source: "", kind: "technical" };
+  }
+  return { ok: true, text: reconstructedText, source: transcription.source, kind: "ok" };
 }
 
 /** Ingresso TECNICO del percorso a due passaggi: Gemini ha esaurito i tentativi transitori. */

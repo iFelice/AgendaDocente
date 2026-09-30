@@ -92,6 +92,47 @@ export const GROQ_TWO_PASS_A_SHARE = 0.4;
 export const GROQ_TWO_PASS_MIN_ATTEMPT_MS = 1_500;
 
 /**
+ * H6 — AL PIÙ un retry per FASE (Passo A e Passo B) sui soli errori transitori
+ * HTTP 429 (`quota`), HTTP 5xx (`sovraccarico`) ed errore di RETE: il primo
+ * tentativo più un eventuale secondo = massimo due chiamate per fase, mai di
+ * più e sempre dentro il budget della fase (il tempo già consumato dal primo
+ * tentativo viene sottratto). La stessa richiesta riproposta una volta può
+ * valere su un fallimento transitorio; un terzo tentativo aggiungerebbe solo
+ * latenza (Gemini ha già fatto i suoi retry). Nessun retry su 400/
+ * richiesta-non-valida, autenticazione, modello-non-trovato, errori di forma
+ * (schema/output) o rifiuti H3/H4: lì la richiesta è sbagliata o la risposta è
+ * definitiva, e riprovare brucerebbe quota senza cambiare l'esito.
+ */
+export const GROQ_MAX_CALLS_PER_PHASE = 2;
+
+/** Budget residuo minimo DI FASE sotto il quale il retry non parte. */
+export const GROQ_RETRY_MIN_ATTEMPT_MS = GROQ_TWO_PASS_MIN_ATTEMPT_MS;
+
+/**
+ * L'unico elenco delle categorie Groq su cui HA SENSO riprovare UNA volta:
+ * `quota` (429) e `sovraccarico` (5xx) sono stati transitori del fornitore,
+ * `rete` è un fallimento di trasporto prima di qualunque risposta. Tutto il
+ * resto — `richiesta-non-valida` (400/422), `chiave-o-permessi` (401/403),
+ * `modello-non-trovato` (404), `deadline`, `output-vuoto`, `output-troncato`,
+ * `budget-esaurito`, `annullata`, `sconosciuta` — non migliora ripetendo la
+ * stessa chiamata e non viene MAI ritentato.
+ */
+export function groqRetryableCategory(category: GroqFailureCategory | "ok"): boolean {
+  return category === "quota" || category === "sovraccarico" || category === "rete";
+}
+
+/**
+ * Decisione PURA del retry: restituisce il timeout con cui riprovare dentro il
+ * budget RESIDUO della fase, oppure 0 (nessun retry). Nessun retry quando la
+ * categoria non è transitoria o quando il residuo è sotto soglia.
+ */
+export function groqRetryAttemptTimeoutMs(category: GroqFailureCategory | "ok", remainingPhaseMs: number): number {
+  if (!groqRetryableCategory(category)) return 0;
+  const usable = Math.floor(remainingPhaseMs);
+  return usable >= GROQ_RETRY_MIN_ATTEMPT_MS ? usable : 0;
+}
+
+/**
  * Divide il budget Groq RESIDUO fra Passo A e Passo B, restituendo i due timeout
  * di rete effettivi. È deterministica e pura:
  *  - si sottrae UNA volta il margine di scrittura della risposta finale;
@@ -373,10 +414,10 @@ export interface GroqJsonRunResult {
 }
 
 /**
- * Un solo tentativo Groq (nessun retry: i retry sono già stati fatti da Gemini e
- * un fallback che riprova allunga il tempo di risposta dell'utente). Ritorna
- * sempre un esito classificato; `ok=false` lascia all'endpoint la risposta di
- * errore controllata già prevista.
+ * Un solo tentativo Groq (il retry H6 vive in `runGroqJsonWithTransientRetry`,
+ * così chi vuole il comportamento monolitico/curricolare resta invariato).
+ * Ritorna sempre un esito classificato; `ok=false` lascia all'endpoint la
+ * risposta di errore controllata già prevista.
  */
 export async function runGroqJson(opts: RunGroqJsonOptions): Promise<GroqJsonRunResult> {
   const log = opts.log ?? ((line: string) => console.warn(line));
@@ -465,4 +506,39 @@ export async function runGroqJson(opts: RunGroqJsonOptions): Promise<GroqJsonRun
     clearTimeout(timer);
     opts.signal.removeEventListener("abort", onAbort);
   }
+}
+
+/**
+ * H6 — Un tentativo + AL PIÙ UN retry transitorio, dentro il budget della fase.
+ *
+ * Pensato per le due fasi del percorso personale (Passo A e Passo B): il primo
+ * tentativo usa l'intero timeout della fase; se fallisce con `quota` (429),
+ * `sovraccarico` (503/5xx) o `rete` E il residuo della fase supera la soglia
+ * minima, la STESSA richiesta viene ripetuta UNA sola volta con il timeout
+ * residuo. In totale mai più di `GROQ_MAX_CALLS_PER_PHASE` chiamate per fase e
+ * mai oltre il timeout che il chiamante aveva assegnato alla fase.
+ *
+ * Il percorso curricolare (one-shot) non cambia: continua a usare
+ * `runGroqJson` direttamente.
+ */
+export async function runGroqJsonWithTransientRetry(opts: RunGroqJsonOptions): Promise<GroqJsonRunResult> {
+  const log = opts.log ?? ((line: string) => console.warn(line));
+  const now = opts.now ?? Date.now;
+  // Timeout effettivo del primo tentativo (stessa regola del singolo tentativo).
+  const phaseTimeoutMs = opts.attemptTimeoutMs !== undefined
+    ? (Math.floor(opts.attemptTimeoutMs) > 0 ? Math.floor(opts.attemptTimeoutMs) : 0)
+    : groqAttemptTimeoutMs(opts.budgetMs);
+  if (phaseTimeoutMs === 0) return runGroqJson({ ...opts, attemptTimeoutMs: phaseTimeoutMs });
+
+  const startedAt = now();
+  const first = await runGroqJson({ ...opts, attemptTimeoutMs: phaseTimeoutMs });
+  if (first.ok) return first;
+
+  const retryTimeoutMs = groqRetryAttemptTimeoutMs(first.category, phaseTimeoutMs - (now() - startedAt));
+  if (retryTimeoutMs === 0) return first;
+
+  // Log del retry privacy-safe come gli altri: solo categoria e numero di tentativo.
+  const phaseTag = opts.phase ? ` fase=${opts.phase}` : "";
+  log(`[${opts.label}] provider=groq${phaseTag} esito=retry categoria=${first.category} tentativo=2/${GROQ_MAX_CALLS_PER_PHASE} (nessun contenuto nel log)`);
+  return runGroqJson({ ...opts, attemptTimeoutMs: retryTimeoutMs });
 }
