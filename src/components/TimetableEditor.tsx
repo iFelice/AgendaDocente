@@ -44,6 +44,7 @@ import { DEFAULT_SUBJECTS, mergeSubjectSuggestions, normalizeSubjectName } from 
 import { effectiveSchoolForSlot, getPrimarySchool, normalizeTeacherProfile } from "../utils/multiSchool";
 import { slotSchoolKey } from "../utils/reconstructTimetable";
 import { MAX_PERIODS_PER_DAY, maxPeriodsInWeek, periodsForDay, reassignTimetableSlotSchool } from "../utils/schoolDayPeriods";
+import type { TimeSlotConfigOpenRequest } from "../utils/timeSlotCoverage";
 import {
   DAY_SWIPE_HORIZONTAL_RATIO,
   DAY_SWIPE_INTERACTIVE_SELECTOR,
@@ -212,6 +213,9 @@ interface TimetableEditorProps {
      */
     realignment?: { provisional: TimetableSlot[]; definitive: TimetableSlot[] }
   ) => void | false | Promise<void | false>;
+  /** One-shot CTA request: select this school and open its existing bell-slot drawer. */
+  timeSlotConfigOpenRequest?: TimeSlotConfigOpenRequest | null;
+  onTimeSlotConfigOpenRequestHandled?: () => void;
   /**
    * Lezione da aprire DIRETTAMENTE in modifica (tap su una lezione del
    * Planning: Oggi/Settimana). È solo l'handle della richiesta: la validazione
@@ -254,6 +258,8 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
   onSaveProfile,
   onSaveTimeSlotConfig,
   onSaveSchoolTimeSlotConfig,
+  timeSlotConfigOpenRequest = null,
+  onTimeSlotConfigOpenRequestHandled,
   initialSlot = null,
   initialSlotType = null,
   onBackToOrigin,
@@ -291,6 +297,7 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
       ? { slotId: initialSlot.id, type: initialSlotType }
       : null
   );
+  const handledTimeSlotConfigRequestRef = useRef<number | null>(null);
 
   // Class selection state in slot modal
   const [isAddingNewClass, setIsAddingNewClass] = useState(false);
@@ -1065,6 +1072,29 @@ export const TimetableEditor: React.FC<TimetableEditorProps> = ({
     }
     setIsSlotConfigOpen(true);
   };
+
+  // CTA dal warning Profilo: prima seleziona l'istituto richiesto, poi — nel
+  // render successivo, quando tutte le derivazioni sono quelle giuste — riusa
+  // lo stesso handler del pulsante locale. Nessuna seconda logica di proposta.
+  useEffect(() => {
+    const request = timeSlotConfigOpenRequest;
+    if (!request || handledTimeSlotConfigRequestRef.current === request.requestId) return;
+    if (!schools.some(school => school.id === request.schoolId)) {
+      handledTimeSlotConfigRequestRef.current = request.requestId;
+      onTimeSlotConfigOpenRequestHandled?.();
+      return;
+    }
+    if (activeSchoolId !== request.schoolId) {
+      setActiveSchoolId(request.schoolId);
+      return;
+    }
+    handledTimeSlotConfigRequestRef.current = request.requestId;
+    handleOpenSlotConfig();
+    onTimeSlotConfigOpenRequestHandled?.();
+    // The request id is the one-shot trigger. The other values are checked so
+    // the drawer opens only after the requested school has become active.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timeSlotConfigOpenRequest?.requestId, timeSlotConfigOpenRequest?.schoolId, activeSchoolId, schools]);
 
   /**
    * Completa le fasce mancanti nel DRAFT locale, senza salvare.

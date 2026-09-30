@@ -35,14 +35,18 @@ import type { SyncStatus } from "../services/sync/types";
 import { CloudSync } from "./CloudSyncCard";
 import { useManualSync } from "../hooks/useManualSync";
 import { hasActiveSecondarySchool, normalizeTeacherProfile } from "../utils/multiSchool";
-import { SchoolDayPeriodsEditor } from "./SchoolDayPeriodsEditor";
+import { DEFAULT_SCHOOL_DAYS, SchoolDayPeriodsEditor } from "./SchoolDayPeriodsEditor";
 import { isSupportTeacherOf } from "../utils/teacherType";
+import { timeSlotConfigForSchool } from "../utils/timeSlots";
+import { findMissingTimeSlotCoverage, type MissingTimeSlotCoverage } from "../utils/timeSlotCoverage";
 
 interface ProfileModalProps {
   isOpen: boolean;
   onClose: () => void;
   profile: TeacherProfile;
   onSaveProfile: (updatedProfile: TeacherProfile, expected?: TeacherProfile) => void | false | Promise<void | false>;
+  /** Reports, after a successful save, schools whose longest day still lacks a real bell slot. */
+  onMissingTimeSlotCoverage?: (missing: MissingTimeSlotCoverage[]) => void;
   onDataImported: () => void | false | Promise<void | false>;
   onOpenTutorial?: () => void;
   googleUser?: FirebaseUser | null;
@@ -102,6 +106,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   onClose,
   profile,
   onSaveProfile,
+  onMissingTimeSlotCoverage,
   onDataImported,
   onOpenTutorial,
   googleUser,
@@ -188,6 +193,12 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   // CloudSync card: same pipeline (accountSync.syncNow), same double-trigger
   // guard, same transient feedback. No second sync engine is ever created here.
   const manualSync = useManualSync({ status: accountSyncStatus, onSyncNow });
+
+  // Each day-period editor must use the bells of its own school (or the global
+  // fallback), otherwise a multi-school profile can display the wrong legacy
+  // ordinary count before the user changes it.
+  const primaryEffectiveTimeSlots = timeSlotConfigForSchool(primarySchoolOf(profile), timeSlotConfig);
+  const secondaryEffectiveTimeSlots = timeSlotConfigForSchool(secondarySchool, timeSlotConfig);
 
   if (!isOpen) return null;
 
@@ -283,6 +294,13 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
     // la struttura giornaliera viene scritta DOPO, sulla primaria definitiva.
     const normalizedUpdated = withPrimaryDayPeriods(normalizeTeacherProfile(updated), primaryDayPeriods);
     if (!await save.run(() => onSaveProfile(normalizedUpdated, editBaseline.current))) return;
+
+    // Save dayPeriods exactly as chosen, without inventing bell times. Once the
+    // profile is safely persisted, tell App whether an explicit follow-up in
+    // the existing timetable drawer is needed.
+    onMissingTimeSlotCoverage?.(
+      findMissingTimeSlotCoverage(normalizedUpdated, timeSlotConfig, DEFAULT_SCHOOL_DAYS)
+    );
     onClose();
   };
 
@@ -683,7 +701,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
               <SchoolDayPeriodsEditor
                 context="istituto principale"
                 value={primaryDayPeriods}
-                timeSlotConfig={timeSlotConfig}
+                timeSlotConfig={primaryEffectiveTimeSlots}
                 onChange={setPrimaryDayPeriods}
               />
 
@@ -706,7 +724,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                   <SchoolDayPeriodsEditor
                     context="altro istituto"
                     value={secondarySchool.dayPeriods}
-                    timeSlotConfig={timeSlotConfig}
+                    timeSlotConfig={secondaryEffectiveTimeSlots}
                     onChange={next => updateSecondary({ dayPeriods: next })}
                   />
                   <p className="text-[11px] text-stone-500">I dati restano conservati anche se disattivi questa opzione.</p>
