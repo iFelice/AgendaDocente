@@ -59,7 +59,7 @@ const OnboardingModal = lazy(() => import("./components/OnboardingModal").then(m
 import { OfflineIndicator } from "./components/OfflineIndicator";
 import { useOnlineStatus } from "./hooks/useOnlineStatus";
 import { formatPersonDisplayName, isPlaceholderFullName } from "./utils/names";
-import { CheckCircle2, AlertCircle } from "lucide-react";
+import { CheckCircle2 } from "lucide-react";
 import { User as FirebaseUser } from "firebase/auth";
 import {
   initAuth,
@@ -76,6 +76,9 @@ import { normalizeTeacherProfile } from "./utils/multiSchool";
 import { accountSync } from "./services/sync/accountSync";
 import type { SyncStatus } from "./services/sync/types";
 import { usePWAUpdates } from "./hooks/usePWAUpdates";
+import type { MissingTimeSlotCoverage, TimeSlotConfigOpenRequest } from "./utils/timeSlotCoverage";
+import { getEffectivePeriodSlots } from "./utils/timeSlots";
+import { MissingTimeSlotCoverageBanner } from "./components/MissingTimeSlotCoverageBanner";
 
 export default function App({ initialData }: { initialData: LocalData }) {
   const [profile, setProfile] = useState<TeacherProfile>(() => initialData.profile);
@@ -131,6 +134,9 @@ export default function App({ initialData }: { initialData: LocalData }) {
   } | null>(null);
   const [isEventModalOpen, setIsEventModalOpen] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+  const [missingTimeSlotCoverage, setMissingTimeSlotCoverage] = useState<MissingTimeSlotCoverage[]>([]);
+  const [timeSlotConfigOpenRequest, setTimeSlotConfigOpenRequest] = useState<TimeSlotConfigOpenRequest | null>(null);
+  const timeSlotConfigRequestSequence = useRef(0);
   const [isOnboardingOpen, setIsOnboardingOpen] = useState<boolean>(() => !initialData.onboardingCompleted);
 
   const [editingEvent, setEditingEvent] = useState<CalendarEvent | null>(null);
@@ -410,6 +416,10 @@ export default function App({ initialData }: { initialData: LocalData }) {
         await storage.saveDefinitiveTimetable(realignment.definitive);
       }
     });
+    const effectiveCount = getEffectivePeriodSlots(config).length;
+    setMissingTimeSlotCoverage(current =>
+      current.filter(item => item.schoolId !== schoolId || item.requiredPeriods > effectiveCount)
+    );
     showToast(realignment ? "Fasce orarie e lezioni aggiornate." : "Fasce orarie aggiornate.");
   });
 
@@ -801,6 +811,18 @@ export default function App({ initialData }: { initialData: LocalData }) {
         </div>
       )}
 
+      {/* Follow-up after saving dayPeriods: persistent until the matching school
+          has enough real bell slots. The CTA opens the existing drawer; no slot
+          is generated or persisted here. */}
+      <MissingTimeSlotCoverageBanner
+        missing={missingTimeSlotCoverage}
+        onConfigure={(schoolId) => {
+          timeSlotConfigRequestSequence.current += 1;
+          setTimeSlotConfigOpenRequest({ schoolId, requestId: timeSlotConfigRequestSequence.current });
+          handleViewChange("orario");
+        }}
+      />
+
       {/* Main View Container: `.app-main` reserves the bottom navigation space on phones */}
       <main className="app-main flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 pt-3 sm:pt-6">
         {currentView === "oggi" && (
@@ -929,6 +951,8 @@ export default function App({ initialData }: { initialData: LocalData }) {
             onSaveProfile={handleSaveProfile}
             onSaveTimeSlotConfig={handleSaveTimeSlotConfig}
             onSaveSchoolTimeSlotConfig={handleSaveSchoolTimeSlotConfig}
+            timeSlotConfigOpenRequest={timeSlotConfigOpenRequest}
+            onTimeSlotConfigOpenRequestHandled={() => setTimeSlotConfigOpenRequest(null)}
             initialSlot={isSlotEditOpen(slotEditNav) ? slotEditNav.slot : null}
             initialSlotType={isSlotEditOpen(slotEditNav) ? slotEditNav.type : null}
             onBackToOrigin={isSlotEditOpen(slotEditNav) ? handleBackFromSlotEdit : undefined}
@@ -1027,6 +1051,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
         profile={profile}
         timeSlotConfig={timeSlotConfig}
         onSaveProfile={handleSaveProfile}
+        onMissingTimeSlotCoverage={setMissingTimeSlotCoverage}
         onDataImported={refreshAllData}
         onOpenTutorial={() => setIsOnboardingOpen(true)}
         googleUser={googleUser}
