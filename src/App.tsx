@@ -1032,6 +1032,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
         definitiveTimetable={definitiveTimetable}
         onOpenCircularWithFile={handleScanDocumentToCircular}
         onSaveReconstructedTimetable={handleSaveReconstructedTimetable}
+        onSaveProfile={handleSaveProfile}
         onImportStudentCommitments={handleImportStudentCommitments}
       />
       )}
