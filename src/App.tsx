@@ -170,10 +170,20 @@ export default function App({ initialData }: { initialData: LocalData }) {
   // Google Workspace / Institutional Account State
   const [googleUser, setGoogleUser] = useState<FirebaseUser | null>(null);
   const [googleAccessToken, setGoogleAccessToken] = useState<string | null>(null);
+  // G1.1: automatic inbound Calendar refresh is session-only. There is no
+  // background worker: it runs only while the app is open, online and the
+  // OAuth token is available.
+  const autoImportInFlight = useRef<Promise<GoogleCalendarImportResult | null> | null>(null);
+  const lastSuccessfulImportAt = useRef<number | null>(null);
+  const previousOnline = useRef<boolean | null>(null);
   const [profileInitialTab, setProfileInitialTab] = useState<"profilo" | "backup" | "google">("profilo");
 
   // Feedback Notification Banner
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [googleAutoImportStatus, setGoogleAutoImportStatus] = useState<"idle" | "syncing" | "success" | "error" | "needs-auth">("idle");
+  const [lastImportResult, setLastImportResult] = useState<GoogleCalendarImportResult | null>(null);
+  const [lastSuccessfulImportAtState, setLastSuccessfulImportAtState] = useState<number | null>(null);
+  const GOOGLE_CALENDAR_AUTO_IMPORT_COOLDOWN_MS = 5 * 60 * 1000;
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
@@ -259,12 +269,62 @@ export default function App({ initialData }: { initialData: LocalData }) {
     return () => window.clearTimeout(timeout);
   }, [updateCheckFeedback]);
 
+  const runAutomaticGoogleImport = useCallback(async (force = false, tokenOverride?: string, userOverride?: FirebaseUser): Promise<GoogleCalendarImportResult | null> => {
+    const activeGoogleUser = userOverride || googleUser;
+    if (!activeGoogleUser || !isOnline) return null;
+    const token = tokenOverride || googleAccessToken || getAccessToken();
+    if (!token) {
+      setGoogleAutoImportStatus("needs-auth");
+      return null;
+    }
+    const last = lastSuccessfulImportAt.current;
+    if (!force && last !== null && Date.now() - last < GOOGLE_CALENDAR_AUTO_IMPORT_COOLDOWN_MS) return null;
+    if (autoImportInFlight.current) return autoImportInFlight.current;
+    const request = (async () => {
+      setGoogleAutoImportStatus("syncing");
+      try {
+        const result = await importGoogleCalendarEvents(token);
+        lastSuccessfulImportAt.current = Date.now();
+        setLastSuccessfulImportAtState(lastSuccessfulImportAt.current);
+        setLastImportResult(result);
+        setGoogleAutoImportStatus("success");
+        return result;
+      } catch (error) {
+        console.warn("Aggiornamento automatico Google Calendar non riuscito:", error);
+        setGoogleAutoImportStatus("error");
+        return null;
+      } finally {
+        autoImportInFlight.current = null;
+      }
+    })();
+    autoImportInFlight.current = request;
+    return request;
+  }, [googleUser, googleAccessToken, isOnline]);
+
+  // Focus and online transitions are the only automatic triggers. Missing OAuth
+  // tokens never cause a popup; the card asks the user to reconnect instead.
+  useEffect(() => {
+    const onFocus = () => { void runAutomaticGoogleImport(false); };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [runAutomaticGoogleImport]);
+  useEffect(() => {
+    const cameOnline = previousOnline.current === false && isOnline;
+    previousOnline.current = isOnline;
+    if (cameOnline) void runAutomaticGoogleImport(false);
+  }, [isOnline, runAutomaticGoogleImport]);
+  useEffect(() => {
+    if (googleUser && googleAccessToken && isOnline) void runAutomaticGoogleImport(false);
+  }, [googleUser, googleAccessToken, isOnline, runAutomaticGoogleImport]);
+
   const handleGoogleLogin = async () => {
     try {
       const result = await signInWithGoogle();
       if (result) {
         setGoogleUser(result.user);
         setGoogleAccessToken(result.accessToken);
+        // Explicit login bypasses the cooldown and imports immediately.
+        void runAutomaticGoogleImport(true, result.accessToken, result.user);
         const email = result.user.email || "";
         // Google display names arrive inconsistently cased ("felice manganiello"); normalize
         // the view only when there is no real name yet (empty or old placeholder/seed names).
@@ -314,12 +374,18 @@ export default function App({ initialData }: { initialData: LocalData }) {
   const handleImportFromGoogle = async (): Promise<GoogleCalendarImportResult> => {
     if (database.mode !== "indexeddb") throw new Error("Archivio locale in sola lettura: importazione sospesa.");
     let token = googleAccessToken || getAccessToken();
+    let loginUser: FirebaseUser | undefined;
     if (!token) {
       const login = await handleGoogleLogin();
       token = login?.accessToken ?? null;
+      loginUser = login?.user;
     }
     if (!token) throw new Error("Riconnetti l’account Google per autorizzare il download degli eventi.");
-    return importGoogleCalendarEvents(token);
+    // Manual refresh uses the same single-flight G1 pipeline and only bypasses
+    // its cooldown; it never creates a second import implementation.
+    const result = await runAutomaticGoogleImport(true, token, loginUser || googleUser || undefined);
+    if (!result) throw new Error("Aggiornamento Google Calendar non disponibile.");
+    return result;
   };
 
   const handleSyncAllToGoogle = async (): Promise<{ syncedCount: number; errorCount: number }> => {
@@ -1130,6 +1196,10 @@ export default function App({ initialData }: { initialData: LocalData }) {
         onGoogleLogout={handleGoogleLogout}
         events={events}
         onImportFromGoogle={handleImportFromGoogle}
+        googleAutoImportStatus={googleAutoImportStatus}
+        lastImportResult={lastImportResult}
+        lastSuccessfulImportAt={lastSuccessfulImportAtState}
+        onAutomaticImport={() => runAutomaticGoogleImport(true)}
         onSyncAllToGoogle={handleSyncAllToGoogle}
         accountSyncStatus={syncStatus}
         onSyncNow={() => void accountSync.syncNow()}
