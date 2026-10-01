@@ -30,7 +30,7 @@ import { storage } from "../services/storage";
 import { getCurrentSchoolYear, getSuggestedSchoolYears } from "../utils/schoolYear";
 import { GoogleSignInButton } from "./GoogleSignInButton";
 import { isUserCancellationError } from "../services/googleAuth";
-import { downloadIcsCalendar, type GoogleCalendarListEntry } from "../services/googleCalendarService";
+import { downloadIcsCalendar, isInsufficientScopeError, type GoogleCalendarListEntry } from "../services/googleCalendarService";
 import type { SyncStatus } from "../services/sync/types";
 import type { GoogleCalendarImportResult } from "../services/googleCalendarImportService";
 import { CloudSync } from "./CloudSyncCard";
@@ -48,6 +48,15 @@ import {
   timeSlotConfigEditorMode,
   type TimeSlotConfigEditorMode,
 } from "./TimeSlotConfigEditor";
+
+// G1.2.1 — friendly message when the CalendarList fails because the OAuth grant
+// predates the read-only scopes; the CTA then forces a new Google consent screen.
+export const GOOGLE_RECONSENT_MESSAGE = "Google richiede una nuova autorizzazione per leggere i calendari condivisi.";
+
+const calendarListErrorMessage = (error: unknown): string =>
+  isInsufficientScopeError(error)
+    ? GOOGLE_RECONSENT_MESSAGE
+    : error instanceof Error && error.message ? error.message : "Elenco calendari non disponibile.";
 
 export interface ProfileTimeSlotRealignment {
   provisional: TimetableSlot[];
@@ -73,6 +82,8 @@ interface ProfileModalProps {
   googleUser?: FirebaseUser | null;
   googleAccessToken?: string | null;
   onGoogleLogin?: () => Promise<void>;
+  /** G1.2.1 — explicit reconnect with forced Google consent (prompt="consent select_account"). */
+  onGoogleReconnect?: () => Promise<void>;
   onGoogleLogout?: () => Promise<void>;
   events?: CalendarEvent[];
   onImportFromGoogle?: () => Promise<GoogleCalendarImportResult>;
@@ -162,6 +173,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   googleUser,
   googleAccessToken,
   onGoogleLogin,
+  onGoogleReconnect,
   onGoogleLogout,
   events = [],
   onImportFromGoogle,
@@ -209,7 +221,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
     setCalendarListError(null);
     void onLoadGoogleCalendars(false)
       .catch((error: unknown) => {
-        if (!cancelled) setCalendarListError(error instanceof Error ? error.message : "Elenco calendari non disponibile.");
+        if (!cancelled) setCalendarListError(calendarListErrorMessage(error));
       })
       .finally(() => { if (!cancelled) setIsLoadingCalendars(false); });
     return () => { cancelled = true; };
@@ -1387,7 +1399,8 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                     {googleAutoImportStatus === "needs-auth" && (
                       <div className="flex items-center justify-between gap-3 text-[11px] text-amber-800">
                         <span>Ricollega Google per riattivare l’aggiornamento automatico del Calendar.</span>
-                        <button type="button" onClick={() => void onGoogleLogin?.()} className="shrink-0 underline font-bold">Ricollega Google</button>
+                        {/* G1.2.1 — the reconnect CTA forces the Google consent screen (never the normal login). */}
+                        <button type="button" onClick={() => void (onGoogleReconnect ?? onGoogleLogin)?.()} className="shrink-0 underline font-bold">Ricollega Google</button>
                       </div>
                     )}
                     <p className={`text-xs font-semibold ${googleAutoImportStatus === "error" ? "text-amber-800" : "text-blue-800"}`}>
@@ -1447,7 +1460,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                             setCalendarListError(null);
                             await onLoadGoogleCalendars(true);
                           } catch (err: any) {
-                            setCalendarListError(err?.message || "Elenco calendari non disponibile.");
+                            setCalendarListError(calendarListErrorMessage(err));
                           } finally {
                             setIsLoadingCalendars(false);
                           }
@@ -1461,7 +1474,19 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                     {calendarListError && (
                       <div className="flex items-center justify-between gap-3 text-[11px] text-amber-800">
                         <span>{calendarListError}</span>
-                        <button type="button" onClick={() => void onGoogleLogin?.()} className="shrink-0 underline font-bold">Ricollega Google</button>
+                        {/* G1.2.1 — insufficient scopes requires an explicit re-consent, not a plain login. */}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const reconnect = onGoogleReconnect ?? onGoogleLogin;
+                            if (!reconnect) return;
+                            setCalendarListError(null);
+                            void reconnect();
+                          }}
+                          className="shrink-0 underline font-bold"
+                        >
+                          {calendarListError === GOOGLE_RECONSENT_MESSAGE ? "Autorizza calendari" : "Ricollega Google"}
+                        </button>
                       </div>
                     )}
 

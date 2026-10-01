@@ -357,30 +357,34 @@ export default function App({ initialData }: { initialData: LocalData }) {
     if (googleUser && googleAccessToken && isOnline) void runAutomaticGoogleImport(false);
   }, [googleUser, googleAccessToken, isOnline, runAutomaticGoogleImport]);
 
-  const handleGoogleLogin = async () => {
+  /** Shared bookkeeping for a successful Google login (normal login AND explicit reconnect). */
+  const applyGoogleLoginResult = async (result: { user: FirebaseUser; accessToken: string }) => {
+    setGoogleUser(result.user);
+    setGoogleAccessToken(result.accessToken);
+    // Explicit login bypasses the cooldown and imports immediately.
+    void runAutomaticGoogleImport(true, result.accessToken, result.user);
+    const email = result.user.email || "";
+    // Google display names arrive inconsistently cased ("felice manganiello"); normalize
+    // the view only when there is no real name yet (empty or old placeholder/seed names).
+    const displayName = result.user.displayName ? formatPersonDisplayName(result.user.displayName) : "";
+    const updated = {
+      ...profile,
+      email: email || profile.email,
+      fullName: displayName && isPlaceholderFullName(profile.fullName) ? displayName : profile.fullName,
+      googleCalendarLinked: true,
+      googleCalendarAccount: email,
+    };
+    if (await handleSaveProfile(updated) === false) return null;
+    showToast(`Account istituzionale collegato: ${email}`);
+    return result;
+  };
+
+  /** Single sign-in pipeline; `forceConsent` is reserved for the explicit reconnect gesture. */
+  const runGoogleSignIn = async (options?: { forceConsent?: boolean }) => {
     try {
-      const result = await signInWithGoogle();
-      if (result) {
-        setGoogleUser(result.user);
-        setGoogleAccessToken(result.accessToken);
-        // Explicit login bypasses the cooldown and imports immediately.
-        void runAutomaticGoogleImport(true, result.accessToken, result.user);
-        const email = result.user.email || "";
-        // Google display names arrive inconsistently cased ("felice manganiello"); normalize
-        // the view only when there is no real name yet (empty or old placeholder/seed names).
-        const displayName = result.user.displayName ? formatPersonDisplayName(result.user.displayName) : "";
-        const updated = {
-          ...profile,
-          email: email || profile.email,
-          fullName: displayName && isPlaceholderFullName(profile.fullName) ? displayName : profile.fullName,
-          googleCalendarLinked: true,
-          googleCalendarAccount: email,
-        };
-        if (await handleSaveProfile(updated) === false) return null;
-        showToast(`Account istituzionale collegato: ${email}`);
-        return result;
-      }
-      return null;
+      const result = await signInWithGoogle(options);
+      if (!result) return null;
+      return await applyGoogleLoginResult(result);
     } catch (err: unknown) {
       if (isUserCancellationError(err)) {
         return null;
@@ -390,6 +394,29 @@ export default function App({ initialData }: { initialData: LocalData }) {
       showToast(msg);
       return null;
     }
+  };
+
+  /** Normal login: never forces the Google consent screen. */
+  const handleGoogleLogin = async () => runGoogleSignIn();
+
+  /**
+   * G1.2.1 — explicit "Ricollega Google": forces prompt="consent select_account" so the
+   * new read-only CalendarList scopes are actually granted, then invalidates the cached
+   * CalendarList and reloads it with the fresh token. The automatic import starts
+   * immediately (cooldown bypassed) inside applyGoogleLoginResult.
+   */
+  const handleGoogleReconnect = async () => {
+    const result = await runGoogleSignIn({ forceConsent: true });
+    if (!result) return null;
+    // The previous token's CalendarList may be stale/unauthorized: drop the cache and
+    // refetch right away so the open modal updates without a close/reopen cycle.
+    setGoogleCalendars(null);
+    try {
+      setGoogleCalendars(await listGoogleCalendars(result.accessToken));
+    } catch (error) {
+      console.warn("Elenco calendari non aggiornato dopo la riconnessione:", error);
+    }
+    return result;
   };
 
   const handleGoogleLogout = async () => {
@@ -1233,6 +1260,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
         googleUser={googleUser}
         googleAccessToken={googleAccessToken}
         onGoogleLogin={handleGoogleLogin}
+        onGoogleReconnect={handleGoogleReconnect}
         onGoogleLogout={handleGoogleLogout}
         events={events}
         onImportFromGoogle={handleImportFromGoogle}

@@ -26,12 +26,29 @@ export const SCOPES = [
   "https://www.googleapis.com/auth/calendar.events.readonly",
 ];
 
-const provider = new GoogleAuthProvider();
-SCOPES.forEach((scope) => provider.addScope(scope));
-// Allow selecting institutional account (@scuola.edu.it)
-provider.setCustomParameters({
-  prompt: "select_account",
-});
+// G1.2.1 — the provider is built fresh for every sign-in attempt: a shared
+// mutable provider could keep prompt=consent alive and force re-consent on
+// every later normal login. Normal logins use "select_account" only; the
+// explicit "Ricollega Google" CTA adds "consent" so Google re-shows the scope
+// screen and grants the new read-only CalendarList scopes.
+export function createGoogleProvider(forceConsent = false): GoogleAuthProvider {
+  const provider = new GoogleAuthProvider();
+  SCOPES.forEach((scope) => provider.addScope(scope));
+  // Allow selecting institutional account (@scuola.edu.it)
+  provider.setCustomParameters({
+    prompt: forceConsent ? "consent select_account" : "select_account",
+  });
+  return provider;
+}
+
+export interface SignInWithGoogleOptions {
+  /**
+   * Forces the Google consent screen (prompt="consent select_account").
+   * Used ONLY by explicit user gestures such as the "Ricollega Google" CTA
+   * when the CalendarList reports insufficient authentication scopes.
+   */
+  forceConsent?: boolean;
+}
 
 // Flag to track ongoing sign in flow
 let isSigningIn = false;
@@ -73,14 +90,15 @@ export const initAuth = (
   });
 };
 
-export const signInWithGoogle = async (): Promise<{
+export const signInWithGoogle = async (options?: SignInWithGoogleOptions): Promise<{
   user: User;
   accessToken: string;
 } | null> => {
   if (!auth) throw new Error("Accesso Google non configurato. Puoi continuare a usare l’agenda locale.");
   try {
     isSigningIn = true;
-    const result = await signInWithPopup(auth, provider);
+    // Per-call provider: forceConsent never leaks into subsequent logins.
+    const result = await signInWithPopup(auth, createGoogleProvider(options?.forceConsent === true));
     const credential = GoogleAuthProvider.credentialFromResult(result);
     if (!credential?.accessToken) {
       throw new Error("Impossibile recuperare il token di accesso Google.");
