@@ -374,14 +374,16 @@ export default function App({ initialData }: { initialData: LocalData }) {
   const handleImportFromGoogle = async (): Promise<GoogleCalendarImportResult> => {
     if (database.mode !== "indexeddb") throw new Error("Archivio locale in sola lettura: importazione sospesa.");
     let token = googleAccessToken || getAccessToken();
+    let loginUser: FirebaseUser | undefined;
     if (!token) {
       const login = await handleGoogleLogin();
       token = login?.accessToken ?? null;
+      loginUser = login?.user;
     }
     if (!token) throw new Error("Riconnetti l’account Google per autorizzare il download degli eventi.");
     // Manual refresh uses the same single-flight G1 pipeline and only bypasses
     // its cooldown; it never creates a second import implementation.
-    const result = await runAutomaticGoogleImport(true, token, googleUser || undefined);
+    const result = await runAutomaticGoogleImport(true, token, loginUser || googleUser || undefined);
     if (!result) throw new Error("Aggiornamento Google Calendar non disponibile.");
     return result;
   };
