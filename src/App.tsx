@@ -74,7 +74,12 @@ import {
   isGoogleSyncEnabled,
   syncOptedInGoogleEvents,
 } from "./services/googleCalendarService";
-import { importGoogleCalendarEvents, type GoogleCalendarImportResult } from "./services/googleCalendarImportService";
+import {
+  importSelectedGoogleCalendars,
+  resolveImportCalendarIds,
+  type GoogleCalendarImportResult,
+} from "./services/googleCalendarImportService";
+import { listGoogleCalendars, type GoogleCalendarListEntry } from "./services/googleCalendarService";
 import { normalizeTeacherProfile } from "./utils/multiSchool";
 import { accountSync } from "./services/sync/accountSync";
 import type { SyncStatus } from "./services/sync/types";
@@ -175,6 +180,10 @@ export default function App({ initialData }: { initialData: LocalData }) {
   // OAuth token is available.
   const autoImportInFlight = useRef<Promise<GoogleCalendarImportResult | null> | null>(null);
   const lastSuccessfulImportAt = useRef<number | null>(null);
+  // G1.2/§22: the first import of a session must run immediately, never waiting the cooldown.
+  const sessionImportDone = useRef(false);
+  const [googleCalendars, setGoogleCalendars] = useState<GoogleCalendarListEntry[] | null>(null);
+  const googleCalendarsLoading = useRef(false);
   const previousOnline = useRef<boolean | null>(null);
   const [profileInitialTab, setProfileInitialTab] = useState<"profilo" | "backup" | "google">("profilo");
 
@@ -269,7 +278,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
     return () => window.clearTimeout(timeout);
   }, [updateCheckFeedback]);
 
-  const runAutomaticGoogleImport = useCallback(async (force = false, tokenOverride?: string, userOverride?: FirebaseUser): Promise<GoogleCalendarImportResult | null> => {
+  const runAutomaticGoogleImport = useCallback(async (force = false, tokenOverride?: string, userOverride?: FirebaseUser, calendarIdsOverride?: string[]): Promise<GoogleCalendarImportResult | null> => {
     const activeGoogleUser = userOverride || googleUser;
     if (!activeGoogleUser || !isOnline) return null;
     const token = tokenOverride || googleAccessToken || getAccessToken();
@@ -278,12 +287,17 @@ export default function App({ initialData }: { initialData: LocalData }) {
       return null;
     }
     const last = lastSuccessfulImportAt.current;
-    if (!force && last !== null && Date.now() - last < GOOGLE_CALENDAR_AUTO_IMPORT_COOLDOWN_MS) return null;
+    // Session start (and explicit user actions) bypass the 5-minute cooldown.
+    const immediate = force || !sessionImportDone.current;
+    if (!immediate && last !== null && Date.now() - last < GOOGLE_CALENDAR_AUTO_IMPORT_COOLDOWN_MS) return null;
+    // Single-flight: one running import already covers ALL selected calendars.
     if (autoImportInFlight.current) return autoImportInFlight.current;
+    const calendarIds = calendarIdsOverride ?? resolveImportCalendarIds(profile);
     const request = (async () => {
       setGoogleAutoImportStatus("syncing");
       try {
-        const result = await importGoogleCalendarEvents(token);
+        const result = await importSelectedGoogleCalendars(token, calendarIds);
+        sessionImportDone.current = true;
         lastSuccessfulImportAt.current = Date.now();
         setLastSuccessfulImportAtState(lastSuccessfulImportAt.current);
         setLastImportResult(result);
@@ -299,7 +313,33 @@ export default function App({ initialData }: { initialData: LocalData }) {
     })();
     autoImportInFlight.current = request;
     return request;
-  }, [googleUser, googleAccessToken, isOnline]);
+  }, [googleUser, googleAccessToken, isOnline, profile.googleCalendarImportIds]);
+
+  /** Loads the CalendarList once per session/token; the UI never refetches on every render. */
+  const loadGoogleCalendars = useCallback(async (forceReload = false): Promise<GoogleCalendarListEntry[]> => {
+    const token = googleAccessToken || getAccessToken();
+    if (!token) {
+      setGoogleAutoImportStatus("needs-auth");
+      throw new Error("Ricollega Google per leggere l’elenco dei calendari.");
+    }
+    if (!forceReload && googleCalendars) return googleCalendars;
+    if (googleCalendarsLoading.current && googleCalendars) return googleCalendars;
+    googleCalendarsLoading.current = true;
+    try {
+      const calendars = await listGoogleCalendars(token);
+      setGoogleCalendars(calendars);
+      return calendars;
+    } finally {
+      googleCalendarsLoading.current = false;
+    }
+  }, [googleAccessToken, googleCalendars]);
+
+  /** Persists the selection (IDs only) and imports the new set immediately, bypassing the cooldown. */
+  const handleUpdateGoogleCalendarSelection = useCallback(async (calendarIds: string[]) => {
+    const unique = Array.from(new Set(calendarIds.length > 0 ? calendarIds : ["primary"]));
+    if (await handleSaveProfile({ ...profile, googleCalendarImportIds: unique }) === false) return;
+    await runAutomaticGoogleImport(true, undefined, undefined, unique);
+  }, [profile, runAutomaticGoogleImport]);
 
   // Focus and online transitions are the only automatic triggers. Missing OAuth
   // tokens never cause a popup; the card asks the user to reconnect instead.
@@ -1200,6 +1240,10 @@ export default function App({ initialData }: { initialData: LocalData }) {
         lastImportResult={lastImportResult}
         lastSuccessfulImportAt={lastSuccessfulImportAtState}
         onAutomaticImport={() => runAutomaticGoogleImport(true)}
+        googleCalendars={googleCalendars}
+        onLoadGoogleCalendars={loadGoogleCalendars}
+        selectedGoogleCalendarIds={resolveImportCalendarIds(profile)}
+        onUpdateGoogleCalendarSelection={handleUpdateGoogleCalendarSelection}
         onSyncAllToGoogle={handleSyncAllToGoogle}
         accountSyncStatus={syncStatus}
         onSyncNow={() => void accountSync.syncNow()}

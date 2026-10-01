@@ -30,7 +30,7 @@ import { storage } from "../services/storage";
 import { getCurrentSchoolYear, getSuggestedSchoolYears } from "../utils/schoolYear";
 import { GoogleSignInButton } from "./GoogleSignInButton";
 import { isUserCancellationError } from "../services/googleAuth";
-import { downloadIcsCalendar } from "../services/googleCalendarService";
+import { downloadIcsCalendar, type GoogleCalendarListEntry } from "../services/googleCalendarService";
 import type { SyncStatus } from "../services/sync/types";
 import type { GoogleCalendarImportResult } from "../services/googleCalendarImportService";
 import { CloudSync } from "./CloudSyncCard";
@@ -80,6 +80,11 @@ interface ProfileModalProps {
   lastImportResult?: GoogleCalendarImportResult | null;
   lastSuccessfulImportAt?: number | null;
   onAutomaticImport?: () => Promise<GoogleCalendarImportResult | null>;
+  /** G1.2: read-only multi-calendar selection. */
+  googleCalendars?: GoogleCalendarListEntry[] | null;
+  onLoadGoogleCalendars?: (forceReload?: boolean) => Promise<GoogleCalendarListEntry[]>;
+  selectedGoogleCalendarIds?: string[];
+  onUpdateGoogleCalendarSelection?: (calendarIds: string[]) => Promise<void>;
   onSyncAllToGoogle?: () => Promise<{ syncedCount: number; errorCount: number }>;
   accountSyncStatus?: SyncStatus;
   onSyncNow?: () => void;
@@ -165,6 +170,10 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   lastSuccessfulImportAt,
   onAutomaticImport,
   onSyncAllToGoogle,
+  googleCalendars = null,
+  onLoadGoogleCalendars,
+  selectedGoogleCalendarIds = ["primary"],
+  onUpdateGoogleCalendarSelection,
   accountSyncStatus,
   onSyncNow,
   onSyncToggle,
@@ -179,11 +188,32 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [isImportingGoogle, setIsImportingGoogle] = useState(false);
+  // G1.2: CalendarList is fetched once per session (cached by App), never on every render.
+  const [calendarListError, setCalendarListError] = useState<string | null>(null);
+  const [isLoadingCalendars, setIsLoadingCalendars] = useState(false);
+  const [pendingCalendarId, setPendingCalendarId] = useState<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<{ message: string; isError?: boolean } | null>(null);
   const [showSyncConfirm, setShowSyncConfirm] = useState(false);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const [fullName, setFullName] = useState(profile.fullName);
   const [email, setEmail] = useState(profile.email || "");
+
+  // Loads the Google CalendarList only when the Google tab is actually visible and a
+  // token exists. The result is cached by App, so re-renders never refetch.
+  useEffect(() => {
+    if (!isOpen || activeTab !== "google") return;
+    if (!googleUser || !onLoadGoogleCalendars) return;
+    if (googleCalendars) return;
+    let cancelled = false;
+    setIsLoadingCalendars(true);
+    setCalendarListError(null);
+    void onLoadGoogleCalendars(false)
+      .catch((error: unknown) => {
+        if (!cancelled) setCalendarListError(error instanceof Error ? error.message : "Elenco calendari non disponibile.");
+      })
+      .finally(() => { if (!cancelled) setIsLoadingCalendars(false); });
+    return () => { cancelled = true; };
+  }, [isOpen, activeTab, googleUser, googleCalendars, onLoadGoogleCalendars]);
 
   useEffect(() => {
     if (isOpen) {
@@ -1365,7 +1395,11 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                        googleAutoImportStatus === "error" ? "Aggiornamento Google non riuscito. Riproveremo più tardi." :
                        googleAutoImportStatus === "success" ? "Aggiornamento automatico attivo" :
                        googleAutoImportStatus === "needs-auth" ? "Ricollega Google per aggiornare il Calendar" : "Aggiornamento automatico attivo"}
+                      {` · ${selectedGoogleCalendarIds.length} ${selectedGoogleCalendarIds.length === 1 ? "calendario selezionato" : "calendari selezionati"}`}
                       {lastImportResult && lastSuccessfulImportAt ? ` · Ultimo aggiornamento: ${new Date(lastSuccessfulImportAt).toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" })} · ${lastImportResult.added} nuovo · ${lastImportResult.updated} aggiornati` : ""}
+                      {lastImportResult?.inaccessibleCalendarIds?.length
+                        ? ` · Aggiornamento parziale: ${lastImportResult.inaccessibleCalendarIds.length} calendario non accessibile`
+                        : ""}
                     </p>
                     <button
                       type="button"
@@ -1391,6 +1425,103 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                       <RefreshCw className={`w-4 h-4 ${isImportingGoogle ? "animate-spin" : ""}`} />
                       <span>{isImportingGoogle ? "Aggiornamento…" : "Aggiorna ora"}</span>{/* Scaricamento…; in precedenza: Scarica eventi. Ora l’azione forza un aggiornamento. */}
                     </button>
+                  </div>
+
+                  {/* G1.2 — selezione dei calendari Google importati (solo lettura). */}
+                  <div className="p-5 rounded-2xl border border-blue-200 bg-white space-y-3" data-google-calendar-selection>
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <h4 className="font-bold text-stone-900 text-sm">Calendari importati</h4>
+                        <p className="text-xs text-stone-600 mt-1 leading-relaxed">
+                          Scegli quali calendari Google leggere automaticamente. Gli eventi restano in sola lettura:
+                          AgendaDocente non scrive mai sui calendari condivisi.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={isLoadingCalendars || !onLoadGoogleCalendars}
+                        onClick={async () => {
+                          if (!onLoadGoogleCalendars) return;
+                          try {
+                            setIsLoadingCalendars(true);
+                            setCalendarListError(null);
+                            await onLoadGoogleCalendars(true);
+                          } catch (err: any) {
+                            setCalendarListError(err?.message || "Elenco calendari non disponibile.");
+                          } finally {
+                            setIsLoadingCalendars(false);
+                          }
+                        }}
+                        className="shrink-0 text-[11px] font-bold text-blue-700 underline disabled:text-stone-400"
+                      >
+                        Aggiorna elenco calendari
+                      </button>
+                    </div>
+
+                    {calendarListError && (
+                      <div className="flex items-center justify-between gap-3 text-[11px] text-amber-800">
+                        <span>{calendarListError}</span>
+                        <button type="button" onClick={() => void onGoogleLogin?.()} className="shrink-0 underline font-bold">Ricollega Google</button>
+                      </div>
+                    )}
+
+                    {isLoadingCalendars && !googleCalendars && (
+                      <p className="text-xs text-stone-500">Caricamento elenco calendari…</p>
+                    )}
+
+                    {googleCalendars && googleCalendars.length > 0 && (
+                      <ul className="space-y-2">
+                        {googleCalendars.map(calendar => {
+                          const checked = selectedGoogleCalendarIds.includes(calendar.id) ||
+                            (!!calendar.primary && selectedGoogleCalendarIds.includes("primary"));
+                          const kind = calendar.primary
+                            ? "Principale"
+                            : calendar.accessRole === "owner" ? "Mio calendario" : "Condiviso";
+                          return (
+                            <li key={calendar.id} className="flex items-start gap-2.5">
+                              <input
+                                id={`gcal-select-${calendar.id}`}
+                                type="checkbox"
+                                checked={checked}
+                                disabled={pendingCalendarId !== null || !onUpdateGoogleCalendarSelection}
+                                onChange={async (event) => {
+                                  if (!onUpdateGoogleCalendarSelection) return;
+                                  const current = new Set(selectedGoogleCalendarIds);
+                                  if (calendar.primary) current.add("primary");
+                                  if (event.target.checked) current.add(calendar.id);
+                                  else { current.delete(calendar.id); if (calendar.primary) current.delete("primary"); }
+                                  try {
+                                    setPendingCalendarId(calendar.id);
+                                    setSyncStatus(null);
+                                    // La scelta utente avvia subito un import: non aspetta il cooldown.
+                                    await onUpdateGoogleCalendarSelection(Array.from(current));
+                                    setSyncStatus({ message: "Selezione calendari aggiornata: importazione avviata.", isError: false });
+                                  } catch (err: any) {
+                                    setSyncStatus({ message: err?.message || "Impossibile aggiornare la selezione dei calendari.", isError: true });
+                                  } finally {
+                                    setPendingCalendarId(null);
+                                  }
+                                }}
+                                className="mt-0.5 rounded text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
+                              />
+                              <label htmlFor={`gcal-select-${calendar.id}`} className="cursor-pointer">
+                                <span className="block text-xs font-bold text-stone-800">{calendar.summary}</span>
+                                <span className="block text-[10px] text-stone-500">{kind}</span>
+                              </label>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+
+                    {googleCalendars && googleCalendars.length === 0 && (
+                      <p className="text-xs text-stone-500">Nessun calendario Google disponibile.</p>
+                    )}
+
+                    <p className="text-[10px] text-stone-500 leading-relaxed">
+                      Deselezionando un calendario gli eventi già importati restano in AgendaDocente: smette soltanto
+                      l’aggiornamento automatico. Viene memorizzato solo l’identificativo del calendario, mai token o credenziali.
+                    </p>
                   </div>
 
                   <CloudSync

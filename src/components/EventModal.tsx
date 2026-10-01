@@ -80,6 +80,8 @@ export const EventModal: React.FC<EventModalProps> = ({
   const [location, setLocation] = useState(initialTimeFields.location);
   const [notes, setNotes] = useState("");
   const [syncWithGoogle, setSyncWithGoogle] = useState(false);
+  /** G1.2: a Google-imported event (primary or shared) is read-only towards Google. */
+  const isGoogleSourcedEvent = eventToEdit?.sourceType === "google_calendar";
   const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
   // L'evento in modifica (o precompilato dallo scanner) possiede gia' la
   // categoria legacy? Allora l'opzione resta disponibile per tutta la sessione
@@ -150,7 +152,10 @@ export const EventModal: React.FC<EventModalProps> = ({
       sourceType: eventToEdit ? eventToEdit.sourceType : "manuale",
       completed: eventToEdit ? eventToEdit.completed : false,
       googleEventId: eventToEdit?.googleEventId,
-      syncedWithGoogle: syncWithGoogle,
+      googleCalendarId: eventToEdit?.googleCalendarId,
+      // G1.2: events imported from Google (primary or shared) stay strictly read-only;
+      // editing them locally must never enable an outbound push to Google.
+      syncedWithGoogle: isGoogleSourcedEvent ? false : syncWithGoogle,
     };
 
     if (!await save.run(() => onSave(newEvent, eventToEdit ?? undefined))) return;
@@ -256,7 +261,7 @@ export const EventModal: React.FC<EventModalProps> = ({
           </div>
 
           {validationError && <p role="alert" className="text-sm text-rose-700">{validationError}</p>}
-          {eventToEdit?.googleEventId && !syncWithGoogle && (
+          {!isGoogleSourcedEvent && eventToEdit?.googleEventId && !syncWithGoogle && (
             <p className="text-xs text-stone-600">Sincronizzazione disattivata: la copia su Google resta disponibile e non verrà aggiornata o eliminata da questa agenda.</p>
           )}
           {/*
@@ -364,8 +369,8 @@ export const EventModal: React.FC<EventModalProps> = ({
             />
           </div>
 
-          {/* Google Calendar Sync Option */}
-          {(isGoogleConnected || !!eventToEdit?.googleEventId || syncWithGoogle) && (
+          {/* Google Calendar Sync Option — never offered for events imported from Google (read-only). */}
+          {!isGoogleSourcedEvent && (isGoogleConnected || !!eventToEdit?.googleEventId || syncWithGoogle) && (
             <div className="p-3 rounded-xl bg-blue-50/70 border border-blue-200 flex items-center justify-between">
               <div className="flex items-center space-x-2.5">
                 <div className="w-5 h-5 flex-shrink-0">

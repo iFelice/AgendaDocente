@@ -15,11 +15,15 @@ export const firebaseApp = config ? (getApps().length === 0 ? initializeApp(conf
 export const auth = firebaseApp ? getAuth(firebaseApp) : null;
 
 // Calendar writes use the primary (owned) calendar; identity scopes alone cannot authorize them.
-// The OAuth consent screen must allow this scope for the configured beta testers.
+// G1.2 adds two least-privilege READ-ONLY scopes so shared calendars can be listed and imported.
+// The owned write scope is intentionally unchanged: outbound stays primary-only and never widens.
+// The OAuth consent screen must allow these scopes for the configured beta testers.
 export const SCOPES = [
   "https://www.googleapis.com/auth/userinfo.email",
   "https://www.googleapis.com/auth/userinfo.profile",
   "https://www.googleapis.com/auth/calendar.events.owned",
+  "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+  "https://www.googleapis.com/auth/calendar.events.readonly",
 ];
 
 const provider = new GoogleAuthProvider();
