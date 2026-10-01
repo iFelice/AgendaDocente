@@ -27,7 +27,14 @@ export function googleDateTimeInRome(dateTime: string): { date: string; time: st
  * Maps one Google occurrence to one local event. Multi-day all-day events are
  * deliberately represented by their first day only in G1 (Google's end.date is exclusive).
  */
-export function googleEventToCalendarEvent(remote: GoogleCalendarApiEvent): CalendarEvent {
+export function googleEventLocalId(calendarId: string | undefined, eventId: string): string {
+  // G1 kept `gcal-<eventId>`; with several calendars the local id must carry both identities.
+  return calendarId
+    ? `gcal-${encodeURIComponent(calendarId)}-${encodeURIComponent(eventId)}`
+    : `gcal-${encodeURIComponent(eventId)}`;
+}
+
+export function googleEventToCalendarEvent(remote: GoogleCalendarApiEvent, calendarId?: string): CalendarEvent {
   if (!remote.id) throw new Error("Evento Google Calendar senza identificativo");
 
   const allDay = !!remote.start?.date;
@@ -49,7 +56,7 @@ export function googleEventToCalendarEvent(remote: GoogleCalendarApiEvent): Cale
   }
 
   return {
-    id: `gcal-${encodeURIComponent(remote.id)}`,
+    id: googleEventLocalId(calendarId, remote.id),
     title: remote.summary?.trim() || "Evento Google",
     category: "personale",
     date,
@@ -59,6 +66,7 @@ export function googleEventToCalendarEvent(remote: GoogleCalendarApiEvent): Cale
     location: remote.location,
     notes: remote.description,
     googleEventId: remote.id,
+    ...(calendarId ? { googleCalendarId: calendarId } : {}),
     sourceType: "google_calendar",
     syncedWithGoogle: false,
     completed: false,
@@ -111,6 +119,82 @@ export function mergeGoogleCalendarEvents(
       updatedAt: existing.updatedAt,
     };
     updated++;
+  }
+
+  return { events, added, updated, linked, ignoredCancelled };
+}
+
+
+/** One selected Google calendar and the events already downloaded from it. */
+export interface GoogleCalendarEventGroup {
+  calendarId: string;
+  /** The primary calendar enables legacy (G1) matching on googleEventId alone. */
+  isPrimary?: boolean;
+  events: GoogleCalendarApiEvent[];
+}
+
+/**
+ * Multi-calendar merge. Remote identity is `googleCalendarId + googleEventId`.
+ *
+ * Backward compatibility rules:
+ * - primary: a legacy local record (`sourceType === "google_calendar"` and no
+ *   `googleCalendarId`) matching on `googleEventId` is the SAME event. It keeps its local id
+ *   and `completed`, and simply acquires `googleCalendarId` on first refresh.
+ * - primary: an Agenda-born event already linked to Google (`sourceType !== "google_calendar"`)
+ *   counts as linked and is never duplicated nor overwritten.
+ * - shared calendars: never match on `googleEventId` alone, so a shared event can never
+ *   collide with an Agenda event or with the same event id coming from another calendar.
+ */
+export function mergeGoogleCalendarGroups(
+  localEvents: CalendarEvent[],
+  groups: GoogleCalendarEventGroup[],
+): GoogleCalendarMergeResult {
+  const events = [...localEvents];
+  let added = 0;
+  let updated = 0;
+  let linked = 0;
+  let ignoredCancelled = 0;
+
+  for (const group of groups) {
+    const { calendarId } = group;
+    for (const remote of group.events) {
+      if (remote.status === "cancelled") {
+        ignoredCancelled++;
+        continue;
+      }
+      const mapped = googleEventToCalendarEvent(remote, calendarId);
+      let index = events.findIndex(
+        event => event.googleCalendarId === calendarId && event.googleEventId === remote.id,
+      );
+      if (index < 0 && group.isPrimary) {
+        index = events.findIndex(
+          event => event.googleCalendarId == null && event.googleEventId === remote.id,
+        );
+      }
+      if (index < 0) {
+        events.push(mapped);
+        added++;
+        continue;
+      }
+      const existing = events[index];
+      if (existing.sourceType !== "google_calendar") {
+        // Agenda → Google record already linked to this remote event: never touched here.
+        linked++;
+        continue;
+      }
+      events[index] = {
+        ...existing,
+        ...mapped,
+        id: existing.id,
+        googleEventId: existing.googleEventId,
+        googleCalendarId: calendarId,
+        sourceType: "google_calendar",
+        syncedWithGoogle: false,
+        completed: existing.completed,
+        updatedAt: existing.updatedAt,
+      };
+      updated++;
+    }
   }
 
   return { events, added, updated, linked, ignoredCancelled };

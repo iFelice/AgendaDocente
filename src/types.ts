@@ -127,6 +127,12 @@ export interface TeacherProfile {
   assignedStudents?: string[];
   googleCalendarLinked?: boolean;
   googleCalendarAccount?: string;
+  /**
+   * G1.2: IDs of the Google calendars imported automatically (read-only).
+   * Optional and additive: a legacy profile without it imports only "primary".
+   * Only IDs are persisted — never tokens or credentials.
+   */
+  googleCalendarImportIds?: string[];
   /** Ore settimanali dichiarate dal docente (default 18 se non presente). */
   weeklyDeclaredHours?: number;
   /** Additive multi-institute model; legacy scalar fields remain supported. */
@@ -200,6 +206,8 @@ export interface CalendarEvent {
   completed?: boolean;
   reminderMinutesBefore?: number;
   googleEventId?: string;
+  /** G1.2: remote identity is googleCalendarId + googleEventId. Absent on legacy primary imports. */
+  googleCalendarId?: string;
   syncedWithGoogle?: boolean;
   /** Wall-clock stamp maintained by the storage layer; used by account sync conflict checks. */
   updatedAt?: string;

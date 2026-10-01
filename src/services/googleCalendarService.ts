@@ -19,7 +19,61 @@ export interface GoogleCalendarApiEvent {
   };
 }
 
-const CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3/calendars/primary/events";
+const CALENDAR_V3_BASE = "https://www.googleapis.com/calendar/v3";
+/** Outbound (create/update/delete) stays primary-only by design: G1.2 never writes shared calendars. */
+const CALENDAR_API_BASE = `${CALENDAR_V3_BASE}/calendars/primary/events`;
+export const PRIMARY_CALENDAR_ID = "primary";
+
+/** Minimal CalendarList entry: G1.2 needs identity and read access only, no colors/metadata. */
+export interface GoogleCalendarListEntry {
+  id: string;
+  summary: string;
+  primary?: boolean;
+  accessRole?: string;
+  selected?: boolean;
+  hidden?: boolean;
+}
+
+/** Reads every CalendarList page (GET only) and keeps calendars the user can at least read. */
+export const listGoogleCalendars = async (
+  accessToken: string,
+  limits: { maxPages?: number } = {},
+): Promise<GoogleCalendarListEntry[]> => {
+  if (!accessToken) throw new Error("Riconnetti l’account Google per leggere l’elenco dei calendari.");
+  const maxPages = limits.maxPages ?? 10;
+  const calendars: GoogleCalendarListEntry[] = [];
+  let pageToken: string | undefined;
+  let pagesRead = 0;
+
+  do {
+    const params = new URLSearchParams({ maxResults: "250", minAccessRole: "reader" });
+    if (pageToken) params.set("pageToken", pageToken);
+    const response = await fetch(`${CALENDAR_V3_BASE}/users/me/calendarList?${params.toString()}`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!response.ok) {
+      const errData = await response.json().catch(() => ({}));
+      throw new Error(errData?.error?.message || `Errore elenco calendari Google (${response.status})`);
+    }
+    const data = await response.json() as { items?: GoogleCalendarListEntry[]; nextPageToken?: string };
+    pagesRead++;
+    for (const item of data.items ?? []) {
+      if (!item?.id) continue;
+      calendars.push({
+        id: item.id,
+        summary: item.summary || item.id,
+        primary: item.primary,
+        accessRole: item.accessRole,
+        selected: item.selected,
+        hidden: item.hidden,
+      });
+    }
+    pageToken = data.nextPageToken;
+  } while (pageToken && pagesRead < maxPages);
+
+  return calendars;
+};
 
 function validateExportEvent(event: CalendarEvent): void {
   const error = eventDateError(event);
@@ -152,9 +206,10 @@ export type GoogleCalendarEventList = GoogleCalendarApiEvent[] & {
   pagesRead: number;
 };
 
-/** Fetches every page in the requested range, up to G1's explicit safety cap. */
-export const listGoogleCalendarEvents = async (
+/** Fetches every page of one calendar in the requested range, up to G1's explicit safety cap. */
+export const listCalendarEvents = async (
   accessToken: string,
+  calendarId: string = PRIMARY_CALENDAR_ID,
   timeMin?: string,
   timeMax?: string,
   limits: { maxPages?: number; maxEvents?: number } = {},
@@ -162,6 +217,7 @@ export const listGoogleCalendarEvents = async (
   const maxPages = limits.maxPages ?? 10;
   const maxEvents = limits.maxEvents ?? 1000;
   const events: GoogleCalendarApiEvent[] = [];
+  const endpoint = `${CALENDAR_V3_BASE}/calendars/${encodeURIComponent(calendarId || PRIMARY_CALENDAR_ID)}/events`;
   let pageToken: string | undefined;
   let pagesRead = 0;
   let partial = false;
@@ -176,13 +232,15 @@ export const listGoogleCalendarEvents = async (
     if (timeMax) params.set("timeMax", timeMax);
     if (pageToken) params.set("pageToken", pageToken);
 
-    const response = await fetch(`${CALENDAR_API_BASE}?${params.toString()}`, {
+    const response = await fetch(`${endpoint}?${params.toString()}`, {
       method: "GET",
       headers: { Authorization: `Bearer ${accessToken}` },
     });
     if (!response.ok) {
       const errData = await response.json().catch(() => ({}));
-      throw new Error(errData?.error?.message || `Errore recupero eventi Google Calendar (${response.status})`);
+      const error = new Error(errData?.error?.message || `Errore recupero eventi Google Calendar (${response.status})`);
+      (error as Error & { status?: number }).status = response.status;
+      throw error;
     }
 
     const data = await response.json() as { items?: GoogleCalendarApiEvent[]; nextPageToken?: string };
@@ -199,6 +257,14 @@ export const listGoogleCalendarEvents = async (
 
   return Object.assign(events, { partial, pagesRead });
 };
+
+/** G1 signature kept intact for outbound/primary callers and the existing suite. */
+export const listGoogleCalendarEvents = async (
+  accessToken: string,
+  timeMin?: string,
+  timeMax?: string,
+  limits: { maxPages?: number; maxEvents?: number } = {},
+): Promise<GoogleCalendarEventList> => listCalendarEvents(accessToken, PRIMARY_CALENDAR_ID, timeMin, timeMax, limits);
 
 /**
  * Generates an official Google Calendar 1-click web URL to add an event without requiring any OAuth scopes
