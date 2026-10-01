@@ -132,6 +132,7 @@ function navProps(overrides: Partial<React.ComponentProps<typeof MobileNav>> = {
     currentView: 'oggi' as ViewMode,
     onViewChange: () => {},
     onOpenNewEvent: () => {},
+    onOpenNewNote: () => {},
     onOpenProfileModal: () => {},
     onOpenGoogleTab: () => {},
     onOpenGoogleLogin: async () => null,
@@ -150,6 +151,7 @@ function navbarProps(overrides: Partial<React.ComponentProps<typeof Navbar>> = {
     profile,
     onOpenCircularModal: () => {},
     onOpenNewEventModal: () => {},
+    onOpenNewNote: () => {},
     onOpenProfileModal: () => {},
     onOpenTutorial: () => {},
     googleUser: null,
@@ -265,9 +267,10 @@ test('the primary "+" action is a floating button that opens the quick-actions s
   assert.equal(byId(renderer, 'mobile-fab-actions').props['aria-expanded'], true);
   const menu = renderer.root.findByProps({ role: 'menu' });
   assert.equal(menu.props['aria-label'], 'Azioni rapide');
-  // The two quick actions are reachable: new commitment AND document scan.
+  // The quick actions are reachable: new commitment, note, and document scan.
   const menuText = flatText(menu);
   assert.ok(menuText.includes('Nuovo impegno'), 'quick action "Nuovo impegno"');
+  assert.ok(menuText.includes('Nuova nota'), 'quick action "Nuova nota"');
   assert.ok(menuText.includes('Scansiona documento'), 'quick action "Scansiona documento"');
 
   await act(async () => { byId(renderer, 'mobile-fab-scan-document').props.onClick(); });
@@ -382,14 +385,14 @@ test('on phones the header keeps only brand and profile', async () => {
     const button = byId(renderer, id);
     assert.ok(hasClass(button, 'hidden') && hasClass(button, 'md:inline-flex'), `${id} is hidden on phones`);
   }
-  // The two creation CTAs moved to the desktop-only tier (from 1280px): on
-  // phones AND tablets the primary action is the MobileNav FAB.
+  // The generic creation entry and scanner are desktop-only (from 1280px):
+  // on phones AND tablets the primary action is the MobileNav FAB.
   const withScanner = await render(React.createElement(Navbar, navbarProps({ onOpenScanner: () => {} })));
-  for (const id of ['btn-new-event', 'btn-scan-document']) {
-    const button = byId(withScanner, id);
-    assert.ok(hasClass(button, 'hidden') && hasClass(button, 'xl:inline-flex'), `${id} is hidden on phones and tablets`);
-    assert.ok(!hasClass(button, 'md:inline-flex') && !hasClass(button, 'lg:inline-flex'), `${id} no longer appears on tablets (md nor lg)`);
-  }
+  const newEntryWrapper = ancestorWithClass(byId(withScanner, 'btn-new-event'), 'hidden', 'xl:block');
+  assert.ok(newEntryWrapper, 'the generic creation entry is hidden on phones and tablets');
+  const scannerButton = byId(withScanner, 'btn-scan-document');
+  assert.ok(hasClass(scannerButton, 'hidden') && hasClass(scannerButton, 'xl:inline-flex'), 'scanner is hidden on phones and tablets');
+  assert.ok(!hasClass(scannerButton, 'md:inline-flex') && !hasClass(scannerButton, 'lg:inline-flex'), 'scanner does not reappear on tablets');
   // Google status chip (rendered when an account is connected) is desktop only too.
   const connected = await render(React.createElement(Navbar, navbarProps({
     googleUser: { email: 'docente@icdavinci.edu.it', uid: 'u1', displayName: 'Andrea Conti' } as any,
@@ -445,7 +448,7 @@ test('desktop navigation is unchanged: every section stays in the header tabs', 
   }
   assert.equal(byId(renderer, 'nav-tab-orario').props['aria-current'], 'page');
   // The desktop action row is intact (creation CTAs visible from 1280px up).
-  assert.ok(hasClass(byId(renderer, 'btn-new-event'), 'xl:inline-flex'));
+  assert.ok(ancestorWithClass(byId(renderer, 'btn-new-event'), 'hidden', 'xl:block'), 'generic creation entry is desktop-only');
   const circularCta = byId(renderer, 'btn-scan-circular');
   assert.ok(hasClass(circularCta, 'md:inline-flex'));
   assert.ok(!String(circularCta.props.className).includes('bg-amber-500'), 'circular action is not a temporal warning surface');
@@ -588,13 +591,16 @@ test('FAB tablet: un solo FAB "+" (xl:hidden), CTA di creazione solo da xl, ness
 
   // Il tap sul FAB apre le STESSHE azioni di sempre, ciascuna una sola volta.
   let newEventFromFab = 0;
+  let newNoteFromFab = 0;
   let scanFromFab = 0;
   const navWithSpies = await render(React.createElement(MobileNav, navProps({
     onOpenNewEvent: () => { newEventFromFab += 1; },
+    onOpenNewNote: () => { newNoteFromFab += 1; },
     onOpenScanner: () => { scanFromFab += 1; },
   })));
   await act(async () => { byId(navWithSpies, 'mobile-fab-actions').props.onClick(); });
   assert.equal(navWithSpies.root.findAll((el: any) => el.type === 'button' && el.props.id === 'mobile-fab-new-event').length, 1, 'azione "Nuovo impegno" non duplicata nel menu FAB');
+  assert.equal(navWithSpies.root.findAll((el: any) => el.type === 'button' && el.props.id === 'mobile-fab-new-note').length, 1, 'azione "Nuova nota" nel menu FAB');
   assert.equal(navWithSpies.root.findAll((el: any) => el.type === 'button' && el.props.id === 'mobile-fab-scan-document').length, 1, 'azione "Scansiona documento" non duplicata nel menu FAB');
   // Ogni azione chiude il menu: si riapre il FAB fra le due verifiche.
   await act(async () => { byId(navWithSpies, 'mobile-fab-scan-document').props.onClick(); });
@@ -602,25 +608,34 @@ test('FAB tablet: un solo FAB "+" (xl:hidden), CTA di creazione solo da xl, ness
   await act(async () => { byId(navWithSpies, 'mobile-fab-actions').props.onClick(); });
   await act(async () => { byId(navWithSpies, 'mobile-fab-new-event').props.onClick(); });
   assert.equal(newEventFromFab, 1, 'il FAB continua ad aprire il flusso Nuovo Impegno');
+  await act(async () => { byId(navWithSpies, 'mobile-fab-actions').props.onClick(); });
+  await act(async () => { byId(navWithSpies, 'mobile-fab-new-note').props.onClick(); });
+  assert.equal(newNoteFromFab, 1, 'il FAB apre anche il flusso Nuova nota');
 
-  // Navbar: le due CTA di creazione compaiono solo da lg (desktop), una volta
-  // ciascuna, e continuano ad aprire gli stessi flussi del FAB.
+  // Navbar: l'ingresso generico e lo scanner compaiono solo da xl; il menu
+  // apre sia l'EventModal sia il QuickNoteModal senza duplicare CTA.
   let newEventFromCta = 0;
+  let newNoteFromCta = 0;
   let scanFromCta = 0;
   const bar = await render(React.createElement(Navbar, navbarProps({
     onOpenNewEventModal: () => { newEventFromCta += 1; },
+    onOpenNewNote: () => { newNoteFromCta += 1; },
     onOpenScanner: () => { scanFromCta += 1; },
   })));
-  for (const id of ['btn-new-event', 'btn-scan-document']) {
-    const button = byId(bar, id);
-    assert.ok(hasClass(button, 'hidden') && hasClass(button, 'xl:inline-flex'), `${id} visibile solo da xl (1280px)`);
-    assert.ok(!hasClass(button, 'md:inline-flex') && !hasClass(button, 'lg:inline-flex'), `${id} non compare su smartphone ne tablet (md/lg)`);
-  }
-  assert.equal(bar.root.findAll((el: any) => el.type === 'button' && el.props.id === 'btn-new-event').length, 1, 'CTA Nuovo Impegno non duplicata');
+  assert.ok(ancestorWithClass(byId(bar, 'btn-new-event'), 'hidden', 'xl:block'), 'ingresso generico visibile solo da xl');
+  const scannerCta = byId(bar, 'btn-scan-document');
+  assert.ok(hasClass(scannerCta, 'hidden') && hasClass(scannerCta, 'xl:inline-flex'), 'scanner visibile solo da xl');
+  assert.equal(bar.root.findAll((el: any) => el.type === 'button' && el.props.id === 'btn-new-event').length, 1, 'CTA Nuovo non duplicata');
   assert.equal(bar.root.findAll((el: any) => el.type === 'button' && el.props.id === 'btn-scan-document').length, 1, 'CTA Scansiona Documento non duplicata');
   await act(async () => { byId(bar, 'btn-new-event').props.onClick(); });
+  assert.ok(byId(bar, 'btn-new-event-option'));
+  assert.ok(byId(bar, 'btn-new-note-option'));
+  await act(async () => { byId(bar, 'btn-new-event-option').props.onClick(); });
+  await act(async () => { byId(bar, 'btn-new-event').props.onClick(); });
+  await act(async () => { byId(bar, 'btn-new-note-option').props.onClick(); });
   await act(async () => { byId(bar, 'btn-scan-document').props.onClick(); });
-  assert.equal(newEventFromCta, 1, '"Nuovo Impegno" continua ad aprire lo stesso flusso');
+  assert.equal(newEventFromCta, 1, '"Nuovo impegno" continua ad aprire lo stesso flusso');
+  assert.equal(newNoteFromCta, 1, '"Nuova nota" apre il flusso rapido');
   assert.equal(scanFromCta, 1, '"Scansiona Documento" continua ad aprire lo stesso flusso');
 
   // EventModal e TimetableEditor restano fuori da questo micro-step: nessuna
@@ -661,12 +676,13 @@ test('tabella breakpoint: FAB e bottom nav sotto 1280px (767/820/834/1024/1194/1
     'nessun residuo md/lg: nessuna finestra 768-1279px senza FAB/bottom nav (UI ibrida assente)');
 
   const bar = await render(React.createElement(Navbar, navbarProps({ onOpenScanner: () => {} })));
-  for (const id of ['btn-new-event', 'btn-scan-document']) {
-    const button = byId(bar, id);
-    assert.ok(hasClass(button, 'hidden') && hasClass(button, 'xl:inline-flex'), `${id}: nascosto di default, visibile solo da 1280px`);
-    assert.ok(!hasClass(button, 'lg:inline-flex') && !hasClass(button, 'md:inline-flex'),
-      `${id}: nessuna ri-comparsa fra 768 e 1279px => mai FAB+CTA contemporaneamente`);
-  }
+  assert.ok(ancestorWithClass(byId(bar, 'btn-new-event'), 'hidden', 'xl:block'),
+    'ingresso generico: nascosto di default, visibile solo da 1280px');
+  const scannerButton = byId(bar, 'btn-scan-document');
+  assert.ok(hasClass(scannerButton, 'hidden') && hasClass(scannerButton, 'xl:inline-flex'),
+    'scanner: nascosto di default, visibile solo da 1280px');
+  assert.ok(!hasClass(scannerButton, 'lg:inline-flex') && !hasClass(scannerButton, 'md:inline-flex'),
+    'scanner: nessuna ri-comparsa fra 768 e 1279px => mai FAB+CTA contemporaneamente');
 
   // Geometria/colore/safe-area del FAB: nessuna modifica (regole CSS intatte).
   const fabCss = css.slice(css.indexOf('.app-fab {'), css.indexOf('}', css.indexOf('.app-fab {')));
