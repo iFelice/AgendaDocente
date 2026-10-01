@@ -309,7 +309,8 @@ test('H10 UI: se 1C è già nel Profilo, l’import locale non mostra il banner 
 
 test('H10 UI: più fogli e più righe compatibili richiedono una scelta esplicita', async () => {
   const book = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet([['Note'], ['scegli Orario']]), 'Note');
+  // Due fogli REALMENTE validi: qui la scelta deve restare all'utente.
+  XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet(fixtureRows()), 'Orario A');
   const ambiguous = fixtureRows();
   ambiguous.push(['Manganiello A.', ...periods.flat()]);
   XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet(ambiguous), 'Orario');

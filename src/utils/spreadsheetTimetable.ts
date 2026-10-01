@@ -319,27 +319,28 @@ function firstOrderedWeekGroups(row: string[]): DayHeaderGroup[] | null {
   return ordered;
 }
 
-interface PeriodRun {
-  rowIndex: number;
-  columns: number[];
-}
-
-function periodRunsInSegment(matrix: string[][], headerRow: number, start: number, endExclusive: number): PeriodRun[] {
-  const runs: PeriodRun[] = [];
-  const from = Math.max(0, headerRow - 2);
-  const to = Math.min(matrix.length - 1, headerRow + 3);
-  for (let rowIndex = from; rowIndex <= to; rowIndex++) {
-    const row = matrix[rowIndex] ?? [];
-    for (let column = start; column < endExclusive; column++) {
-      if (periodFromHeader(row[column]) !== 1) continue;
-      const columns: number[] = [];
-      let expected = 1;
-      while (column + columns.length < endExclusive && periodFromHeader(row[column + columns.length]) === expected) {
-        columns.push(column + columns.length);
-        expected++;
-      }
-      if (columns.length) runs.push({ rowIndex, columns });
+/**
+ * Sequenze consecutive di ore che partono da 1 (`1,2,3,…`) su una riga.
+ * Sono la SORGENTE PRIMARIA della geometria: ogni sequenza è un blocco fisico
+ * di colonne, indipendentemente da dove sia scritta l'etichetta del giorno
+ * (spesso centrata nel blocco e non sulla prima colonna).
+ */
+function periodRunsInRow(row: readonly string[]): number[][] {
+  const runs: number[][] = [];
+  let column = 0;
+  while (column < row.length) {
+    if (periodFromHeader(row[column]) !== 1) {
+      column++;
+      continue;
     }
+    const columns: number[] = [column];
+    let expected = 2;
+    while (periodFromHeader(row[column + columns.length]) === expected) {
+      columns.push(column + columns.length);
+      expected++;
+    }
+    runs.push(columns);
+    column += columns.length;
   }
   return runs;
 }
@@ -356,60 +357,126 @@ interface LayoutCandidate {
   score: number;
 }
 
-function layoutCandidates(matrix: string[][], periodsByDay: PersonalTimetablePeriodsByDay): { candidates: LayoutCandidate[]; hasDayHeaders: boolean; mismatch?: number[] } {
+/** Lunghezza minima di una sequenza per essere considerata un blocco giornaliero. */
+const MIN_PERIOD_RUN = 2;
+/** Quante righe sopra la riga delle ore possono contenere l'etichetta del giorno. */
+const DAY_LABEL_LOOKBACK = 4;
+
+interface BlockLabel {
+  dayOfWeek: number;
+  rowIndex: number;
+}
+
+/**
+ * Cerca l'etichetta del giorno nelle righe immediatamente sopra la riga delle
+ * ore, in una colonna COMPRESA nel blocco: la scritta è spesso centrata
+ * (`LUNEDI'` su E per il blocco D:I), quindi la sua colonna non può essere usata
+ * come confine fisico del blocco.
+ */
+function dayLabelForBlock(matrix: string[][], periodRow: number, columns: readonly number[]): BlockLabel | null {
+  const first = columns[0];
+  const last = columns[columns.length - 1];
+  for (let rowIndex = periodRow - 1; rowIndex >= Math.max(0, periodRow - DAY_LABEL_LOOKBACK); rowIndex--) {
+    const row = matrix[rowIndex] ?? [];
+    for (let column = first; column <= last; column++) {
+      const day = dayFromHeader(row[column]);
+      if (day) return { dayOfWeek: day, rowIndex };
+    }
+  }
+  return null;
+}
+
+function hasAnyDayLabel(matrix: string[][]): boolean {
+  return matrix.some(row => row.some(value => dayFromHeader(value) !== null));
+}
+
+/**
+ * Geometria derivata dalle sequenze delle ore: ogni run `1..n` è un blocco
+ * fisico, i giorni vengono associati dopo. I blocchi sono per costruzione
+ * disgiunti e ordinati da sinistra a destra.
+ */
+function runLayoutCandidates(
+  matrix: string[][],
+  periodsByDay: PersonalTimetablePeriodsByDay,
+): { candidates: LayoutCandidate[]; mismatch?: number[] } {
   const candidates: LayoutCandidate[] = [];
-  let hasDayHeaders = false;
+  let mismatch: number[] | undefined;
+  let mismatchLabels = -1;
+
+  for (let periodRow = 0; periodRow < matrix.length; periodRow++) {
+    const runs = periodRunsInRow(matrix[periodRow] ?? []).filter(columns => columns.length >= MIN_PERIOD_RUN);
+    if (runs.length < 5) continue;
+
+    for (let offset = 0; offset + 5 <= runs.length; offset++) {
+      const window = runs.slice(offset, offset + 5);
+      const labels = window.map(columns => dayLabelForBlock(matrix, periodRow, columns));
+      // I giorni etichettati devono rispettare l'ordine Lun→Ven sulla loro
+      // posizione: un blocco marcato "Mercoledì" in terza posizione va bene,
+      // uno marcato "Lunedì" in seconda posizione invalida la finestra.
+      const consistent = labels.every((label, index) => !label || label.dayOfWeek === index + 1);
+      const labelCount = labels.filter(Boolean).length;
+      if (!consistent || labelCount === 0) continue;
+
+      const lengths = window.map(columns => columns.length);
+      if (lengths.some((length, index) => length !== periodsByDay[index])) {
+        if (labelCount > mismatchLabels) {
+          mismatch = lengths;
+          mismatchLabels = labelCount;
+        }
+        continue;
+      }
+
+      const labelRows = labels.filter((label): label is BlockLabel => Boolean(label)).map(label => label.rowIndex);
+      candidates.push({
+        headerRow: labelRows.length ? Math.min(...labelRows) : periodRow,
+        periodHeaderRow: periodRow,
+        dayBlocks: window.map((columns, index) => ({ dayOfWeek: index + 1, columns })),
+        score: lengths.reduce((sum, length) => sum + length, 0) + labelCount * 10,
+      });
+    }
+  }
+
+  return { candidates, mismatch };
+}
+
+/**
+ * Fallback per fogli SENZA riga delle ore: l'unica geometria disponibile è
+ * l'ampiezza dell'intestazione del giorno (tipicamente una cella unita).
+ */
+function mergedLayoutCandidates(
+  matrix: string[][],
+  periodsByDay: PersonalTimetablePeriodsByDay,
+): { candidates: LayoutCandidate[]; mismatch?: number[] } {
+  const candidates: LayoutCandidate[] = [];
   let mismatch: number[] | undefined;
 
   for (let headerRow = 0; headerRow < matrix.length; headerRow++) {
     const groups = firstOrderedWeekGroups(matrix[headerRow] ?? []);
     if (!groups) continue;
-    hasDayHeaders = true;
-    const blocks: SpreadsheetDayBlock[] = [];
-    let periodHeaderRow = headerRow;
-    let valid = true;
-    const actualLengths: number[] = [];
-
-    for (let index = 0; index < groups.length; index++) {
-      const group = groups[index];
-      const nextStart = groups[index + 1]?.start ?? matrix[headerRow].length;
-      const runs = periodRunsInSegment(matrix, headerRow, group.start, nextStart);
-      const longest = runs.sort((a, b) => b.columns.length - a.columns.length || Math.abs(a.rowIndex - headerRow) - Math.abs(b.rowIndex - headerRow))[0];
-      const expected = periodsByDay[index];
-      if (longest) {
-        actualLengths.push(longest.columns.length);
-        if (longest.columns.length !== expected) {
-          valid = false;
-          continue;
-        }
-        blocks.push({ dayOfWeek: index + 1, columns: longest.columns });
-        periodHeaderRow = Math.max(periodHeaderRow, longest.rowIndex);
-        continue;
-      }
-
-      // Intestazione unita: se il giorno copre ESATTAMENTE le colonne previste,
-      // la geometria è già determinata anche quando la riga dei numeri manca.
-      const mergedWidth = group.end - group.start + 1;
-      actualLengths.push(mergedWidth);
-      if (mergedWidth !== expected) {
-        valid = false;
-        continue;
-      }
-      blocks.push({ dayOfWeek: index + 1, columns: Array.from({ length: expected }, (_, offset) => group.start + offset) });
-    }
-
-    if (!valid || blocks.length !== 5) {
-      if (actualLengths.length === 5) mismatch = actualLengths;
+    const widths = groups.map(group => group.end - group.start + 1);
+    if (widths.some((width, index) => width !== periodsByDay[index])) {
+      mismatch ??= widths;
       continue;
     }
     candidates.push({
       headerRow,
-      periodHeaderRow,
-      dayBlocks: blocks,
-      score: blocks.reduce((sum, block) => sum + block.columns.length, 0),
+      periodHeaderRow: headerRow,
+      dayBlocks: groups.map((group, index) => ({
+        dayOfWeek: index + 1,
+        columns: Array.from({ length: widths[index] }, (_, column) => group.start + column),
+      })),
+      score: widths.reduce((sum, width) => sum + width, 0),
     });
   }
-  return { candidates, hasDayHeaders, mismatch };
+  return { candidates, mismatch };
+}
+
+function layoutCandidates(matrix: string[][], periodsByDay: PersonalTimetablePeriodsByDay): { candidates: LayoutCandidate[]; hasDayHeaders: boolean; mismatch?: number[] } {
+  const hasDayHeaders = hasAnyDayLabel(matrix);
+  const fromRuns = runLayoutCandidates(matrix, periodsByDay);
+  if (fromRuns.candidates.length) return { candidates: fromRuns.candidates, hasDayHeaders, mismatch: fromRuns.mismatch };
+  const merged = mergedLayoutCandidates(matrix, periodsByDay);
+  return { candidates: merged.candidates, hasDayHeaders, mismatch: fromRuns.mismatch ?? merged.mismatch };
 }
 
 function teacherColumns(matrix: string[][], lastHeaderRow: number, occupiedColumns: Set<number>): number[] {
@@ -508,4 +575,41 @@ export function spreadsheetRowToPersonalCells(
     }
   }
   return cells;
+}
+
+/**
+ * Un foglio è utile per l'import personale solo se porta DAVVERO un orario:
+ * geometria Lun→Ven riconoscibile, sequenze ore compatibili col Profilo, una
+ * riga docente plausibile e dati reali nelle colonne dei giorni. Un foglio con
+ * sole intestazioni (p.es. "ORDINE ALFABETICO") non è un candidato e non deve
+ * essere preferito al foglio dell'orario.
+ */
+export function isUsableTimetableSheet(
+  sheet: SpreadsheetSheet,
+  profileName: string,
+  periodsByDay: PersonalTimetablePeriodsByDay,
+): boolean {
+  let inspection: SpreadsheetTimetableInspection;
+  try {
+    inspection = inspectSpreadsheetTimetable(sheet, profileName, periodsByDay);
+  } catch {
+    return false;
+  }
+  return inspection.teacherRows.some(teacher => inspection.dayBlocks.some(block => block.columns.some(
+    column => String(sheet.cells[teacher.rowIndex]?.[column] ?? "").trim().length > 0,
+  )));
+}
+
+/**
+ * Restituisce i fogli realmente utilizzabili. Se ne resta uno solo, il
+ * chiamante può usarlo senza domande; se ne restano più d'uno la scelta torna
+ * all'utente; se nessuno supera i controlli si ricade sull'elenco completo.
+ */
+export function selectUsableTimetableSheets(
+  sheets: readonly SpreadsheetSheet[],
+  profileName: string,
+  periodsByDay: PersonalTimetablePeriodsByDay,
+): SpreadsheetSheet[] {
+  const usable = sheets.filter(sheet => isUsableTimetableSheet(sheet, profileName, periodsByDay));
+  return usable.length ? usable : [...sheets];
 }
