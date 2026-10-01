@@ -7,6 +7,7 @@ import {
 import {
   CAMERA_INPUT_PROPS,
   FILE_INPUT_PROPS,
+  PERSONAL_TIMETABLE_FILE_INPUT_PROPS,
   OFFLINE_ANALYSIS_MESSAGE,
   createPreviewUrl,
   documentFileError,
@@ -54,6 +55,15 @@ import { DAY_LABELS } from "../utils/timetableTokens";
 import { matchStudentName, studentMatchLabel } from "../utils/studentMatcher";
 import { getPrimarySchool, normalizeTeacherProfile, schoolByIdOrPrimary } from "../utils/multiSchool";
 import { derivePersonalScannerPeriodsByDay } from "../utils/scannerWeekGeometry";
+import {
+  SpreadsheetTimetableError,
+  inspectSpreadsheetTimetable,
+  isSpreadsheetTimetableFile,
+  readSpreadsheetWorkbook,
+  spreadsheetRowToPersonalCells,
+  type SpreadsheetSheet,
+  type SpreadsheetTimetableInspection,
+} from "../utils/spreadsheetTimetable";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
@@ -90,6 +100,8 @@ type Step =
   | "type"
   | "source"
   | "preview"
+  | "spreadsheet-sheet"
+  | "spreadsheet-row"
   | "consent"
   | "working"
   | "review-personal"
@@ -109,6 +121,11 @@ interface ReconEditSlot extends ReconstructedSlot {
   /** Correzioni manuali dell'utente (classe/materia/giorno/periodo). */
   correctedClass?: string;
   correctedSubject?: string;
+}
+
+interface SpreadsheetImportState {
+  sheets: SpreadsheetSheet[];
+  inspection?: SpreadsheetTimetableInspection;
 }
 
 interface PersonalReviewState {
@@ -303,6 +320,9 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
   const [fileBase64, setFileBase64] = useState<string | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | undefined>(undefined);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
+  /** Workbook e celle vivono solo durante questa apertura del modale. */
+  const [spreadsheetImport, setSpreadsheetImport] = useState<SpreadsheetImportState | null>(null);
+  const [isSpreadsheetReading, setIsSpreadsheetReading] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isReading, setIsReading] = useState(false);
   const [consentGiven, setConsentGiven] = useState(false);
@@ -693,6 +713,8 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     setPreviewSafe(undefined);
     fileRef.current = null;
     setAnalysisError(null);
+    setSpreadsheetImport(null);
+    setIsSpreadsheetReading(false);
     setIsAnalyzing(false);
     setIsReading(false);
     setConsentGiven(false);
@@ -739,12 +761,101 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     }
   };
 
-  /** Scatto o selezione: steso percorso per entrambi gli input (fallback incluso). */
+  /** Porta una riga letta localmente nello stesso stato review dello scanner AI. */
+  const completeSpreadsheetImport = (inspection: SpreadsheetTimetableInspection, rowIndex: number) => {
+    const teacher = inspection.teacherRows.find(row => row.rowIndex === rowIndex);
+    if (!teacher) {
+      setAnalysisError("La riga docente selezionata non è disponibile in questo foglio.");
+      setStep("source");
+      return;
+    }
+    try {
+      const cells = spreadsheetRowToPersonalCells(inspection, rowIndex);
+      // Dopo aver isolato la sola riga necessaria, rilascia l'intero workbook.
+      // La review conserva solo le celle del docente, come il flusso AI.
+      setSpreadsheetImport(null);
+      setPersonal({ rowLabel: teacher.rowLabel, cells, periodsByDay: inspection.periodsByDay });
+      setAnalysisError(null);
+      setStep("review-personal");
+    } catch (error) {
+      setAnalysisError(error instanceof SpreadsheetTimetableError ? error.message : "Non riesco a leggere la riga docente del foglio.");
+      setStep("source");
+    }
+  };
+
+  /** Analizza il solo foglio scelto; una riga ambigua viene sempre mostrata in UI. */
+  const chooseSpreadsheetSheet = (sheet: SpreadsheetSheet, sheets: SpreadsheetSheet[]) => {
+    try {
+      const inspection = inspectSpreadsheetTimetable(sheet, profile.fullName, periodsByDayPrefill);
+      setSpreadsheetImport({ sheets, inspection });
+      if (inspection.teacherRows.length === 1) {
+        completeSpreadsheetImport(inspection, inspection.teacherRows[0].rowIndex);
+      } else {
+        setAnalysisError(null);
+        setStep("spreadsheet-row");
+      }
+    } catch (error) {
+      setAnalysisError(error instanceof SpreadsheetTimetableError ? error.message : "Non riesco a leggere il foglio selezionato.");
+      // Con più fogli l'utente può provare un altro tab senza ricaricare il file.
+      setStep(sheets.length > 1 ? "spreadsheet-sheet" : "source");
+    }
+  };
+
+  /**
+   * Percorso locale dell'orario personale: non crea base64, non chiede consenso
+   * cloud e non chiama mai analyzeTimetableDocument. Workbook e file restano in
+   * memoria fino a chiusura/reset del modale.
+   */
+  const startSpreadsheetImport = (picked: File) => {
+    const revision = ++readingRevision.current;
+    revokePreviewUrl(previewUrl);
+    // Il File non serve più dopo arrayBuffer(): non viene trattenuto in stato/ref.
+    fileRef.current = null;
+    setPreviewSafe(undefined);
+    setFile(null);
+    setFileBase64(null);
+    setSpreadsheetImport(null);
+    setAnalysisError(null);
+    setIsReading(false);
+    setIsSpreadsheetReading(true);
+    setStep("working");
+    void readSpreadsheetWorkbook(picked)
+      .then(workbook => {
+        if (revision !== readingRevision.current) return;
+        setIsSpreadsheetReading(false);
+        if (workbook.sheets.length === 1) {
+          chooseSpreadsheetSheet(workbook.sheets[0], workbook.sheets);
+        } else {
+          setSpreadsheetImport({ sheets: workbook.sheets });
+          setStep("spreadsheet-sheet");
+        }
+      })
+      .catch((error: unknown) => {
+        if (revision !== readingRevision.current) return;
+        setIsSpreadsheetReading(false);
+        setAnalysisError(error instanceof SpreadsheetTimetableError
+          ? error.message
+          : "Non riesco a leggere il foglio. Verifica che il file non sia danneggiato.");
+        setStep("source");
+      });
+  };
+
+  /** Scatto o selezione: stesso percorso per foto/PDF; Excel/CSV solo per l'orario personale. */
   const handleFilePicked = (event: React.ChangeEvent<HTMLInputElement>) => {
     const picked = event.target.files?.[0];
     event.target.value = ""; // permette di ripescare lo stesso file
     if (!picked) return; // annullato: nessun crash, nessun stato
     const meta: DocumentFileMeta = { name: picked.name, size: picked.size, type: picked.type };
+    if (captureFor === "personal" && isSpreadsheetTimetableFile(picked)) {
+      const error = meta.size > 5 * 1024 * 1024 ? "Documento troppo grande: massimo 5 MB." : null;
+      if (error) {
+        setAnalysisError(error);
+        setStep("source");
+        return;
+      }
+      startSpreadsheetImport(picked);
+      return;
+    }
     const error = documentFileError(meta);
     if (error) {
       setAnalysisError(error);
@@ -779,6 +890,8 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     setFile(null);
     setFileBase64(null);
     fileRef.current = null;
+    setSpreadsheetImport(null);
+    setIsSpreadsheetReading(false);
     setIsReading(false);
     setAnalysisError(null);
   };
@@ -1218,6 +1331,8 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     type: "Scansiona documento",
     source: captureFor === "personal" ? "Orario personale / sostegno" : captureFor === "curricular" ? "Orario curricolare / istituto" : captureFor === "registro" ? "Registro / appunti" : "Circolare",
     preview: "Controlla il documento",
+    "spreadsheet-sheet": "Scegli il foglio",
+    "spreadsheet-row": "Scegli la riga docente",
     consent: "Informativa e consenso",
     working: "Analisi in corso",
     "review-personal": "La tua riga nell'orario",
@@ -1326,7 +1441,7 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
                 </span>
                 <span>
                   <span className="block text-sm font-bold text-stone-900">Scegli foto o file</span>
-                  <span className="block text-[11px] text-stone-500">Foto da galleria o PDF</span>
+                  <span className="block text-[11px] text-stone-500">{captureFor === "personal" ? "Foto · PDF · Excel · CSV" : "Foto da galleria o PDF"}</span>
                 </span>
               </button>
               {captureFor === "circolare" && (
@@ -1347,13 +1462,74 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
               )}
               {isOffline && (
                 <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2">
-                  Scatto e selezione funzionano offline: per l'analisi serve una connessione Internet.
+                  {captureFor === "personal"
+                    ? "Excel e CSV funzionano offline; foto e PDF richiedono una connessione per l'analisi AI."
+                    : "Scatto e selezione funzionano offline: per l'analisi serve una connessione Internet."}
                 </p>
               )}
               {/* Input nascosti: fotocamera con capture=environment (fallback
                   file picker dove non supportato) e file picker immagini/PDF. */}
               <input ref={cameraInputRef} type="file" className="hidden" onChange={handleFilePicked} {...CAMERA_INPUT_PROPS} aria-label="Scatta foto del documento" />
-              <input ref={fileInputRef} type="file" className="hidden" onChange={handleFilePicked} {...FILE_INPUT_PROPS} aria-label="Scegli foto o file" />
+              <input
+                ref={fileInputRef}
+                type="file"
+                className="hidden"
+                onChange={handleFilePicked}
+                {...(captureFor === "personal" ? PERSONAL_TIMETABLE_FILE_INPUT_PROPS : FILE_INPUT_PROPS)}
+                aria-label="Scegli foto o file"
+              />
+            </div>
+          )}
+
+          {/* STEP: workbook con più fogli non vuoti: nessuna scelta automatica. */}
+          {step === "spreadsheet-sheet" && spreadsheetImport && (
+            <div className="space-y-4">
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-900 space-y-1">
+                <p className="font-semibold">Il foglio viene letto solo su questo dispositivo.</p>
+                <p>Nessun consenso cloud e nessuna analisi AI sono necessari per Excel o CSV.</p>
+              </div>
+              <p className="text-sm text-stone-700">Il file contiene più fogli con dati. Scegli quello che contiene il tuo orario:</p>
+              <div className="space-y-2">
+                {spreadsheetImport.sheets.map((sheet, index) => (
+                  <button
+                    key={`${sheet.name}-${index}`}
+                    type="button"
+                    id={`scan-spreadsheet-sheet-${index}`}
+                    onClick={() => chooseSpreadsheetSheet(sheet, spreadsheetImport.sheets)}
+                    className="w-full min-h-[44px] rounded-xl border border-stone-200 bg-white px-4 py-3 text-left text-sm font-semibold text-stone-900 hover:border-emerald-500 hover:bg-emerald-50"
+                  >
+                    {sheet.name || `Foglio ${index + 1}`}
+                  </button>
+                ))}
+              </div>
+              <button type="button" onClick={() => { resetCapture(); setStep("source"); }} className="min-h-[44px] px-4 rounded-xl text-sm font-semibold text-stone-600 hover:bg-stone-100">
+                Scegli un altro file
+              </button>
+            </div>
+          )}
+
+          {/* STEP: più righe compatibili: è l'utente a scegliere, mai il parser. */}
+          {step === "spreadsheet-row" && spreadsheetImport?.inspection && (
+            <div className="space-y-4">
+              <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                Ho trovato più righe compatibili con il nome del Profilo. Scegli la tua riga prima di continuare.
+              </div>
+              <div className="space-y-2">
+                {spreadsheetImport.inspection.teacherRows.map((row, index) => (
+                  <button
+                    key={`${row.rowIndex}-${row.columnIndex}`}
+                    type="button"
+                    id={`scan-spreadsheet-row-${index}`}
+                    onClick={() => completeSpreadsheetImport(spreadsheetImport.inspection!, row.rowIndex)}
+                    className="w-full min-h-[44px] rounded-xl border border-stone-200 bg-white px-4 py-3 text-left text-sm font-semibold text-stone-900 hover:border-emerald-500 hover:bg-emerald-50"
+                  >
+                    {row.rowLabel || `Riga ${row.rowIndex + 1}`}
+                  </button>
+                ))}
+              </div>
+              <button type="button" onClick={() => setStep("spreadsheet-sheet")} className="min-h-[44px] px-4 rounded-xl text-sm font-semibold text-stone-600 hover:bg-stone-100">
+                Cambia foglio
+              </button>
             </div>
           )}
 
@@ -1636,13 +1812,21 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
           {step === "working" && (
             <div className="py-8 sm:py-10 flex flex-col items-center gap-3 text-center">
               <CloudUpload className="w-10 h-10 text-emerald-700 animate-pulse" />
-              <p className="text-sm font-semibold text-stone-900">Analisi del documento in corso…</p>
-              <AnalysisProgressBar
-                percent={analysisProgress.percent}
-                phase={analysisProgress.phase}
-                label={analysisProgress.label}
-              />
-              <p className="text-xs text-stone-500 max-w-xs">Il documento non viene salvato: l'elaborazione può richiedere alcuni secondi.</p>
+              <p className="text-sm font-semibold text-stone-900">
+                {isSpreadsheetReading ? "Lettura del foglio in corso…" : "Analisi del documento in corso…"}
+              </p>
+              {isSpreadsheetReading ? (
+                <p className="text-xs text-stone-500 max-w-xs">Il file Excel o CSV resta nel browser e non viene inviato a servizi AI.</p>
+              ) : (
+                <>
+                  <AnalysisProgressBar
+                    percent={analysisProgress.percent}
+                    phase={analysisProgress.phase}
+                    label={analysisProgress.label}
+                  />
+                  <p className="text-xs text-stone-500 max-w-xs">Il documento non viene salvato: l'elaborazione può richiedere alcuni secondi.</p>
+                </>
+              )}
             </div>
           )}
 
