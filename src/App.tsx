@@ -902,7 +902,10 @@ export default function App({ initialData }: { initialData: LocalData }) {
             events={events}
             scheduledAssessments={scheduledAssessments}
             students={students}
+            classes={profile.classes}
             onEditEvent={handleEditEvent}
+            onCreateNote={handleSaveEvent}
+            onToggleComplete={handleToggleComplete}
           />
         )}
 
