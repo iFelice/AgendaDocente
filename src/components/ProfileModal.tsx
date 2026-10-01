@@ -227,11 +227,29 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
     return () => { cancelled = true; };
   }, [isOpen, activeTab, googleUser, googleCalendars, onLoadGoogleCalendars]);
 
+  // G1.2.2 — tab navigation is applied ONLY on the closed→open transition.
+  // In App.tsx `profileInitialTab` is always set together with
+  // setIsProfileModalOpen(true) (Navbar/MobileNav handlers) and the modal is
+  // conditionally mounted: there is no real case of an intentional
+  // `initialTab` change while the modal is already open. Keeping the tab out
+  // of the profile-refresh effect below means that saving a calendar
+  // checkbox (which updates profile.googleCalendarImportIds and re-renders
+  // with a new `profile` prop) no longer bounces the user back to the
+  // "Profilo & Classi" tab between one selection and the next.
+  const wasOpenRef = useRef(false);
+  useEffect(() => {
+    const justOpened = isOpen && !wasOpenRef.current;
+    if (justOpened && initialTab) {
+      setActiveTab(initialTab);
+    }
+    wasOpenRef.current = isOpen;
+  }, [isOpen, initialTab]);
+
+  // Profile/time-slot refresh: re-derives the drafts (multi-school flag,
+  // secondary school, day periods, campane) whenever the saved data changes
+  // while the modal is open. It MUST NOT touch activeTab (see effect above).
   useEffect(() => {
     if (isOpen) {
-      if (initialTab) {
-        setActiveTab(initialTab);
-      }
       setSyncStatus(null);
       setShowSyncConfirm(false);
       setShowLogoutConfirm(false);
@@ -252,7 +270,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
       setPrimaryConfirmedSlotCount(draft.customSlots?.length ?? 0);
       setProfileRealignmentPrompt(null);
     }
-  }, [isOpen, initialTab, profile, timeSlotConfig]);
+  }, [isOpen, profile, timeSlotConfig]);
   const [schoolName, setSchoolName] = useState(profile.schoolName);
   const [schoolLevel, setSchoolLevel] = useState<SchoolLevel>(profile.schoolLevel || "ssig");
   const [schoolYear, setSchoolYear] = useState(profile.schoolYear);
