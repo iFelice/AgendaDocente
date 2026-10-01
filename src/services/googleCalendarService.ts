@@ -34,6 +34,18 @@ export interface GoogleCalendarListEntry {
   hidden?: boolean;
 }
 
+/**
+ * G1.2.1 — recognizes CalendarList failures caused by an OAuth grant that predates the
+ * read-only scopes ("Request had insufficient authentication scopes.", 403, permissions).
+ * The UI uses this to suggest an explicit re-consent instead of a generic retry.
+ */
+export const isInsufficientScopeError = (error: unknown): boolean => {
+  const status = (error as { status?: number } | null | undefined)?.status;
+  if (status === 403) return true;
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  return /insufficient (authentication )?scopes|insufficient permissions|\b403\b/i.test(message);
+};
+
 /** Reads every CalendarList page (GET only) and keeps calendars the user can at least read. */
 export const listGoogleCalendars = async (
   accessToken: string,
@@ -54,7 +66,10 @@ export const listGoogleCalendars = async (
     });
     if (!response.ok) {
       const errData = await response.json().catch(() => ({}));
-      throw new Error(errData?.error?.message || `Errore elenco calendari Google (${response.status})`);
+      const error = new Error(errData?.error?.message || `Errore elenco calendari Google (${response.status})`);
+      // Keep the HTTP status so the UI can detect insufficient-scope (403) failures.
+      (error as Error & { status?: number }).status = response.status;
+      throw error;
     }
     const data = await response.json() as { items?: GoogleCalendarListEntry[]; nextPageToken?: string };
     pagesRead++;
