@@ -60,6 +60,7 @@ import {
   inspectSpreadsheetTimetable,
   isSpreadsheetTimetableFile,
   readSpreadsheetWorkbook,
+  selectUsableTimetableSheets,
   spreadsheetRowToPersonalCells,
   type SpreadsheetSheet,
   type SpreadsheetTimetableInspection,
@@ -823,10 +824,13 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
       .then(workbook => {
         if (revision !== readingRevision.current) return;
         setIsSpreadsheetReading(false);
-        if (workbook.sheets.length === 1) {
-          chooseSpreadsheetSheet(workbook.sheets[0], workbook.sheets);
+        // Non basta che un foglio non sia vuoto: si chiede all'utente solo
+        // quando restano più fogli con un orario davvero utilizzabile.
+        const usable = selectUsableTimetableSheets(workbook.sheets, profile.fullName, periodsByDayPrefill);
+        if (usable.length === 1) {
+          chooseSpreadsheetSheet(usable[0], usable);
         } else {
-          setSpreadsheetImport({ sheets: workbook.sheets });
+          setSpreadsheetImport({ sheets: usable });
           setStep("spreadsheet-sheet");
         }
       })
