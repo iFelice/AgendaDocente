@@ -11,7 +11,7 @@ import { deriveScheduledAssessmentCalendarItems, scheduledAssessmentTypeLabel } 
  * soltanto mostrato.
  */
 
-export type FutureCommitmentSource = "agenda" | "circolare" | "verifica" | "google" | "registro";
+export type FutureCommitmentSource = "agenda" | "circolare" | "verifica" | "google" | "registro" | "nota";
 
 export interface FutureCommitmentItem {
   id: string;
@@ -25,6 +25,8 @@ export interface FutureCommitmentItem {
   location?: string;
   schoolId?: string;
   source: FutureCommitmentSource;
+  /** Solo per i CalendarEvent: stato di completamento già persistito su `events`. */
+  completed?: boolean;
   originalEvent?: CalendarEvent;
   assessmentId?: string;
 }
@@ -51,11 +53,21 @@ export const FUTURE_COMMITMENT_SOURCE_LABELS: Record<FutureCommitmentSource, str
   verifica: "Verifica",
   google: "Google",
   registro: "Registro",
+  nota: "Nota",
 };
 
 /** Le normali lezioni dell'orario non sono "impegni": inquinerebbero la lista. */
 function isRoutineLesson(event: CalendarEvent): boolean {
   return event.category === "lezione" || event.sourceType === "orario";
+}
+
+/**
+ * Nota personale rapida (N2): resta un normale `CalendarEvent` manuale, ma con
+ * `category === "promemoria"` viene riconosciuta come "Nota" nella lista. I
+ * normali impegni manuali (Consiglio, Collegio, …) restano "Agenda".
+ */
+export function isQuickNoteEvent(event: CalendarEvent): boolean {
+  return event.sourceType === "manuale" && event.category === "promemoria";
 }
 
 function sourceOf(event: CalendarEvent): FutureCommitmentSource {
@@ -67,7 +79,7 @@ function sourceOf(event: CalendarEvent): FutureCommitmentSource {
     case "registro":
       return "registro";
     default:
-      return "agenda";
+      return isQuickNoteEvent(event) ? "nota" : "agenda";
   }
 }
 
@@ -111,6 +123,7 @@ function calendarEventCommitment(event: CalendarEvent): FutureCommitmentItem {
     ...(event.location ? { location: event.location } : {}),
     ...(event.schoolId ? { schoolId: event.schoolId } : {}),
     source: sourceOf(event),
+    completed: !!event.completed,
     originalEvent: event,
   };
 }
