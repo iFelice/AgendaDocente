@@ -76,6 +76,10 @@ interface ProfileModalProps {
   onGoogleLogout?: () => Promise<void>;
   events?: CalendarEvent[];
   onImportFromGoogle?: () => Promise<GoogleCalendarImportResult>;
+  googleAutoImportStatus?: "idle" | "syncing" | "success" | "error" | "needs-auth";
+  lastImportResult?: GoogleCalendarImportResult | null;
+  lastSuccessfulImportAt?: number | null;
+  onAutomaticImport?: () => Promise<GoogleCalendarImportResult | null>;
   onSyncAllToGoogle?: () => Promise<{ syncedCount: number; errorCount: number }>;
   accountSyncStatus?: SyncStatus;
   onSyncNow?: () => void;
@@ -156,6 +160,10 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   onGoogleLogout,
   events = [],
   onImportFromGoogle,
+  googleAutoImportStatus = "idle",
+  lastImportResult,
+  lastSuccessfulImportAt,
+  onAutomaticImport,
   onSyncAllToGoogle,
   accountSyncStatus,
   onSyncNow,
@@ -1340,15 +1348,25 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                         <Download className="w-4 h-4" />
                       </div>
                       <div>
-                        <h4 className="font-bold text-stone-900 text-sm">Google Calendar</h4>
+                        <h4 className="font-bold text-stone-900 text-sm">Google Calendar → AgendaDocente</h4>
                         <p className="text-xs text-stone-600 mt-1 leading-relaxed">
-                          Scarica nell’agenda gli eventi creati direttamente sul tuo Google Calendar. Gli eventi già sincronizzati da AgendaDocente non vengono duplicati.
+                          Gli eventi creati sul tuo Google Calendar vengono aggiornati automaticamente in AgendaDocente quando l’app è attiva e autorizzata.
                         </p>
                       </div>
                     </div>
-                    {!googleAccessToken && (
-                      <p className="text-[11px] text-amber-800">L’autorizzazione è scaduta: al download ti verrà chiesto di riconnettere Google.</p>
+                    {googleAutoImportStatus === "needs-auth" && (
+                      <div className="flex items-center justify-between gap-3 text-[11px] text-amber-800">
+                        <span>Ricollega Google per riattivare l’aggiornamento automatico del Calendar.</span>
+                        <button type="button" onClick={() => void onGoogleLogin?.()} className="shrink-0 underline font-bold">Ricollega Google</button>
+                      </div>
                     )}
+                    <p className={`text-xs font-semibold ${googleAutoImportStatus === "error" ? "text-amber-800" : "text-blue-800"}`}>
+                      {googleAutoImportStatus === "syncing" ? "Aggiornamento in corso…" :
+                       googleAutoImportStatus === "error" ? "Aggiornamento Google non riuscito. Riproveremo più tardi." :
+                       googleAutoImportStatus === "success" ? "Aggiornamento automatico attivo" :
+                       googleAutoImportStatus === "needs-auth" ? "Ricollega Google per aggiornare il Calendar" : "Aggiornamento automatico attivo"}
+                      {lastImportResult && lastSuccessfulImportAt ? ` · Ultimo aggiornamento: ${new Date(lastSuccessfulImportAt).toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" })} · ${lastImportResult.added} nuovo · ${lastImportResult.updated} aggiornati` : ""}
+                    </p>
                     <button
                       type="button"
                       disabled={isImportingGoogle || !onImportFromGoogle}
@@ -1371,7 +1389,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                       className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-blue-700 hover:bg-blue-800 disabled:bg-stone-300 text-white text-xs font-bold transition-colors"
                     >
                       <RefreshCw className={`w-4 h-4 ${isImportingGoogle ? "animate-spin" : ""}`} />
-                      <span>{isImportingGoogle ? "Scaricamento…" : "Scarica eventi"}</span>
+                      <span>{isImportingGoogle ? "Aggiornamento…" : "Aggiorna ora"}</span>{/* Scaricamento…; in precedenza: Scarica eventi. Ora l’azione forza un aggiornamento. */}
                     </button>
                   </div>
 
@@ -1391,34 +1409,18 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                         <div className="flex items-center space-x-2">
                           <CalendarCheck className="w-4 h-4 text-emerald-700" />
                           <h4 className="font-bold text-stone-900 text-sm">
-                            Sincronizzazione con Google Calendar
+                            AgendaDocente → Google Calendar
                           </h4>
                         </div>
                         <p className="text-xs text-stone-500">
-                          Invia gli impegni e le riunioni registrate in questa agenda direttamente al tuo calendario scolastico di Google.
+                          Invia manualmente su Google Calendar solo gli impegni per cui hai scelto di attivare la condivisione/sincronizzazione.
                         </p>
                       </div>
                     </div>
 
-                    {/* Stats */}
-                    <div className="grid grid-cols-3 gap-3">
-                      <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 text-center">
-                        <div className="text-lg font-bold text-stone-900">{events.length}</div>
-                        <div className="text-[11px] text-stone-500 font-medium mt-0.5">Impegni Totali</div>
-                      </div>
-                      <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-center">
-                        <div className="text-lg font-bold text-emerald-800">
-                          {events.filter((e) => e.syncedWithGoogle === true).length}
-                        </div>
-                        <div className="text-[11px] text-emerald-700 font-medium mt-0.5">Sync abilitata</div>
-                      </div>
-                      <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-center">
-                        <div className="text-lg font-bold text-amber-800">
-                          {events.filter((e) => e.syncedWithGoogle !== true).length}
-                        </div>
-                        <div className="text-[11px] text-amber-700 font-medium mt-0.5">Solo locali / Sync disattivata</div>
-                      </div>
-                    </div>
+                    <p className="text-xs font-semibold text-stone-700">
+                      {events.filter(e => e.syncedWithGoogle === true && e.sourceType !== "google_calendar").length} impegni selezionati per Google Calendar
+                    </p>
 
                     {/* Sync Confirmation Dialog (Mandatory User Confirmation) */}
                     {showSyncConfirm ? (
@@ -1428,7 +1430,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                           <div>
                             <h5 className="font-bold text-xs">Conferma Sincronizzazione Google Calendar</h5>
                             <p className="text-xs text-blue-800 mt-0.5 leading-relaxed">
-                              Stai per esportare e sincronizzare <strong>{events.filter(e => e.syncedWithGoogle === true).length} impegni con sincronizzazione abilitata</strong> sul tuo
+                              Stai per esportare e sincronizzare <strong>{events.filter(e => e.syncedWithGoogle === true && e.sourceType !== "google_calendar").length} impegni con sincronizzazione abilitata</strong> sul tuo
                               Google Calendar associato all'account <strong>{googleUser.email}</strong>.
                               Vuoi procedere?
                             </p>
@@ -1477,7 +1479,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                       <div className="pt-1 flex flex-col sm:flex-row gap-2">
                         <button
                           type="button"
-                          disabled={isSyncing || !events.some(e => e.syncedWithGoogle === true)}
+                          disabled={isSyncing || !events.some(e => e.syncedWithGoogle === true && e.sourceType !== "google_calendar")}
                           onClick={() => setShowSyncConfirm(true)}
                           className="flex-1 inline-flex items-center justify-center space-x-2 px-4 py-2.5 bg-emerald-700 hover:bg-emerald-800 disabled:bg-stone-300 disabled:cursor-not-allowed text-white font-bold rounded-xl shadow-xs transition-colors cursor-pointer text-xs"
                         >
@@ -1489,10 +1491,13 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                           ) : (
                             <>
                               <RefreshCw className="w-4 h-4" />
-                              <span>Sincronizza su Google Calendar</span>
+                              <span>Invia impegni selezionati a Google Calendar</span>
                             </>
                           )}
                         </button>
+                        {!events.some(e => e.syncedWithGoogle === true && e.sourceType !== "google_calendar") && (
+                          <p className="text-[11px] text-stone-500 sm:absolute sm:mt-12">Nessun impegno selezionato. Apri un impegno e abilita l’invio a Google Calendar.</p>
+                        )}
 
                         <button
                           type="button"
