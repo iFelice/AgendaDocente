@@ -15,6 +15,7 @@ import {
   User,
   Users,
   BookOpen,
+  StickyNote,
   X,
 } from "lucide-react";
 import type { ViewMode } from "../types";
@@ -61,6 +62,7 @@ export interface MobileNavProps {
   currentView: ViewMode;
   onViewChange: (view: ViewMode) => void;
   onOpenNewEvent: () => void;
+  onOpenNewNote?: () => void;
   onOpenProfileModal: () => void;
   onOpenGoogleTab?: () => void;
   onOpenGoogleLogin?: () => void;
@@ -76,6 +78,7 @@ export const MobileNav: React.FC<MobileNavProps> = ({
   currentView,
   onViewChange,
   onOpenNewEvent,
+  onOpenNewNote,
   onOpenProfileModal,
   onOpenGoogleTab,
   onOpenGoogleLogin,
@@ -128,7 +131,7 @@ export const MobileNav: React.FC<MobileNavProps> = ({
   return (
     <div className="xl:hidden">
       {/* Primary action: always one thumb away, above the bar (never a sixth nav item).
-          The "+" opens the quick-actions sheet: new commitment OR scan a document. */}
+          The "+" opens the quick-actions sheet: new commitment, note, or scan. */}
       <button
         ref={fabRef}
         type="button"
@@ -168,6 +171,21 @@ export const MobileNav: React.FC<MobileNavProps> = ({
               <Plus className="h-5 w-5 shrink-0 text-emerald-700" />
               <span className="text-sm font-semibold">Nuovo impegno</span>
             </button>
+            {onOpenNewNote && (
+              <button
+                type="button"
+                id="mobile-fab-new-note"
+                role="menuitem"
+                onClick={() => {
+                  setIsActionsOpen(false);
+                  onOpenNewNote();
+                }}
+                className="quick-actions-item"
+              >
+                <StickyNote className="h-5 w-5 shrink-0 text-emerald-700" />
+                <span className="text-sm font-semibold">Nuova nota</span>
+              </button>
+            )}
             {onOpenScanner && (
               <button
                 type="button"

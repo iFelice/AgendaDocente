@@ -3,7 +3,7 @@ import { addDaysISO, civilDayOfWeek, isValidDate, localDateISO } from "./dates";
 import { deriveScheduledAssessmentCalendarItems, scheduledAssessmentTypeLabel } from "./scheduledAssessmentCalendar";
 
 /**
- * "Note e impegni" — proiezioni read-only operative e storiche.
+ * "Note e impegni" — proiezioni read-only operative e d'archivio.
  *
  * Questa utility NON crea, copia o persiste nulla: deriva a runtime le liste
  * a partire dagli archivi già esistenti (`events`, `scheduledAssessments`,
@@ -62,7 +62,7 @@ function isRoutineLesson(event: CalendarEvent): boolean {
 }
 
 /**
- * Nota personale rapida (N2): resta un normale `CalendarEvent` manuale, ma con
+ * Nota personale rapida: resta un normale `CalendarEvent` manuale, ma con
  * `category === "promemoria"` viene riconosciuta come "Nota" nella lista. I
  * normali impegni manuali (Consiglio, Collegio, …) restano "Agenda".
  */
@@ -108,6 +108,21 @@ export function comparePastCommitments(a: FutureCommitmentItem, b: FutureCommitm
   if (at !== bt) return at > bt ? -1 : 1;
   if (a.title !== b.title) return a.title < b.title ? -1 : 1;
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+/**
+ * L'Archivio mette in evidenza le note appena completate (oggi o con una data
+ * futura), poi conserva il normale ordinamento storico. Non esiste un
+ * `completedAt`: per quelle note la data civile è l'ordinamento leggibile e
+ * deterministico più vicino.
+ */
+export function compareArchiveCommitments(a: FutureCommitmentItem, b: FutureCommitmentItem, todayIso: string): number {
+  const isRecentCompletedNote = (item: FutureCommitmentItem) =>
+    item.kind === "calendar-event" && item.source === "nota" && item.completed === true && item.date >= todayIso;
+  const aRecent = isRecentCompletedNote(a);
+  const bRecent = isRecentCompletedNote(b);
+  if (aRecent !== bRecent) return aRecent ? -1 : 1;
+  return aRecent ? compareFutureCommitments(a, b) : comparePastCommitments(a, b);
 }
 
 function calendarEventCommitment(event: CalendarEvent): FutureCommitmentItem {
@@ -190,10 +205,13 @@ export function deriveFutureCommitments({
 }
 
 /**
- * Derivazione read-only dello storico. I CalendarEvent completati restano
- * visibili; per le verifiche sono storici sia "scheduled" sia "completed".
+ * Derivazione read-only dell'Archivio.
+ *
+ * Include tutti gli elementi già passati e, in aggiunta, tutte le note rapide
+ * completate: una nota completata oggi o in futuro non può quindi sparire. La
+ * deduplica è sempre per identità dell'evento (`event.id`).
  */
-export function derivePastCommitments({
+export function deriveArchiveCommitments({
   events,
   scheduledAssessments,
   students,
@@ -204,7 +222,8 @@ export function derivePastCommitments({
 
   for (const event of events) {
     if (!event || !isValidDate(event.date)) continue;
-    if (event.date >= todayIso) continue;
+    const belongsToArchive = event.date < todayIso || (isQuickNoteEvent(event) && event.completed === true);
+    if (!belongsToArchive) continue;
     if (isRoutineLesson(event)) continue;
     if (seenEventIds.has(event.id)) continue;
     seenEventIds.add(event.id);
@@ -234,8 +253,11 @@ export function derivePastCommitments({
     });
   }
 
-  return items.sort(comparePastCommitments);
+  return items.sort((a, b) => compareArchiveCommitments(a, b, todayIso));
 }
+
+/** Nome legacy mantenuto per i consumer N1.1: ora rappresenta l'Archivio. */
+export const derivePastCommitments = deriveArchiveCommitments;
 
 /** Gruppi non vuoti, nell'ordine di lettura della schermata. */
 export function groupFutureCommitments(

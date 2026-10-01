@@ -55,6 +55,7 @@ const RegisterView = lazy(() => import("./components/RegisterView").then(module 
 const CircularAnalyzerModal = lazy(() => import("./components/CircularAnalyzerModal").then(module => ({default: module.CircularAnalyzerModal})));
 const DocumentScannerModal = lazy(() => import("./components/DocumentScannerModal").then(module => ({default: module.DocumentScannerModal})));
 import { EventModal } from "./components/EventModal";
+import { QuickNoteModal } from "./components/QuickNoteModal";
 const ProfileModal = lazy(() => import("./components/ProfileModal").then(module => ({default: module.ProfileModal})));
 const OnboardingModal = lazy(() => import("./components/OnboardingModal").then(module => ({default: module.OnboardingModal})));
 import { OfflineIndicator } from "./components/OfflineIndicator";
@@ -81,6 +82,11 @@ import type { MissingTimeSlotCoverage, TimeSlotConfigOpenRequest } from "./utils
 import { getEffectivePeriodSlots } from "./utils/timeSlots";
 import { MissingTimeSlotCoverageBanner } from "./components/MissingTimeSlotCoverageBanner";
 import type { ProfileTimeSlotRealignment } from "./components/ProfileModal";
+
+type QuickNoteState =
+  | { mode: "closed" }
+  | { mode: "creating" }
+  | { mode: "editing"; event: CalendarEvent };
 
 export default function App({ initialData }: { initialData: LocalData }) {
   const [profile, setProfile] = useState<TeacherProfile>(() => initialData.profile);
@@ -135,6 +141,8 @@ export default function App({ initialData }: { initialData: LocalData }) {
     autoStartToken?: string;
   } | null>(null);
   const [isEventModalOpen, setIsEventModalOpen] = useState(false);
+  // Un solo QuickNoteModal, apribile da Note e impegni, dal menu desktop e dal FAB.
+  const [quickNoteState, setQuickNoteState] = useState<QuickNoteState>({ mode: "closed" });
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [missingTimeSlotCoverage, setMissingTimeSlotCoverage] = useState<MissingTimeSlotCoverage[]>([]);
   const [timeSlotConfigOpenRequest, setTimeSlotConfigOpenRequest] = useState<TimeSlotConfigOpenRequest | null>(null);
@@ -535,6 +543,14 @@ export default function App({ initialData }: { initialData: LocalData }) {
     setIsEventModalOpen(true);
   };
 
+  const handleOpenNewQuickNote = () => {
+    setQuickNoteState({ mode: "creating" });
+  };
+
+  const handleEditQuickNote = (event: CalendarEvent) => {
+    setQuickNoteState({ mode: "editing", event });
+  };
+
   // Student & Classes Handlers
   const handleSaveStudent = withPersistenceFeedback(async (student: Student, expected?: Student) => {
     await storage.saveStudent(student, expected);
@@ -794,6 +810,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
         onOpenCircularModal={() => setIsCircularModalOpen(true)}
         onOpenScanner={() => setIsScannerOpen(true)}
         onOpenNewEventModal={() => handleOpenNewEvent()}
+        onOpenNewNote={handleOpenNewQuickNote}
         onOpenProfileModal={() => {
           setProfileInitialTab("profilo");
           setIsProfileModalOpen(true);
@@ -902,9 +919,9 @@ export default function App({ initialData }: { initialData: LocalData }) {
             events={events}
             scheduledAssessments={scheduledAssessments}
             students={students}
-            classes={profile.classes}
             onEditEvent={handleEditEvent}
-            onCreateNote={handleSaveEvent}
+            onEditNote={handleEditQuickNote}
+            onCreateNote={handleOpenNewQuickNote}
             onToggleComplete={handleToggleComplete}
           />
         )}
@@ -1007,6 +1024,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
         currentView={currentView}
         onViewChange={handleViewChange}
         onOpenNewEvent={() => handleOpenNewEvent()}
+        onOpenNewNote={handleOpenNewQuickNote}
         onOpenScanner={() => setIsScannerOpen(true)}
         onOpenProfileModal={() => {
           setProfileInitialTab("profilo");
@@ -1054,6 +1072,15 @@ export default function App({ initialData }: { initialData: LocalData }) {
         initialInputMode={scannerCircularFile?.mode ?? "file"}
       />
       )}
+
+      <QuickNoteModal
+        isOpen={quickNoteState.mode !== "closed"}
+        onClose={() => setQuickNoteState({ mode: "closed" })}
+        noteToEdit={quickNoteState.mode === "editing" ? quickNoteState.event : null}
+        onSave={handleSaveEvent}
+        onDelete={handleDeleteEvent}
+        classes={profile.classes}
+      />
 
       {isEventModalOpen && (
       <EventModal

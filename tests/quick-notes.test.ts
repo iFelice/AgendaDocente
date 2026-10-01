@@ -11,6 +11,7 @@ import { buildQuickNoteEvent } from '../src/utils/quickNote';
 import {
   deriveFutureCommitments,
   derivePastCommitments,
+  deriveArchiveCommitments,
   groupFutureCommitments,
   isQuickNoteEvent,
   FUTURE_COMMITMENT_SOURCE_LABELS,
@@ -121,20 +122,19 @@ test('1. il pulsante "Nuova nota" è visibile nell\'header di Note e impegni', a
   await act(async () => renderer.unmount());
 });
 
-test('2. il modal della nota rapida è chiuso di default', async () => {
+test('2. la vista mantiene soltanto la UI lista: il QuickNoteModal è unico e gestito da App', async () => {
   const renderer = await renderView();
   assert.equal(renderer.root.findAllByProps({ 'data-quick-note-modal': true }).length, 0);
-  assert.ok(!JSON.stringify(renderer.toJSON()).includes('Salva nota'));
+  assert.ok(!viewSource.includes('<QuickNoteModal'), 'FutureCommitmentsView non monta un secondo modal');
+  assert.match(appSource, /<QuickNoteModal/);
   await act(async () => renderer.unmount());
 });
 
-test('3. il click sul pulsante apre il modal della nota rapida', async () => {
-  const renderer = await renderView();
+test('3. il click su "Nuova nota" delega l\'apertura al QuickNoteModal globale', async () => {
+  let opened = 0;
+  const renderer = await renderView({ onCreateNote: () => { opened += 1; } });
   await act(async () => renderer.root.findByProps({ 'data-new-note-button': true }).props.onClick());
-  assert.equal(renderer.root.findAllByProps({ 'data-quick-note-modal': true }).length, 1);
-  const json = JSON.stringify(renderer.toJSON());
-  assert.match(json, /Titolo/);
-  assert.match(json, /Salva nota/);
+  assert.equal(opened, 1);
   await act(async () => renderer.unmount());
 });
 
@@ -297,17 +297,16 @@ test('17. un normale impegno manuale (Consiglio) resta badge Agenda', async () =
 
 // --- 18..20: modifica e completamento --------------------------------------
 
-test('18. il click sulla nota apre l\'EventModal esistente (nessun secondo editor)', async () => {
+test('18. il click su una nota futura apre il QuickNoteModal globale', async () => {
   const target = note({ id: 'n1', date: TODAY });
   const opened: CalendarEvent[] = [];
-  const renderer = await renderView({ events: [target], onEditEvent: (e: CalendarEvent) => opened.push(e) });
+  const renderer = await renderView({ events: [target], onEditNote: (e: CalendarEvent) => opened.push(e) });
   const row = renderer.root.findByProps({ 'data-commitment-id': 'event:n1' });
   await act(async () => row.props.onClick());
   assert.deepEqual(opened, [target]);
   await act(async () => renderer.unmount());
-  // La modifica completa resta l'EventModal montato in App: nessun form duplicato.
-  assert.match(appSource, /<EventModal/);
-  assert.ok(!/EVENT_CATEGORIES|eventDateError/.test(modalSource));
+  assert.match(appSource, /onEditNote=\{handleEditQuickNote\}/);
+  assert.match(appSource, /noteToEdit=\{quickNoteState\.mode === "editing"/);
 });
 
 test('19. il completamento riusa il callback esistente (storage.toggleEventCompleted)', async () => {
@@ -342,14 +341,14 @@ test('19b. gli impegni non-nota e le verifiche non espongono il cerchio di compl
   await act(async () => renderer.unmount());
 });
 
-test('20. una nota completata sparisce dalla parte futura ma non viene cancellata', async () => {
+test('20. una nota completata sparisce dalla parte futura e compare subito nell\'Archivio', async () => {
   const completed = note({ id: 'n1', date: TODAY, completed: true });
   assert.equal(derive([completed]).length, 0);
+  assert.deepEqual(deriveArchiveCommitments({ events: [completed], scheduledAssessments: [], students, todayIso: TODAY }).map(item => item.id), ['event:n1']);
   const renderer = await renderView({ events: [completed], onToggleComplete: () => {} });
-  const json = JSON.stringify(renderer.toJSON());
-  assert.ok(!json.includes('Ricordare di chiamare la famiglia Rossi'));
+  assert.match(JSON.stringify(renderer.toJSON()), /Archivio note e impegni/);
+  assert.equal(renderer.root.findByProps({ 'data-archive-commitments-toggle': true }).props['aria-expanded'], false);
   await act(async () => renderer.unmount());
-  // L'evento resta nell'archivio: nessuna delete nel percorso di completamento.
   assert.ok(!/deleteEvent/.test(viewSource));
 });
 
@@ -451,9 +450,115 @@ test('27. nessuna regressione DeadlinesView: i promemoria restano nello scadenzi
   assert.match(appSource, /currentView === "scadenze"/);
 });
 
-test('28. nessuna regressione EventModal: resta l\'unico editor completo', () => {
+test('28. EventModal resta l\'editor degli impegni normali e QuickNoteModal usa gli handler esistenti', () => {
   assert.match(eventModalSource, /id: eventToEdit \? eventToEdit\.id : `ev-\$\{Date\.now\(\)\}`/);
   assert.match(eventModalSource, /sourceType: eventToEdit \? eventToEdit\.sourceType : "manuale"/);
+  assert.match(appSource, /<EventModal/);
   assert.match(appSource, /onSave=\{handleSaveEvent\}/);
-  assert.match(appSource, /onCreateNote=\{handleSaveEvent\}/);
+  assert.match(appSource, /onDelete=\{handleDeleteEvent\}/);
+  assert.match(appSource, /onCreateNote=\{handleOpenNewQuickNote\}/);
+});
+
+// --- N2.1: Archivio e modifica rapida --------------------------------------
+
+test('N2.1 Archivio: include nota future completed, nota completed oggi, note passate una volta e i soli eventi normali passati', () => {
+  const futureCompleted = note({ id: 'future-done', date: addDaysISO(TODAY, 2), completed: true });
+  const todayCompleted = note({ id: 'today-done', date: TODAY, completed: true });
+  const pastCompleted = note({ id: 'past-done', date: addDaysISO(TODAY, -1), completed: true });
+  const pastEvent = event({ id: 'past-event', date: addDaysISO(TODAY, -2), title: 'Consiglio passato' });
+  const futureEvent = event({ id: 'future-event', date: addDaysISO(TODAY, 1), title: 'Consiglio futuro' });
+  const archive = deriveArchiveCommitments({
+    events: [futureCompleted, todayCompleted, pastCompleted, pastCompleted, pastEvent, futureEvent],
+    scheduledAssessments: [],
+    students,
+    todayIso: TODAY,
+  });
+  assert.deepEqual(archive.map(item => item.id), ['event:today-done', 'event:future-done', 'event:past-done', 'event:past-event']);
+  assert.equal(archive.filter(item => item.id === 'event:past-done').length, 1, 'dedupe per identità evento');
+  assert.ok(!archive.some(item => item.id === 'event:future-event'), 'un evento normale futuro non è in Archivio');
+  assert.equal(derive([futureCompleted]).length, 0, 'nota completed futura non resta nella lista futura');
+});
+
+test('N2.1 Archivio: una nota completed si riapre nel QuickNoteModal, un Consiglio nel normale EventModal', async () => {
+  const archivedNote = note({ id: 'done', date: addDaysISO(TODAY, 1), completed: true });
+  const council = event({ id: 'council', date: TODAY, category: 'consiglio_classe', title: 'Consiglio 2E' });
+  const quickOpened: CalendarEvent[] = [];
+  const eventOpened: CalendarEvent[] = [];
+  const renderer = await renderView({
+    events: [archivedNote, council],
+    onEditNote: (item: CalendarEvent) => quickOpened.push(item),
+    onEditEvent: (item: CalendarEvent) => eventOpened.push(item),
+  });
+  await act(async () => renderer.root.findByProps({ 'data-commitment-id': 'event:council' }).props.onClick());
+  await act(async () => renderer.root.findByProps({ 'data-archive-commitments-toggle': true }).props.onClick());
+  await act(async () => renderer.root.findByProps({ 'data-commitment-id': 'event:done' }).props.onClick());
+  assert.deepEqual(quickOpened, [archivedNote]);
+  assert.deepEqual(eventOpened, [council]);
+  await act(async () => renderer.unmount());
+});
+
+test('N2.1 QuickNoteModal edit precompila titolo, data, classe e dettagli', async () => {
+  const existing = note({
+    id: 'edit-1',
+    title: 'Titolo esistente',
+    date: addDaysISO(TODAY, 3),
+    className: '2E',
+    notes: 'Dettagli esistenti',
+    completed: true,
+  });
+  const renderer = await renderModal({ noteToEdit: existing });
+  assert.equal(renderer.root.findByProps({ 'data-quick-note-title': true }).props.value, 'Titolo esistente');
+  assert.equal(renderer.root.findByProps({ 'data-quick-note-date': true }).props.value, addDaysISO(TODAY, 3));
+  assert.equal(renderer.root.findByProps({ 'data-quick-note-class': true }).props.value, '2E');
+  assert.equal(renderer.root.findByProps({ 'data-quick-note-details': true }).props.value, 'Dettagli esistenti');
+  assert.match(JSON.stringify(renderer.toJSON()), /Modifica nota/);
+  await act(async () => renderer.unmount());
+});
+
+test('N2.1 QuickNoteModal edit salva con l\'originale e preserva id, sourceType, category e completed', async () => {
+  const existing = note({
+    id: 'edit-2',
+    title: 'Prima',
+    date: addDaysISO(TODAY, 2),
+    className: '3D',
+    notes: 'Vecchi dettagli',
+    completed: true,
+    syncedWithGoogle: false,
+  });
+  const calls: Array<[CalendarEvent, CalendarEvent | undefined]> = [];
+  const renderer = await renderModal({
+    noteToEdit: existing,
+    onSave: (updated: CalendarEvent, expected?: CalendarEvent) => { calls.push([updated, expected]); },
+  });
+  await act(async () => renderer.root.findByProps({ 'data-quick-note-title': true }).props.onChange({ target: { value: 'Dopo' } }));
+  await act(async () => renderer.root.findByProps({ 'data-quick-note-save': true }).props.onClick());
+  assert.equal(calls.length, 1);
+  const [updated, expected] = calls[0];
+  assert.equal(updated.id, 'edit-2');
+  assert.equal(updated.sourceType, 'manuale');
+  assert.equal(updated.category, 'promemoria');
+  assert.equal(updated.completed, true);
+  assert.equal(updated.title, 'Dopo');
+  assert.equal(expected, existing, 'handleSaveEvent riceve l\'originale per il controllo concorrenza');
+  await act(async () => renderer.unmount());
+});
+
+test('N2.1 QuickNoteModal edit elimina con il callback evento esistente e conferma coerente', async () => {
+  const existing = note({ id: 'delete-1', date: TODAY });
+  const deleted: string[] = [];
+  const renderer = await renderModal({ noteToEdit: existing, onDelete: (id: string) => { deleted.push(id); } });
+  assert.ok(renderer.root.findByProps({ 'data-quick-note-delete': true }));
+  await act(async () => renderer.root.findByProps({ 'data-quick-note-delete': true }).props.onClick());
+  assert.ok(renderer.root.findByProps({ 'data-quick-note-delete-confirm': true }));
+  await act(async () => renderer.root.findByProps({ 'data-quick-note-delete-confirm-yes': true }).props.onClick());
+  assert.deepEqual(deleted, ['delete-1']);
+  await act(async () => renderer.unmount());
+});
+
+test('N2.1 non introduce nuova persistenza e conserva DeadlinesView', () => {
+  assert.ok(!/notes\s*:|version\(4\)|completedAt/.test(dbSource));
+  assert.ok(!/completedAt/.test(typesSource));
+  assert.match(deadlinesSource, /e\.category === "scadenza" \|\| e\.category === "promemoria" \|\| e\.category === "pei"/);
+  assert.ok(!/from "\.\.\/services/.test(viewSource));
+  assert.ok(!/from "\.\.\/services/.test(modalSource));
 });

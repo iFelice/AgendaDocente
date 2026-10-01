@@ -16,6 +16,8 @@ import {
   BookOpen,
   Bell,
   ListTodo,
+  ChevronDown,
+  StickyNote,
 } from "lucide-react";
 import { TeacherProfile, ViewMode } from "../types";
 import { isSupportTeacherOf } from "../utils/teacherType";
@@ -29,6 +31,7 @@ interface NavbarProps {
   profile: TeacherProfile;
   onOpenCircularModal: () => void;
   onOpenNewEventModal: () => void;
+  onOpenNewNote?: () => void;
   onOpenProfileModal: () => void;
   onOpenTutorial?: () => void;
   /** Ingresso unificato "Scansiona documento" (desktop/tablet). */
@@ -51,6 +54,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   profile,
   onOpenCircularModal,
   onOpenNewEventModal,
+  onOpenNewNote = () => {},
   onOpenProfileModal,
   onOpenTutorial,
   onOpenScanner,
@@ -62,6 +66,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenUpdatePrompt,
   onCheckUpdates,
 }) => {
+  const [isNewMenuOpen, setNewMenuOpen] = React.useState(false);
   const views: { id: ViewMode; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
     { id: "oggi", label: "Oggi", icon: Clock },
     { id: "settimana", label: "Settimana", icon: CalendarDays },
@@ -125,11 +130,11 @@ export const Navbar: React.FC<NavbarProps> = ({
           </div>
 
           {/*
-            Quick actions. The two creation CTAs (Nuovo Impegno, Scansiona
-            Documento) are desktop-only (xl, from 1280px): on phones AND
-            tablets (portrait and landscape) the primary action is the
-            floating "+" of MobileNav. PWA install, circolare AI and Google
-            account stay visible from md (768px) as before.
+            Quick actions. The generic creation entry and the scanner are
+            desktop-only (xl, from 1280px): on phones AND tablets (portrait
+            and landscape) the primary action is the floating "+" of
+            MobileNav. PWA install, circolare AI and Google account stay
+            visible from md (768px) as before.
           */}
           <div className="flex items-center gap-1 sm:gap-2 shrink-0">
             <span className="hidden md:inline-flex">
@@ -160,15 +165,56 @@ export const Navbar: React.FC<NavbarProps> = ({
               </button>
             )}
 
-            <button
-              id="btn-new-event"
-              onClick={onOpenNewEventModal}
-              className="hidden xl:inline-flex items-center justify-center gap-1 px-3 sm:px-3.5 min-h-[44px] rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 transition-colors shadow-xs"
-            >
-              <Plus className="w-4 h-4 text-sky-600" />
-              <span className="hidden sm:inline">Nuovo Impegno</span>
-              <span className="sm:hidden">Nuovo</span>
-            </button>
+            <div className="hidden xl:block relative">
+              <button
+                id="btn-new-event"
+                type="button"
+                onClick={() => setNewMenuOpen(open => !open)}
+                aria-haspopup="menu"
+                aria-expanded={isNewMenuOpen}
+                aria-controls="new-item-menu"
+                className="inline-flex items-center justify-center gap-1 px-3 sm:px-3.5 min-h-[44px] rounded-lg border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 transition-colors shadow-xs"
+              >
+                <Plus className="w-4 h-4 text-sky-600" />
+                <span>Nuovo</span>
+                <ChevronDown className="w-3.5 h-3.5 text-stone-500" />
+              </button>
+              {isNewMenuOpen && (
+                <div
+                  id="new-item-menu"
+                  role="menu"
+                  aria-label="Crea nuovo elemento"
+                  className="absolute right-0 top-full z-40 mt-2 min-w-48 overflow-hidden rounded-xl border border-stone-200 bg-white p-1 shadow-lg"
+                >
+                  <button
+                    id="btn-new-event-option"
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setNewMenuOpen(false);
+                      onOpenNewEventModal();
+                    }}
+                    className="flex min-h-[44px] w-full items-center gap-2 rounded-lg px-3 text-left text-sm font-semibold text-stone-800 hover:bg-stone-100"
+                  >
+                    <Plus className="h-4 w-4 text-sky-600" />
+                    Nuovo impegno
+                  </button>
+                  <button
+                    id="btn-new-note-option"
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setNewMenuOpen(false);
+                      onOpenNewNote();
+                    }}
+                    className="flex min-h-[44px] w-full items-center gap-2 rounded-lg px-3 text-left text-sm font-semibold text-stone-800 hover:bg-stone-100"
+                  >
+                    <StickyNote className="h-4 w-4 text-emerald-700" />
+                    Nuova nota
+                  </button>
+                </div>
+              )}
+            </div>
 
             {/* Google account chip: kept out of the phone header (login/status live in
                 Profilo → Account Istituzionale & Google, reachable from the avatar). */}

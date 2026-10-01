@@ -2,10 +2,9 @@ import React from "react";
 import { CalendarClock, CheckCircle2, ChevronDown, ChevronRight, Circle, ListTodo, MapPin, Plus, Users } from "lucide-react";
 import type { CalendarEvent, Student, StudentScheduledAssessment } from "../types";
 import { formatCivilDateIt, localDateISO } from "../utils/dates";
-import { QuickNoteModal } from "./QuickNoteModal";
 import {
+  deriveArchiveCommitments,
   deriveFutureCommitments,
-  derivePastCommitments,
   groupFutureCommitments,
   FUTURE_COMMITMENT_SOURCE_LABELS,
   type FutureCommitmentItem,
@@ -13,7 +12,7 @@ import {
 } from "../utils/futureCommitments";
 
 /**
- * "Note e impegni": proiezione read-only degli impegni operativi, con storico
+ * "Note e impegni": proiezione read-only degli impegni operativi, con Archivio
  * consultabile a scomparsa. Non è un secondo calendario e non possiede archivi
  * propri: tutto è derivato da `events` + `scheduledAssessments`.
  */
@@ -22,14 +21,14 @@ export interface FutureCommitmentsViewProps {
   events: CalendarEvent[];
   scheduledAssessments: StudentScheduledAssessment[];
   students: Student[];
-  /** Solo per i CalendarEvent: riusa l'EventModal esistente, nessuna seconda UI di modifica. */
+  /** Gli impegni normali continuano ad aprire l'EventModal esistente. */
   onEditEvent?: (event: CalendarEvent) => void;
-  /** N2: salvataggio della nota rapida; la persistenza resta in App (`storage.saveEvent`). */
-  onCreateNote?: (event: CalendarEvent) => void | false | Promise<void | false>;
-  /** N2: riusa il flusso esistente `storage.toggleEventCompleted`. */
+  /** Le note rapide aprono sempre il loro editor rapido, anche dall'Archivio. */
+  onEditNote?: (event: CalendarEvent) => void;
+  /** App possiede il singolo QuickNoteModal e apre la modalità creazione. */
+  onCreateNote?: () => void;
+  /** Riusa il flusso esistente `storage.toggleEventCompleted`. */
   onToggleComplete?: (id: string) => void | Promise<void | false> | false;
-  /** Classi del profilo per la select opzionale della nota rapida. */
-  classes?: string[];
   todayIso?: string;
 }
 
@@ -45,9 +44,11 @@ const SOURCE_BADGE_CLASS: Record<FutureCommitmentSource, string> = {
 const CommitmentRow: React.FC<{
   item: FutureCommitmentItem;
   onEditEvent?: (event: CalendarEvent) => void;
+  onEditNote?: (event: CalendarEvent) => void;
   onToggleComplete?: (id: string) => void | Promise<void | false> | false;
-}> = ({ item, onEditEvent, onToggleComplete }) => {
-  const clickable = item.kind === "calendar-event" && !!onEditEvent && !!item.originalEvent;
+}> = ({ item, onEditEvent, onEditNote, onToggleComplete }) => {
+  const editCallback = item.source === "nota" ? onEditNote : onEditEvent;
+  const clickable = item.kind === "calendar-event" && !!editCallback && !!item.originalEvent;
   // Il completamento è offerto sulle note personali: restano CalendarEvent con `completed`.
   const completable = item.kind === "calendar-event" && item.source === "nota" && !!onToggleComplete && !!item.originalEvent;
   const content = (
@@ -88,7 +89,7 @@ const CommitmentRow: React.FC<{
     <button
       type="button"
       data-commitment-id={item.id}
-      onClick={() => onEditEvent!(item.originalEvent!)}
+      onClick={() => editCallback!(item.originalEvent!)}
       className={`${rowClass} text-left hover:bg-stone-50 transition-colors`}
     >
       {content}
@@ -124,16 +125,15 @@ export const FutureCommitmentsView: React.FC<FutureCommitmentsViewProps> = ({
   scheduledAssessments,
   students,
   onEditEvent,
+  onEditNote,
   onCreateNote,
   onToggleComplete,
-  classes = [],
   todayIso = localDateISO(),
 }) => {
-  const [showPast, setShowPast] = React.useState(false);
-  const [isQuickNoteOpen, setIsQuickNoteOpen] = React.useState(false);
+  const [showArchive, setShowArchive] = React.useState(false);
   const items = deriveFutureCommitments({ events, scheduledAssessments, students, todayIso });
   const groups = groupFutureCommitments(items, todayIso);
-  const pastItems = derivePastCommitments({ events, scheduledAssessments, students, todayIso });
+  const archiveItems = deriveArchiveCommitments({ events, scheduledAssessments, students, todayIso });
 
   return (
     <div className="space-y-6" data-view="impegni">
@@ -151,7 +151,7 @@ export const FutureCommitmentsView: React.FC<FutureCommitmentsViewProps> = ({
           <button
             type="button"
             data-new-note-button
-            onClick={() => setIsQuickNoteOpen(true)}
+            onClick={onCreateNote}
             className="inline-flex min-h-[44px] w-full sm:w-auto shrink-0 items-center justify-center gap-1.5 rounded-xl bg-emerald-700 px-4 text-sm font-semibold text-white hover:bg-emerald-800 active:bg-emerald-900 transition-colors"
           >
             <Plus className="h-4 w-4" />
@@ -173,48 +173,39 @@ export const FutureCommitmentsView: React.FC<FutureCommitmentsViewProps> = ({
             </h3>
             <div className="space-y-2">
               {group.items.map(item => (
-                <CommitmentRow key={item.id} item={item} onEditEvent={onEditEvent} onToggleComplete={onToggleComplete} />
+                <CommitmentRow key={item.id} item={item} onEditEvent={onEditEvent} onEditNote={onEditNote} onToggleComplete={onToggleComplete} />
               ))}
             </div>
           </section>
         ))
       )}
 
-      {pastItems.length > 0 && (
-        <section data-past-commitments className="border-t border-stone-200 pt-3">
+      {archiveItems.length > 0 && (
+        <section data-archive-commitments data-past-commitments className="border-t border-stone-200 pt-3">
           <button
             type="button"
+            data-archive-commitments-toggle
             data-past-commitments-toggle
-            aria-expanded={showPast}
-            aria-controls="past-commitments-list"
-            onClick={() => setShowPast(current => !current)}
+            aria-expanded={showArchive}
+            aria-controls="archive-commitments-list"
+            onClick={() => setShowArchive(current => !current)}
             className="flex min-h-[48px] w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-left text-sm font-semibold text-stone-700 hover:bg-stone-100 active:bg-stone-200 transition-colors"
           >
             <span className="inline-flex items-center gap-2">
-              {showPast ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-              Note e impegni passati ({pastItems.length})
+              {showArchive ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+              Archivio note e impegni ({archiveItems.length})
             </span>
-            <span className="text-xs font-medium text-stone-500">{showPast ? "Nascondi" : "Mostra"}</span>
+            <span className="text-xs font-medium text-stone-500">{showArchive ? "Nascondi" : "Mostra"}</span>
           </button>
 
-          {showPast && (
-            <div id="past-commitments-list" data-past-commitments-list className="mt-2 space-y-2">
-              {pastItems.map(item => (
-                <CommitmentRow key={item.id} item={item} onEditEvent={onEditEvent} />
+          {showArchive && (
+            <div id="archive-commitments-list" data-archive-commitments-list data-past-commitments-list className="mt-2 space-y-2">
+              {archiveItems.map(item => (
+                <CommitmentRow key={item.id} item={item} onEditEvent={onEditEvent} onEditNote={onEditNote} />
               ))}
             </div>
           )}
         </section>
-      )}
-
-      {onCreateNote && (
-        <QuickNoteModal
-          isOpen={isQuickNoteOpen}
-          onClose={() => setIsQuickNoteOpen(false)}
-          onSave={onCreateNote}
-          classes={classes}
-          todayIso={todayIso}
-        />
       )}
     </div>
   );
