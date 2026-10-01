@@ -3,7 +3,8 @@ import { CalendarEvent } from "../types";
 
 export interface GoogleCalendarApiEvent {
   id?: string;
-  summary: string;
+  summary?: string;
+  status?: string;
   description?: string;
   location?: string;
   start: {
@@ -145,37 +146,58 @@ export const deleteGoogleCalendarEvent = async (
   }
 };
 
-/**
- * Fetches upcoming Google Calendar events
- */
+/** Array result retains the old API while exposing whether the safety cap truncated it. */
+export type GoogleCalendarEventList = GoogleCalendarApiEvent[] & {
+  partial: boolean;
+  pagesRead: number;
+};
+
+/** Fetches every page in the requested range, up to G1's explicit safety cap. */
 export const listGoogleCalendarEvents = async (
   accessToken: string,
   timeMin?: string,
-  timeMax?: string
-): Promise<GoogleCalendarApiEvent[]> => {
-  const params = new URLSearchParams({
-    singleEvents: "true",
-    orderBy: "startTime",
-    maxResults: "100",
-  });
-  if (timeMin) params.append("timeMin", timeMin);
-  if (timeMax) params.append("timeMax", timeMax);
+  timeMax?: string,
+  limits: { maxPages?: number; maxEvents?: number } = {},
+): Promise<GoogleCalendarEventList> => {
+  const maxPages = limits.maxPages ?? 10;
+  const maxEvents = limits.maxEvents ?? 1000;
+  const events: GoogleCalendarApiEvent[] = [];
+  let pageToken: string | undefined;
+  let pagesRead = 0;
+  let partial = false;
 
-  const response = await fetch(`${CALENDAR_API_BASE}?${params.toString()}`, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-  });
+  do {
+    const params = new URLSearchParams({
+      singleEvents: "true",
+      orderBy: "startTime",
+      maxResults: "100",
+    });
+    if (timeMin) params.set("timeMin", timeMin);
+    if (timeMax) params.set("timeMax", timeMax);
+    if (pageToken) params.set("pageToken", pageToken);
 
-  if (!response.ok) {
-    const errData = await response.json().catch(() => ({}));
-    throw new Error(
-      errData?.error?.message || `Errore recupero eventi Google Calendar (${response.status})`
-    );
-  }
+    const response = await fetch(`${CALENDAR_API_BASE}?${params.toString()}`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!response.ok) {
+      const errData = await response.json().catch(() => ({}));
+      throw new Error(errData?.error?.message || `Errore recupero eventi Google Calendar (${response.status})`);
+    }
 
-  const data = await response.json();
-  return (data.items || []) as GoogleCalendarApiEvent[];
+    const data = await response.json() as { items?: GoogleCalendarApiEvent[]; nextPageToken?: string };
+    pagesRead++;
+    const room = Math.max(0, maxEvents - events.length);
+    const pageItems = data.items ?? [];
+    events.push(...pageItems.slice(0, room));
+    pageToken = data.nextPageToken;
+    if (pageItems.length > room || (pageToken && (pagesRead >= maxPages || events.length >= maxEvents))) {
+      partial = true;
+      break;
+    }
+  } while (pageToken);
+
+  return Object.assign(events, { partial, pagesRead });
 };
 
 /**

@@ -74,6 +74,7 @@ import {
   isGoogleSyncEnabled,
   syncOptedInGoogleEvents,
 } from "./services/googleCalendarService";
+import { importGoogleCalendarEvents, type GoogleCalendarImportResult } from "./services/googleCalendarImportService";
 import { normalizeTeacherProfile } from "./utils/multiSchool";
 import { accountSync } from "./services/sync/accountSync";
 import type { SyncStatus } from "./services/sync/types";
@@ -308,6 +309,17 @@ export default function App({ initialData }: { initialData: LocalData }) {
       showToast("Errore durante la disconnessione.");
       throw err;
     }
+  };
+
+  const handleImportFromGoogle = async (): Promise<GoogleCalendarImportResult> => {
+    if (database.mode !== "indexeddb") throw new Error("Archivio locale in sola lettura: importazione sospesa.");
+    let token = googleAccessToken || getAccessToken();
+    if (!token) {
+      const login = await handleGoogleLogin();
+      token = login?.accessToken ?? null;
+    }
+    if (!token) throw new Error("Riconnetti l’account Google per autorizzare il download degli eventi.");
+    return importGoogleCalendarEvents(token);
   };
 
   const handleSyncAllToGoogle = async (): Promise<{ syncedCount: number; errorCount: number }> => {
@@ -1117,6 +1129,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
         onGoogleLogin={handleGoogleLogin}
         onGoogleLogout={handleGoogleLogout}
         events={events}
+        onImportFromGoogle={handleImportFromGoogle}
         onSyncAllToGoogle={handleSyncAllToGoogle}
         accountSyncStatus={syncStatus}
         onSyncNow={() => void accountSync.syncNow()}

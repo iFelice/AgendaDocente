@@ -32,6 +32,7 @@ import { GoogleSignInButton } from "./GoogleSignInButton";
 import { isUserCancellationError } from "../services/googleAuth";
 import { downloadIcsCalendar } from "../services/googleCalendarService";
 import type { SyncStatus } from "../services/sync/types";
+import type { GoogleCalendarImportResult } from "../services/googleCalendarImportService";
 import { CloudSync } from "./CloudSyncCard";
 import { useManualSync } from "../hooks/useManualSync";
 import { hasActiveSecondarySchool, normalizeTeacherProfile } from "../utils/multiSchool";
@@ -74,6 +75,7 @@ interface ProfileModalProps {
   onGoogleLogin?: () => Promise<void>;
   onGoogleLogout?: () => Promise<void>;
   events?: CalendarEvent[];
+  onImportFromGoogle?: () => Promise<GoogleCalendarImportResult>;
   onSyncAllToGoogle?: () => Promise<{ syncedCount: number; errorCount: number }>;
   accountSyncStatus?: SyncStatus;
   onSyncNow?: () => void;
@@ -153,6 +155,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   onGoogleLogin,
   onGoogleLogout,
   events = [],
+  onImportFromGoogle,
   onSyncAllToGoogle,
   accountSyncStatus,
   onSyncNow,
@@ -167,6 +170,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   const [activeTab, setActiveTab] = useState<"profilo" | "backup" | "google">(initialTab);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isImportingGoogle, setIsImportingGoogle] = useState(false);
   const [syncStatus, setSyncStatus] = useState<{ message: string; isError?: boolean } | null>(null);
   const [showSyncConfirm, setShowSyncConfirm] = useState(false);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
@@ -1328,6 +1332,48 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                       </div>
                     </div>
                   )}
+
+                  {/* Read-only primary-calendar download; deliberately separate from Firestore and outbound sync. */}
+                  <div className="p-5 rounded-2xl border border-blue-200 bg-blue-50/40 space-y-3" data-google-calendar-import>
+                    <div className="flex items-start space-x-3">
+                      <div className="w-9 h-9 rounded-xl bg-blue-100 text-blue-700 flex items-center justify-center shrink-0">
+                        <Download className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h4 className="font-bold text-stone-900 text-sm">Google Calendar</h4>
+                        <p className="text-xs text-stone-600 mt-1 leading-relaxed">
+                          Scarica nell’agenda gli eventi creati direttamente sul tuo Google Calendar. Gli eventi già sincronizzati da AgendaDocente non vengono duplicati.
+                        </p>
+                      </div>
+                    </div>
+                    {!googleAccessToken && (
+                      <p className="text-[11px] text-amber-800">L’autorizzazione è scaduta: al download ti verrà chiesto di riconnettere Google.</p>
+                    )}
+                    <button
+                      type="button"
+                      disabled={isImportingGoogle || !onImportFromGoogle}
+                      onClick={async () => {
+                        if (!onImportFromGoogle) return;
+                        try {
+                          setIsImportingGoogle(true);
+                          setSyncStatus(null);
+                          const result = await onImportFromGoogle();
+                          setSyncStatus({
+                            message: `Google Calendar aggiornato: ${result.added} nuovi · ${result.updated} aggiornati · ${result.linked} già collegati${result.partial ? " · importazione parziale (limite di sicurezza raggiunto)" : ""}`,
+                            isError: false,
+                          });
+                        } catch (err: any) {
+                          setSyncStatus({ message: err?.message || "Errore durante il download da Google Calendar.", isError: true });
+                        } finally {
+                          setIsImportingGoogle(false);
+                        }
+                      }}
+                      className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-blue-700 hover:bg-blue-800 disabled:bg-stone-300 text-white text-xs font-bold transition-colors"
+                    >
+                      <RefreshCw className={`w-4 h-4 ${isImportingGoogle ? "animate-spin" : ""}`} />
+                      <span>{isImportingGoogle ? "Scaricamento…" : "Scarica eventi"}</span>
+                    </button>
+                  </div>
 
                   <CloudSync
                     status={accountSyncStatus}
