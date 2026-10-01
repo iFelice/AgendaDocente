@@ -419,7 +419,9 @@ test('scansione: tipo documento + sorgente (fotocamera preferita con fallback fi
   assert.equal(cameraInput.props.capture, 'environment', 'fotocamera posteriore preferita');
 
   const fileInput = renderer.root.findByProps({ 'aria-label': 'Scegli foto o file' });
-  assert.equal(fileInput.props.accept, 'image/*,application/pdf');
+  assert.match(fileInput.props.accept, /image\/\*,application\/pdf/);
+  assert.match(fileInput.props.accept, /\.xlsx/);
+  assert.match(fileInput.props.accept, /\.csv/);
   assert.equal(fileInput.props.capture, undefined, 'il file picker NON forza la fotocamera (fallback desktop)');
 });
 

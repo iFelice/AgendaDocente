@@ -50,6 +50,15 @@ export const FILE_INPUT_PROPS = {
 } as const;
 
 /**
+ * Picker specifico dell'orario personale. Excel/CSV sono ammessi SOLO qui:
+ * circolari e registro continuano a ricevere esclusivamente immagini/PDF,
+ * perché non hanno un parser strutturato corrispondente.
+ */
+export const PERSONAL_TIMETABLE_FILE_INPUT_PROPS = {
+  accept: "image/*,application/pdf,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.csv,text/csv,text/tab-separated-values",
+} as const;
+
+/**
  * Legge un file come base64 puro (senza prefisso data:).
  * Usa FileReader in browser; fallback arrayBuffer in ambienti di test.
  */
