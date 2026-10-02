@@ -1288,7 +1288,8 @@ export function convertExtractedItemToEvent(
     id: `ev-circ-${sourceCircularId}-${it.tempId}`,
     title: it.title, category: it.category, date: it.date,
     startTime: it.startTime || undefined, endTime: it.endTime || undefined,
-    isAllDay: !!it.isDeadline && !it.startTime,
+    // Nessun orario nel documento => impegno per l'intera giornata, anche se non è una scadenza.
+    isAllDay: !it.startTime && !it.endTime,
     className: it.className || undefined, subject: it.subject || undefined,
     location: it.location || undefined, notes: it.notes || it.relevanceReason,
     sourceType: 'circolare', sourceCircularTitle, sourceCircularId, sourceItemId: it.tempId,

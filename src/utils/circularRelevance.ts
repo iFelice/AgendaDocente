@@ -41,8 +41,10 @@ export function extractClassesFromText(text: string): string[] {
     }
   }
 
-  // 2. Sigle con numeri romani (I, II, III, IV, V seguito da lettera)
-  const romanRegex = /\b(I|II|III|IV|V)\s*[\^°ª]?\s*([A-Za-z])\b/g;
+  // 2. Sigle con numeri romani (I, II, III, IV, V seguito da lettera).
+  // L'ordine delle alternative è decrescente per lunghezza: senza di esso "IV" verrebbe
+  // letto come romano "I" + sezione "V", inventando la classe "1V" (vedi anno romano).
+  const romanRegex = /\b(III|IV|II|I|V)\b\s*[\^°ª]?\s*([A-Za-z])\b/g;
   while ((match = romanRegex.exec(text)) !== null) {
     const roman = match[1].toUpperCase();
     const section = match[2].toUpperCase();
@@ -53,11 +55,13 @@ export function extractClassesFromText(text: string): string[] {
   }
 
   // 3. Pattern espliciti con parola "classe" / "classi" / "sezione"
-  const explicitClassRegex = /\b(?:classe|classi|cl\.|sez\.|sezione)\s+(III|II|IV|V|I|[1-5])\s*[\^°ª]?\s*([A-Za-z])\b/gi;
+  // Anche qui i romani sono ordinati dal più lungo al più corto e chiusi da \b:
+  // "classi IV" non deve mai diventare "1V" (romano "I" + finta sezione "V").
+  const explicitClassRegex = /\b(?:classe|classi|cl\.|sez\.|sezione)\s+(?:(III|IV|II|I|V)\b|([1-5]))\s*[\^°ª]?\s*([A-Za-z])\b/gi;
   while ((match = explicitClassRegex.exec(text)) !== null) {
-    let grade = match[1].toUpperCase();
+    let grade = (match[1] || match[2]).toUpperCase();
     if (ROMAN_TO_NUM[grade]) grade = ROMAN_TO_NUM[grade];
-    const section = match[2].toUpperCase();
+    const section = match[3].toUpperCase();
     if (/[1-5]/.test(grade) && /[A-Z]/.test(section)) {
       found.add(`${grade}${section}`);
     }
@@ -73,6 +77,17 @@ export function extractGradesFromText(text: string): number[] {
   if (!text) return [];
   const lower = text.toLowerCase();
   const grades = new Set<number>();
+
+  // Anno di corso in numeri romani senza sezione: "classi IV", "classe III".
+  // Le alternative sono ordinate dal romano più lungo al più corto (III, IV, II, I, V)
+  // e chiuse da \b, così "IV" non viene spezzato in "I" + "V".
+  // Il lookahead negativo lascia le sigle complete ("classe III E") a extractClassesFromText.
+  const romanGradeRegex = /\b(?:classi|classe|cl\.)\s+(III|IV|II|I|V)\b(?!\s*[\^°ª]?\s*[A-Za-z]\b)/gi;
+  let romanMatch: RegExpExecArray | null;
+  while ((romanMatch = romanGradeRegex.exec(text)) !== null) {
+    const grade = ROMAN_TO_NUM[romanMatch[1].toUpperCase()];
+    if (grade) grades.add(Number(grade));
+  }
 
   if (lower.includes("classi prime") || lower.includes("classe prima") || lower.includes("prime classi") || lower.includes("cl 1**") || lower.includes("classi 1")) {
     grades.add(1);
@@ -100,6 +115,12 @@ export interface RelevanceEvaluation {
   primaryClass?: string;
   location: string;
   selectedForImport: boolean;
+  /**
+   * true quando il documento stesso (titolo/note/snippet) contiene evidenza di classi o
+   * di anno di corso: in quel caso il campo `className` prodotto dal modello non è
+   * autorevole e non deve essere usato come fallback né conservato se discordante.
+   */
+  documentClassEvidence: boolean;
 }
 
 /**
@@ -150,9 +171,19 @@ export function evaluateItemRelevance(
     rawSnippet?: string; location?: string; relevance?: "VERDE" | "GIALLO" | "ROSSO"; relevanceReason?: string },
   profile: TeacherProfile, chosenLocation?: string
 ): RelevanceEvaluation {
-  const text = `${item.title || ''} ${item.className || ''} ${item.subject || ''} ${item.notes || ''} ${item.rawSnippet || ''}`;
+  // Evidenza documentale (titolo, materia, note, snippet) e metadata del modello
+  // restano separati: una classe allucinata in `className` (p.es. "1V" da un "IV" del
+  // documento) non deve contaminare la rilevazione quando il testo è già esplicito.
+  const documentEvidence = `${item.title || ''} ${item.subject || ''} ${item.notes || ''} ${item.rawSnippet || ''}`;
+  const modelClassEvidence = item.className || '';
+  const text = `${documentEvidence} ${modelClassEvidence}`;
   const lower = text.toLowerCase();
-  const detected = extractClassesFromText(text);
+  const documentClasses = extractClassesFromText(documentEvidence);
+  const documentGrades = extractGradesFromText(documentEvidence);
+  // Il documento parla (sigla completa o solo anno di corso): il modello non aggiunge nulla.
+  const documentClassEvidence = documentClasses.length > 0 || documentGrades.length > 0;
+  const detected = documentClassEvidence ? documentClasses : extractClassesFromText(modelClassEvidence);
+  const grades = documentClassEvidence ? documentGrades : extractGradesFromText(modelClassEvidence);
   const userClasses = (profile.classes || []).flatMap(c => extractClassesFromText(c));
   const matched = detected.filter(c => userClasses.includes(c));
   const result = (relevance: "VERDE" | "GIALLO" | "ROSSO", reason: string): RelevanceEvaluation => ({
@@ -160,6 +191,7 @@ export function evaluateItemRelevance(
     primaryClass: matched[0] || detected[0],
     location: (item.location || chosenLocation || '').trim(),
     selectedForImport: relevance === 'VERDE',
+    documentClassEvidence,
   });
   const levels = [
     /\binfanzia\b/.test(lower) ? 'infanzia' : '',
@@ -171,7 +203,6 @@ export function evaluateItemRelevance(
   if (/staff|collaboratori del dirigente/.test(lower) && !(profile.roles || []).some(r => r.role === 'collaboratore_dirigente' || /staff|dirigent/i.test(`${r.description || ''} ${r.label || ''}`))) return result('ROSSO', "Riservato allo staff di dirigenza.");
   if (/riservat[oaie].*coordinator|soli coordinatori/.test(lower) && !(profile.roles || []).some(r => r.role === 'coordinatore' && (!r.targetClass || matched.includes(r.targetClass)))) return result('ROSSO', "Riservato ai coordinatori delle classi indicate.");
   if (detected.length && !matched.length) return result('ROSSO', `Destinato alle classi ${detected.join(', ')}, non assegnate al docente.`);
-  const grades = extractGradesFromText(text);
   if (grades.length && !userClasses.some(c => grades.includes(Number(c[0])))) return result('ROSSO', "Destinato a un altro anno di corso.");
 
   const subjects = detectSubjects(text, profile);

@@ -416,7 +416,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
           date: it.date,
           startTime: it.startTime || undefined,
           endTime: it.endTime || undefined,
-          isAllDay: !!it.isDeadline && !it.startTime,
+          isAllDay: !it.startTime && !it.endTime,
           className: it.className || match.className,
           subject: it.subject || match.subject,
           location: it.location || match.location,
@@ -924,7 +924,11 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                                 </div>
                               </div>
 
-                              {extractedItemError(item) && <p className="text-xs text-amber-800" role="status">{extractedItemError(item)}</p>}
+                              {extractedItemError(item)
+                                ? <p className="text-xs text-amber-800" role="status">{extractedItemError(item)}</p>
+                                : !item.startTime && !item.endTime && (
+                                  <p className="text-xs text-stone-500" role="status">Senza orario: verrà aggiunto come impegno per l'intera giornata.</p>
+                                )}
                               {/* Relevance Reason */}
                               <div className="text-xs text-stone-600 bg-stone-50 p-2 rounded-md border border-stone-100">
                                 <span className="font-semibold text-stone-700">Motivo pertinenza: </span>
