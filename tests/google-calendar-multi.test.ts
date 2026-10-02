@@ -105,7 +105,7 @@ test("CalendarList restituisce primary e condivisi e segue la pagination", async
 test("profilo legacy importa solo primary; la selezione condivisa è persistita nel profilo e valida per Firestore", () => {
   assert.deepEqual(resolveImportCalendarIds(undefined), ["primary"]);
   assert.deepEqual(resolveImportCalendarIds({}), ["primary"]);
-  assert.deepEqual(resolveImportCalendarIds({ googleCalendarImportIds: [] }), ["primary"]);
+  assert.deepEqual(resolveImportCalendarIds({ googleCalendarImportIds: [] }), []);
   assert.deepEqual(resolveImportCalendarIds({ googleCalendarImportIds: ["primary", "3d@scuola.it", "primary"] }),
     ["primary", "3d@scuola.it"]);
 

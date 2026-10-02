@@ -1562,8 +1562,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                     )}
 
                     <p className="text-[10px] text-stone-500 leading-relaxed">
-                      Deselezionando un calendario gli eventi già importati restano in AgendaDocente: smette soltanto
-                      l’aggiornamento automatico. Viene memorizzato solo l’identificativo del calendario, mai token o credenziali.
+                      Deselezionando un calendario, gli eventi importati da quel calendario vengono rimossi da AgendaDocente. Non viene cancellato nulla da Google.
                     </p>
                   </div>
 

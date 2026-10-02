@@ -73,6 +73,25 @@ export function googleEventToCalendarEvent(remote: GoogleCalendarApiEvent, calen
   };
 }
 
+/**
+ * Removes only inbound Google events belonging to calendars explicitly removed
+ * from the user's selection. The primary legacy fallback is intentionally
+ * limited to the primary calendar.
+ */
+export function removeImportedGoogleEventsForCalendars(
+  events: CalendarEvent[],
+  removedCalendarIds: string[],
+): CalendarEvent[] {
+  const removed = new Set(removedCalendarIds);
+  return events.filter(event => {
+    if (event.sourceType !== "google_calendar") return true;
+    if (event.googleCalendarId && removed.has(event.googleCalendarId)) return false;
+    // Older imports had no calendar id and can only belong to primary.
+    if (!event.googleCalendarId && removed.has("primary") && event.googleEventId != null) return false;
+    return true;
+  });
+}
+
 export interface GoogleCalendarMergeResult {
   events: CalendarEvent[];
   added: number;

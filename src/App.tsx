@@ -79,6 +79,7 @@ import {
   resolveImportCalendarIds,
   type GoogleCalendarImportResult,
 } from "./services/googleCalendarImportService";
+import { removeImportedGoogleEventsForCalendars } from "./utils/googleCalendarImport";
 import { listGoogleCalendars, type GoogleCalendarListEntry } from "./services/googleCalendarService";
 import { normalizeTeacherProfile } from "./utils/multiSchool";
 import { accountSync } from "./services/sync/accountSync";
@@ -336,10 +337,39 @@ export default function App({ initialData }: { initialData: LocalData }) {
 
   /** Persists the selection (IDs only) and imports the new set immediately, bypassing the cooldown. */
   const handleUpdateGoogleCalendarSelection = useCallback(async (calendarIds: string[]) => {
-    const unique = Array.from(new Set(calendarIds.length > 0 ? calendarIds : ["primary"]));
-    if (await handleSaveProfile({ ...profile, googleCalendarImportIds: unique }) === false) return;
+    const rawUnique = Array.from(new Set(calendarIds));
+    // CalendarList may expose the primary as its real email id; use one stable
+    // identity for diffing and cleanup, while preserving other calendar ids.
+    const primaryEntry = googleCalendars?.find(calendar => calendar.primary);
+    const canonical = (id: string) => primaryEntry && id === primaryEntry.id ? PRIMARY_CALENDAR_ID : id;
+    const previousIds = resolveImportCalendarIds(profile).map(canonical);
+    const nextIds = rawUnique.map(canonical);
+    const removedIds = previousIds.filter(id => !nextIds.includes(id));
+    const normalizedNext = Array.from(new Set(nextIds));
+    // Keep the persisted selection equivalent to googleCalendarImportIds: unique.
+    const unique = normalizedNext;
+
+    // Persist first: a failed profile save must never delete local events.
+    if (await handleSaveProfile({ ...profile, googleCalendarImportIds: normalizedNext }) === false) return;
+    let removedCount = 0;
+    if (removedIds.length > 0) {
+      await database.atomic(async () => {
+        const current = await storage.getEvents();
+        const cleaned = removeImportedGoogleEventsForCalendars(current, removedIds);
+        removedCount = current.length - cleaned.length;
+        if (removedCount > 0) await storage.saveEvents(cleaned);
+      });
+    }
+    if (removedCount > 0) {
+      showToast(removedIds.length === 1
+        ? `Calendario deselezionato: rimossi ${removedCount} eventi importati da AgendaDocente.`
+        : `Calendari aggiornati: rimossi ${removedCount} eventi importati da calendari deselezionati.`);
+    } else if (removedIds.length > 0) {
+      showToast("Selezione calendari aggiornata.");
+    }
+    // Selection changes bypass cooldown and import only the new selection.
     await runAutomaticGoogleImport(true, undefined, undefined, unique);
-  }, [profile, runAutomaticGoogleImport]);
+  }, [profile, googleCalendars, runAutomaticGoogleImport]);
 
   // Focus and online transitions are the only automatic triggers. Missing OAuth
   // tokens never cause a popup; the card asks the user to reconnect instead.
