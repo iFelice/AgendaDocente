@@ -131,7 +131,7 @@ test('simultaneous Google sync requests serialize and cannot create duplicate re
 
 import { SCOPES } from '../src/services/googleAuth';
 test('Google login requests the events permission needed by primary-calendar writes, without full-calendar access',()=>{
- assert.ok(SCOPES.includes('https://www.googleapis.com/auth/calendar.events.owned'));
+ assert.ok(SCOPES.includes('https://www.googleapis.com/auth/calendar.events'));
  assert.ok(!SCOPES.includes('https://www.googleapis.com/auth/calendar'));
 });
 

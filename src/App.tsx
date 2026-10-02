@@ -71,7 +71,7 @@ import {
   isUserCancellationError,
 } from "./services/googleAuth";
 import {
-  isGoogleSyncEnabled,
+  createGoogleCalendarEvent, updateGoogleCalendarEvent, PRIMARY_CALENDAR_ID,
   syncOptedInGoogleEvents,
 } from "./services/googleCalendarService";
 import {
@@ -642,27 +642,42 @@ export default function App({ initialData }: { initialData: LocalData }) {
 
   // Event Handlers
   const handleSaveEvent = withPersistenceFeedback(async (event: CalendarEvent, expected?: CalendarEvent) => {
-    // Save locally first
     await storage.saveEvent(event, expected);
-
-    // If sync with Google is requested and we have an access token
-    const token = googleAccessToken || getAccessToken();
-    if (isGoogleSyncEnabled(event) && token) {
-      try {
-      const result = await syncOptedInGoogleEvents(
-        token, [event.id],
-        async id => (await storage.getEvents()).find(current => current.id === id),
-        async current => (await storage.saveEvent(current)),
-      );
-
-      showToast(result.errorCount ? "Impegno salvato in locale (errore sync Google Calendar)."
-        : result.syncedCount ? "Impegno salvato e sincronizzato su Google Calendar." : "Impegno salvato in locale.");
-      } catch { showToast("Impegno salvato in locale; sincronizzazione Google non completata."); }
-      return;
-    }
-
     showToast("Impegno salvato con successo.");
   });
+
+
+  const googleSendFlights = useRef(new Map<string, Promise<CalendarEvent>>());
+  const handleSendEventToGoogle = async (event: CalendarEvent, requestedCalendarId: string): Promise<CalendarEvent> => {
+    const existing = googleSendFlights.current.get(event.id);
+    if (existing) return existing;
+    const request = (async () => {
+      // Local-first is deliberate: a remote failure must never lose form edits.
+      await storage.saveEvent(event);
+      const token = googleAccessToken || getAccessToken();
+      if (!token) throw new Error("Ricollega Google prima di inviare l’impegno.");
+      const calendarId = event.googleEventId ? (event.googleCalendarId || PRIMARY_CALENDAR_ID) : requestedCalendarId;
+      try {
+        let googleEventId = event.googleEventId;
+        if (googleEventId) await updateGoogleCalendarEvent(token, googleEventId, event, calendarId);
+        else googleEventId = await createGoogleCalendarEvent(token, event, calendarId);
+        const linked = { ...event, googleEventId, googleCalendarId: calendarId, syncedWithGoogle: false };
+        await storage.saveEvent(linked);
+        setEditingEvent(linked);
+        showToast(event.googleEventId ? "Copia Google aggiornata." : "Impegno inviato a Google Calendar.");
+        return linked;
+      } catch (error) {
+        const status = (error as { status?: number })?.status;
+        if (status === 403) {
+          void loadGoogleCalendars(true).catch(() => undefined);
+          throw new Error("Non hai più il permesso di scrivere su questo calendario Google.");
+        }
+        throw error;
+      }
+    })().finally(() => googleSendFlights.current.delete(event.id));
+    googleSendFlights.current.set(event.id, request);
+    return request;
+  };
 
   const handleDeleteEvent = withPersistenceFeedback(async (id: string) => {
     const remoteRemoved = await deleteEventLocallyFirst(id, googleAccessToken || getAccessToken());
@@ -1242,6 +1257,11 @@ export default function App({ initialData }: { initialData: LocalData }) {
         onDelete={handleDeleteEvent}
         isGoogleConnected={!!googleUser && !!googleAccessToken}
         googleUserEmail={googleUser?.email || undefined}
+        googleWritableCalendars={(googleCalendars || []).filter(calendar => ["owner", "writer", "organizer"].includes(calendar.accessRole || ""))}
+        googleCalendarsLoaded={googleCalendars !== null}
+        onLoadGoogleCalendars={() => loadGoogleCalendars()}
+        onGoogleConnect={googleUser ? handleGoogleReconnect : handleGoogleLogin}
+        onSendToGoogle={handleSendEventToGoogle}
       />
       )}
 

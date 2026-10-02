@@ -10,6 +10,9 @@ import {
 import {
   listCalendarEvents,
   listGoogleCalendars,
+  createGoogleCalendarEvent,
+  updateGoogleCalendarEvent,
+  getWritableGoogleCalendars,
   isGoogleSyncEnabled,
   PRIMARY_CALENDAR_ID,
   type GoogleCalendarApiEvent,
@@ -54,6 +57,29 @@ async function withFetch<T>(
 }
 
 // 1 + 2
+
+test("G1.3 filtra calendari scrivibili e parametrizza create/update", async () => {
+  const writable = getWritableGoogleCalendars([
+    { id: "p", summary: "Primary", primary: true, accessRole: "owner" },
+    { id: "shared/a", summary: "Shared", accessRole: "writer" },
+    { id: "org", summary: "Organizer", accessRole: "organizer" },
+    { id: "reader", summary: "Reader", accessRole: "reader" },
+    { id: "busy", summary: "Busy", accessRole: "freeBusyReader" },
+  ]);
+  assert.deepEqual(writable.map(c => c.id), ["p", "shared/a", "org"]);
+  const event: CalendarEvent = { id: "e", title: "Riunione", category: "riunione", date: "2026-10-10", isAllDay: true, sourceType: "manuale", completed: false };
+  await withFetch((_url, options) => jsonResponse(options?.method === "POST" ? { id: "remote" } : {}), async calls => {
+    assert.equal(await createGoogleCalendarEvent("token", event, "shared/a"), "remote");
+    await updateGoogleCalendarEvent("token", "remote/id", event, "shared/a");
+    assert.match(calls[0].url, /calendars\/shared%2Fa\/events$/);
+    assert.match(calls[1].url, /calendars\/shared%2Fa\/events\/remote%2Fid$/);
+  });
+  await withFetch(() => jsonResponse({ id: "primary-event" }), async calls => {
+    await createGoogleCalendarEvent("token", event);
+    assert.match(calls[0].url, /calendars\/primary\/events$/);
+  });
+});
+
 test("CalendarList restituisce primary e condivisi e segue la pagination", async () => {
   await withFetch(url => jsonResponse(
     url.includes("pageToken=p2")
@@ -192,20 +218,15 @@ test("primary e shared usano solo GET su /calendars/{id}/events, con pagination 
 });
 
 // 20 + 22 + 23
-test("outbound resta primary-only e non tocca i calendari condivisi", () => {
+test("outbound manuale parametrizza create/update e mantiene delete su primary", () => {
   const service = readSource("src/services/googleCalendarService.ts");
-  assert.match(service, /const CALENDAR_API_BASE = `\$\{CALENDAR_V3_BASE\}\/calendars\/primary\/events`/);
-  for (const fn of ["createGoogleCalendarEvent", "updateGoogleCalendarEvent", "deleteGoogleCalendarEvent"]) {
-    const body = service.slice(service.indexOf(`export const ${fn}`), service.indexOf(`export const ${fn}`) + 900);
-    assert.ok(body.includes("CALENDAR_API_BASE"), `${fn} deve restare su primary`);
-    assert.ok(!/calendarId/.test(body), `${fn} non deve accettare un calendarId`);
-  }
-  const workflows = readSource("src/services/eventWorkflows.ts");
-  assert.match(workflows, /isGoogleSyncEnabled/);
+  assert.match(service, /createGoogleCalendarEvent[\s\S]*?calendarId: string = PRIMARY_CALENDAR_ID/);
+  assert.match(service, /updateGoogleCalendarEvent[\s\S]*?calendarId: string = PRIMARY_CALENDAR_ID/);
+  assert.match(service, /encodeURIComponent\(calendarId \|\| PRIMARY_CALENDAR_ID\)/);
   const modal = readSource("src/components/EventModal.tsx");
-  assert.match(modal, /isGoogleSourcedEvent = eventToEdit\?\.sourceType === "google_calendar"/);
-  assert.match(modal, /syncedWithGoogle: isGoogleSourcedEvent \? false : syncWithGoogle/);
-  assert.match(modal, /\{!isGoogleSourcedEvent && \(isGoogleConnected/);
+  assert.match(modal, /Invia a Google Calendar/);
+  assert.match(modal, /Aggiorna su Google Calendar/);
+  assert.match(modal, /!isGoogleSourcedEvent/);
 });
 
 // 25 + 26 + 32 + 33
@@ -261,7 +282,7 @@ test("App: single-flight multi-calendar, apertura sessione immediata, cooldown, 
   assert.deepEqual(SCOPES, [
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
-    "https://www.googleapis.com/auth/calendar.events.owned",
+    "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
     "https://www.googleapis.com/auth/calendar.events.readonly",
   ]);
@@ -298,8 +319,9 @@ test("UI: elenco calendari, badge Google nelle viste e outbound manuale invariat
   // la CalendarList si carica solo con tab Google attivo e utente autenticato, con cache
   assert.match(profile, /if \(!isOpen \|\| activeTab !== "google"\) return;/);
   assert.match(profile, /if \(googleCalendars\) return;/);
-  // outbound manuale/selettivo invariato
-  assert.match(profile, /syncedWithGoogle === true && e\.sourceType !== "google_calendar"/);
+  // Il batch outbound è stato sostituito dall'invio dalla scheda.
+  assert.match(profile, /Gli impegni vengono inviati singolarmente/);
+  assert.doesNotMatch(profile, /Conferma e Sincronizza Ora/);
 
   const commitments = readSource("src/utils/futureCommitments.ts");
   assert.match(commitments, /case ["']google_calendar["']:[\s\S]*?return ["']google["']/);

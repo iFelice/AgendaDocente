@@ -40,7 +40,7 @@ test("SCOPES invariati rispetto a G1.2 e tutti registrati sul provider", () => {
   assert.deepEqual(SCOPES, [
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
-    "https://www.googleapis.com/auth/calendar.events.owned",
+    "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
     "https://www.googleapis.com/auth/calendar.events.readonly",
   ]);
@@ -126,8 +126,9 @@ test("import multi-calendar, cooldown e outbound primary-only invariati", () => 
   assert.match(app, /await runAutomaticGoogleImport\(true, undefined, undefined, unique\)/);
 
   const profileModal = readSource("src/components/ProfileModal.tsx");
-  // Outbound selettivo invariato: mai eventi importati da Google, mai calendari condivisi.
-  assert.match(profileModal, /syncedWithGoogle === true && e\.sourceType !== "google_calendar"/);
+  // Outbound G1.3 è per singolo impegno; nessuna UI batch.
+  assert.match(profileModal, /Gli impegni vengono inviati singolarmente/);
+  assert.doesNotMatch(profileModal, /Conferma e Sincronizza Ora/);
 
   const service = readSource("src/services/googleCalendarService.ts");
   assert.match(service, /PRIMARY_CALENDAR_ID/);

@@ -20,8 +20,6 @@ export interface GoogleCalendarApiEvent {
 }
 
 const CALENDAR_V3_BASE = "https://www.googleapis.com/calendar/v3";
-/** Outbound (create/update/delete) stays primary-only by design: G1.2 never writes shared calendars. */
-const CALENDAR_API_BASE = `${CALENDAR_V3_BASE}/calendars/primary/events`;
 export const PRIMARY_CALENDAR_ID = "primary";
 
 /** Minimal CalendarList entry: G1.2 needs identity and read access only, no colors/metadata. */
@@ -33,6 +31,9 @@ export interface GoogleCalendarListEntry {
   selected?: boolean;
   hidden?: boolean;
 }
+
+export const getWritableGoogleCalendars = (calendars: GoogleCalendarListEntry[]): GoogleCalendarListEntry[] =>
+  calendars.filter(calendar => ["owner", "writer", "organizer"].includes(calendar.accessRole || ""));
 
 /**
  * G1.2.1 — recognizes CalendarList failures caused by an OAuth grant that predates the
@@ -144,10 +145,11 @@ export const toGoogleCalendarPayload = (event: CalendarEvent): GoogleCalendarApi
  */
 export const createGoogleCalendarEvent = async (
   accessToken: string,
-  event: CalendarEvent
+  event: CalendarEvent,
+  calendarId: string = PRIMARY_CALENDAR_ID,
 ): Promise<string> => {
   const payload = toGoogleCalendarPayload(event);
-  const response = await fetch(CALENDAR_API_BASE, {
+  const response = await fetch(`${CALENDAR_V3_BASE}/calendars/${encodeURIComponent(calendarId || PRIMARY_CALENDAR_ID)}/events`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -158,9 +160,9 @@ export const createGoogleCalendarEvent = async (
 
   if (!response.ok) {
     const errData = await response.json().catch(() => ({}));
-    throw new Error(
-      errData?.error?.message || `Errore Google Calendar (${response.status})`
-    );
+    const error = new Error(errData?.error?.message || `Errore Google Calendar (${response.status})`);
+    (error as Error & { status?: number }).status = response.status;
+    throw error;
   }
 
   const created = await response.json();
@@ -173,10 +175,11 @@ export const createGoogleCalendarEvent = async (
 export const updateGoogleCalendarEvent = async (
   accessToken: string,
   googleEventId: string,
-  event: CalendarEvent
+  event: CalendarEvent,
+  calendarId: string = PRIMARY_CALENDAR_ID,
 ): Promise<void> => {
   const payload = toGoogleCalendarPayload(event);
-  const response = await fetch(`${CALENDAR_API_BASE}/${encodeURIComponent(googleEventId)}`, {
+  const response = await fetch(`${CALENDAR_V3_BASE}/calendars/${encodeURIComponent(calendarId || PRIMARY_CALENDAR_ID)}/events/${encodeURIComponent(googleEventId)}`, {
     method: "PATCH",
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -187,9 +190,9 @@ export const updateGoogleCalendarEvent = async (
 
   if (!response.ok) {
     const errData = await response.json().catch(() => ({}));
-    throw new Error(
-      errData?.error?.message || `Errore aggiornamento Google Calendar (${response.status})`
-    );
+    const error = new Error(errData?.error?.message || `Errore aggiornamento Google Calendar (${response.status})`);
+    (error as Error & { status?: number }).status = response.status;
+    throw error;
   }
 };
 
@@ -200,7 +203,7 @@ export const deleteGoogleCalendarEvent = async (
   accessToken: string,
   googleEventId: string
 ): Promise<void> => {
-  const response = await fetch(`${CALENDAR_API_BASE}/${encodeURIComponent(googleEventId)}`, {
+  const response = await fetch(`${CALENDAR_V3_BASE}/calendars/${PRIMARY_CALENDAR_ID}/events/${encodeURIComponent(googleEventId)}`, {
     method: "DELETE",
     headers: {
       Authorization: `Bearer ${accessToken}`,

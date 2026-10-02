@@ -1464,8 +1464,8 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                       <div>
                         <h4 className="font-bold text-stone-900 text-sm">Calendari importati</h4>
                         <p className="text-xs text-stone-600 mt-1 leading-relaxed">
-                          Scegli quali calendari Google leggere automaticamente. Gli eventi restano in sola lettura:
-                          AgendaDocente non scrive mai sui calendari condivisi.
+                          Scegli quali calendari Google leggere automaticamente. Gli eventi importati restano in sola lettura;
+                          l’invio da AgendaDocente avviene solo manualmente dalla scheda dell’impegno.
                         </p>
                       </div>
                       <button
@@ -1576,122 +1576,15 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                     controller={manualSync}
                   />
 
-                  {/* Google Calendar Sync Section */}
-                  <div className="p-5 rounded-2xl border border-stone-200 bg-white space-y-4">
-                    <div className="flex items-start justify-between">
-                      <div className="space-y-1">
-                        <div className="flex items-center space-x-2">
-                          <CalendarCheck className="w-4 h-4 text-emerald-700" />
-                          <h4 className="font-bold text-stone-900 text-sm">
-                            AgendaDocente → Google Calendar
-                          </h4>
-                        </div>
-                        <p className="text-xs text-stone-500">
-                          Invia manualmente su Google Calendar solo gli impegni per cui hai scelto di attivare la condivisione/sincronizzazione.
-                        </p>
-                      </div>
+                  <div className="p-5 rounded-2xl border border-stone-200 bg-white space-y-4" data-google-outbound-info>
+                    <div className="flex items-center space-x-2">
+                      <CalendarCheck className="w-4 h-4 text-emerald-700" />
+                      <h4 className="font-bold text-stone-900 text-sm">AgendaDocente → Google Calendar</h4>
                     </div>
-
-                    <p className="text-xs font-semibold text-stone-700">
-                      {events.filter(e => e.syncedWithGoogle === true && e.sourceType !== "google_calendar").length} impegni selezionati per Google Calendar
-                    </p>
-
-                    {/* Sync Confirmation Dialog (Mandatory User Confirmation) */}
-                    {showSyncConfirm ? (
-                      <div className="p-4 rounded-xl bg-blue-50 border border-blue-200 space-y-3">
-                        <div className="flex items-start space-x-2 text-blue-950">
-                          <Calendar className="w-5 h-5 text-blue-700 flex-shrink-0 mt-0.5" />
-                          <div>
-                            <h5 className="font-bold text-xs">Conferma Sincronizzazione Google Calendar</h5>
-                            <p className="text-xs text-blue-800 mt-0.5 leading-relaxed">
-                              Stai per esportare e sincronizzare <strong>{events.filter(e => e.syncedWithGoogle === true && e.sourceType !== "google_calendar").length} impegni con sincronizzazione abilitata</strong> sul tuo
-                              Google Calendar associato all'account <strong>{googleUser.email}</strong>.
-                              Vuoi procedere?
-                            </p>
-                          </div>
-                        </div>
-                        <div className="flex justify-end space-x-2 pt-1">
-                          <button
-                            type="button"
-                            onClick={() => setShowSyncConfirm(false)}
-                            className="px-3 py-1.5 rounded-lg border border-stone-300 bg-white text-stone-700 text-xs font-semibold"
-                          >
-                            Annulla
-                          </button>
-                          <button
-                            type="button"
-                            disabled={isSyncing}
-                            onClick={async () => {
-                              if (!onSyncAllToGoogle) return;
-                              try {
-                                setIsSyncing(true);
-                                setShowSyncConfirm(false);
-                                const res = await onSyncAllToGoogle();
-                                setSyncStatus({
-                                  message: `Operazione completata con successo: ${res.syncedCount} impegni sincronizzati su Google Calendar${
-                                    res.errorCount > 0 ? ` (${res.errorCount} errori)` : ""
-                                  }.`,
-                                  isError: res.errorCount > 0 && res.syncedCount === 0,
-                                });
-                              } catch (err: any) {
-                                setSyncStatus({
-                                  message: err?.message || "Errore durante la sincronizzazione con Google Calendar.",
-                                  isError: true,
-                                });
-                              } finally {
-                                setIsSyncing(false);
-                              }
-                            }}
-                            className="inline-flex items-center space-x-1.5 px-4 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold shadow-xs transition-colors"
-                          >
-                            <Check className="w-3.5 h-3.5" />
-                            <span>Conferma e Sincronizza Ora</span>
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="pt-1 flex flex-col sm:flex-row gap-2">
-                        <button
-                          type="button"
-                          disabled={isSyncing || !events.some(e => e.syncedWithGoogle === true && e.sourceType !== "google_calendar")}
-                          onClick={() => setShowSyncConfirm(true)}
-                          className="flex-1 inline-flex items-center justify-center space-x-2 px-4 py-2.5 bg-emerald-700 hover:bg-emerald-800 disabled:bg-stone-300 disabled:cursor-not-allowed text-white font-bold rounded-xl shadow-xs transition-colors cursor-pointer text-xs"
-                        >
-                          {isSyncing ? (
-                            <>
-                              <RefreshCw className="w-4 h-4 animate-spin" />
-                              <span>Sincronizzazione in corso su Google Calendar...</span>
-                            </>
-                          ) : (
-                            <>
-                              <RefreshCw className="w-4 h-4" />
-                              <span>Invia impegni selezionati a Google Calendar</span>
-                            </>
-                          )}
-                        </button>
-                        {!events.some(e => e.syncedWithGoogle === true && e.sourceType !== "google_calendar") && (
-                          <p className="text-[11px] text-stone-500 sm:absolute sm:mt-12">Nessun impegno selezionato. Apri un impegno e abilita l’invio a Google Calendar.</p>
-                        )}
-
-                        <button
-                          type="button"
-                          disabled={events.length === 0}
-                          onClick={() => {
-                            downloadIcsCalendar(events);
-                            setSyncStatus({
-                              message:
-                                "File agenda_docente.ics generato! Puoi importarlo in Google Calendar o Apple Calendar senza restrizioni.",
-                              isError: false,
-                            });
-                          }}
-                          className="inline-flex items-center justify-center space-x-1.5 px-4 py-2.5 rounded-xl border border-stone-300 bg-white hover:bg-stone-50 disabled:opacity-50 text-stone-700 font-semibold text-xs transition-colors shadow-2xs cursor-pointer"
-                          title="Esporta tutti gli eventi in formato standard compatibile con tutti i calendari"
-                        >
-                          <Download className="w-4 h-4 text-emerald-700" />
-                          <span>Esporta File .ICS</span>
-                        </button>
-                      </div>
-                    )}
+                    <p className="text-xs text-stone-600">Gli impegni vengono inviati singolarmente dalla loro scheda. Puoi scegliere il calendario Google di destinazione prima dell’invio.</p>
+                    <button type="button" disabled={events.length === 0} onClick={() => { downloadIcsCalendar(events); setSyncStatus({ message: "File agenda_docente.ics generato!", isError: false }); }} className="inline-flex items-center justify-center space-x-1.5 px-4 py-2.5 rounded-xl border border-stone-300 bg-white disabled:opacity-50 text-stone-700 font-semibold text-xs">
+                      <Download className="w-4 h-4 text-emerald-700" /><span>Esporta File .ICS</span>
+                    </button>
                   </div>
                 </div>
               )}
