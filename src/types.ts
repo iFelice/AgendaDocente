@@ -112,6 +112,21 @@ export interface TeacherRole {
   label?: string;
 }
 
+/**
+ * G1.2.4 — minimal, NON sensitive snapshot of one Google CalendarList entry.
+ *
+ * It is the only Google Calendar information AgendaDocente is allowed to persist:
+ * no access token, no refresh token, no credentials, no events. It exists so the
+ * app can show the known calendars (and let the teacher change the checkboxes)
+ * after a restart, when the OAuth token is no longer available in memory.
+ */
+export interface CachedGoogleCalendar {
+  id: string;
+  summary: string;
+  primary?: boolean;
+  accessRole?: string;
+}
+
 export interface TeacherProfile {
   id: string;
   fullName: string;
@@ -133,6 +148,13 @@ export interface TeacherProfile {
    * Only IDs are persisted — never tokens or credentials.
    */
   googleCalendarImportIds?: string[];
+  /**
+   * G1.2.4: last known Google CalendarList, cached so the list (and its checkboxes)
+   * survive an app restart without an OAuth token. Metadata only — see
+   * {@link CachedGoogleCalendar}. Optional and additive: a legacy profile simply has
+   * no cache and shows nothing until the first successful CalendarList fetch.
+   */
+  googleCalendarListCache?: CachedGoogleCalendar[];
   /** Ore settimanali dichiarate dal docente (default 18 se non presente). */
   weeklyDeclaredHours?: number;
   /** Additive multi-institute model; legacy scalar fields remain supported. */

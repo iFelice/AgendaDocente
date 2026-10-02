@@ -36,6 +36,30 @@ export const getWritableGoogleCalendars = (calendars: GoogleCalendarListEntry[])
   calendars.filter(calendar => ["owner", "writer", "organizer"].includes(calendar.accessRole || ""));
 
 /**
+ * G1.2.4 — access roles that really allow reading event data through
+ * `listCalendarEvents` (GET /calendars/{id}/events).
+ *
+ * DOCUMENTED CHOICE: inbound import is NOT limited to writable calendars — a
+ * read-only shared calendar (`reader`) is perfectly importable and stays selectable.
+ * `freeBusyReader` is excluded instead: that role only exposes busy/free blocks, so
+ * an import would either fail or create empty placeholder events. Note that
+ * `listGoogleCalendars` already queries the CalendarList with `minAccessRole=reader`,
+ * so Google itself never returns freeBusyReader entries; this filter is the explicit,
+ * testable guarantee for cached lists and for "Seleziona tutti".
+ */
+export const IMPORTABLE_ACCESS_ROLES = ["owner", "organizer", "writer", "reader"] as const;
+
+/** A legacy cache entry without accessRole is kept: it was listed with minAccessRole=reader. */
+export const canImportGoogleCalendarEvents = (
+  calendar: Pick<GoogleCalendarListEntry, "accessRole">,
+): boolean =>
+  calendar.accessRole === undefined
+  || (IMPORTABLE_ACCESS_ROLES as readonly string[]).includes(calendar.accessRole);
+
+export const getImportableGoogleCalendars = (calendars: GoogleCalendarListEntry[]): GoogleCalendarListEntry[] =>
+  calendars.filter(canImportGoogleCalendarEvents);
+
+/**
  * G1.2.1 — recognizes CalendarList failures caused by an OAuth grant that predates the
  * read-only scopes ("Request had insufficient authentication scopes.", 403, permissions).
  * The UI uses this to suggest an explicit re-consent instead of a generic retry.

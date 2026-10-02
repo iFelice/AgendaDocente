@@ -30,7 +30,7 @@ import { storage } from "../services/storage";
 import { getCurrentSchoolYear, getSuggestedSchoolYears } from "../utils/schoolYear";
 import { GoogleSignInButton } from "./GoogleSignInButton";
 import { isUserCancellationError } from "../services/googleAuth";
-import { downloadIcsCalendar, isInsufficientScopeError, type GoogleCalendarListEntry } from "../services/googleCalendarService";
+import { downloadIcsCalendar, getImportableGoogleCalendars, isInsufficientScopeError, canImportGoogleCalendarEvents, type GoogleCalendarListEntry } from "../services/googleCalendarService";
 import type { SyncStatus } from "../services/sync/types";
 import type { GoogleCalendarImportResult } from "../services/googleCalendarImportService";
 import { CloudSync } from "./CloudSyncCard";
@@ -93,6 +93,8 @@ interface ProfileModalProps {
   onAutomaticImport?: () => Promise<GoogleCalendarImportResult | null>;
   /** G1.2: read-only multi-calendar selection. */
   googleCalendars?: GoogleCalendarListEntry[] | null;
+  /** G1.2.4: "cache" = list restored from the profile, "live" = fetched from Google this session. */
+  googleCalendarListSource?: "cache" | "live" | null;
   onLoadGoogleCalendars?: (forceReload?: boolean) => Promise<GoogleCalendarListEntry[]>;
   selectedGoogleCalendarIds?: string[];
   onUpdateGoogleCalendarSelection?: (calendarIds: string[]) => Promise<void>;
@@ -183,6 +185,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   onAutomaticImport,
   onSyncAllToGoogle,
   googleCalendars = null,
+  googleCalendarListSource = null,
   onLoadGoogleCalendars,
   selectedGoogleCalendarIds = ["primary"],
   onUpdateGoogleCalendarSelection,
@@ -204,6 +207,8 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   const [calendarListError, setCalendarListError] = useState<string | null>(null);
   const [isLoadingCalendars, setIsLoadingCalendars] = useState(false);
   const [pendingCalendarId, setPendingCalendarId] = useState<string | null>(null);
+  // G1.2.4 — bulk actions are a SINGLE selection update, never N simulated clicks.
+  const [pendingBulkAction, setPendingBulkAction] = useState<"select-all" | "clear-all" | null>(null);
   const [syncStatus, setSyncStatus] = useState<{ message: string; isError?: boolean } | null>(null);
   const [showSyncConfirm, setShowSyncConfirm] = useState(false);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
@@ -212,10 +217,61 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
 
   // Loads the Google CalendarList only when the Google tab is actually visible and a
   // token exists. The result is cached by App, so re-renders never refetch.
+  // G1.2.4: a list coming from the persisted cache is shown immediately, but it is still
+  // refreshed when a token is available. Without a token the cache is simply kept: no fetch,
+  // no red error — the card shows the discreet "saved list" note instead.
+  const hasLiveCalendarList = !!googleCalendars && googleCalendarListSource === "live";
+  const isCachedCalendarList = !!googleCalendars && googleCalendarListSource === "cache";
+  // G1.2.4 — only calendars whose access role really allows reading events can be imported
+  // (freeBusyReader is excluded: it exposes busy/free blocks only). This is the set used by
+  // "Seleziona tutti" and the set of enabled checkboxes.
+  const importableCalendars = getImportableGoogleCalendars(googleCalendars ?? []);
+  const selectAllCalendarIds = importableCalendars.flatMap(calendar =>
+    calendar.primary ? [calendar.id, "primary"] : [calendar.id]);
+  const isBulkPending = pendingBulkAction !== null;
+
+  /**
+   * Single entry point for every selection change (checkbox and bulk actions):
+   * ONE call to onUpdateGoogleCalendarSelection ⇒ one profile save, one cleanup,
+   * at most one import, one feedback message. Without a token it is a local-only
+   * operation and must never surface an error.
+   */
+  const calendarSelectionFeedback = (nextIds: string[]): string => {
+    const added = nextIds.filter(id => !selectedGoogleCalendarIds.includes(id));
+    if (!googleAccessToken) {
+      return added.length > 0
+        ? "Calendario selezionato. Gli eventi verranno importati alla prossima riconnessione Google."
+        : "Selezione calendari aggiornata.";
+    }
+    return "Selezione calendari aggiornata: importazione avviata.";
+  };
+
+  const runCalendarSelectionUpdate = async (
+    action: "select-all" | "clear-all" | string,
+    nextIds: string[],
+  ): Promise<void> => {
+    if (!onUpdateGoogleCalendarSelection) return;
+    const isBulk = action === "select-all" || action === "clear-all";
+    try {
+      if (isBulk) setPendingBulkAction(action as "select-all" | "clear-all");
+      else setPendingCalendarId(action);
+      setSyncStatus(null);
+      await onUpdateGoogleCalendarSelection(nextIds);
+      setSyncStatus({ message: calendarSelectionFeedback(nextIds), isError: false });
+    } catch (err: any) {
+      setSyncStatus({ message: err?.message || "Impossibile aggiornare la selezione dei calendari.", isError: true });
+    } finally {
+      if (isBulk) setPendingBulkAction(null);
+      else setPendingCalendarId(null);
+    }
+  };
   useEffect(() => {
     if (!isOpen || activeTab !== "google") return;
     if (!googleUser || !onLoadGoogleCalendars) return;
-    if (googleCalendars) return;
+    if (hasLiveCalendarList) return;
+    // No OAuth token in memory: never fetch and never show a red error. The card falls
+    // back to the persisted cache (or to a discreet "reconnect" note when empty).
+    if (!googleAccessToken) return;
     let cancelled = false;
     setIsLoadingCalendars(true);
     setCalendarListError(null);
@@ -225,7 +281,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
       })
       .finally(() => { if (!cancelled) setIsLoadingCalendars(false); });
     return () => { cancelled = true; };
-  }, [isOpen, activeTab, googleUser, googleCalendars, onLoadGoogleCalendars]);
+  }, [isOpen, activeTab, googleUser, googleAccessToken, hasLiveCalendarList, isCachedCalendarList, onLoadGoogleCalendars]);
 
   // G1.2.2 — tab navigation is applied ONLY on the closed→open transition.
   // In App.tsx `profileInitialTab` is always set together with
@@ -1473,6 +1529,12 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                         disabled={isLoadingCalendars || !onLoadGoogleCalendars}
                         onClick={async () => {
                           if (!onLoadGoogleCalendars) return;
+                          // G1.2.4 §15 — richiede un token valido: senza token propone il
+                          // reconnect, non tenta la fetch e non tocca mai le spunte.
+                          if (!googleAccessToken) {
+                            setCalendarListError("Ricollega Google per aggiornare l’elenco dei calendari.");
+                            return;
+                          }
                           try {
                             setIsLoadingCalendars(true);
                             setCalendarListError(null);
@@ -1488,6 +1550,57 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                         Aggiorna elenco calendari
                       </button>
                     </div>
+
+                    {/* G1.2.4 — azioni bulk: UNA sola chiamata a onUpdateGoogleCalendarSelection. */}
+                    {googleCalendars && googleCalendars.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-2" data-google-calendar-bulk-actions>
+                        <button
+                          type="button"
+                          disabled={isBulkPending || pendingCalendarId !== null || !onUpdateGoogleCalendarSelection}
+                          onClick={() => void runCalendarSelectionUpdate("select-all", selectAllCalendarIds)}
+                          className="px-2.5 py-1 rounded-lg border border-blue-200 bg-blue-50 text-blue-800 text-[11px] font-bold disabled:opacity-50"
+                        >
+                          {pendingBulkAction === "select-all" ? "Selezione…" : "Seleziona tutti"}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isBulkPending || pendingCalendarId !== null || !onUpdateGoogleCalendarSelection}
+                          onClick={() => void runCalendarSelectionUpdate("clear-all", [])}
+                          className="px-2.5 py-1 rounded-lg border border-stone-300 bg-white text-stone-700 text-[11px] font-bold disabled:opacity-50"
+                        >
+                          {pendingBulkAction === "clear-all" ? "Rimozione…" : "Deseleziona tutti"}
+                        </button>
+                      </div>
+                    )}
+
+                    {/* G1.2.4 — origine dell'elenco: cache persistita vs lista live di sessione. */}
+                    {isCachedCalendarList && (
+                      <div className="flex items-start justify-between gap-3 text-[11px] text-stone-600" data-google-calendar-cache-note>
+                        <span>Elenco salvato dall’ultima connessione Google. Ricollega Google per aggiornare l’elenco.</span>
+                        <button
+                          type="button"
+                          onClick={() => void (onGoogleReconnect ?? onGoogleLogin)?.()}
+                          className="shrink-0 underline font-bold text-blue-700"
+                        >
+                          Ricollega Google
+                        </button>
+                      </div>
+                    )}
+                    {hasLiveCalendarList && (
+                      <p className="text-[11px] text-stone-500" data-google-calendar-live-note>Elenco aggiornato da Google.</p>
+                    )}
+                    {!googleCalendars && !googleAccessToken && !isLoadingCalendars && (
+                      <div className="flex items-start justify-between gap-3 text-[11px] text-stone-600">
+                        <span>Ricollega Google per visualizzare l’elenco dei calendari.</span>
+                        <button
+                          type="button"
+                          onClick={() => void (onGoogleReconnect ?? onGoogleLogin)?.()}
+                          className="shrink-0 underline font-bold text-blue-700"
+                        >
+                          Ricollega Google
+                        </button>
+                      </div>
+                    )}
 
                     {calendarListError && (
                       <div className="flex items-center justify-between gap-3 text-[11px] text-amber-800">
@@ -1517,33 +1630,28 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                         {googleCalendars.map(calendar => {
                           const checked = selectedGoogleCalendarIds.includes(calendar.id) ||
                             (!!calendar.primary && selectedGoogleCalendarIds.includes("primary"));
+                          const importable = canImportGoogleCalendarEvents(calendar);
                           const kind = calendar.primary
                             ? "Principale"
-                            : calendar.accessRole === "owner" ? "Mio calendario" : "Condiviso";
+                            : calendar.accessRole === "owner" ? "Mio calendario"
+                            : !importable ? "Solo disponibilità (non importabile)"
+                            : calendar.accessRole === "reader" ? "Condiviso (sola lettura)" : "Condiviso";
                           return (
                             <li key={calendar.id} className="flex items-start gap-2.5">
                               <input
                                 id={`gcal-select-${calendar.id}`}
                                 type="checkbox"
                                 checked={checked}
-                                disabled={pendingCalendarId !== null || !onUpdateGoogleCalendarSelection}
+                                disabled={!importable || isBulkPending || pendingCalendarId !== null || !onUpdateGoogleCalendarSelection}
                                 onChange={async (event) => {
                                   if (!onUpdateGoogleCalendarSelection) return;
                                   const current = new Set(selectedGoogleCalendarIds);
                                   if (calendar.primary) current.add("primary");
                                   if (event.target.checked) current.add(calendar.id);
                                   else { current.delete(calendar.id); if (calendar.primary) current.delete("primary"); }
-                                  try {
-                                    setPendingCalendarId(calendar.id);
-                                    setSyncStatus(null);
-                                    // La scelta utente avvia subito un import: non aspetta il cooldown.
-                                    await onUpdateGoogleCalendarSelection(Array.from(current));
-                                    setSyncStatus({ message: "Selezione calendari aggiornata: importazione avviata.", isError: false });
-                                  } catch (err: any) {
-                                    setSyncStatus({ message: err?.message || "Impossibile aggiornare la selezione dei calendari.", isError: true });
-                                  } finally {
-                                    setPendingCalendarId(null);
-                                  }
+                                  // La scelta utente avvia subito un import quando il token c'è;
+                                  // senza token resta un'operazione locale, senza errori.
+                                  await runCalendarSelectionUpdate(calendar.id, Array.from(current));
                                 }}
                                 className="mt-0.5 rounded text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
                               />

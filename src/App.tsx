@@ -81,6 +81,12 @@ import {
 } from "./services/googleCalendarImportService";
 import { removeImportedGoogleEventsForCalendars } from "./utils/googleCalendarImport";
 import { listGoogleCalendars, type GoogleCalendarListEntry } from "./services/googleCalendarService";
+import {
+  cachedGoogleCalendarsToEntries,
+  googleCalendarSelectableIds,
+  sameCachedGoogleCalendarList,
+  toCachedGoogleCalendarList,
+} from "./utils/googleCalendarCache";
 import { normalizeTeacherProfile } from "./utils/multiSchool";
 import { accountSync } from "./services/sync/accountSync";
 import type { SyncStatus } from "./services/sync/types";
@@ -183,7 +189,16 @@ export default function App({ initialData }: { initialData: LocalData }) {
   const lastSuccessfulImportAt = useRef<number | null>(null);
   // G1.2/§22: the first import of a session must run immediately, never waiting the cooldown.
   const sessionImportDone = useRef(false);
-  const [googleCalendars, setGoogleCalendars] = useState<GoogleCalendarListEntry[] | null>(null);
+  // G1.2.4 — BOOTSTRAP: at startup the OAuth token is gone, but the CalendarList
+  // cached in the profile (metadata only) is enough to show the calendars and let
+  // the teacher change the checkboxes offline.
+  const [googleCalendars, setGoogleCalendars] = useState<GoogleCalendarListEntry[] | null>(() => {
+    const bootstrapped = cachedGoogleCalendarsToEntries(initialData.profile.googleCalendarListCache);
+    return bootstrapped.length > 0 ? bootstrapped : null;
+  });
+  /** Distinguishes a list restored from the persisted cache from one fetched in this session. */
+  const [googleCalendarListSource, setGoogleCalendarListSource] = useState<"cache" | "live" | null>(() =>
+    cachedGoogleCalendarsToEntries(initialData.profile.googleCalendarListCache).length > 0 ? "cache" : null);
   const googleCalendarsLoading = useRef(false);
   const previousOnline = useRef<boolean | null>(null);
   const [profileInitialTab, setProfileInitialTab] = useState<"profilo" | "backup" | "google">("profilo");
@@ -316,26 +331,89 @@ export default function App({ initialData }: { initialData: LocalData }) {
     return request;
   }, [googleUser, googleAccessToken, isOnline, profile.googleCalendarImportIds]);
 
+  // G1.2.4 — re-bootstrap from the persisted cache whenever no list is available in
+  // memory: startup, backup restore and account-sync pulls all flow through `profile`.
+  useEffect(() => {
+    if (googleCalendars !== null) return;
+    const cached = cachedGoogleCalendarsToEntries(profile.googleCalendarListCache);
+    if (cached.length === 0) return;
+    setGoogleCalendars(cached);
+    setGoogleCalendarListSource("cache");
+  }, [profile.googleCalendarListCache, googleCalendars]);
+
+  /**
+   * G1.2.4 — a CalendarList really downloaded from Google becomes the live list AND
+   * replaces the persisted cache (metadata only: never a token).
+   *
+   * The persisted selection (`googleCalendarImportIds`) is never rewritten here, with one
+   * audited exception: a calendar that no longer exists in the live list is dropped from
+   * the selection and its locally imported events are cleaned up (same local cleanup as
+   * G1.2.3). Legacy profiles without an explicit selection are left untouched.
+   */
+  const applyLiveGoogleCalendarList = useCallback(async (calendars: GoogleCalendarListEntry[]) => {
+    setGoogleCalendars(calendars);
+    setGoogleCalendarListSource("live");
+    const cache = toCachedGoogleCalendarList(calendars);
+    let staleIds: string[] = [];
+    try {
+      await database.atomic(async () => {
+        const current = await storage.getProfile();
+        const liveIds = googleCalendarSelectableIds(calendars);
+        const selection = current.googleCalendarImportIds;
+        staleIds = Array.isArray(selection) ? selection.filter(id => !liveIds.has(id)) : [];
+        const cacheChanged = !sameCachedGoogleCalendarList(current.googleCalendarListCache, cache);
+        if (!cacheChanged && staleIds.length === 0) return;
+        const nextProfile: TeacherProfile = { ...current, googleCalendarListCache: cache };
+        if (staleIds.length > 0) nextProfile.googleCalendarImportIds = selection!.filter(id => liveIds.has(id));
+        await storage.saveProfile(nextProfile);
+        if (staleIds.length > 0) {
+          const currentEvents = await storage.getEvents();
+          const cleaned = removeImportedGoogleEventsForCalendars(currentEvents, staleIds);
+          if (cleaned.length !== currentEvents.length) await storage.saveEvents(cleaned);
+        }
+      });
+    } catch (error) {
+      // The cache is an optimization: a persistence failure must never hide the live list.
+      console.warn("Cache elenco calendari Google non aggiornata:", error);
+      return;
+    }
+    if (staleIds.length > 0) {
+      showToast(staleIds.length === 1
+        ? "Un calendario non è più disponibile ed è stato rimosso dalla selezione."
+        : "Alcuni calendari non sono più disponibili e sono stati rimossi dalla selezione.");
+    }
+  }, []);
+
   /** Loads the CalendarList once per session/token; the UI never refetches on every render. */
   const loadGoogleCalendars = useCallback(async (forceReload = false): Promise<GoogleCalendarListEntry[]> => {
     const token = googleAccessToken || getAccessToken();
     if (!token) {
       setGoogleAutoImportStatus("needs-auth");
-      throw new Error("Ricollega Google per leggere l’elenco dei calendari.");
+      throw new Error("Ricollega Google per aggiornare l’elenco dei calendari.");
     }
-    if (!forceReload && googleCalendars) return googleCalendars;
-    if (googleCalendarsLoading.current && googleCalendars) return googleCalendars;
+    // A cached list is shown but is NOT a session list: with a valid token it is refreshed.
+    const hasLiveList = googleCalendars !== null && googleCalendarListSource === "live";
+    if (!forceReload && hasLiveList) return googleCalendars!;
+    if (googleCalendarsLoading.current && hasLiveList) return googleCalendars!;
     googleCalendarsLoading.current = true;
     try {
       const calendars = await listGoogleCalendars(token);
-      setGoogleCalendars(calendars);
+      await applyLiveGoogleCalendarList(calendars);
       return calendars;
     } finally {
       googleCalendarsLoading.current = false;
     }
-  }, [googleAccessToken, googleCalendars]);
+  }, [googleAccessToken, googleCalendars, googleCalendarListSource, applyLiveGoogleCalendarList]);
 
-  /** Persists the selection (IDs only) and imports the new set immediately, bypassing the cooldown. */
+  /**
+   * Persists the selection (IDs only) and imports the new set immediately, bypassing the cooldown.
+   *
+   * G1.2.4 — changing the checkboxes is a LOCAL operation:
+   * - token available: save profile → cleanup removed → import the new selection;
+   * - token missing:   save profile → cleanup removed → stop, with NO error and NO Google call.
+   * One single call handles bulk actions too ("Seleziona tutti" / "Deseleziona tutti"):
+   * one profile save, one cleanup, at most one import.
+   */
   const handleUpdateGoogleCalendarSelection = useCallback(async (calendarIds: string[]) => {
     const rawUnique = Array.from(new Set(calendarIds));
     // CalendarList may expose the primary as its real email id; use one stable
@@ -345,9 +423,12 @@ export default function App({ initialData }: { initialData: LocalData }) {
     const previousIds = resolveImportCalendarIds(profile).map(canonical);
     const nextIds = rawUnique.map(canonical);
     const removedIds = previousIds.filter(id => !nextIds.includes(id));
+    const addedIds = nextIds.filter(id => !previousIds.includes(id));
     const normalizedNext = Array.from(new Set(nextIds));
     // Keep the persisted selection equivalent to googleCalendarImportIds: unique.
     const unique = normalizedNext;
+    // Read the token BEFORE any write: it decides only whether an import follows.
+    const token = googleAccessToken || getAccessToken();
 
     // Persist first: a failed profile save must never delete local events.
     if (await handleSaveProfile({ ...profile, googleCalendarImportIds: normalizedNext }) === false) return;
@@ -367,9 +448,18 @@ export default function App({ initialData }: { initialData: LocalData }) {
     } else if (removedIds.length > 0) {
       showToast("Selezione calendari aggiornata.");
     }
+    if (!token) {
+      // Offline/senza token: la selezione è già salvata e il cleanup locale è già avvenuto.
+      // Nessun errore, nessuna chiamata a Google, nessun runAutomaticGoogleImport().
+      setGoogleAutoImportStatus("needs-auth");
+      if (addedIds.length > 0) {
+        showToast("Calendario selezionato. Gli eventi verranno importati alla prossima riconnessione Google.");
+      }
+      return;
+    }
     // Selection changes bypass cooldown and import only the new selection.
     await runAutomaticGoogleImport(true, undefined, undefined, unique);
-  }, [profile, googleCalendars, runAutomaticGoogleImport]);
+  }, [profile, googleCalendars, googleAccessToken, runAutomaticGoogleImport]);
 
   // Focus and online transitions are the only automatic triggers. Missing OAuth
   // tokens never cause a popup; the card asks the user to reconnect instead.
@@ -438,11 +528,12 @@ export default function App({ initialData }: { initialData: LocalData }) {
   const handleGoogleReconnect = async () => {
     const result = await runGoogleSignIn({ forceConsent: true });
     if (!result) return null;
-    // The previous token's CalendarList may be stale/unauthorized: drop the cache and
-    // refetch right away so the open modal updates without a close/reopen cycle.
-    setGoogleCalendars(null);
+    // G1.2.4 — the previously shown list may come from the persisted cache: mark it stale
+    // and refetch right away, so the open modal updates without a close/reopen cycle.
+    // The visible list is NOT cleared: a failed refetch must never leave an empty card.
+    setGoogleCalendarListSource(previous => (previous === "live" ? "cache" : previous));
     try {
-      setGoogleCalendars(await listGoogleCalendars(result.accessToken));
+      await applyLiveGoogleCalendarList(await listGoogleCalendars(result.accessToken));
     } catch (error) {
       console.warn("Elenco calendari non aggiornato dopo la riconnessione:", error);
     }
@@ -1288,7 +1379,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
         isGoogleConnected={!!googleUser && !!googleAccessToken}
         googleUserEmail={googleUser?.email || undefined}
         googleWritableCalendars={(googleCalendars || []).filter(calendar => ["owner", "writer", "organizer"].includes(calendar.accessRole || ""))}
-        googleCalendarsLoaded={googleCalendars !== null}
+        googleCalendarsLoaded={googleCalendars !== null && googleCalendarListSource === "live"}
         onLoadGoogleCalendars={() => loadGoogleCalendars()}
         onGoogleConnect={googleUser ? handleGoogleReconnect : handleGoogleLogin}
         onSendToGoogle={handleSendEventToGoogle}
@@ -1319,6 +1410,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
         lastSuccessfulImportAt={lastSuccessfulImportAtState}
         onAutomaticImport={() => runAutomaticGoogleImport(true)}
         googleCalendars={googleCalendars}
+        googleCalendarListSource={googleCalendarListSource}
         onLoadGoogleCalendars={loadGoogleCalendars}
         selectedGoogleCalendarIds={resolveImportCalendarIds(profile)}
         onUpdateGoogleCalendarSelection={handleUpdateGoogleCalendarSelection}
