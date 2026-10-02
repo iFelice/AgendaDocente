@@ -20,9 +20,15 @@ export interface GoogleCalendarApiEvent {
 }
 
 const CALENDAR_V3_BASE = "https://www.googleapis.com/calendar/v3";
-/** Outbound (create/update/delete) stays primary-only by design: G1.2 never writes shared calendars. */
-const CALENDAR_API_BASE = `${CALENDAR_V3_BASE}/calendars/primary/events`;
 export const PRIMARY_CALENDAR_ID = "primary";
+
+/**
+ * G1.3 — outbound create/update target one explicit calendar chosen by the user.
+ * The calendarId is always URL-encoded; callers that omit it keep writing on primary
+ * (backward compatibility with G1 events that predate googleCalendarId).
+ */
+const calendarEventsEndpoint = (calendarId: string = PRIMARY_CALENDAR_ID): string =>
+  `${CALENDAR_V3_BASE}/calendars/${encodeURIComponent(calendarId || PRIMARY_CALENDAR_ID)}/events`;
 
 /** Minimal CalendarList entry: G1.2 needs identity and read access only, no colors/metadata. */
 export interface GoogleCalendarListEntry {
@@ -33,6 +39,21 @@ export interface GoogleCalendarListEntry {
   selected?: boolean;
   hidden?: boolean;
 }
+
+/**
+ * G1.3 — a calendar is a valid outbound destination only when Google grants write
+ * access on it: `owner` and `writer` always can write; `organizer` is accepted
+ * defensively if the Calendar API ever returns it in a CalendarList entry.
+ * `reader`, `freeBusyReader` and any unknown/missing role are excluded.
+ * The primary calendar is always writable by its owner.
+ */
+const WRITABLE_ACCESS_ROLES = new Set(["owner", "writer", "organizer"]);
+
+export const getWritableGoogleCalendars = (
+  calendars: GoogleCalendarListEntry[],
+): GoogleCalendarListEntry[] =>
+  calendars.filter(calendar =>
+    calendar.primary === true || WRITABLE_ACCESS_ROLES.has(calendar.accessRole ?? ""));
 
 /**
  * G1.2.1 — recognizes CalendarList failures caused by an OAuth grant that predates the
@@ -140,14 +161,18 @@ export const toGoogleCalendarPayload = (event: CalendarEvent): GoogleCalendarApi
 };
 
 /**
- * Creates an event on user's primary Google Calendar
+ * Creates an event on the requested Google calendar.
+ * G1.3: callers may pass any writable calendarId; omitting it keeps the legacy
+ * primary-only behaviour. The HTTP status is preserved on failures so the UI can
+ * distinguish lost write permission (403) from a vanished calendar (404/410).
  */
 export const createGoogleCalendarEvent = async (
   accessToken: string,
-  event: CalendarEvent
+  event: CalendarEvent,
+  calendarId: string = PRIMARY_CALENDAR_ID
 ): Promise<string> => {
   const payload = toGoogleCalendarPayload(event);
-  const response = await fetch(CALENDAR_API_BASE, {
+  const response = await fetch(calendarEventsEndpoint(calendarId), {
     method: "POST",
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -158,9 +183,11 @@ export const createGoogleCalendarEvent = async (
 
   if (!response.ok) {
     const errData = await response.json().catch(() => ({}));
-    throw new Error(
+    const error = new Error(
       errData?.error?.message || `Errore Google Calendar (${response.status})`
     );
+    (error as Error & { status?: number }).status = response.status;
+    throw error;
   }
 
   const created = await response.json();
@@ -168,15 +195,18 @@ export const createGoogleCalendarEvent = async (
 };
 
 /**
- * Updates an event on user's primary Google Calendar
+ * Updates an event on the requested Google calendar.
+ * G1.3: the update always targets the calendar the event was originally sent to
+ * (event.googleCalendarId); legacy callers without calendarId stay on primary.
  */
 export const updateGoogleCalendarEvent = async (
   accessToken: string,
   googleEventId: string,
-  event: CalendarEvent
+  event: CalendarEvent,
+  calendarId: string = PRIMARY_CALENDAR_ID
 ): Promise<void> => {
   const payload = toGoogleCalendarPayload(event);
-  const response = await fetch(`${CALENDAR_API_BASE}/${encodeURIComponent(googleEventId)}`, {
+  const response = await fetch(`${calendarEventsEndpoint(calendarId)}/${encodeURIComponent(googleEventId)}`, {
     method: "PATCH",
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -187,20 +217,24 @@ export const updateGoogleCalendarEvent = async (
 
   if (!response.ok) {
     const errData = await response.json().catch(() => ({}));
-    throw new Error(
+    const error = new Error(
       errData?.error?.message || `Errore aggiornamento Google Calendar (${response.status})`
     );
+    (error as Error & { status?: number }).status = response.status;
+    throw error;
   }
 };
 
 /**
- * Deletes an event from Google Calendar
+ * Deletes an event from Google Calendar.
+ * G1.3 keeps the delete semantics untouched: only legacy opted-in events
+ * (syncedWithGoogle === true, primary-only by construction) ever reach it.
  */
 export const deleteGoogleCalendarEvent = async (
   accessToken: string,
   googleEventId: string
 ): Promise<void> => {
-  const response = await fetch(`${CALENDAR_API_BASE}/${encodeURIComponent(googleEventId)}`, {
+  const response = await fetch(`${calendarEventsEndpoint(PRIMARY_CALENDAR_ID)}/${encodeURIComponent(googleEventId)}`, {
     method: "DELETE",
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -390,7 +424,12 @@ export const downloadIcsCalendar = (events: CalendarEvent[], filename = "agenda_
   URL.revokeObjectURL(url);
 };
 
-/** Only an explicit per-event opt-in grants permission to send data to Google. */
+/**
+ * Legacy opt-in flag (pre-G1.3). The new manual flow always stores
+ * syncedWithGoogle: false — the linked remote copy is identified by
+ * googleEventId + googleCalendarId instead. This predicate remains only for
+ * events created before G1.3 (e.g. delete of a legacy opted-in event).
+ */
 export const isGoogleSyncEnabled = (event: Pick<CalendarEvent, 'syncedWithGoogle'>): boolean =>
   event.syncedWithGoogle === true;
 
@@ -423,6 +462,7 @@ async function syncGoogleEventsUnlocked(
   return { syncedCount, errorCount };
 }
 
+// G1.3: the batch UI no longer exists; this stays only for legacy callers/tests.
 // Web Locks coordinate concurrent sync buttons across tabs. Older browsers still serialize within a tab.
 let pendingSync: Promise<unknown> = Promise.resolve();
 export function syncOptedInGoogleEvents(...args: Parameters<typeof syncGoogleEventsUnlocked>): ReturnType<typeof syncGoogleEventsUnlocked> {

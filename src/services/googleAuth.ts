@@ -14,16 +14,24 @@ const config = firebaseOptions(import.meta.env || {});
 export const firebaseApp = config ? (getApps().length === 0 ? initializeApp(config) : getApp()) : null;
 export const auth = firebaseApp ? getAuth(firebaseApp) : null;
 
-// Calendar writes use the primary (owned) calendar; identity scopes alone cannot authorize them.
-// G1.2 adds two least-privilege READ-ONLY scopes so shared calendars can be listed and imported.
-// The owned write scope is intentionally unchanged: outbound stays primary-only and never widens.
-// The OAuth consent screen must allow these scopes for the configured beta testers.
+// G1.3 scope audit — the user now chooses the outbound destination calendar, which can
+// be a shared calendar where they are "writer" but NOT owner. The previous scope
+// `calendar.events.owned` only authorizes event writes on calendars the user owns, so it
+// cannot create events on shared writer calendars. The least-privilege scope that can is
+// `calendar.events` (events read/write on calendars the user can access): it does NOT
+// grant calendar management, ACL or settings access like the full
+// `https://www.googleapis.com/auth/calendar` scope would — that one stays banned.
+// `calendar.events` also covers every read performed by the G1/G1.2 inbound import, so
+// the separate `calendar.events.readonly` scope became redundant and was removed:
+// the total grant is still the minimum needed (events + CalendarList read-only).
+// Because the scope set changed, the existing explicit "Ricollega Google" CTA
+// (prompt="consent select_account") is the gesture that collects the new consent;
+// no popup is ever opened automatically.
 export const SCOPES = [
   "https://www.googleapis.com/auth/userinfo.email",
   "https://www.googleapis.com/auth/userinfo.profile",
-  "https://www.googleapis.com/auth/calendar.events.owned",
+  "https://www.googleapis.com/auth/calendar.events",
   "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
-  "https://www.googleapis.com/auth/calendar.events.readonly",
 ];
 
 // G1.2.1 — the provider is built fresh for every sign-in attempt: a shared

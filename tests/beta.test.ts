@@ -130,9 +130,12 @@ test('simultaneous Google sync requests serialize and cannot create duplicate re
 });
 
 import { SCOPES } from '../src/services/googleAuth';
-test('Google login requests the events permission needed by primary-calendar writes, without full-calendar access',()=>{
- assert.ok(SCOPES.includes('https://www.googleapis.com/auth/calendar.events.owned'));
+test('Google login requests the events permission needed by writable-calendar sends, without full-calendar access',()=>{
+ // G1.3: calendar.events (eventi sui calendari accessibili, incluso writer condiviso);
+ // mai il full access https://www.googleapis.com/auth/calendar.
+ assert.ok(SCOPES.includes('https://www.googleapis.com/auth/calendar.events'));
  assert.ok(!SCOPES.includes('https://www.googleapis.com/auth/calendar'));
+ assert.ok(!SCOPES.includes('https://www.googleapis.com/auth/calendar.events.owned'));
 });
 
 test('profile and both timetable editors reject stale saves without overwriting another tab',async()=>{

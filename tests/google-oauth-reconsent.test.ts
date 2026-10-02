@@ -35,16 +35,18 @@ test("forceConsent non altera i login successivi (nessun provider globale mutabi
   assert.match(auth, /prompt: forceConsent \? "consent select_account" : "select_account"/);
 });
 
-// 4 — stessi SCOPES di G1.2, nessun calendar full access
-test("SCOPES invariati rispetto a G1.2 e tutti registrati sul provider", () => {
+// 4 — SCOPES G1.3: calendar.events (minimo per scrivere eventi anche su calendari
+// condivisi "writer"; copre anche le letture inbound), mai calendar full access.
+// Il nuovo consenso viene raccolto SOLO dal gesto esplicito "Ricollega Google".
+test("SCOPES minimi G1.3 e tutti registrati sul provider", () => {
   assert.deepEqual(SCOPES, [
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
-    "https://www.googleapis.com/auth/calendar.events.owned",
+    "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
-    "https://www.googleapis.com/auth/calendar.events.readonly",
   ]);
   assert.ok(!SCOPES.includes("https://www.googleapis.com/auth/calendar"));
+  assert.ok(!SCOPES.includes("https://www.googleapis.com/auth/calendar.events.owned"));
   const scopes = createGoogleProvider(true).getScopes();
   SCOPES.forEach(scope => assert.ok(scopes.includes(scope), `scope mancante sul provider: ${scope}`));
 });
@@ -117,17 +119,19 @@ test("nessun popup OAuth automatico: token assente ⇒ needs-auth", () => {
   assert.equal(popupCalls.length, 1, "signInWithPopup deve esistere solo dentro signInWithGoogle");
 });
 
-// 11 + 12 — nessuna regressione G1/G1.1/G1.2 e outbound invariato
-test("import multi-calendar, cooldown e outbound primary-only invariati", () => {
+// 11 + 12 — nessuna regressione G1/G1.1/G1.2; outbound G1.3 per singolo impegno
+test("import multi-calendar e cooldown invariati; outbound esplicito G1.3", () => {
   const app = readSource("src/App.tsx");
   assert.match(app, /if \(autoImportInFlight\.current\) return autoImportInFlight\.current;/);
   assert.match(app, /importSelectedGoogleCalendars\(token, calendarIds\)/);
   assert.match(app, /GOOGLE_CALENDAR_AUTO_IMPORT_COOLDOWN_MS = 5 \* 60 \* 1000/);
   assert.match(app, /await runAutomaticGoogleImport\(true, undefined, undefined, unique\)/);
+  // G1.3: l'invio remoto passa SOLO dall'azione esplicita per singolo impegno.
+  assert.match(app, /handleSendEventToGoogle/);
 
   const profileModal = readSource("src/components/ProfileModal.tsx");
-  // Outbound selettivo invariato: mai eventi importati da Google, mai calendari condivisi.
-  assert.match(profileModal, /syncedWithGoogle === true && e\.sourceType !== "google_calendar"/);
+  // G1.3: nessun batch outbound nel Profilo.
+  assert.doesNotMatch(profileModal, /onSyncAllToGoogle/);
 
   const service = readSource("src/services/googleCalendarService.ts");
   assert.match(service, /PRIMARY_CALENDAR_ID/);
