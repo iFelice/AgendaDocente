@@ -451,8 +451,10 @@ test('27. nessuna regressione DeadlinesView: i promemoria restano nello scadenzi
 });
 
 test('28. EventModal resta l\'editor degli impegni normali e QuickNoteModal usa gli handler esistenti', () => {
-  assert.match(eventModalSource, /id: eventToEdit \? eventToEdit\.id : `ev-\$\{Date\.now\(\)\}`/);
-  assert.match(eventModalSource, /sourceType: eventToEdit \? eventToEdit\.sourceType : "manuale"/);
+  // G1.3: la costruzione dell'evento è centralizzata in buildCurrentEvent con un
+  // draft id stabile (stesso impegno locale per "Salva" e "Invia a Google").
+  assert.match(eventModalSource, /id: baseline \? baseline\.id : draftIdRef\.current/);
+  assert.match(eventModalSource, /sourceType: baseline \? baseline\.sourceType : "manuale"/);
   assert.match(appSource, /<EventModal/);
   assert.match(appSource, /onSave=\{handleSaveEvent\}/);
   assert.match(appSource, /onDelete=\{handleDeleteEvent\}/);

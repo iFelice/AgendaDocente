@@ -198,7 +198,6 @@ function Harness({ engine, online, initialTab, syncSpy }: {
     onGoogleLogin: async () => {},
     onGoogleLogout: async () => {},
     events: [],
-    onSyncAllToGoogle: async () => ({ syncedCount: 0, errorCount: 0 }),
     accountSyncStatus: status,
     onSyncNow: () => { syncSpy?.(); void engine.syncNow(); },
     onSyncToggle: () => {},

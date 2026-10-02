@@ -1,9 +1,9 @@
 import { usePersistenceAction } from "../hooks/usePersistenceAction";
-import { isGoogleSyncEnabled } from "../services/googleCalendarService";
+import { PRIMARY_CALENDAR_ID, type GoogleCalendarListEntry } from "../services/googleCalendarService";
 import { eventDateError } from "../utils/dates";
 import { localDateISO } from "../utils/dates";
-import React, { useState, useEffect } from "react";
-import { Clock, MapPin, X, Calendar, BookOpen, AlertCircle, Trash2, ChevronRight } from "lucide-react";
+import React, { useState, useEffect, useRef } from "react";
+import { Clock, MapPin, X, Calendar, BookOpen, AlertCircle, Trash2, ChevronRight, CheckCircle2, RefreshCw, Send } from "lucide-react";
 import { CalendarEvent, EventCategory, TeacherProfile } from "../types";
 
 interface EventModalProps {
@@ -15,8 +15,24 @@ interface EventModalProps {
   profile: TeacherProfile;
   onSave: (event: CalendarEvent, expected?: CalendarEvent) => void | false | Promise<void | false>;
   onDelete?: (id: string) => void | false | Promise<void | false>;
+  /** Account linked AND access token available in memory. */
   isGoogleConnected?: boolean;
+  /** G1.3: account linked (even when the in-memory token expired with the session). */
+  hasGoogleAccount?: boolean;
   googleUserEmail?: string;
+  /** G1.3: ONLY the calendars the user can write to (owner/writer/organizer). */
+  googleWritableCalendars?: GoogleCalendarListEntry[] | null;
+  /** G1.3: on-demand CalendarList load (cached by App — never refetched per render). */
+  onLoadGoogleWritableCalendars?: () => Promise<GoogleCalendarListEntry[]>;
+  /**
+   * G1.3 — explicit manual outbound: saves locally FIRST, then creates/updates the
+   * Google copy. Returns the locally saved event (with googleEventId/googleCalendarId).
+   */
+  onSendToGoogle?: (event: CalendarEvent, calendarId: string) => Promise<CalendarEvent | void>;
+  /** Explicit reconnect (forced consent). Never called without a user gesture. */
+  onGoogleReconnect?: () => Promise<unknown>;
+  /** Explicit login when no Google account is linked. Never called automatically. */
+  onGoogleLogin?: () => Promise<unknown>;
 }
 
 export const EVENT_CATEGORIES: { id: EventCategory; label: string }[] = [
@@ -64,7 +80,13 @@ export const EventModal: React.FC<EventModalProps> = ({
   onSave,
   onDelete,
   isGoogleConnected = false,
+  hasGoogleAccount = false,
   googleUserEmail,
+  googleWritableCalendars = null,
+  onLoadGoogleWritableCalendars,
+  onSendToGoogle,
+  onGoogleReconnect,
+  onGoogleLogin,
 }) => {
   const save = usePersistenceAction();
   const [validationError, setValidationError] = useState<string | null>(null);
@@ -79,10 +101,33 @@ export const EventModal: React.FC<EventModalProps> = ({
   const [subject, setSubject] = useState("");
   const [location, setLocation] = useState(initialTimeFields.location);
   const [notes, setNotes] = useState("");
-  const [syncWithGoogle, setSyncWithGoogle] = useState(false);
   /** G1.2: a Google-imported event (primary or shared) is read-only towards Google. */
   const isGoogleSourcedEvent = eventToEdit?.sourceType === "google_calendar";
   const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
+  // ——— G1.3 manual outbound state ———
+  // The remote link currently known to the modal: starts from eventToEdit and is
+  // refreshed after a successful "Invia/Aggiorna su Google Calendar".
+  const [googleLink, setGoogleLink] = useState<{ googleEventId: string; googleCalendarId?: string } | null>(null);
+  // Latest locally persisted copy (used as optimistic-concurrency baseline for Salva
+  // after a send already saved the event with its new googleEventId/googleCalendarId).
+  const [savedBaseline, setSavedBaseline] = useState<CalendarEvent | null>(null);
+  const [destinationCalendarId, setDestinationCalendarId] = useState("");
+  const [isSendingToGoogle, setIsSendingToGoogle] = useState(false);
+  const [isConnectingGoogle, setIsConnectingGoogle] = useState(false);
+  const [isLoadingCalendars, setIsLoadingCalendars] = useState(false);
+  const [googleActionError, setGoogleActionError] = useState<string | null>(null);
+  const [googleActionNotice, setGoogleActionNotice] = useState<string | null>(null);
+  // Calendars loaded on demand by this modal (App's cache remains the source of truth).
+  const [loadedCalendars, setLoadedCalendars] = useState<GoogleCalendarListEntry[] | null>(null);
+  // Stable local id for a brand-new draft: "Invia a Google" followed by "Salva Impegno"
+  // must address the SAME local event, never create a duplicate.
+  const draftIdRef = useRef(`ev-${Date.now()}`);
+  // Synchronous single-flight guard: a double tap must never trigger two sends
+  // (state updates are async, a ref blocks the second tap immediately).
+  const sendInFlightRef = useRef(false);
+  // One CalendarList request per open/token: never refetch on every render.
+  const calendarsRequestedRef = useRef(false);
+  const writableCalendars = googleWritableCalendars ?? loadedCalendars;
   // L'evento in modifica (o precompilato dallo scanner) possiede gia' la
   // categoria legacy? Allora l'opzione resta disponibile per tutta la sessione
   // di modifica: si puo' anche tornare indietro dopo un cambio di idea. Per un
@@ -98,6 +143,17 @@ export const EventModal: React.FC<EventModalProps> = ({
     setLocation(timeFields.location);
     setValidationError(null);
     setIsConfirmingDelete(false);
+    // G1.3 outbound state follows the edited event.
+    setGoogleLink(eventToEdit?.googleEventId
+      ? { googleEventId: eventToEdit.googleEventId, googleCalendarId: eventToEdit.googleCalendarId }
+      : null);
+    setSavedBaseline(eventToEdit ?? null);
+    draftIdRef.current = eventToEdit?.id ?? `ev-${Date.now()}`;
+    setGoogleActionError(null);
+    setGoogleActionNotice(null);
+    setIsSendingToGoogle(false);
+    sendInFlightRef.current = false;
+    calendarsRequestedRef.current = false;
     if (eventToEdit) {
       setTitle(eventToEdit.title);
       setCategory(eventToEdit.category);
@@ -106,7 +162,6 @@ export const EventModal: React.FC<EventModalProps> = ({
       setClassName(eventToEdit.className || "");
       setSubject(eventToEdit.subject || "");
       setNotes(eventToEdit.notes || "");
-      setSyncWithGoogle(isGoogleSyncEnabled(eventToEdit));
     } else if (initialEventData) {
       setTitle(initialEventData.title || "");
       setCategory(initialEventData.category || "glo");
@@ -115,7 +170,6 @@ export const EventModal: React.FC<EventModalProps> = ({
       setClassName(initialEventData.className || profile.classes[0] || "1A");
       setSubject(initialEventData.subject || profile.primarySubjects[0] || "");
       setNotes(initialEventData.notes || "");
-      setSyncWithGoogle(isGoogleSyncEnabled(initialEventData));
     } else {
       setTitle("");
       setCategory("consiglio_classe");
@@ -124,9 +178,39 @@ export const EventModal: React.FC<EventModalProps> = ({
       setClassName(profile.classes[0] || "1A");
       setSubject(profile.primarySubjects[0] || "");
       setNotes("");
-      setSyncWithGoogle(false);
     }
   }, [eventToEdit, initialDate, initialEventData, isOpen]);
+
+  // G1.3 — CalendarList on demand: only while the modal is open, only with a token,
+  // only when no cached list exists, and at most once per open/reconnect. No popups.
+  useEffect(() => {
+    if (!isOpen || isGoogleSourcedEvent || !onSendToGoogle) return;
+    if (!isGoogleConnected || !onLoadGoogleWritableCalendars) return;
+    if (writableCalendars || calendarsRequestedRef.current) return;
+    calendarsRequestedRef.current = true;
+    let cancelled = false;
+    setIsLoadingCalendars(true);
+    onLoadGoogleWritableCalendars()
+      .then(calendars => { if (!cancelled) setLoadedCalendars(calendars); })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setGoogleActionError(error instanceof Error && error.message
+            ? error.message
+            : "Elenco calendari Google non disponibile.");
+        }
+      })
+      .finally(() => { if (!cancelled) setIsLoadingCalendars(false); });
+    return () => { cancelled = true; };
+  }, [isOpen, isGoogleSourcedEvent, isGoogleConnected, writableCalendars, onLoadGoogleWritableCalendars, onSendToGoogle]);
+
+  // Default destination: the primary calendar when present, otherwise the first
+  // writable one. NEVER auto-matched against class names — the choice stays explicit.
+  useEffect(() => {
+    if (!writableCalendars || writableCalendars.length === 0) return;
+    if (destinationCalendarId && writableCalendars.some(calendar => calendar.id === destinationCalendarId)) return;
+    const primary = writableCalendars.find(calendar => calendar.primary);
+    setDestinationCalendarId((primary ?? writableCalendars[0]).id);
+  }, [writableCalendars, destinationCalendarId]);
 
   useEffect(() => {
     if (!isOpen || typeof document === "undefined") return;
@@ -142,15 +226,13 @@ export const EventModal: React.FC<EventModalProps> = ({
 
   if (!isOpen) return null;
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!title.trim()) return;
-
-    const error = eventDateError({ date, startTime, endTime, isAllDay });
-    if (error) { setValidationError(error); return; }
-    const newEvent: CalendarEvent = {
-      ...eventToEdit,
-      id: eventToEdit ? eventToEdit.id : `ev-${Date.now()}`,
+  // G1.3 — single builder for BOTH "Salva Impegno" and "Invia/Aggiorna su Google
+  // Calendar": one CalendarEvent construction, always from the current form values.
+  const buildCurrentEvent = (): CalendarEvent => {
+    const baseline = savedBaseline ?? eventToEdit;
+    return {
+      ...baseline,
+      id: baseline ? baseline.id : draftIdRef.current,
       title: title.trim(),
       category,
       date,
@@ -161,18 +243,98 @@ export const EventModal: React.FC<EventModalProps> = ({
       subject: subject.trim() || undefined,
       location: location.trim() || undefined,
       notes: notes.trim() || undefined,
-      sourceType: eventToEdit ? eventToEdit.sourceType : "manuale",
-      completed: eventToEdit ? eventToEdit.completed : false,
-      googleEventId: eventToEdit?.googleEventId,
-      googleCalendarId: eventToEdit?.googleCalendarId,
-      // G1.2: events imported from Google (primary or shared) stay strictly read-only;
-      // editing them locally must never enable an outbound push to Google.
-      syncedWithGoogle: isGoogleSourcedEvent ? false : syncWithGoogle,
+      sourceType: baseline ? baseline.sourceType : "manuale",
+      completed: baseline ? baseline.completed : false,
+      googleEventId: googleLink?.googleEventId,
+      googleCalendarId: googleLink?.googleCalendarId,
+      // G1.2: events imported from Google (primary or shared) stay strictly read-only.
+      // G1.3: syncedWithGoogle is no longer a persistent consent — plain Salva only
+      // carries the legacy value along; manual send/update normalizes it to false.
+      syncedWithGoogle: isGoogleSourcedEvent ? false : (baseline?.syncedWithGoogle ?? false),
     };
+  };
 
-    if (!await save.run(() => onSave(newEvent, eventToEdit ?? undefined))) return;
+  const validateCurrentForm = (): boolean => {
+    if (!title.trim()) return false;
+    const error = eventDateError({ date, startTime, endTime, isAllDay });
+    if (error) { setValidationError(error); return false; }
+    setValidationError(null);
+    return true;
+  };
+
+  // Plain Salva: LOCAL ONLY. Never POSTs or PATCHes towards Google (G1.3 §21).
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!validateCurrentForm()) return;
+    const newEvent = buildCurrentEvent();
+
+    if (!await save.run(() => onSave(newEvent, savedBaseline ?? eventToEdit ?? undefined))) return;
     onClose();
   };
+
+  // G1.3 — explicit manual outbound. Local save happens first (inside onSendToGoogle);
+  // a Google failure never loses the local copy. The modal stays open on success.
+  const handleSendToGoogle = async () => {
+    if (!onSendToGoogle || sendInFlightRef.current) return;
+    setGoogleActionError(null);
+    setGoogleActionNotice(null);
+    if (!validateCurrentForm()) return;
+    sendInFlightRef.current = true;
+    const event = buildCurrentEvent();
+    // Already linked ⇒ destination locked to the saved calendar (legacy ⇒ primary).
+    const calendarId = googleLink
+      ? (googleLink.googleCalendarId ?? PRIMARY_CALENDAR_ID)
+      : (destinationCalendarId || PRIMARY_CALENDAR_ID);
+    const wasLinked = !!googleLink;
+    setIsSendingToGoogle(true);
+    try {
+      const result = await onSendToGoogle(event, calendarId);
+      const updated = result ?? event;
+      if (updated.googleEventId) {
+        setGoogleLink({ googleEventId: updated.googleEventId, googleCalendarId: updated.googleCalendarId });
+      }
+      setSavedBaseline(updated);
+      setGoogleActionNotice(wasLinked
+        ? "Impegno aggiornato su Google Calendar."
+        : "Impegno inviato a Google Calendar.");
+    } catch (error: unknown) {
+      setGoogleActionError(error instanceof Error && error.message
+        ? error.message
+        : "Invio a Google Calendar non riuscito. L'impegno resta salvato in locale.");
+    } finally {
+      sendInFlightRef.current = false;
+      setIsSendingToGoogle(false);
+    }
+  };
+
+  const handleConnectGoogle = async (connect: (() => Promise<unknown>) | undefined) => {
+    if (!connect || isConnectingGoogle) return;
+    setGoogleActionError(null);
+    setIsConnectingGoogle(true);
+    try {
+      await connect();
+      // After an explicit (re)connect the CalendarList may be reloaded on demand.
+      calendarsRequestedRef.current = false;
+    } catch (error: unknown) {
+      setGoogleActionError(error instanceof Error && error.message
+        ? error.message
+        : "Connessione a Google non riuscita.");
+    } finally {
+      setIsConnectingGoogle(false);
+    }
+  };
+
+  // Destination name shown once the event is linked (list in memory, never persisted).
+  const linkedCalendarName = (() => {
+    if (!googleLink) return null;
+    const list = writableCalendars ?? [];
+    const entry = googleLink.googleCalendarId
+      ? list.find(calendar => calendar.id === googleLink.googleCalendarId)
+      : list.find(calendar => calendar.primary);
+    if (entry) return entry.primary ? "Il mio calendario" : entry.summary;
+    if (!googleLink.googleCalendarId || googleLink.googleCalendarId === PRIMARY_CALENDAR_ID) return "Il mio calendario";
+    return "Calendario Google collegato";
+  })();
 
   return (
     <div className="app-modal app-modal-scroll fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-stone-950/40 backdrop-blur-xs">
@@ -273,9 +435,6 @@ export const EventModal: React.FC<EventModalProps> = ({
           </div>
 
           {validationError && <p role="alert" className="text-sm text-rose-700">{validationError}</p>}
-          {!isGoogleSourcedEvent && eventToEdit?.googleEventId && !syncWithGoogle && (
-            <p className="text-xs text-stone-600">Sincronizzazione disattivata: la copia su Google resta disponibile e non verrà aggiornata o eliminata da questa agenda.</p>
-          )}
           {/*
             Orari — DUE RIGHE COMPATTE tappabili (label a sinistra, valore
             HH:MM e chevron a destra), non grandi box time. Dal test reale
@@ -381,9 +540,10 @@ export const EventModal: React.FC<EventModalProps> = ({
             />
           </div>
 
-          {/* Google Calendar Sync Option — never offered for events imported from Google (read-only). */}
-          {!isGoogleSourcedEvent && (isGoogleConnected || !!eventToEdit?.googleEventId || syncWithGoogle) && (
-            <div className="p-3 rounded-xl bg-blue-50/70 border border-blue-200 flex items-center justify-between">
+          {/* G1.3 — Google Calendar manual outbound. Never rendered for events imported
+              from Google (read-only towards Google): no send, no update, no destination. */}
+          {!isGoogleSourcedEvent && onSendToGoogle && (
+            <div data-google-outbound className="p-3 rounded-xl bg-blue-50/70 border border-blue-200 space-y-2.5">
               <div className="flex items-center space-x-2.5">
                 <div className="w-5 h-5 flex-shrink-0">
                   <svg version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" className="w-full h-full block">
@@ -395,21 +555,123 @@ export const EventModal: React.FC<EventModalProps> = ({
                   </svg>
                 </div>
                 <div>
-                  <div className="text-xs font-bold text-blue-950">Sincronizza su Google Calendar</div>
-                  <div className="text-[10px] text-blue-800">
-                    {googleUserEmail ? `Account: ${googleUserEmail}` : "Account istituzionale"}
-                    {eventToEdit?.googleEventId && " • Già sincronizzato"}
-                  </div>
+                  <div className="text-xs font-bold text-blue-950">Google Calendar</div>
+                  {googleUserEmail && <div className="text-[10px] text-blue-800">Account: {googleUserEmail}</div>}
                 </div>
               </div>
-              <label className="relative inline-flex items-center cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={syncWithGoogle}
-                  onChange={(e) => setSyncWithGoogle(e.target.checked)}
-                  className="rounded text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
-                />
-              </label>
+
+              {googleLink ? (
+                <>
+                  {/* Already sent: destination locked to the saved calendar (G1.3 §17). */}
+                  <p className="flex items-center space-x-1.5 text-xs font-bold text-emerald-800">
+                    <CheckCircle2 className="w-3.5 h-3.5 flex-shrink-0" />
+                    <span>Presente su Google Calendar</span>
+                  </p>
+                  <p className="text-[11px] text-blue-900">Calendario: {linkedCalendarName}</p>
+                  {isGoogleConnected ? (
+                    <button
+                      type="button"
+                      disabled={isSendingToGoogle}
+                      onClick={() => void handleSendToGoogle()}
+                      className="inline-flex items-center space-x-1.5 px-3 py-2 min-h-[40px] text-xs font-bold text-white bg-blue-700 hover:bg-blue-800 disabled:bg-stone-300 disabled:cursor-not-allowed rounded-lg shadow-2xs transition-colors"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${isSendingToGoogle ? "animate-spin" : ""}`} />
+                      <span>{isSendingToGoogle ? "Aggiornamento in corso..." : "Aggiorna su Google Calendar"}</span>
+                    </button>
+                  ) : (
+                    <>
+                      <p className="text-[11px] text-blue-900">
+                        Per aggiornare la copia su Google devi ricollegare Google.
+                      </p>
+                      <button
+                        type="button"
+                        disabled={isConnectingGoogle}
+                        onClick={() => void handleConnectGoogle(hasGoogleAccount ? onGoogleReconnect : onGoogleLogin)}
+                        className="px-3 py-2 min-h-[40px] text-xs font-bold text-blue-800 bg-white border border-blue-300 hover:bg-blue-50 disabled:opacity-60 rounded-lg transition-colors"
+                      >
+                        {hasGoogleAccount ? "Ricollega Google" : "Collega Google"}
+                      </button>
+                    </>
+                  )}
+                </>
+              ) : !hasGoogleAccount ? (
+                <>
+                  {/* No linked account: explicit login, never an automatic popup (G1.3 §10). */}
+                  <p className="text-[11px] text-blue-900">
+                    Collega il tuo account Google per inviare questo impegno a un calendario.
+                  </p>
+                  <button
+                    type="button"
+                    disabled={isConnectingGoogle}
+                    onClick={() => void handleConnectGoogle(onGoogleLogin)}
+                    className="px-3 py-2 min-h-[40px] text-xs font-bold text-blue-800 bg-white border border-blue-300 hover:bg-blue-50 disabled:opacity-60 rounded-lg transition-colors"
+                  >
+                    {isConnectingGoogle ? "Connessione in corso..." : "Collega Google"}
+                  </button>
+                </>
+              ) : !isGoogleConnected ? (
+                <>
+                  {/* Token expired: explicit reconnect, modal stays open (G1.3 §9). */}
+                  <p className="text-[11px] text-blue-900">
+                    Per scegliere il calendario di destinazione devi ricollegare Google.
+                  </p>
+                  <button
+                    type="button"
+                    disabled={isConnectingGoogle}
+                    onClick={() => void handleConnectGoogle(onGoogleReconnect ?? onGoogleLogin)}
+                    className="px-3 py-2 min-h-[40px] text-xs font-bold text-blue-800 bg-white border border-blue-300 hover:bg-blue-50 disabled:opacity-60 rounded-lg transition-colors"
+                  >
+                    {isConnectingGoogle ? "Connessione in corso..." : "Ricollega Google"}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <label htmlFor="google-destination-calendar" className="block text-[11px] font-semibold text-blue-950">
+                    Calendario di destinazione
+                  </label>
+                  {isLoadingCalendars && (
+                    <p className="text-[11px] text-blue-800">Caricamento calendari Google...</p>
+                  )}
+                  {!isLoadingCalendars && writableCalendars && writableCalendars.length === 0 && (
+                    <p className="text-[11px] text-blue-900">Nessun calendario Google scrivibile disponibile.</p>
+                  )}
+                  {writableCalendars && writableCalendars.length > 0 && (
+                    <>
+                      <select
+                        id="google-destination-calendar"
+                        value={destinationCalendarId}
+                        onChange={(e) => setDestinationCalendarId(e.target.value)}
+                        className="w-full p-2 min-h-[40px] border border-blue-200 rounded-lg text-xs bg-white"
+                      >
+                        {writableCalendars.map(calendar => (
+                          <option key={calendar.id} value={calendar.id}>
+                            {calendar.primary ? "Il mio calendario" : calendar.summary}
+                          </option>
+                        ))}
+                      </select>
+                      <p className="text-[11px] text-blue-900">
+                        Invia questo impegno al calendario Google selezionato.
+                      </p>
+                      <button
+                        type="button"
+                        disabled={isSendingToGoogle || !destinationCalendarId}
+                        onClick={() => void handleSendToGoogle()}
+                        className="inline-flex items-center space-x-1.5 px-3 py-2 min-h-[40px] text-xs font-bold text-white bg-blue-700 hover:bg-blue-800 disabled:bg-stone-300 disabled:cursor-not-allowed rounded-lg shadow-2xs transition-colors"
+                      >
+                        <Send className="w-3.5 h-3.5" />
+                        <span>{isSendingToGoogle ? "Invio in corso..." : "Invia a Google Calendar"}</span>
+                      </button>
+                    </>
+                  )}
+                </>
+              )}
+
+              {googleActionError && (
+                <p role="alert" className="text-[11px] font-semibold text-rose-700">{googleActionError}</p>
+              )}
+              {googleActionNotice && (
+                <p role="status" className="text-[11px] font-semibold text-emerald-800">{googleActionNotice}</p>
+              )}
             </div>
           )}
 

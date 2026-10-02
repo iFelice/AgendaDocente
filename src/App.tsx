@@ -5,7 +5,7 @@ import { isStudentActive } from "./utils/studentMatcher";
 import { deriveScheduledAssessmentCalendarItems } from "./utils/scheduledAssessmentCalendar";
 import { database, type LocalData } from "./services/db";
 import { localDateISO } from "./utils/dates";
-import React, { useState, useEffect, useRef, lazy, Suspense, useCallback } from "react";
+import React, { useState, useEffect, useRef, lazy, Suspense, useCallback, useMemo } from "react";
 import {
   CalendarEvent,
   CircularDocument,
@@ -71,8 +71,11 @@ import {
   isUserCancellationError,
 } from "./services/googleAuth";
 import {
-  isGoogleSyncEnabled,
-  syncOptedInGoogleEvents,
+  createGoogleCalendarEvent,
+  updateGoogleCalendarEvent,
+  getWritableGoogleCalendars,
+  isInsufficientScopeError,
+  PRIMARY_CALENDAR_ID,
 } from "./services/googleCalendarService";
 import {
   importSelectedGoogleCalendars,
@@ -334,6 +337,19 @@ export default function App({ initialData }: { initialData: LocalData }) {
     }
   }, [googleAccessToken, googleCalendars]);
 
+  // G1.3 — EventModal only ever sees the WRITABLE calendars (owner/writer/organizer):
+  // read-only entries (reader, freeBusyReader) are for the inbound import only.
+  const googleWritableCalendars = useMemo(
+    () => (googleCalendars ? getWritableGoogleCalendars(googleCalendars) : null),
+    [googleCalendars],
+  );
+
+  /** On-demand CalendarList for the outbound UI: reuses the session cache, GET only. */
+  const loadGoogleWritableCalendars = useCallback(
+    async () => getWritableGoogleCalendars(await loadGoogleCalendars(false)),
+    [loadGoogleCalendars],
+  );
+
   /** Persists the selection (IDs only) and imports the new set immediately, bypassing the cooldown. */
   const handleUpdateGoogleCalendarSelection = useCallback(async (calendarIds: string[]) => {
     const unique = Array.from(new Set(calendarIds.length > 0 ? calendarIds : ["primary"]));
@@ -455,19 +471,69 @@ export default function App({ initialData }: { initialData: LocalData }) {
     return result;
   };
 
-  const handleSyncAllToGoogle = async (): Promise<{ syncedCount: number; errorCount: number }> => {
-    if (database.mode !== "indexeddb") throw new Error("Archivio locale in sola lettura: sincronizzazione sospesa.");
-    const token = googleAccessToken || getAccessToken();
-    if (!token) {
-      throw new Error("Effettua prima l'accesso con il tuo account istituzionale Google.");
-    }
-    const result = await syncOptedInGoogleEvents(
-      token, (await storage.getEvents()).map(event => event.id),
-      async id => (await storage.getEvents()).find(event => event.id === id),
-      async event => (await storage.saveEvent(event)),
-    );
+  // G1.3 — single-flight per event id: a double tap on "Invia a Google Calendar"
+  // must never create two remote copies. The second call joins the first request.
+  const sendToGoogleInFlight = useRef(new Map<string, Promise<CalendarEvent>>());
 
-    return result;
+  /**
+   * G1.3 — explicit manual outbound for ONE event.
+   * - Local save ALWAYS happens first: a Google failure never loses local data.
+   * - create (no googleEventId): POST on the calendar the user selected, then persist
+   *   googleEventId + googleCalendarId with syncedWithGoogle: false (the legacy flag is
+   *   no longer a persistent consent — manual send ≠ consent to remote deletion).
+   * - update (googleEventId present): PATCH on the calendar already linked
+   *   (googleCalendarId ?? primary); a different calendarId from the UI is ignored and
+   *   legacy events acquire googleCalendarId: "primary" without changing googleEventId.
+   */
+  const handleSendEventToGoogle = async (event: CalendarEvent, calendarId: string): Promise<CalendarEvent> => {
+    const pending = sendToGoogleInFlight.current.get(event.id);
+    if (pending) return pending;
+    const request = (async () => {
+      if (database.mode !== "indexeddb") throw new Error("Archivio locale in sola lettura: invio sospeso.");
+      // 1. Local first.
+      await storage.saveEvent(event);
+      const token = googleAccessToken || getAccessToken();
+      if (!token) throw new Error("Impegno salvato in locale. Ricollega Google per inviarlo a Google Calendar.");
+      try {
+        if (!event.googleEventId) {
+          const googleEventId = await createGoogleCalendarEvent(token, event, calendarId);
+          const updated: CalendarEvent = { ...event, googleEventId, googleCalendarId: calendarId, syncedWithGoogle: false };
+          await storage.saveEvent(updated);
+          showToast("Impegno inviato a Google Calendar.");
+          return updated;
+        }
+        // Destination locked: always the calendar saved at send time (legacy ⇒ primary).
+        const targetCalendarId = event.googleCalendarId ?? PRIMARY_CALENDAR_ID;
+        await updateGoogleCalendarEvent(token, event.googleEventId, event, targetCalendarId);
+        const updated: CalendarEvent = { ...event, googleCalendarId: targetCalendarId, syncedWithGoogle: false };
+        await storage.saveEvent(updated);
+        showToast("Impegno aggiornato su Google Calendar.");
+        return updated;
+      } catch (error: unknown) {
+        // The event stays saved locally; no googleEventId is written on failure.
+        const status = (error as { status?: number } | null | undefined)?.status;
+        if (status === 403 || isInsufficientScopeError(error)) {
+          // Permission lost meanwhile: refresh the CalendarList so the user can pick
+          // another writable destination. Nothing is deleted or moved automatically.
+          void loadGoogleCalendars(true).catch(() => undefined);
+          throw new Error("Non hai più il permesso di scrivere su questo calendario Google.");
+        }
+        if (status === 404 || status === 410) {
+          throw new Error(event.googleEventId
+            ? "Il calendario Google collegato non è più disponibile. L'impegno resta salvato in locale."
+            : "Il calendario Google selezionato non è più disponibile. L'impegno resta salvato in locale.");
+        }
+        throw error instanceof Error && error.message
+          ? error
+          : new Error("Invio a Google Calendar non riuscito. L'impegno resta salvato in locale.");
+      }
+    })();
+    sendToGoogleInFlight.current.set(event.id, request);
+    try {
+      return await request;
+    } finally {
+      sendToGoogleInFlight.current.delete(event.id);
+    }
   };
 
   const handleNavigateToPlanning = (
@@ -641,26 +707,11 @@ export default function App({ initialData }: { initialData: LocalData }) {
   });
 
   // Event Handlers
+  // G1.3 — plain save is LOCAL ONLY: no automatic POST/PATCH towards Google, even for
+  // legacy events with syncedWithGoogle === true. The remote copy is touched exclusively
+  // by the explicit "Invia/Aggiorna su Google Calendar" actions (handleSendEventToGoogle).
   const handleSaveEvent = withPersistenceFeedback(async (event: CalendarEvent, expected?: CalendarEvent) => {
-    // Save locally first
     await storage.saveEvent(event, expected);
-
-    // If sync with Google is requested and we have an access token
-    const token = googleAccessToken || getAccessToken();
-    if (isGoogleSyncEnabled(event) && token) {
-      try {
-      const result = await syncOptedInGoogleEvents(
-        token, [event.id],
-        async id => (await storage.getEvents()).find(current => current.id === id),
-        async current => (await storage.saveEvent(current)),
-      );
-
-      showToast(result.errorCount ? "Impegno salvato in locale (errore sync Google Calendar)."
-        : result.syncedCount ? "Impegno salvato e sincronizzato su Google Calendar." : "Impegno salvato in locale.");
-      } catch { showToast("Impegno salvato in locale; sincronizzazione Google non completata."); }
-      return;
-    }
-
     showToast("Impegno salvato con successo.");
   });
 
@@ -1241,7 +1292,13 @@ export default function App({ initialData }: { initialData: LocalData }) {
         onSave={handleSaveEvent}
         onDelete={handleDeleteEvent}
         isGoogleConnected={!!googleUser && !!googleAccessToken}
+        hasGoogleAccount={!!googleUser}
         googleUserEmail={googleUser?.email || undefined}
+        googleWritableCalendars={googleWritableCalendars}
+        onLoadGoogleWritableCalendars={loadGoogleWritableCalendars}
+        onSendToGoogle={handleSendEventToGoogle}
+        onGoogleReconnect={handleGoogleReconnect}
+        onGoogleLogin={handleGoogleLogin}
       />
       )}
 
@@ -1272,7 +1329,6 @@ export default function App({ initialData }: { initialData: LocalData }) {
         onLoadGoogleCalendars={loadGoogleCalendars}
         selectedGoogleCalendarIds={resolveImportCalendarIds(profile)}
         onUpdateGoogleCalendarSelection={handleUpdateGoogleCalendarSelection}
-        onSyncAllToGoogle={handleSyncAllToGoogle}
         accountSyncStatus={syncStatus}
         onSyncNow={() => void accountSync.syncNow()}
         onSyncToggle={(enabled) => void accountSync.setEnabled(enabled)}
