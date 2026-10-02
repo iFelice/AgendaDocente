@@ -72,15 +72,25 @@ test('dotted clocks are not dates; header date applies to following rows',()=>{
   assert.equal(x.length,2);assert.ok(x.every(i=>i.date==='2027-09-14'));
   assert.equal(x[1].startTime,'10:00');
 });
-test('missing or invalid dates and hours remain uncertain and unselected',()=>{
-  for(const text of ['Collegio docenti','31/02/2027 Collegio docenti 15:00-17:00','14/09/2027 Collegio docenti']){
+test('missing or invalid dates remain uncertain and unselected',()=>{
+  for(const text of ['Collegio docenti','31/02/2027 Collegio docenti 15:00-17:00']){
     const [x]=parseCircularText(text,profile);assert.equal(x.selectedForImport,false);assert.ok(extractedItemError(x));
   }
+  // A valid date without any hour is a legitimate all-day commitment, not an error.
+  const [untimed]=parseCircularText('14/09/2027 Collegio docenti',profile);
+  assert.equal(untimed.startTime,undefined);assert.equal(untimed.endTime,undefined);
+  assert.equal(extractedItemError(untimed),null);
+  assert.equal(convertExtractedItemToEvent(untimed,'Circolare test','circ-untimed').isAllDay,true);
 });
 test('cancelled meeting is not added as an event',()=>assert.deepEqual(parseCircularText('14/09/2027 Consiglio 1A annullato 15:00-16:00',profile),[]));
 test('cloud normalization never supplies default times or school locations',()=>{
   const [x]=normalizeExtractedItems([{title:'Collegio docenti',date:'2027-09-14',category:'collegio_docenti'}],profile);
-  assert.equal(x.startTime,undefined);assert.equal(x.endTime,undefined);assert.equal(x.location,'');assert.equal(x.selectedForImport,false);
+  // No default hour and no default location are invented; the untimed item stays importable as all-day.
+  assert.equal(x.startTime,undefined);assert.equal(x.endTime,undefined);assert.equal(x.location,'');
+  assert.equal(extractedItemError(x),null);
+  // A half interval, instead, is still incomplete evidence and never auto-selected.
+  const [half]=normalizeExtractedItems([{title:'Collegio docenti',date:'2027-09-14',category:'collegio_docenti',startTime:'15:00'}],profile);
+  assert.equal(half.selectedForImport,false);assert.ok(extractedItemError(half));
 });
 test('class plus subject matches the original specification',()=>{
   const inputs=['1A - Italiano','1A - Matematica','1A - Scienze motorie','1B - Italiano','2E - Scienze motorie','3C - Inglese','3B - Scienze motorie'];

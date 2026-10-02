@@ -416,7 +416,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
           date: it.date,
           startTime: it.startTime || undefined,
           endTime: it.endTime || undefined,
-          isAllDay: !!it.isDeadline && !it.startTime,
+          isAllDay: !it.startTime && !it.endTime,
           className: it.className || match.className,
           subject: it.subject || match.subject,
           location: it.location || match.location,
@@ -501,7 +501,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                     </div>
                     <div className="text-stone-600 leading-relaxed">
                       Grado: <strong className="uppercase text-stone-900">{profile.schoolLevel || "SSIG"}</strong>.
-                      Il filtro confronta classi, materie, ordine scolastico e destinatari. Le attività ambigue rimangono da verificare; date e orari mancanti vanno completati prima dell'importazione.
+                      Il filtro confronta classi, materie, ordine scolastico e destinatari. Le attività ambigue rimangono da verificare; la data deve essere presente. Se l’orario non è indicato, l’impegno viene aggiunto per l’intera giornata.
                     </div>
                   </div>
                 </div>
@@ -924,7 +924,11 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                                 </div>
                               </div>
 
-                              {extractedItemError(item) && <p className="text-xs text-amber-800" role="status">{extractedItemError(item)}</p>}
+                              {extractedItemError(item)
+                                ? <p className="text-xs text-amber-800" role="status">{extractedItemError(item)}</p>
+                                : !item.startTime && !item.endTime && (
+                                  <p className="text-xs text-stone-500" role="status">Senza orario: verrà aggiunto come impegno per l'intera giornata.</p>
+                                )}
                               {/* Relevance Reason */}
                               <div className="text-xs text-stone-600 bg-stone-50 p-2 rounded-md border border-stone-100">
                                 <span className="font-semibold text-stone-700">Motivo pertinenza: </span>

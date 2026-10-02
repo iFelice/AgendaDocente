@@ -1,6 +1,6 @@
 import type { ExtractedItem, TeacherProfile, EventCategory } from "../types";
 import { evaluateItemRelevance, extractClassesFromText, detectSubjects, isGenericSubject } from "./circularRelevance";
-import { eventDateError, isValidDate, isValidTime } from "./dates";
+import { isValidDate, isValidTime } from "./dates";
 
 const categories: EventCategory[] = ["lezione", "consiglio_classe", "collegio_docenti", "dipartimento", "dipartimento_sostegno", "glo", "pei", "riunione", "ricevimento_genitori", "formazione", "uscita_didattica", "scadenza", "promemoria", "personale"];
 const datePattern = /\b(\d{1,2})[/.\-](\d{1,2})(?:[/.\-](\d{4}|\d{2}))?\b/g;
@@ -30,9 +30,33 @@ function extractDate(line: string, profile: TeacherProfile): { date: string; tex
   return { date: isValidDate(iso) ? iso : '', text: match[0] };
 }
 
+/**
+ * Un impegno estratto da circolare è "senza orario" quando il documento non indica
+ * né inizio né fine: in quel caso diventa un evento per l'intera giornata, a
+ * prescindere dalla categoria (non serve che sia una scadenza).
+ */
+export function isUntimedExtractedItem(item: Pick<ExtractedItem, 'startTime' | 'endTime'>): boolean {
+  return !item.startTime && !item.endTime;
+}
+
+/**
+ * Validazione specifica degli elementi estratti da circolare: `eventDateError()`
+ * resta invariato per gli altri editor (EventModal, scadenze, ecc.).
+ * - nessun orario  -> valido (evento intera giornata);
+ * - un solo orario -> errore (intervallo incompleto, mai completato d'ufficio);
+ * - entrambi       -> validi solo se HH:MM corretti e fine > inizio.
+ */
 export function extractedItemError(item: Pick<ExtractedItem, 'title' | 'date' | 'startTime' | 'endTime' | 'isDeadline'>): string | null {
   if (!item.title.trim()) return "Inserisci un titolo.";
-  return eventDateError({ ...item, isAllDay: !!item.isDeadline });
+  if (!isValidDate(item.date)) return "Inserisci una data valida.";
+  const hasStart = !!item.startTime;
+  const hasEnd = !!item.endTime;
+  if (!hasStart && !hasEnd) return null;
+  if (hasStart !== hasEnd || !isValidTime(item.startTime) || !isValidTime(item.endTime)) {
+    return "Completa l'ora di inizio e di fine oppure lascia entrambi vuoti.";
+  }
+  if (item.endTime! <= item.startTime!) return "L'ora di fine deve essere successiva all'ora di inizio.";
+  return null;
 }
 
 export function normalizeExtractedItems(input: unknown, profile: TeacherProfile, location?: string): ExtractedItem[] {
@@ -80,7 +104,12 @@ export function normalizeExtractedItems(input: unknown, profile: TeacherProfile,
       item.startTime = undefined; item.endTime = undefined;
     }
     const evaluation = evaluateItemRelevance(item, profile, location);
-    Object.assign(item, { relevance: evaluation.relevance, relevanceReason: evaluation.relevanceReason, location: evaluation.location, className: evaluation.primaryClass || item.className });
+    // Sanificazione del className del modello: se il documento contiene già evidenza di
+    // classi o di anno di corso, una sigla discordante inventata dall'AI (p.es. "1V"
+    // ottenuto da un "IV" del testo) viene scartata invece di essere conservata.
+    const sanitizedClassName = evaluation.primaryClass
+      || (evaluation.documentClassEvidence ? (evaluation.detectedClasses.includes(item.className || '') ? item.className : '') : item.className);
+    Object.assign(item, { relevance: evaluation.relevance, relevanceReason: evaluation.relevanceReason, location: evaluation.location, className: sanitizedClassName });
     item.selectedForImport = evaluation.selectedForImport && !extractedItemError(item);
     return item;
   });
