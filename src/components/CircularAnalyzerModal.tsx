@@ -501,7 +501,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                     </div>
                     <div className="text-stone-600 leading-relaxed">
                       Grado: <strong className="uppercase text-stone-900">{profile.schoolLevel || "SSIG"}</strong>.
-                      Il filtro confronta classi, materie, ordine scolastico e destinatari. Le attività ambigue rimangono da verificare; date e orari mancanti vanno completati prima dell'importazione.
+                      Il filtro confronta classi, materie, ordine scolastico e destinatari. Le attività ambigue rimangono da verificare; la data deve essere presente. Se l’orario non è indicato, l’impegno viene aggiunto per l’intera giornata.
                     </div>
                   </div>
                 </div>
