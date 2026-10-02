@@ -106,6 +106,10 @@ export function validateBackup(data: unknown): asserts data is Record<string, an
     || !p.roles.every(r => record(r) && TEACHER_ROLE_KINDS.includes(r.role) && optional(r.targetClass,text) && optional(r.description,text) && optional(r.label,text))
     || !optional(p.assignedStudents,strings) || !optional(p.isSupportTeacher,bool)
     || !optional(p.googleCalendarLinked,bool) || !optional(p.email,text) || !optional(p.googleCalendarAccount,text)
+    || !optional(p.googleCalendarImportIds,strings)
+    // G1.2.4: cache elenco calendari (solo metadata). Tollerante per elemento: una voce
+    // malformata viene scartata in lettura e non invalida mai l'intero profilo/backup.
+    || !optional(p.googleCalendarListCache, v => Array.isArray(v) && v.length <= 500)
     || !optional(p.schoolLevel,v => ['infanzia','primaria','ssig','ssiig'].includes(v as string))
     || !optional(p.schools, v => Array.isArray(v) && v.every(s => record(s) && required(s.id) && text(s.name) && optional(s.institutionalEmail,text) && optional(s.campuses,strings) && optional(s.schoolLevel,l => ['infanzia','primaria','ssig','ssiig'].includes(l as string)) && optional(s.weeklyHours,number) && optional(s.isPrimary,bool) && optional(s.active,bool) && optional(s.dayPeriods,dayPeriodsValidator) && optional(s.timeSlotConfig,timeSlotConfigValidator)))) throw new Error('Profilo nel backup non valido.');
   if (!list(data.events, e => required(e.title) && isValidDate(e.date) && bool(e.isAllDay) && eventDateError({ date: e.date, isAllDay: e.isAllDay, startTime: e.startTime, endTime: e.endTime }) === null && categories.includes(e.category)

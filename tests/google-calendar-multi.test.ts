@@ -318,7 +318,9 @@ test("UI: elenco calendari, badge Google nelle viste e outbound manuale invariat
   assert.match(profile, /calendario non accessibile/);
   // la CalendarList si carica solo con tab Google attivo e utente autenticato, con cache
   assert.match(profile, /if \(!isOpen \|\| activeTab !== "google"\) return;/);
-  assert.match(profile, /if \(googleCalendars\) return;/);
+  // G1.2.4: la lista live di sessione non viene mai riscaricata; una lista da cache sì (solo con token).
+  assert.match(profile, /if \(hasLiveCalendarList\) return;/);
+  assert.match(profile, /if \(!googleAccessToken\) return;/);
   // Il batch outbound è stato sostituito dall'invio dalla scheda.
   assert.match(profile, /Gli impegni vengono inviati singolarmente/);
   assert.doesNotMatch(profile, /Conferma e Sincronizza Ora/);

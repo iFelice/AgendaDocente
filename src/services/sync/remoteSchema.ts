@@ -129,6 +129,19 @@ export function isValidSettingsPayload(v: unknown): boolean {
   );
 }
 
+/**
+ * G1.2.4 — persisted Google CalendarList cache (metadata only).
+ *
+ * Deliberately TOLERANT at document level: the array must be an array, but a single
+ * malformed entry must never invalidate the whole profile document (which would make
+ * the remote profile unusable for a cosmetic cache). Element-level validation lives in
+ * `isValidCachedGoogleCalendar` and is applied by `normalizeCachedGoogleCalendars`
+ * every time the cache is read, so malformed entries are simply discarded.
+ */
+export function isValidGoogleCalendarListCache(v: unknown): boolean {
+  return Array.isArray(v) && v.length <= 500;
+}
+
 export function isValidProfilePayload(v: unknown): boolean {
   return (
     isRecord(v) &&
@@ -154,6 +167,7 @@ export function isValidProfilePayload(v: unknown): boolean {
     optional(v.email, text) &&
     optional(v.googleCalendarAccount, text) &&
     optional(v.googleCalendarImportIds, strings) &&
+    optional(v.googleCalendarListCache, isValidGoogleCalendarListCache) &&
     optional(v.schoolLevel, l => ["infanzia", "primaria", "ssig", "ssiig"].includes(l as string)) &&
     optional(v.schools, schools => Array.isArray(schools) && schools.every(s => isRecord(s) && requiredText(s.id) && text(s.name) && optional(s.institutionalEmail, text) && optional(s.campuses, strings) && optional(s.schoolLevel, l => ["infanzia", "primaria", "ssig", "ssiig"].includes(l as string)) && optional(s.weeklyHours, n => typeof n === "number" && Number.isFinite(n)) && optional(s.isPrimary, bool) && optional(s.active, bool) && optional(s.dayPeriods, isValidSchoolDayPeriods) && optional(s.timeSlotConfig, isValidTimeSlotConfig)))
   );

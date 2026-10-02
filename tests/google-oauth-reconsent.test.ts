@@ -82,12 +82,15 @@ test("reconnect aggiorna access token e avvia import immediato", () => {
   assert.match(app, /const result = await runGoogleSignIn\(\{ forceConsent: true \}\);/);
 });
 
-// 8 — il reconnect invalida la cache CalendarList e la ricarica senza riaprire la modale
-test("reconnect azzera googleCalendars e ricarica la CalendarList", () => {
+// 8 — il reconnect marca l'elenco come stale e ricarica la lista live senza riaprire la modale
+// G1.2.4: l'elenco visibile NON viene più azzerato (la cache persistita resta mostrata se la
+// fetch fallisce); la sorgente torna "cache" finché la lista live non è arrivata.
+test("reconnect marca l'elenco come cache e ricarica la CalendarList live", () => {
   const app = readSource("src/App.tsx");
   const reconnect = app.slice(app.indexOf("const handleGoogleReconnect"));
-  assert.match(reconnect, /setGoogleCalendars\(null\);/);
-  assert.match(reconnect, /setGoogleCalendars\(await listGoogleCalendars\(result\.accessToken\)\)/);
+  assert.match(reconnect, /setGoogleCalendarListSource\(previous => \(previous === "live" \? "cache" : previous\)\);/);
+  assert.match(reconnect, /await applyLiveGoogleCalendarList\(await listGoogleCalendars\(result\.accessToken\)\)/);
+  assert.doesNotMatch(reconnect, /setGoogleCalendars\(null\);/);
 });
 
 // Errore scope: riconoscimento esplicito e messaggio utile
