@@ -102,7 +102,17 @@ button {
  * Modals on phones become bottom sheets ("quasi full screen") while desktop stays a
  * centered dialog. Opt-in classes: .app-modal on the backdrop, .app-modal-panel on the
  * card. Panels that should scroll entirely get .app-modal-scroll on the backdrop too.
+ * Their viewport cap and internal scrolling apply at every width, including short
+ * tablet-landscape viewports; only the phone breakpoint changes the card into a sheet.
  */
+.app-modal-scroll > .app-modal-panel {
+  max-height: calc(100vh - 2rem);
+  max-height: calc(100dvh - 2rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
 @media (max-width: 639.98px) {
   .app-modal {
     align-items: flex-end !important;
@@ -118,10 +128,6 @@ button {
     border-bottom: none !important;
     border-left: none !important;
     border-right: none !important;
-  }
-  .app-modal-scroll > .app-modal-panel {
-    overflow-y: auto !important;
-    -webkit-overflow-scrolling: touch;
   }
 }
 

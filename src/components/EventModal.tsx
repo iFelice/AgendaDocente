@@ -128,6 +128,18 @@ export const EventModal: React.FC<EventModalProps> = ({
     }
   }, [eventToEdit, initialDate, initialEventData, isOpen]);
 
+  useEffect(() => {
+    if (!isOpen || typeof document === "undefined") return;
+
+    const { style } = document.body;
+    const previousOverflow = style.overflow;
+    style.overflow = "hidden";
+
+    return () => {
+      style.overflow = previousOverflow;
+    };
+  }, [isOpen]);
+
   if (!isOpen) return null;
 
   const handleSubmit = async (e: React.FormEvent) => {
