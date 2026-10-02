@@ -33,9 +33,8 @@ export function resolveImportCalendarIds(
   profile?: Pick<TeacherProfile, "googleCalendarImportIds"> | null,
 ): string[] {
   const configured = profile?.googleCalendarImportIds;
-  if (!Array.isArray(configured) || configured.length === 0) return [PRIMARY_CALENDAR_ID];
-  const unique = Array.from(new Set(configured.filter(id => typeof id === "string" && id.trim() !== "")));
-  return unique.length === 0 ? [PRIMARY_CALENDAR_ID] : unique;
+  if (!Array.isArray(configured)) return [PRIMARY_CALENDAR_ID];
+  return Array.from(new Set(configured.filter(id => typeof id === "string" && id.trim() !== "")));
 }
 
 /** Google signals a calendar the user can no longer read with 403/404/410. */
@@ -129,7 +128,21 @@ export async function importSelectedGoogleCalendars(
   dependencies: MultiImportDependencies = {},
 ): Promise<GoogleCalendarImportResult> {
   if (!accessToken) throw new Error("Riconnetti l’account Google per autorizzare il download degli eventi.");
-  const ids = calendarIds.length > 0 ? Array.from(new Set(calendarIds)) : [PRIMARY_CALENDAR_ID];
+  const ids = Array.from(new Set(calendarIds));
+  if (ids.length === 0) {
+    return {
+      added: 0,
+      updated: 0,
+      linked: 0,
+      ignoredCancelled: 0,
+      partial: false,
+      pagesRead: 0,
+      calendarsRequested: 0,
+      calendarsImported: 0,
+      inaccessibleCalendarIds: [],
+      failedCalendarIds: [],
+    };
+  }
   const range = googleCalendarImportWindow(dependencies.now);
   const list = dependencies.list ?? ((token, calendarId, min, max) => listCalendarEvents(token, calendarId, min, max));
 
