@@ -52,6 +52,12 @@ const realSchoolPostCG = {
 
 const withSchools = (...schools: unknown[]) => ({ ...baseProfile, schools });
 
+const googleProfile = {
+  ...baseProfile,
+  googleCalendarImportIds: ['primary', 'abc@example.com'],
+  googleCalendarListCache: [{ id: 'abc@example.com', summary: 'Consiglio di classe', primary: false, accessRole: 'reader' }],
+};
+
 const accepts = (profile: unknown) => assert.doesNotThrow(() => validateTeacherProfile(profile));
 const rejects = (profile: unknown) => {
   assert.throws(() => validateTeacherProfile(profile), (error: unknown) => {
@@ -63,6 +69,18 @@ const rejects = (profile: unknown) => {
 };
 
 // ---------------------------------------------------------------- caso reale
+
+test('hotfix: profilo con campi Google Calendar realistici è accettato', () => accepts(googleProfile));
+test('hotfix: campi Google Calendar mantengono validazione stretta', () => {
+  for (const invalid of [
+    { ...googleProfile, googleCalendarImportIds: 'primary' },
+    { ...googleProfile, googleCalendarListCache: [{ summary: 'Missing id' }] },
+    { ...googleProfile, googleCalendarListCache: [{ id: 'x', summary: 'Calendar', primary: 'true' }] },
+    { ...googleProfile, googleCalendarListCache: [{ id: 'x', summary: 'Calendar', extra: true }] },
+    { ...googleProfile, googleCalendarListCache: Array.from({ length: 501 }, (_, i) => ({ id: `c${i}`, summary: 'Calendar' })) },
+    { ...googleProfile, unexpected: true },
+  ]) rejects(invalid);
+});
 
 test('H2 REGRESSIONE: profilo reale post-C/G (dayPeriods 7ª ora + timeSlotConfig) è accettato', () => {
   accepts(withSchools(realSchoolPostCG));

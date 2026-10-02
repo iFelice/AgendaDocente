@@ -45,7 +45,7 @@ test('production starts on PORT: health, SPA/assets, API isolation and no expose
     for(const route of ['/asset.js','/manifest.webmanifest','/sw.js'])assert.equal((await get(route)).status,200);
     for(const route of ['/api/missing','/api/analyze-circular']){const r=await get(route);assert.equal(r.status,404);assert.match(r.headers.get('content-type')!,/json/);}
     for(const route of ['/server.cjs','/server.cjs.map','/server.%63js'])assert.equal((await get(route)).status,404);
-    const profile={id:'test',fullName:'Test',schoolName:'Test',schoolYear:'2026/2027',primarySubjects:[],classes:[],campuses:[],roles:[]};
+    const profile={id:'test',fullName:'Test',schoolName:'Test',schoolYear:'2026/2027',primarySubjects:[],classes:[],campuses:[],roles:[],googleCalendarImportIds:['primary','abc@example.com'],googleCalendarListCache:[{id:'abc@example.com',summary:'Consiglio di classe',primary:false,accessRole:'reader'}]};
     const analyze=(payload:object)=>fetch(`http://127.0.0.1:${port}/api/analyze-circular`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...payload,profile})});
     const text=await analyze({text:'15 settembre 2026 Collegio docenti 15:00-17:00'});assert.equal(text.status,200);assert.equal((await text.json()).source,'local-heuristic');
     const pdf=await analyze({imageBase64:Buffer.from('%PDF-test').toString('base64'),mimeType:'application/pdf'});assert.equal(pdf.status,503);assert.match((await pdf.json()).error,/non disponibile/);

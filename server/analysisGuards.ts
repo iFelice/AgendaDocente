@@ -19,6 +19,18 @@ const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v ===
 const text = (v: unknown, max = 256): v is string => typeof v === 'string' && v.length <= max;
 const optional = (v: unknown, check: (v: unknown) => boolean) => v === undefined || check(v);
 const strings = (v: unknown) => Array.isArray(v) && v.length <= 100 && v.every(x => text(x));
+
+/** Metadata-only Google CalendarList cache; deliberately kept server-local. */
+function googleCalendarListCache(v: unknown): boolean {
+  const keys = ['id', 'summary', 'primary', 'accessRole'];
+  return Array.isArray(v) && v.length <= 500 && v.every(calendar => record(calendar)
+    && typeof calendar.id === 'string' && calendar.id.length > 0 && calendar.id.length <= 512
+    && typeof calendar.summary === 'string'
+    && optional(calendar.primary, value => typeof value === 'boolean')
+    && optional(calendar.accessRole, value => typeof value === 'string')
+    && !Object.keys(calendar).some(key => !keys.includes(key)));
+}
+
 const SCHOOL_LEVELS = ['infanzia', 'primaria', 'ssig', 'ssiig'];
 /**
  * Ore settimanali: numero finito e non negativo, come nello schema di sync
@@ -150,11 +162,13 @@ export function validateTeacherProfile(p: unknown): void {
     || !optional(p.isSupportTeacher, v => typeof v === 'boolean') || !optional(p.assignedStudents, strings)
     || !['email', 'googleCalendarAccount'].every(k => optional(p[k], v => text(v)))
     || !optional(p.googleCalendarLinked, v => typeof v === 'boolean')
+    || !optional(p.googleCalendarImportIds, strings)
+    || !optional(p.googleCalendarListCache, googleCalendarListCache)
     || !optional(p.weeklyDeclaredHours, hours) || !optional(p.schools, schools)
     || !Array.isArray(p.roles) || p.roles.length > 30
     || !p.roles.every(r => record(r) && TEACHER_ROLE_KINDS.includes(r.role as TeacherRoleKind)
       && optional(r.targetClass, v => text(v)) && optional(r.description, v => text(v, 1000)) && optional(r.label, v => text(v)))) return invalid();
-  const profileKeys = ['id', 'fullName', 'schoolName', 'schoolYear', 'primarySubjects', 'classes', 'campuses', 'schoolLevel', 'isSupportTeacher', 'assignedStudents', 'email', 'googleCalendarAccount', 'googleCalendarLinked', 'roles', 'weeklyDeclaredHours', 'schools'];
+  const profileKeys = ['id', 'fullName', 'schoolName', 'schoolYear', 'primarySubjects', 'classes', 'campuses', 'schoolLevel', 'isSupportTeacher', 'assignedStudents', 'email', 'googleCalendarAccount', 'googleCalendarLinked', 'googleCalendarImportIds', 'googleCalendarListCache', 'roles', 'weeklyDeclaredHours', 'schools'];
   if (Object.keys(p).some(k => !profileKeys.includes(k))) return invalid();
 }
 
