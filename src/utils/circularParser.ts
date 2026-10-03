@@ -7,6 +7,18 @@ const datePattern = /\b(\d{1,2})[/.\-](\d{1,2})(?:[/.\-](\d{4}|\d{2}))?\b/g;
 const timePattern = /\b([01]?\d|2[0-3])[.:]([0-5]\d)(?:\s*(?:[-–—]|alle|a)\s*([01]?\d|2[0-3])[.:]([0-5]\d))?\b/i;
 const months = ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre"];
 
+/** Correzione minima e conservativa: attività straordinarie manifestamente non sono lezioni ordinarie. */
+export function normalizeCircularCategory(category: unknown, title: string, rawSnippet = ""): EventCategory {
+  const normalized = typeof category === "string" && categories.includes(category as EventCategory)
+    ? category as EventCategory
+    : "riunione";
+  if (normalized !== "lezione") return normalized;
+  const text = `${title} ${rawSnippet}`.toLocaleLowerCase("it-IT");
+  return /\b(giochi matematici|gara didattica|competizione|progetto scolastico|manifestazione)\b/i.test(text)
+    ? "promemoria"
+    : normalized;
+}
+
 function yearForMonth(month: number, profile: TeacherProfile): number {
   const year = /^(\d{4})\/(\d{4})$/.exec(profile.schoolYear || "");
   return year ? Number(year[month >= 8 ? 1 : 2]) : new Date().getFullYear();
@@ -71,7 +83,7 @@ export function normalizeExtractedItems(input: unknown, profile: TeacherProfile,
     const item: ExtractedItem = {
       tempId: `extracted-${Date.now()}-${index}`,
       title: str(raw.title),
-      category: categories.includes(raw.category) ? raw.category : 'riunione',
+      category: normalizeCircularCategory(raw.category, str(raw.title), str(raw.rawSnippet)),
       date: isValidDate(raw.date) ? raw.date : '',
       startTime: time(raw.startTime), endTime: time(raw.endTime),
       className: str(raw.className), subject: isGenericSubject(str(raw.subject)) ? "" : str(raw.subject), location: str(raw.location),

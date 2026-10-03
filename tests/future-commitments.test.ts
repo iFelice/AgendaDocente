@@ -101,12 +101,17 @@ test('evento completato escluso', () => {
   assert.equal(derive([event({ id: 'a', date: TODAY, completed: true })]).length, 0);
 });
 
-test('normale lezione esclusa (categoria e sourceType orario)', () => {
+test('solo sourceType orario esclude la lezione ordinaria', () => {
   const items = derive([
-    event({ id: 'l1', date: TODAY, category: 'lezione', title: 'Matematica 3E' }),
-    event({ id: 'l2', date: TODAY, sourceType: 'orario', title: 'Italiano 2D' }),
+    event({ id: 'l1', date: TODAY, category: 'lezione', sourceType: 'orario', title: 'Matematica 3E' }),
+    event({ id: 'l2', date: TODAY, sourceType: 'orario', category: 'promemoria', title: 'Italiano 2D' }),
   ]);
   assert.equal(items.length, 0);
+});
+
+test('attività circolare classificata lezione compare negli impegni', () => {
+  const items = derive([event({ id: 'prisma', date: '2026-11-26', category: 'lezione', sourceType: 'circolare', title: 'Svolgimento Giochi Matematici di Prisma', isAllDay: true })]);
+  assert.equal(items.length, 1);
 });
 
 // --- 9..12: provenienze ----------------------------------------------------
@@ -217,7 +222,7 @@ test('render: gruppi e badge visibili, titolo Note e impegni', async () => {
         events: [
           event({ id: 'a', date: TODAY, startTime: '15:00', title: 'Consiglio di classe 2E', location: 'Aula riunioni' }),
           event({ id: 'past', date: addDaysISO(TODAY, -2), title: 'Vecchio' }),
-          event({ id: 'lez', date: TODAY, category: 'lezione', title: 'Matematica 3E' }),
+          event({ id: 'lez', date: TODAY, category: 'lezione', sourceType: 'orario', title: 'Matematica 3E' }),
         ],
         scheduledAssessments: [assessment({ id: 'as-1', date: addDaysISO(TODAY, 1) })],
         students,
@@ -276,13 +281,13 @@ test('storico include CalendarEvent passati sia completati sia non completati', 
   assert.deepEqual(items.map(item => item.id), ['event:done', 'event:open']);
 });
 
-test('storico esclude lezioni passate per categoria o sourceType orario', () => {
+test('storico esclude solo gli eventi con sourceType orario', () => {
   const items = derivePast([
     event({ id: 'lesson', date: addDaysISO(TODAY, -1), category: 'lezione' }),
     event({ id: 'timetable', date: addDaysISO(TODAY, -1), sourceType: 'orario' }),
     event({ id: 'meeting', date: addDaysISO(TODAY, -1), category: 'riunione' }),
   ]);
-  assert.deepEqual(items.map(item => item.id), ['event:meeting']);
+  assert.deepEqual(items.map(item => item.id), ['event:lesson', 'event:meeting']);
 });
 
 test('storico mantiene una sola circolare e i badge Circolare, Google e Registro', () => {
@@ -343,7 +348,7 @@ test('deriveFutureCommitments conserva il contratto N1', () => {
     event({ id: 'past', date: addDaysISO(TODAY, -1) }),
     event({ id: 'today', date: TODAY }),
     event({ id: 'done', date: addDaysISO(TODAY, 1), completed: true }),
-    event({ id: 'lesson', date: addDaysISO(TODAY, 1), category: 'lezione' }),
+    event({ id: 'lesson', date: addDaysISO(TODAY, 1), category: 'lezione', sourceType: 'orario' }),
     event({ id: 'future', date: addDaysISO(TODAY, 2) }),
   ], [
     assessment({ id: 'scheduled-future', date: addDaysISO(TODAY, 1), status: 'scheduled' }),

@@ -422,7 +422,7 @@ test('26. nessuna regressione N1/N1.1: esclusioni, gruppi e storico invariati', 
     event({ id: 'past', date: addDaysISO(TODAY, -1) }),
     event({ id: 'today', date: TODAY }),
     event({ id: 'done', date: addDaysISO(TODAY, 1), completed: true }),
-    event({ id: 'lesson', date: addDaysISO(TODAY, 1), category: 'lezione' }),
+    event({ id: 'lesson', date: addDaysISO(TODAY, 1), category: 'lezione', sourceType: 'orario' }),
     note({ id: 'nota-domani', date: addDaysISO(TODAY, 1) }),
   ]);
   assert.deepEqual(items.map(item => item.id), ['event:today', 'event:nota-domani']);
