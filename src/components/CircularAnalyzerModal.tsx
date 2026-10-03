@@ -2,6 +2,7 @@ import { circularUploadError } from "../utils/circularUpload";
 import { usePersistenceAction } from "../hooks/usePersistenceAction";
 import { convertExtractedItemToEvent } from "../services/storage";
 import { extractedItemError } from "../utils/circularParser";
+import { formatRecipientsLabel } from "../utils/circularRelevance";
 import { localDateISO } from "../utils/dates";
 import React, { useState, useEffect, useRef } from "react";
 import {
@@ -929,6 +930,13 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                                 : !item.startTime && !item.endTime && (
                                   <p className="text-xs text-stone-500" role="status">Senza orario: verrà aggiunto come impegno per l'intera giornata.</p>
                                 )}
+                              {/* Destinatari strutturati rilevati dall'AI (verifica manuale rapida) */}
+                              {formatRecipientsLabel(item) && (
+                                <p className="text-[11px] text-stone-500">
+                                  Destinatari rilevati: {formatRecipientsLabel(item)}
+                                </p>
+                              )}
+
                               {/* Relevance Reason */}
                               <div className="text-xs text-stone-600 bg-stone-50 p-2 rounded-md border border-stone-100">
                                 <span className="font-semibold text-stone-700">Motivo pertinenza: </span>

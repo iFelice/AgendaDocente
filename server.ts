@@ -180,6 +180,16 @@ export const GROQ_CIRCULAR_RESPONSE_SCHEMA = {
               },
               relevanceReason: { type: "string", description: "Spiegazione sintetica del perché è VERDE, GIALLO o ROSSO" },
               rawSnippet: { type: "string", description: "Frase originale o riga di tabella da cui è estratto l'impegno" },
+              recipientGrades: {
+                type: "array",
+                items: { type: "integer" },
+                description: "Anni di corso destinatari dell'attività (interi 1..5), anche quando dichiarati nell'intestazione o nel paragrafo generale collegato e non ripetuti nella stessa riga dell'evento. Esempi: \"classi I e III\" -> [1,3]; \"classi seconde\" -> [2]; \"classi I, II e III\" -> [1,2,3]. NON trasformare questi anni in sigle di classe. Array vuoto se il documento non indica destinatari per anno.",
+              },
+              recipientClasses: {
+                type: "array",
+                items: { type: "string" },
+                description: "Classi COMPLETE (anno + sezione) destinatarie dell'attività, in formato canonico. Esempi: \"classe III E\" -> [\"3E\"]; \"3D e 1C\" -> [\"3D\",\"1C\"]. Mai anni di corso senza sezione. Array vuoto se non ci sono classi complete esplicite.",
+              },
             },
             required: [
               "title",
@@ -195,6 +205,8 @@ export const GROQ_CIRCULAR_RESPONSE_SCHEMA = {
               "relevance",
               "relevanceReason",
               "rawSnippet",
+              "recipientGrades",
+              "recipientClasses",
             ],
             additionalProperties: false,
           },
@@ -676,6 +688,9 @@ Prima di restituire ogni oggetto ricontrolla l'allineamento visivo delle colonne
 rawSnippet deve contenere soltanto la riga/blocco dell'attività, con destinatari e orario originali (inclusa la cella ORARI unita che la copre), mai l'intera tabella o righe adiacenti.
 Riporta i destinatari espliciti in notes. subject contiene solo una disciplina specifica: espressioni generiche come tutte le materie o programmazione per materia non sono discipline e richiedono subject vuoto.
 Quando un'attività ha destinatari dichiarati in un'intestazione o nel paragrafo immediatamente collegato (es. "classi I e III"), riportali in notes e/o rawSnippet anche se non sono ripetuti nella stessa frase della data: il destinatario deve appartenere allo stesso blocco logico dell'attività, non a sezioni diverse o non correlate del documento.
+Per ogni impegno individua anche i destinatari dell'attività e riportali nei campi strutturati recipientGrades (anni di corso, interi 1..5) e recipientClasses (classi complete anno+sezione, es. "3E").
+Se un'intestazione, un titolo, un paragrafo introduttivo o un blocco logicamente collegato dichiara destinatari validi per più date successive, riportali in recipientGrades e/o recipientClasses per OGNI impegno a cui si applicano, anche quando non sono ripetuti nella stessa riga della data. Esempio strutturale: "Giochi Matematici di Prisma - classi I e III" seguito da "14 ottobre versamento quota" e "26 novembre svolgimento gara" produce due impegni entrambi con recipientGrades: [1,3]. L'esempio vale solo come regola di struttura, non come contenuto da inventare.
+Non propagare destinatari a sezioni o attività diverse. recipientGrades e recipientClasses sono sempre presenti: usa un array vuoto quando il documento non indica destinatari espliciti.
 Il colore del modello non è autorevole: estrai anche gli impegni apparentemente non pertinenti, la classificazione finale è deterministica.
 Non aggiungere attività, sedi, date, orari o sottocalendari da esempi o conoscenze esterne.
 Se un campo non è ricavabile, usa stringa vuota. Non inventare la durata.
@@ -862,6 +877,16 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
           },
           relevanceReason: { type: Type.STRING, description: "Spiegazione sintetica del perché è VERDE, GIALLO o ROSSO" },
           rawSnippet: { type: Type.STRING, description: "Frase originale o riga di tabella da cui è estratto l'impegno" },
+          recipientGrades: {
+            type: Type.ARRAY,
+            items: { type: Type.INTEGER },
+            description: "Anni di corso destinatari dell'attività (interi 1..5), anche quando dichiarati nell'intestazione o nel paragrafo generale collegato e non ripetuti nella stessa riga dell'evento. Esempi: \"classi I e III\" -> [1,3]; \"classi seconde\" -> [2]; \"classi I, II e III\" -> [1,2,3]. NON trasformare questi anni in sigle di classe. Array vuoto se assenti.",
+          },
+          recipientClasses: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
+            description: "Classi COMPLETE (anno + sezione) destinatarie dell'attività, in formato canonico. Esempi: \"classe III E\" -> [\"3E\"]; \"3D e 1C\" -> [\"3D\",\"1C\"]. Solo classi complete, mai anni di corso senza sezione. Array vuoto se assenti.",
+          },
         },
         required: ["title", "category", "date", "startTime", "endTime", "relevance", "relevanceReason"],
       },
