@@ -163,7 +163,7 @@ export const GROQ_CIRCULAR_RESPONSE_SCHEMA = {
               title: { type: "string", description: "Titolo chiaro e descrittivo dell'impegno" },
               category: {
                 type: "string",
-                description: "Categoria: consiglio_classe, collegio_docenti, dipartimento, riunione, formazione, scadenza, promemoria, ricevimento_genitori, lezione, personale",
+                description: "Categoria: consiglio_classe, collegio_docenti, dipartimento, riunione, formazione, scadenza, promemoria, ricevimento_genitori, lezione, personale. Usa lezione SOLO per una vera attività di insegnamento specifica (es. lezione di recupero, lezione aperta o lezione straordinaria), NON solo perché avviene durante l'orario scolastico. Usa promemoria per attività/eventi scolastici da ricordare senza categoria più specifica, come svolgimento di giochi matematici, gara didattica, progetto scolastico, attività speciale, giornata tematica, manifestazione, divieto di organizzare uscite o attività didattica straordinaria.",
               },
               date: { type: "string", description: "Data in formato ISO YYYY-MM-DD" },
               startTime: { type: "string", description: "Ora inizio in formato HH:MM (es. 09:00 o 10:45) o stringa vuota" },
@@ -861,7 +861,7 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
           title: { type: Type.STRING, description: "Titolo chiaro e descrittivo dell'impegno" },
           category: {
             type: Type.STRING,
-            description: "Categoria: consiglio_classe, collegio_docenti, dipartimento, riunione, formazione, scadenza, promemoria, ricevimento_genitori, lezione, personale",
+            description: "Categoria: consiglio_classe, collegio_docenti, dipartimento, riunione, formazione, scadenza, promemoria, ricevimento_genitori, lezione, personale. Usa lezione SOLO per una vera attività di insegnamento specifica (es. lezione di recupero, lezione aperta o lezione straordinaria), NON solo perché avviene durante l'orario scolastico. Usa promemoria per attività/eventi scolastici da ricordare senza categoria più specifica, come svolgimento di giochi matematici, gara didattica, progetto scolastico, attività speciale, giornata tematica, manifestazione, divieto di organizzare uscite o attività didattica straordinaria.",
           },
           date: { type: Type.STRING, description: "Data in formato ISO YYYY-MM-DD" },
           startTime: { type: Type.STRING, description: "Ora inizio in formato HH:MM (es. 09:00 o 10:45). Vuota se il documento non supporta un orario per questo blocco; mai ereditato da righe adiacenti." },

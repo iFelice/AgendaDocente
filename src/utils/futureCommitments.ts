@@ -58,7 +58,9 @@ export const FUTURE_COMMITMENT_SOURCE_LABELS: Record<FutureCommitmentSource, str
 
 /** Le normali lezioni dell'orario non sono "impegni": inquinerebbero la lista. */
 function isRoutineLesson(event: CalendarEvent): boolean {
-  return event.category === "lezione" || event.sourceType === "orario";
+  // La provenienza è la discriminante semantica: una circolare può contenere
+  // un'attività didattica straordinaria classificata dall'AI come "lezione".
+  return event.sourceType === "orario";
 }
 
 /**
