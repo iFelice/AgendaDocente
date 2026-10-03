@@ -675,6 +675,7 @@ startTime e endTime devono formare un intervallo valido: se endTime <= startTime
 Prima di restituire ogni oggetto ricontrolla l'allineamento visivo delle colonne. Se l'associazione dell'orario è incerta, lascia startTime/endTime vuoti, senza durata predefinita.
 rawSnippet deve contenere soltanto la riga/blocco dell'attività, con destinatari e orario originali (inclusa la cella ORARI unita che la copre), mai l'intera tabella o righe adiacenti.
 Riporta i destinatari espliciti in notes. subject contiene solo una disciplina specifica: espressioni generiche come tutte le materie o programmazione per materia non sono discipline e richiedono subject vuoto.
+Quando un'attività ha destinatari dichiarati in un'intestazione o nel paragrafo immediatamente collegato (es. "classi I e III"), riportali in notes e/o rawSnippet anche se non sono ripetuti nella stessa frase della data: il destinatario deve appartenere allo stesso blocco logico dell'attività, non a sezioni diverse o non correlate del documento.
 Il colore del modello non è autorevole: estrai anche gli impegni apparentemente non pertinenti, la classificazione finale è deterministica.
 Non aggiungere attività, sedi, date, orari o sottocalendari da esempi o conoscenze esterne.
 Se un campo non è ricavabile, usa stringa vuota. Non inventare la durata.
