@@ -191,8 +191,8 @@ export function normalizeRecipientGrades(input: unknown): number[] {
  * Normalizza il campo strutturato `recipientClasses`: solo classi COMPLETE
  * anno+sezione, riportate in formato canonico ("III E" -> "3E") tramite la stessa
  * utility usata per il testo. Un anno isolato ("IV", "I", "III") non è una classe e
- * viene scartato; così resta impossibile che un numero romano di anno di corso
- * diventi la finta sigla "1V".
+ * viene scartato: un "IV" del documento resta un anno di corso e non diventa la
+ * finta sigla "1V". Le sezioni reali con lettera V ("1V", "3V") restano valide.
  */
 export function normalizeRecipientClasses(input: unknown): string[] {
   if (!Array.isArray(input)) return [];
@@ -202,13 +202,11 @@ export function normalizeRecipientClasses(input: unknown): string[] {
     const value = raw.trim();
     if (!value) continue;
     // Un token puramente romano è un anno di corso, non una classe.
-    if (/^[IVX]+$/i.test(value.replace(/[\s^°ª]/g, ''))) continue;
-    for (const candidate of extractClassesFromText(value)) {
-      // La sezione "V" non esiste nelle sigle reali: è l'artefatto tipico della
-      // lettura di un romano ("IV" -> "1V"). Viene sempre scartata.
-      if (candidate.endsWith('V')) continue;
-      classes.add(candidate);
-    }
+    // (lo spazio non viene rimosso: "III V" è una classe, non un anno isolato)
+    if (/^[IVX]+$/i.test(value.replace(/[\^°ª]/g, '').trim())) continue;
+    // Una sezione "V" è legittima ("1V", "3V"): l'artefatto "IV" -> "1V" è già
+    // escluso dal filtro sui romani isolati e dalla distinzione anno/classe.
+    for (const candidate of extractClassesFromText(value)) classes.add(candidate);
   }
   return Array.from(classes);
 }

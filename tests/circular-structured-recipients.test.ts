@@ -140,7 +140,9 @@ test('normalizeRecipientGrades filtra, deduplica e ordina', () => {
 test('normalizeRecipientClasses accetta solo classi complete e deduplica', () => {
   assert.deepEqual(normalizeRecipientClasses(['3E', '3 E', 'III E']), ['3E']);
   assert.deepEqual(normalizeRecipientClasses(['3D', '1C']), ['3D', '1C']);
-  assert.deepEqual(normalizeRecipientClasses(['IV', 'I', 'III', '1V']), []);
+  // Anni romani isolati non sono classi; una sezione V reale invece resta valida.
+  assert.deepEqual(normalizeRecipientClasses(['IV', 'I', 'III']), []);
+  assert.deepEqual(normalizeRecipientClasses(['1V', '2V', 'III V']), ['1V', '2V', '3V']);
   assert.deepEqual(normalizeRecipientClasses([42, '', null]), []);
 });
 
@@ -163,4 +165,21 @@ test('formatRecipientsLabel produce etichette leggibili', () => {
   assert.equal(formatRecipientsLabel({ recipientGrades: [1, 3] }), 'classi I e III');
   assert.equal(formatRecipientsLabel({ recipientClasses: ['3E', '1C'] }), '3E, 1C');
   assert.equal(formatRecipientsLabel({}), null);
+});
+
+// ---------------------------------------------------------------------------
+// 18. Regressione PR #46: un anno di corso non genera mai una sigla di classe
+// ---------------------------------------------------------------------------
+
+test("recipientGrades [4] non produce automaticamente le sigle 1V o 4V", () => {
+  const evaluation = evaluateItemRelevance(
+    { title: 'Uscita didattica', notes: 'Riservata alle classi IV.', recipientGrades: [4] },
+    supportProfile,
+  );
+  assert.ok(!evaluation.detectedClasses.includes('1V'));
+  assert.ok(!evaluation.detectedClasses.includes('4V'));
+  assert.deepEqual(evaluation.detectedClasses, []);
+  // Il docente non ha classi del quarto anno: resta ROSSO per annualità.
+  assert.equal(evaluation.relevance, 'ROSSO');
+  assert.equal(evaluation.relevanceReason, 'Destinato a un altro anno di corso.');
 });
