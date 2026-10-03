@@ -222,7 +222,7 @@ test('render: gruppi e badge visibili, titolo Note e impegni', async () => {
         events: [
           event({ id: 'a', date: TODAY, startTime: '15:00', title: 'Consiglio di classe 2E', location: 'Aula riunioni' }),
           event({ id: 'past', date: addDaysISO(TODAY, -2), title: 'Vecchio' }),
-          event({ id: 'lez', date: TODAY, category: 'lezione', title: 'Matematica 3E' }),
+          event({ id: 'lez', date: TODAY, category: 'lezione', sourceType: 'orario', title: 'Matematica 3E' }),
         ],
         scheduledAssessments: [assessment({ id: 'as-1', date: addDaysISO(TODAY, 1) })],
         students,
