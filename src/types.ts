@@ -253,6 +253,14 @@ export interface ExtractedItem {
   relevance: RelevanceLevel;
   relevanceReason: string;
   rawSnippet?: string;
+  /**
+   * Anni di corso destinatari dell'attività (1..5), dichiarati anche solo
+   * nell'intestazione o nel paragrafo collegato: "classi I e III" -> [1, 3].
+   * Non sono sigle di classe: non contengono alcuna sezione.
+   */
+  recipientGrades?: number[];
+  /** Classi complete anno+sezione destinatarie, in formato canonico ("3E", "1C"). */
+  recipientClasses?: string[];
   selectedForImport: boolean;
 }
 

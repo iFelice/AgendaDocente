@@ -173,6 +173,47 @@ export function extractGradesFromText(text: string): number[] {
 }
 
 /**
+ * Normalizza il campo strutturato `recipientGrades` prodotto dall'AI: accetta solo
+ * interi 1..5, deduplicati e ordinati. Qualunque altro valore (stringhe, 0, 8,
+ * decimali, non-array) viene scartato senza invalidare gli altri.
+ */
+export function normalizeRecipientGrades(input: unknown): number[] {
+  if (!Array.isArray(input)) return [];
+  const grades = new Set<number>();
+  for (const raw of input) {
+    const value = typeof raw === 'number' ? raw : (typeof raw === 'string' && /^[1-5]$/.test(raw.trim()) ? Number(raw.trim()) : NaN);
+    if (Number.isInteger(value) && value >= 1 && value <= 5) grades.add(value);
+  }
+  return Array.from(grades).sort((a, b) => a - b);
+}
+
+/**
+ * Normalizza il campo strutturato `recipientClasses`: solo classi COMPLETE
+ * anno+sezione, riportate in formato canonico ("III E" -> "3E") tramite la stessa
+ * utility usata per il testo. Un anno isolato ("IV", "I", "III") non è una classe e
+ * viene scartato; così resta impossibile che un numero romano di anno di corso
+ * diventi la finta sigla "1V".
+ */
+export function normalizeRecipientClasses(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  const classes = new Set<string>();
+  for (const raw of input) {
+    if (typeof raw !== 'string') continue;
+    const value = raw.trim();
+    if (!value) continue;
+    // Un token puramente romano è un anno di corso, non una classe.
+    if (/^[IVX]+$/i.test(value.replace(/[\s^°ª]/g, ''))) continue;
+    for (const candidate of extractClassesFromText(value)) {
+      // La sezione "V" non esiste nelle sigle reali: è l'artefatto tipico della
+      // lettura di un romano ("IV" -> "1V"). Viene sempre scartata.
+      if (candidate.endsWith('V')) continue;
+      classes.add(candidate);
+    }
+  }
+  return Array.from(classes);
+}
+
+/**
  * Incrocia gli anni di corso rilevati nel documento con le classi assegnate al docente:
  * un anno è "pertinente" se il docente ha almeno una classe appartenente a quell'anno
  * (es. anno 3 è pertinente se il docente ha "3E").
@@ -259,7 +300,8 @@ export function detectSubjects(text: string, profile?: TeacherProfile): string[]
 
 export function evaluateItemRelevance(
   item: { title: string; category?: string; className?: string; subject?: string; notes?: string;
-    rawSnippet?: string; location?: string; relevance?: "VERDE" | "GIALLO" | "ROSSO"; relevanceReason?: string },
+    rawSnippet?: string; location?: string; relevance?: "VERDE" | "GIALLO" | "ROSSO"; relevanceReason?: string;
+    recipientGrades?: number[]; recipientClasses?: string[] },
   profile: TeacherProfile, chosenLocation?: string
 ): RelevanceEvaluation {
   // Evidenza documentale (titolo, materia, note, snippet) e metadata del modello
@@ -269,10 +311,22 @@ export function evaluateItemRelevance(
   const modelClassEvidence = item.className || '';
   const text = `${documentEvidence} ${modelClassEvidence}`;
   const lower = text.toLowerCase();
-  const documentClasses = extractClassesFromText(documentEvidence);
-  const documentGrades = extractGradesFromText(documentEvidence);
+  // Gerarchia delle evidenze sui destinatari:
+  //   1. campi strutturati recipientClasses / recipientGrades (l'AI li ricava anche da
+  //      intestazioni o paragrafi collegati, non ripetuti nella riga dell'evento);
+  //   2. classi/anni ricavati deterministicamente da title/subject/notes/rawSnippet;
+  //   3. className del modello, solo come ultimo fallback.
+  const structuredClasses = normalizeRecipientClasses(item.recipientClasses);
+  const structuredGrades = normalizeRecipientGrades(item.recipientGrades);
+  const structuredEvidence = structuredClasses.length > 0 || structuredGrades.length > 0;
+  const textClasses = extractClassesFromText(documentEvidence);
+  const textGrades = extractGradesFromText(documentEvidence);
   // Il documento parla (sigla completa o solo anno di corso): il modello non aggiunge nulla.
-  const documentClassEvidence = documentClasses.length > 0 || documentGrades.length > 0;
+  const documentClassEvidence = structuredEvidence || textClasses.length > 0 || textGrades.length > 0;
+  // Unione senza duplicati fra evidenza strutturata e testuale: recipientGrades [1,3]
+  // con un rawSnippet che cita "classi III" resta [1,3].
+  const documentClasses = Array.from(new Set([...structuredClasses, ...textClasses]));
+  const documentGrades = Array.from(new Set([...structuredGrades, ...textGrades])).sort((a, b) => a - b);
   const detected = documentClassEvidence ? documentClasses : extractClassesFromText(modelClassEvidence);
   const grades = documentClassEvidence ? documentGrades : extractGradesFromText(modelClassEvidence);
   const userClasses = (profile.classes || []).flatMap(c => extractClassesFromText(c));
@@ -327,4 +381,24 @@ export function evaluateItemRelevance(
   if (/dipartiment|commission/.test(lower)) return result('GIALLO', "Verifica materia o appartenenza al gruppo prima di importare.");
   if (levels.length) return result('GIALLO', "Ordine scolastico pertinente: verifica i destinatari dell'attività.");
   return result('GIALLO', "Destinatari non sufficientemente specificati: verifica la pertinenza.");
+}
+
+const GRADE_TO_ROMAN: Record<number, string> = { 1: 'I', 2: 'II', 3: 'III', 4: 'IV', 5: 'V' };
+
+/**
+ * Etichetta breve dei destinatari strutturati per la card di analisi
+ * ("Destinatari rilevati: classi I e III" oppure "Destinatari rilevati: 3E, 1C").
+ * Restituisce null quando il modello non ha riportato alcun destinatario.
+ */
+export function formatRecipientsLabel(item: { recipientGrades?: number[]; recipientClasses?: string[] }): string | null {
+  const classes = normalizeRecipientClasses(item.recipientClasses);
+  const grades = normalizeRecipientGrades(item.recipientGrades);
+  const parts: string[] = [];
+  if (classes.length) parts.push(classes.join(', '));
+  if (grades.length) {
+    const labels = grades.map(g => GRADE_TO_ROMAN[g]);
+    const joined = labels.length === 1 ? labels[0] : `${labels.slice(0, -1).join(', ')} e ${labels[labels.length - 1]}`;
+    parts.push(`classi ${joined}`);
+  }
+  return parts.length ? parts.join(' · ') : null;
 }

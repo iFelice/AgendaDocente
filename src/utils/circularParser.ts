@@ -1,5 +1,5 @@
 import type { ExtractedItem, TeacherProfile, EventCategory } from "../types";
-import { evaluateItemRelevance, extractClassesFromText, detectSubjects, isGenericSubject } from "./circularRelevance";
+import { evaluateItemRelevance, extractClassesFromText, detectSubjects, isGenericSubject, normalizeRecipientClasses, normalizeRecipientGrades } from "./circularRelevance";
 import { isValidDate, isValidTime } from "./dates";
 
 const categories: EventCategory[] = ["lezione", "consiglio_classe", "collegio_docenti", "dipartimento", "dipartimento_sostegno", "glo", "pei", "riunione", "ricevimento_genitori", "formazione", "uscita_didattica", "scadenza", "promemoria", "personale"];
@@ -76,6 +76,10 @@ export function normalizeExtractedItems(input: unknown, profile: TeacherProfile,
       startTime: time(raw.startTime), endTime: time(raw.endTime),
       className: str(raw.className), subject: isGenericSubject(str(raw.subject)) ? "" : str(raw.subject), location: str(raw.location),
       notes: str(raw.notes), rawSnippet: str(raw.rawSnippet),
+      // Destinatari strutturati dell'AI: anni 1..5 deduplicati/ordinati e classi
+      // complete in formato canonico. I valori non validi vengono scartati.
+      recipientGrades: normalizeRecipientGrades(raw.recipientGrades),
+      recipientClasses: normalizeRecipientClasses(raw.recipientClasses),
       isDeadline: raw.isDeadline === true || raw.category === 'scadenza',
       relevance: ['VERDE', 'GIALLO', 'ROSSO'].includes(raw.relevance) ? raw.relevance : 'GIALLO',
       relevanceReason: str(raw.relevanceReason), selectedForImport: false,
