@@ -444,8 +444,8 @@ test('26b. empty state: sparisce appena esiste una nota futura', async () => {
   await act(async () => withNote.unmount());
 });
 
-test('27. nessuna regressione DeadlinesView: i promemoria restano nello scadenziario', () => {
-  assert.match(deadlinesSource, /e\.category === "scadenza" \|\| e\.category === "promemoria" \|\| e\.category === "pei"/);
+test('27. DeadlinesView usa effectiveDeadlineDate', () => {
+  assert.match(deadlinesSource, /effectiveDeadlineDate/);
   assert.match(appSource, /<DeadlinesView/);
   assert.match(appSource, /currentView === "scadenze"/);
 });
@@ -558,7 +558,7 @@ test('N2.1 QuickNoteModal edit elimina con il callback evento esistente e confer
 test('N2.1 non introduce nuova persistenza e conserva DeadlinesView', () => {
   assert.ok(!/notes\s*:|version\(4\)|completedAt/.test(dbSource));
   assert.ok(!/completedAt/.test(typesSource));
-  assert.match(deadlinesSource, /e\.category === "scadenza" \|\| e\.category === "promemoria" \|\| e\.category === "pei"/);
+  assert.match(deadlinesSource, /effectiveDeadlineDate/);
   assert.ok(!/from "\.\.\/services/.test(viewSource));
   assert.ok(!/from "\.\.\/services/.test(modalSource));
 });

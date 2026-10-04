@@ -1,3 +1,5 @@
+import type { CalendarEvent } from "../types";
+
 /** Calendar days are civil dates, not UTC instants. */
 export function localDateISO(date: Date = new Date()): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
@@ -59,4 +61,25 @@ export function eventDateError(event: { date: string; isAllDay?: boolean; startT
   if (!isValidTime(event.startTime) || !isValidTime(event.endTime)) return "Completa l'ora di inizio e di fine prima di aggiungere l'impegno.";
   if (event.endTime <= event.startTime) return "L'ora di fine deve essere successiva all'ora di inizio.";
   return null;
+}
+
+/**
+ * Helper centrale per determinare la data di scadenza effettiva di un impegno/evento.
+ * - Se `event.deadlineDate` è presente ed è una data valida, restituisce `deadlineDate`.
+ * - Compatibilità retroattiva: se `event.category === "scadenza"` e `deadlineDate` è assente,
+ *   considera `event.date` come fallback logico.
+ * - Per tutte le altre categorie (es. promemoria, pei, glo, riunione, ecc.) senza `deadlineDate`,
+ *   restituisce `undefined`.
+ */
+export function effectiveDeadlineDate(
+  event: Pick<CalendarEvent, "deadlineDate" | "category" | "date"> | null | undefined
+): string | undefined {
+  if (!event) return undefined;
+  if (event.deadlineDate && isValidDate(event.deadlineDate)) {
+    return event.deadlineDate;
+  }
+  if (event.category === "scadenza" && isValidDate(event.date)) {
+    return event.date;
+  }
+  return undefined;
 }

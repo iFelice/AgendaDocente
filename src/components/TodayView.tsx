@@ -1,4 +1,4 @@
-import { addDaysISO, civilDayOfWeek, civilTimetableDay, formatCivilDateIt, isValidDate, localDateISO, parseCivilDate } from "../utils/dates";
+import { addDaysISO, civilDayOfWeek, civilTimetableDay, effectiveDeadlineDate, formatCivilDateIt, isValidDate, localDateISO, parseCivilDate } from "../utils/dates";
 import React from "react";
 import {
   BookOpen,
@@ -57,10 +57,11 @@ export function selectDayAgenda(
   const dayEvents = events
     .filter((e) => e.date === selectedIso && !e.completed)
     .sort((a, b) => (a.startTime || "00:00").localeCompare(b.startTime || "00:00"));
-  const isDeadlineLike = (e: CalendarEvent) => e.category === "scadenza" || e.category === "promemoria" || e.category === "pei";
-  const pending = events.filter((e) => isDeadlineLike(e) && !e.completed).sort((a, b) => a.date.localeCompare(b.date));
-  const dayDeadlines = pending.filter((e) => e.date === selectedIso);
-  const nextDeadlines = pending.filter((e) => e.date > selectedIso).slice(0, 3);
+  const pending = events
+    .filter((e) => !!effectiveDeadlineDate(e) && !e.completed)
+    .sort((a, b) => effectiveDeadlineDate(a)!.localeCompare(effectiveDeadlineDate(b)!));
+  const dayDeadlines = pending.filter((e) => effectiveDeadlineDate(e) === selectedIso);
+  const nextDeadlines = pending.filter((e) => effectiveDeadlineDate(e)! > selectedIso).slice(0, 3);
   const formattedDate = new Intl.DateTimeFormat("it-IT", { weekday: "long", day: "numeric", month: "long", year: "numeric" }).format(parseCivilDate(selectedIso));
   return {
     isToday: selectedIso === todayIso,
@@ -805,35 +806,12 @@ export const TodayView: React.FC<TodayViewProps> = ({
 
             <div className="p-3 sm:p-4">
                 <div className="space-y-3">
-                  {dayDeadlines.map((d) => (
-                    <div
-                      key={d.id}
-                      className="p-3 rounded-lg border border-amber-300 bg-amber-50/60 space-y-1.5"
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <button
-                          onClick={() => onToggleComplete(d.id)}
-                          className="flex items-start space-x-2 text-left"
-                        >
-                          <Circle className="w-4 h-4 text-stone-400 mt-0.5 flex-shrink-0 hover:text-emerald-600 transition-colors" />
-                          <span className="text-xs font-semibold text-stone-900 leading-snug">{d.title}</span>
-                        </button>
-                      </div>
-
-                      <div className="flex items-center justify-between text-[11px] text-stone-500 pl-6">
-                        <span>Data limite: {formatCivilDateIt(d.date)}</span>
-                        {d.location && <span className="truncate max-w-[120px]">{d.location}</span>}
-                      </div>
-                    </div>
-                  ))}
-                  {dayDeadlines.length === 0 && nextDeadlines.length > 0 && (
-                    <p className="text-[11px] text-stone-400 font-medium px-1">Nessuna scadenza in questa data. Prossime:</p>
-                  )}
-                  {dayDeadlines.length === 0 &&
-                    nextDeadlines.map((d) => (
+                  {dayDeadlines.map((d) => {
+                    const deadline = effectiveDeadlineDate(d)!;
+                    return (
                       <div
                         key={d.id}
-                        className="p-3 rounded-lg border border-stone-200 hover:border-amber-300 transition-colors bg-stone-50/40 space-y-1.5"
+                        className="p-3 rounded-lg border border-amber-300 bg-amber-50/60 space-y-1.5"
                       >
                         <div className="flex items-start justify-between gap-2">
                           <button
@@ -845,12 +823,51 @@ export const TodayView: React.FC<TodayViewProps> = ({
                           </button>
                         </div>
 
-                        <div className="flex items-center justify-between text-[11px] text-stone-500 pl-6">
-                          <span>Data limite: {formatCivilDateIt(d.date)}</span>
+                        <div className="flex items-center justify-between text-[11px] text-stone-500 pl-6 gap-2">
+                          <div className="flex flex-wrap items-center gap-x-2">
+                            <span>Data limite: {formatCivilDateIt(deadline)}</span>
+                            {d.date !== deadline && (
+                              <span className="text-stone-400">Evento: {formatCivilDateIt(d.date)}</span>
+                            )}
+                          </div>
                           {d.location && <span className="truncate max-w-[120px]">{d.location}</span>}
                         </div>
                       </div>
-                    ))}
+                    );
+                  })}
+                  {dayDeadlines.length === 0 && nextDeadlines.length > 0 && (
+                    <p className="text-[11px] text-stone-400 font-medium px-1">Nessuna scadenza in questa data. Prossime:</p>
+                  )}
+                  {dayDeadlines.length === 0 &&
+                    nextDeadlines.map((d) => {
+                      const deadline = effectiveDeadlineDate(d)!;
+                      return (
+                        <div
+                          key={d.id}
+                          className="p-3 rounded-lg border border-stone-200 hover:border-amber-300 transition-colors bg-stone-50/40 space-y-1.5"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <button
+                              onClick={() => onToggleComplete(d.id)}
+                              className="flex items-start space-x-2 text-left"
+                            >
+                              <Circle className="w-4 h-4 text-stone-400 mt-0.5 flex-shrink-0 hover:text-emerald-600 transition-colors" />
+                              <span className="text-xs font-semibold text-stone-900 leading-snug">{d.title}</span>
+                            </button>
+                          </div>
+
+                          <div className="flex items-center justify-between text-[11px] text-stone-500 pl-6 gap-2">
+                            <div className="flex flex-wrap items-center gap-x-2">
+                              <span>Data limite: {formatCivilDateIt(deadline)}</span>
+                              {d.date !== deadline && (
+                                <span className="text-stone-400">Evento: {formatCivilDateIt(d.date)}</span>
+                              )}
+                            </div>
+                            {d.location && <span className="truncate max-w-[120px]">{d.location}</span>}
+                          </div>
+                        </div>
+                      );
+                    })}
                 </div>
             </div>
           </div>

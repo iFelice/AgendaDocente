@@ -390,6 +390,7 @@ test('TodayView shows the compact co-teaching line for lessons', async () => {
   await act(async () => {
     renderer = create(React.createElement(TodayView, {
       ...todayPropsBase,
+      initialDateIso: isoOfCurrentWeekday(lessonDay),
       profile: profileWith(),
       timetable: [supportLesson],
     }));

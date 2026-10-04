@@ -172,6 +172,10 @@ export const GROQ_CIRCULAR_RESPONSE_SCHEMA = {
               subject: { type: "string", description: "Materia se specificata o stringa vuota" },
               location: { type: "string", description: "Luogo indicato nel documento o stringa vuota" },
               notes: { type: "string", description: "Eventuali note o istruzioni (es. ordine del giorno, destinatari)" },
+              deadlineDate: {
+                type: "string",
+                description: "Data limite entro cui il docente deve completare un'azione (formato ISO YYYY-MM-DD). NON coincide automaticamente con la data dell'attività. Esempi: \"entro il 14 ottobre versare la quota\" -> deadlineDate 2026-10-14; \"il 26 novembre si svolgono i Giochi\" -> deadlineDate stringa vuota. Stringa vuota quando assente.",
+              },
               isDeadline: { type: "boolean", description: "True se è una scadenza perentoria o consegna entro una data" },
               relevance: {
                 type: "string",
@@ -201,6 +205,7 @@ export const GROQ_CIRCULAR_RESPONSE_SCHEMA = {
               "subject",
               "location",
               "notes",
+              "deadlineDate",
               "isDeadline",
               "relevance",
               "relevanceReason",
@@ -696,7 +701,8 @@ Non aggiungere attività, sedi, date, orari o sottocalendari da esempi o conosce
 Se un campo non è ricavabile, usa stringa vuota. Non inventare la durata.
 Per date senza anno usa il contesto dell'anno scolastico ${teacherProfile.schoolYear || "non specificato"}; se ambiguo lascia la data vuota.
 Date YYYY-MM-DD, orari HH:MM. Riporta classi, materia e destinatari espliciti.
-Le scadenze hanno isDeadline=true. Riporta in rawSnippet l'estratto esatto del documento.
+Distingui EVENTO da SCADENZA. Un evento indica quando qualcosa accade. Una scadenza indica entro quando il docente deve completare un'azione. Non classificare come scadenza una semplice attività prevista in una data. Usa deadlineDate solo quando il testo contiene un vincolo del tipo: "entro", "non oltre", "termine", "scadenza", "da consegnare entro", "da compilare entro", "versamento entro", ecc.
+Le scadenze hanno isDeadline=true e deadlineDate valorizzata. Riporta in rawSnippet l'estratto esatto del documento.
 Le attività annullate non sono nuovi eventi. Non trasformare una data di pubblicazione in un impegno.
 Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e dal docente.`;
 
@@ -870,6 +876,10 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
           subject: { type: Type.STRING, description: "Materia se specificata o stringa vuota" },
           location: { type: Type.STRING, description: "Luogo (es. Aula Magna, Google Meet, sede indicata nel documento)" },
           notes: { type: Type.STRING, description: "Eventuali note o istruzioni (es. ordine del giorno, destinatari)" },
+          deadlineDate: {
+            type: Type.STRING,
+            description: "Data limite entro cui il docente deve completare un'azione (formato ISO YYYY-MM-DD). NON coincide automaticamente con la data dell'attività. Esempi: \"entro il 14 ottobre versare la quota\" -> deadlineDate 2026-10-14, \"il 26 novembre si svolgono i Giochi\" -> deadlineDate vuota. Lascia stringa vuota se assente.",
+          },
           isDeadline: { type: Type.BOOLEAN, description: "True se è una scadenza perentoria o consegna entro una data" },
           relevance: {
             type: Type.STRING,
