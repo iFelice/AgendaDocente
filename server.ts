@@ -540,6 +540,29 @@ export const PDF_TEXT_GROQ_BUDGET_MS = 15_000;
 export const PDF_TEXT_GROQ_MIN_ATTEMPT_MS = 3_000;
 
 /**
+ * Budget MASSIMO del passaggio Gemini TEXT-ONLY sul testo estratto da un PDF
+ * digitale (C-PDF2), che si inserisce tra Groq text-only e il fallback finale
+ * sul PDF originale. Nessun nuovo deadline globale: il passaggio consuma il
+ * budget RESIDUO dei 45 s complessivi e il cap (insieme alla riserva
+ * `GEMINI_MIN_ATTEMPT_MS + GEMINI_RESPONSE_RESERVE_MS` sottratta a monte)
+ * garantisce che l'ultimo fallback sul PDF originale possa sempre ricevere un
+ * tentativo sensato. Resta sempre dentro `controller.signal`.
+ */
+export const PDF_TEXT_GEMINI_TEXT_BUDGET_MS = 15_000;
+
+/**
+ * Contesto aggiuntivo SOLO per il passaggio Gemini text-only sul testo
+ * estratto da un PDF (C-PDF2). Riutilizza il contratto/prompt circolari già
+ * esistente (base + `PDF_TEXT_PROMPT_HINT`): qui si chiarisce soltanto la
+ * natura dell'input, senza alcun contenuto specifico di un documento reale.
+ */
+export const PDF_EXTRACTED_TEXT_GEMINI_HINT =
+  "L'input fornito di seguito è il TESTO ESTRATTO LOCALMENTE da un PDF: il documento originale è un piano delle attività/attività scolastiche (impegni, riunioni, scadenze che riguardano i docenti).\n" +
+  "L'impaginazione originale, le tabelle e la formattazione grafica sono andate perse nell'estrazione: questa perdita NON è un motivo valido per restituire un array vuoto.\n" +
+  "Individua comunque gli impegni/eventi pertinenti al docente applicando le regole già indicate, usando righe e separatori di pagina presenti nel testo.\n" +
+  "Mantieni esattamente lo schema JSON richiesto.";
+
+/**
  * Istruzione aggiuntiva al prompt SOLO per il testo estratto da PDF
  * multipagina: non indebolisce le regole già presenti sulle tabelle, aggiunge
  * solo una cautela specifica al text-layer estratto (righe/colonne che il
@@ -683,6 +706,56 @@ export async function executeGroqCircularAnalysis(params: {
     rawText: groqRawText,
   };
 }
+
+/**
+ * Schema JSON dei risultati dell'analisi circolari: unico per TUTTI i
+ * passaggi Gemini della pipeline (PDF originale, varianti diagnostiche e il
+ * passaggio text-only C-PDF2 sul testo estratto), così il contratto
+ * `ExtractedItem` resta identico senza duplicazioni.
+ */
+export const CIRCULAR_RESPONSE_SCHEMA = {
+  type: Type.ARRAY,
+  description: "Elenco degli impegni estratti dalla circolare",
+  items: {
+    type: Type.OBJECT,
+    properties: {
+      title: { type: Type.STRING, description: "Titolo chiaro e descrittivo dell'impegno" },
+      category: {
+        type: Type.STRING,
+        description: "Categoria: consiglio_classe, collegio_docenti, dipartimento, riunione, formazione, scadenza, promemoria, ricevimento_genitori, lezione, personale. Usa lezione SOLO per una vera attività di insegnamento specifica (es. lezione di recupero, lezione aperta o lezione straordinaria), NON solo perché avviene durante l'orario scolastico. Usa promemoria per attività/eventi scolastici da ricordare senza categoria più specifica, come svolgimento di giochi matematici, gara didattica, progetto scolastico, attività speciale, giornata tematica, manifestazione, divieto di organizzare uscite o attività didattica straordinaria.",
+      },
+      date: { type: Type.STRING, description: "Data in formato ISO YYYY-MM-DD" },
+      startTime: { type: Type.STRING, description: "Ora inizio in formato HH:MM (es. 09:00 o 10:45). Vuota se il documento non supporta un orario per questo blocco; mai ereditato da righe adiacenti." },
+      endTime: { type: Type.STRING, description: "Ora fine in formato HH:MM (es. 12:00 o 12:45). Deve essere successiva a startTime: se non lo è, lascia vuoto startTime/endTime." },
+      className: { type: Type.STRING, description: "Sigla classe COMPLETA (anno + sezione) solo se presente nel documento (es. 1A, 2E, III E -> 3E), altrimenti stringa vuota. Non convertire numeri romani di anno di corso in sigle classe inventate: \"classi IV\" indica il quarto anno, NON la classe \"1V\" o \"4V\"." },
+      subject: { type: Type.STRING, description: "Materia se specificata o stringa vuota" },
+      location: { type: Type.STRING, description: "Luogo (es. Aula Magna, Google Meet, sede indicata nel documento)" },
+      notes: { type: Type.STRING, description: "Eventuali note o istruzioni (es. ordine del giorno, destinatari)" },
+      deadlineDate: {
+        type: Type.STRING,
+        description: "Data limite entro cui il docente deve completare un'azione (formato ISO YYYY-MM-DD). NON coincide automaticamente con la data dell'attività. Esempi: \"entro il 14 ottobre versare la quota\" -> deadlineDate 2026-10-14, \"il 26 novembre si svolgono i Giochi\" -> deadlineDate vuota. Lascia stringa vuota se assente.",
+      },
+      isDeadline: { type: Type.BOOLEAN, description: "True se è una scadenza perentoria o consegna entro una data" },
+      relevance: {
+        type: Type.STRING,
+        description: "VERDE (pertinente al docente), GIALLO (collegiale/generale), ROSSO (altre classi/materie/ordini)",
+      },
+      relevanceReason: { type: Type.STRING, description: "Spiegazione sintetica del perché è VERDE, GIALLO o ROSSO" },
+      rawSnippet: { type: Type.STRING, description: "Frase originale o riga di tabella da cui è estratto l'impegno" },
+      recipientGrades: {
+        type: Type.ARRAY,
+        items: { type: Type.INTEGER },
+        description: "Anni di corso destinatari dell'attività (interi 1..5), anche quando dichiarati nell'intestazione o nel paragrafo generale collegato e non ripetuti nella stessa riga dell'evento. Esempi: \"classi I e III\" -> [1,3]; \"classi seconde\" -> [2]; \"classi I, II e III\" -> [1,2,3]. NON trasformare questi anni in sigle di classe. Array vuoto se assenti.",
+      },
+      recipientClasses: {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+        description: "Classi COMPLETE (anno + sezione) destinatarie dell'attività, in formato canonico. Esempi: \"classe III E\" -> [\"3E\"]; \"3D e 1C\" -> [\"3D\",\"1C\"]. Solo classi complete, mai anni di corso senza sezione. Array vuoto se assenti.",
+      },
+    },
+    required: ["title", "category", "date", "startTime", "endTime", "relevance", "relevanceReason"],
+  },
+};
 
 app.post("/api/analyze-circular", ...circularAnalysisGuards(), async (req, res) => {
   const controller = new AbortController();
@@ -930,6 +1003,79 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
           console.log(`[AI Circolari PDF] primary=groq-text esito=skipped categoria=budget-insufficiente`);
         }
 
+        // -------------------------------------------------------------------
+        // C-PDF2: Groq ha prodotto 0 elementi utili (o è fallito). PRIMA del
+        // PDF originale si tenta Gemini TEXT-ONLY sullo STESSO testo già
+        // estratto localmente (nessun nuovo recupero del PDF). Il PDF
+        // originale resta l'ULTIMO fallback: parte solo se anche questo
+        // passaggio fallisce o produce 0 elementi utili.
+        // -------------------------------------------------------------------
+        if (fallbackFrom === "groq-pdf-text") {
+          const remainingBeforeTextMs = CIRCULAR_ANALYSIS_TIMEOUT_MS - (Date.now() - startedAt);
+          // Budget RESIDUO dei 45s complessivi, con cap e riserva che
+          // garantiscono un tentativo sensato all'ultimo fallback sul PDF
+          // originale (stesso schema del cap Groq, nessun nuovo deadline).
+          const geminiTextBudgetMs = Math.min(
+            PDF_TEXT_GEMINI_TEXT_BUDGET_MS,
+            Math.max(0, remainingBeforeTextMs - GEMINI_MIN_ATTEMPT_MS - GEMINI_RESPONSE_RESERVE_MS),
+          );
+          if (geminiAttemptTimeoutMs(geminiTextBudgetMs) > 0) {
+            console.log(`[AI Circolari PDF] fallback=gemini-text-extracted budgetMs=${geminiTextBudgetMs}`);
+            const geminiTextStartedAt = Date.now();
+            const textRun = await runGeminiJson({
+              systemInstruction: `${baseSystemInstruction}\n${PDF_TEXT_PROMPT_HINT}\n${PDF_EXTRACTED_TEXT_GEMINI_HINT}\nRestituisci soltanto l'array JSON richiesto.`,
+              contents: [{ text: `Testo estratto dal PDF:\n${extraction.text}` }],
+              responseSchema: CIRCULAR_RESPONSE_SCHEMA,
+              signal: controller.signal,
+              label: "AI Circolari PDF-Text",
+              budgetMs: geminiTextBudgetMs,
+              thinkingLevel: "low",
+              models: geminiCandidateModels(),
+              // Budget intermedio stretto: un solo tentativo per modello, il
+              // retry appartiene all'ultimo fallback sul PDF originale.
+              maxAttemptsPerModel: 1,
+            });
+            const geminiTextDurationMs = Date.now() - geminiTextStartedAt;
+            const textModel = textRun.attempts[textRun.attempts.length - 1]?.model || geminiCandidateModels()[0];
+            const textTentativi = summarizeGeminiAttempts(textRun.attempts);
+            const textDecoded = textRun.ok ? parseGeminiJson(textRun.text, "AI Circolari PDF-Text") : { ok: false as const };
+            if (textRun.ok && textDecoded.ok && Array.isArray(textDecoded.value)) {
+              let items: any[] = [];
+              let normOk = false;
+              try {
+                items = normalizeExtractedItems(textDecoded.value as any[], teacherProfile, effectiveCampus);
+                normOk = true;
+              } catch {
+                normOk = false;
+              }
+              if (normOk && items.length > 0) {
+                console.log(`[AI Circolari PDF] fallback=gemini-text-extracted model=${textModel} esito=ok durationMs=${geminiTextDurationMs} items=${items.length}`);
+                logOutcome({ provider: "gemini", fallbackFrom, esito: "ok", categoria: "ok", sorgente: textRun.source, tentativi: textTentativi, status: 200 });
+                return res.json({
+                  success: true,
+                  source: textRun.source,
+                  items,
+                });
+              }
+              if (normOk) {
+                // Risposta formalmente valida ma [] (o tutto scartato): il
+                // fallback continua, esattamente come nel fix C-PDF1.1.
+                console.log(`[AI Circolari PDF] fallback=gemini-text-extracted model=${textModel} esito=empty categoria=zero-items durationMs=${geminiTextDurationMs} items=0`);
+                logOutcome({ provider: "gemini", fallbackFrom, esito: "vuoto", categoria: "zero-items", sorgente: textRun.source, tentativi: textTentativi, status: 200 });
+              } else {
+                console.log(`[AI Circolari PDF] fallback=gemini-text-extracted model=${textModel} esito=failed categoria=normalizzazione-fallita durationMs=${geminiTextDurationMs}`);
+                logOutcome({ provider: "gemini", fallbackFrom, esito: "fallito", errorCode: "AI_UNAVAILABLE", categoria: "normalizzazione-fallita", tentativi: textTentativi, status: 503 });
+              }
+            } else {
+              const textCategoria = textRun.ok ? "json-non-valido" : textRun.category;
+              console.log(`[AI Circolari PDF] fallback=gemini-text-extracted model=${textModel} esito=failed categoria=${textCategoria} durationMs=${geminiTextDurationMs}`);
+              logOutcome({ provider: "gemini", fallbackFrom, esito: "fallito", errorCode: "AI_UNAVAILABLE", categoria: textCategoria, tentativi: textTentativi, status: 503 });
+            }
+          } else {
+            console.log(`[AI Circolari PDF] fallback=gemini-text-extracted esito=skipped categoria=budget-insufficiente`);
+          }
+        }
+
         // Punto 12: budget UNICO dei 45s. Gemini riceve SOLO il tempo residuo
         // utile; se non ne resta abbastanza per un tentativo sensato si
         // risponde con l'errore cloud esistente, senza avviare un tentativo
@@ -997,52 +1143,8 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
 
     contents.push({ text: promptText });
 
-    const responseSchema = {
-      type: Type.ARRAY,
-      description: "Elenco degli impegni estratti dalla circolare",
-      items: {
-        type: Type.OBJECT,
-        properties: {
-          title: { type: Type.STRING, description: "Titolo chiaro e descrittivo dell'impegno" },
-          category: {
-            type: Type.STRING,
-            description: "Categoria: consiglio_classe, collegio_docenti, dipartimento, riunione, formazione, scadenza, promemoria, ricevimento_genitori, lezione, personale. Usa lezione SOLO per una vera attività di insegnamento specifica (es. lezione di recupero, lezione aperta o lezione straordinaria), NON solo perché avviene durante l'orario scolastico. Usa promemoria per attività/eventi scolastici da ricordare senza categoria più specifica, come svolgimento di giochi matematici, gara didattica, progetto scolastico, attività speciale, giornata tematica, manifestazione, divieto di organizzare uscite o attività didattica straordinaria.",
-          },
-          date: { type: Type.STRING, description: "Data in formato ISO YYYY-MM-DD" },
-          startTime: { type: Type.STRING, description: "Ora inizio in formato HH:MM (es. 09:00 o 10:45). Vuota se il documento non supporta un orario per questo blocco; mai ereditato da righe adiacenti." },
-          endTime: { type: Type.STRING, description: "Ora fine in formato HH:MM (es. 12:00 o 12:45). Deve essere successiva a startTime: se non lo è, lascia vuoto startTime/endTime." },
-          className: { type: Type.STRING, description: "Sigla classe COMPLETA (anno + sezione) solo se presente nel documento (es. 1A, 2E, III E -> 3E), altrimenti stringa vuota. Non convertire numeri romani di anno di corso in sigle classe inventate: \"classi IV\" indica il quarto anno, NON la classe \"1V\" o \"4V\"." },
-          subject: { type: Type.STRING, description: "Materia se specificata o stringa vuota" },
-          location: { type: Type.STRING, description: "Luogo (es. Aula Magna, Google Meet, sede indicata nel documento)" },
-          notes: { type: Type.STRING, description: "Eventuali note o istruzioni (es. ordine del giorno, destinatari)" },
-          deadlineDate: {
-            type: Type.STRING,
-            description: "Data limite entro cui il docente deve completare un'azione (formato ISO YYYY-MM-DD). NON coincide automaticamente con la data dell'attività. Esempi: \"entro il 14 ottobre versare la quota\" -> deadlineDate 2026-10-14, \"il 26 novembre si svolgono i Giochi\" -> deadlineDate vuota. Lascia stringa vuota se assente.",
-          },
-          isDeadline: { type: Type.BOOLEAN, description: "True se è una scadenza perentoria o consegna entro una data" },
-          relevance: {
-            type: Type.STRING,
-            description: "VERDE (pertinente al docente), GIALLO (collegiale/generale), ROSSO (altre classi/materie/ordini)",
-          },
-          relevanceReason: { type: Type.STRING, description: "Spiegazione sintetica del perché è VERDE, GIALLO o ROSSO" },
-          rawSnippet: { type: Type.STRING, description: "Frase originale o riga di tabella da cui è estratto l'impegno" },
-          recipientGrades: {
-            type: Type.ARRAY,
-            items: { type: Type.INTEGER },
-            description: "Anni di corso destinatari dell'attività (interi 1..5), anche quando dichiarati nell'intestazione o nel paragrafo generale collegato e non ripetuti nella stessa riga dell'evento. Esempi: \"classi I e III\" -> [1,3]; \"classi seconde\" -> [2]; \"classi I, II e III\" -> [1,2,3]. NON trasformare questi anni in sigle di classe. Array vuoto se assenti.",
-          },
-          recipientClasses: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-            description: "Classi COMPLETE (anno + sezione) destinatarie dell'attività, in formato canonico. Esempi: \"classe III E\" -> [\"3E\"]; \"3D e 1C\" -> [\"3D\",\"1C\"]. Solo classi complete, mai anni di corso senza sezione. Array vuoto se assenti.",
-          },
-        },
-        required: ["title", "category", "date", "startTime", "endTime", "relevance", "relevanceReason"],
-      },
-    };
-
     const effectiveSystemInstruction = variant === "A" ? undefined : systemInstruction;
-    const effectiveSchema = (variant === "A" || variant === "B") ? undefined : responseSchema;
+    const effectiveSchema = (variant === "A" || variant === "B") ? undefined : CIRCULAR_RESPONSE_SCHEMA;
     const effectiveMimeType = variant === "A" ? null : "application/json";
     const effectiveThinking = variant === "C" ? undefined : "low";
     const effectiveModels = variant === "D" ? geminiCandidateModels() : ["gemini-3.8-flash"];
