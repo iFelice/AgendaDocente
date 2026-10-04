@@ -455,7 +455,10 @@ export async function runGeminiJson(opts: RunGeminiJsonOptions): Promise<GeminiJ
       const remainingMs = opts.budgetMs - (now() - startedAt);
       if (geminiAttemptTimeoutMs(remainingMs) === 0) return failed(attempts.length === 0 ? "budget-esaurito" : lastCategory, "budget di tempo terminato");
       // Il tentativo non supera MAI la quota del modello: il tempo restante è del fallback.
-      const timeoutMs = Math.min(geminiAttemptTimeoutMs(remainingMs), modelBudgetMs - (now() - modelStartedAt));
+      const rawTimeoutMs = degradeRetry
+        ? Math.min(geminiAttemptTimeoutMs(remainingMs), Math.max(modelBudgetMs - (now() - modelStartedAt), GEMINI_MIN_ATTEMPT_MS))
+        : Math.min(geminiAttemptTimeoutMs(remainingMs), modelBudgetMs - (now() - modelStartedAt));
+      const timeoutMs = Math.min(geminiAttemptTimeoutMs(remainingMs), rawTimeoutMs);
       if (timeoutMs < GEMINI_MIN_ATTEMPT_MS - 500) break; // quota esaurita: testimone al modello successivo
       if (attempt >= 2 && timeoutMs < GEMINI_RETRY_MIN_ATTEMPT_MS) {
         // Retry da pochi secondi: mai una micro-cascata. Si lascia il tempo al modello
@@ -480,6 +483,7 @@ export async function runGeminiJson(opts: RunGeminiJsonOptions): Promise<GeminiJ
         // 400 con thinkingLevel: riprova subito lo stesso modello senza di esso.
         useThinking = false;
         degradeRetry = true;
+        opts.thinkingLevel = undefined;
         continue;
       }
       if (category === "chiave-o-permessi" || category === "richiesta-non-valida" || category === "non-configurato") {
