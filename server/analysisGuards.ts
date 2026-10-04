@@ -13,7 +13,7 @@ import { isValidTime } from '../src/utils/dates';
  */
 
 export const ANALYSIS_LIMITS = { textChars: 100_000, fileBytes: 5 * 1024 * 1024, jsonBytes: 8 * 1024 * 1024 };
-export const supportedFiles = ['application/pdf', 'image/png', 'image/jpeg', 'image/webp'];
+export const supportedFiles = ['application/pdf', 'image/png', 'image/jpeg', 'image/webp', 'image/heic', 'image/heif'];
 
 const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const text = (v: unknown, max = 256): v is string => typeof v === 'string' && v.length <= max;
@@ -120,9 +120,12 @@ const invalid = () => { throw new AnalysisInputError(400, 'Richiesta di analisi 
  */
 export function payloadMatchesSignature(mimeType: string, bytes: Buffer): boolean {
   if (mimeType === 'application/pdf') return bytes.subarray(0, 5).toString() === '%PDF-';
-  if (mimeType === 'image/png') return bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
-  if (mimeType === 'image/jpeg') return bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
+  if (mimeType === 'image/png' || mimeType === 'image/x-png') return bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  if (mimeType === 'image/jpeg' || mimeType === 'image/jpg' || mimeType === 'image/pjpeg') return bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
   if (mimeType === 'image/webp') return bytes.subarray(0, 4).toString() === 'RIFF' && bytes.subarray(8, 12).toString() === 'WEBP';
+  if (mimeType === 'image/heic' || mimeType === 'image/heif') {
+    return bytes.length >= 12 && bytes.subarray(4, 8).toString() === 'ftyp';
+  }
   return false;
 }
 
@@ -132,6 +135,11 @@ export function payloadMatchesSignature(mimeType: string, bytes: Buffer): boolea
  */
 export function validateImageFields(body: Record<string, unknown>): void {
   if (!record(body)) return invalid();
+  if (typeof body.mimeType === 'string') {
+    const m = body.mimeType.toLowerCase();
+    if (m === 'image/jpg' || m === 'image/pjpeg') body.mimeType = 'image/jpeg';
+    else if (m === 'image/x-png') body.mimeType = 'image/png';
+  }
   if (!optional(body.mimeType, v => text(v, 64))) return invalid();
   if (body.mimeType !== undefined && !supportedFiles.includes(body.mimeType as string)) {
     throw new AnalysisInputError(415, 'Formato non supportato. Usa PDF, PNG, JPEG o WebP.');

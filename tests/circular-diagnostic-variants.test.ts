@@ -978,3 +978,177 @@ test('15. I log di routing e fallback non contengono mai base64, prompt, OCR, ch
     await new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())));
   }
 });
+
+// ---------------------------------------------------------------------------
+// 16. Groq restituisce 0 items su immagine JPEG -> fallback a Gemini
+// ---------------------------------------------------------------------------
+
+test('16. Groq restituisce 0 items su immagine JPEG -> fallback a Gemini (provider=gemini fallbackFrom=groq)', async () => {
+  const saved = {
+    GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT: process.env.GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT,
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+    GROQ_API_KEY: process.env.GROQ_API_KEY,
+  };
+
+  delete process.env.GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT;
+  process.env.GEMINI_API_KEY = 'AIzaSy_FAKE_TEST_KEY';
+  process.env.GROQ_API_KEY = 'gsk_TEST_GROQ_KEY_123';
+
+  let geminiCalls = 0;
+  let groqCalls = 0;
+
+  const originalFetch = globalThis.fetch;
+  const server = app.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const port = (server.address() as { port: number }).port;
+  const url = `http://127.0.0.1:${port}/api/analyze-circular`;
+
+  globalThis.fetch = (async (inputUrl: any, opts: any) => {
+    const sUrl = inputUrl.toString();
+    if (sUrl.includes('api.groq.com')) {
+      groqCalls++;
+      // Groq restituisce successo formale ma array vuoto (nessun impegno estratto da Qwen vision)
+      return groqMockResponse(JSON.stringify({ items: [] }));
+    }
+    if (sUrl.includes('generativelanguage.googleapis.com')) {
+      geminiCalls++;
+      return geminiMockResponse(JSON.stringify([sampleItem]));
+    }
+    return originalFetch(inputUrl, opts);
+  }) as typeof fetch;
+
+  try {
+    const res = await originalFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        imageBase64: jpegBase64,
+        mimeType: 'image/jpeg',
+        profile: validProfile,
+      }),
+    });
+
+    assert.equal(res.status, 200);
+    const json: any = await res.json();
+    assert.equal(json.success, true);
+    assert.equal(json.source, 'gemini-3.8-flash');
+    assert.equal(json.items.length, 1);
+    assert.equal(groqCalls, 1, 'Groq primario tentato');
+    assert.equal(geminiCalls, 1, 'Gemini fallback chiamato dopo 0 items di Groq');
+  } finally {
+    restoreEnv(saved);
+    globalThis.fetch = originalFetch;
+    await new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())));
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 17. mimeType image/jpg e image/pjpeg sono accettati e normalizzati
+// ---------------------------------------------------------------------------
+
+test('17. mimeType image/jpg e image/pjpeg sono accettati e normalizzati senza errore 415', async () => {
+  const saved = {
+    GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT: process.env.GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT,
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+    GROQ_API_KEY: process.env.GROQ_API_KEY,
+  };
+
+  delete process.env.GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT;
+  process.env.GEMINI_API_KEY = 'AIzaSy_FAKE_TEST_KEY';
+  process.env.GROQ_API_KEY = 'gsk_TEST_GROQ_KEY_123';
+
+  const originalFetch = globalThis.fetch;
+  const server = app.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const port = (server.address() as { port: number }).port;
+  const url = `http://127.0.0.1:${port}/api/analyze-circular`;
+
+  globalThis.fetch = (async (inputUrl: any, opts: any) => {
+    const sUrl = inputUrl.toString();
+    if (sUrl.includes('api.groq.com')) {
+      return groqMockResponse(JSON.stringify({ items: [sampleItem] }));
+    }
+    return originalFetch(inputUrl, opts);
+  }) as typeof fetch;
+
+  try {
+    const res = await originalFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        imageBase64: jpegBase64,
+        mimeType: 'image/jpg',
+        profile: validProfile,
+      }),
+    });
+
+    assert.equal(res.status, 200);
+    const json: any = await res.json();
+    assert.equal(json.success, true);
+    assert.equal(json.items.length, 1);
+  } finally {
+    restoreEnv(saved);
+    globalThis.fetch = originalFetch;
+    await new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())));
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 18. Apple HEIC: accettato e inviato a Gemini senza errori
+// ---------------------------------------------------------------------------
+
+test('18. Apple HEIC: accettato e inviato a Gemini senza errori', async () => {
+  const heicBase64 = Buffer.from([
+    0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, // size + ftyp
+    0x68, 0x65, 0x69, 0x63, 0x00, 0x00, 0x00, 0x00, // heic
+    0x6d, 0x69, 0x66, 0x31, 0x68, 0x65, 0x69, 0x63, // mif1heic
+  ]).toString('base64');
+
+  const saved = {
+    GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT: process.env.GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT,
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+    GROQ_API_KEY: process.env.GROQ_API_KEY,
+  };
+
+  delete process.env.GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT;
+  process.env.GEMINI_API_KEY = 'AIzaSy_FAKE_TEST_KEY';
+  process.env.GROQ_API_KEY = 'gsk_TEST_GROQ_KEY_123';
+
+  let geminiCalls = 0;
+  const originalFetch = globalThis.fetch;
+  const server = app.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const port = (server.address() as { port: number }).port;
+  const url = `http://127.0.0.1:${port}/api/analyze-circular`;
+
+  globalThis.fetch = (async (inputUrl: any, opts: any) => {
+    const sUrl = inputUrl.toString();
+    if (sUrl.includes('generativelanguage.googleapis.com')) {
+      geminiCalls++;
+      return geminiMockResponse(JSON.stringify([sampleItem]));
+    }
+    return originalFetch(inputUrl, opts);
+  }) as typeof fetch;
+
+  try {
+    const res = await originalFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        imageBase64: heicBase64,
+        mimeType: 'image/heic',
+        profile: validProfile,
+      }),
+    });
+
+    assert.equal(res.status, 200);
+    const json: any = await res.json();
+    assert.equal(json.success, true);
+    assert.equal(json.items.length, 1);
+    assert.equal(geminiCalls, 1);
+  } finally {
+    restoreEnv(saved);
+    globalThis.fetch = originalFetch;
+    await new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())));
+  }
+});

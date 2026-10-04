@@ -1356,6 +1356,8 @@ test('matching studenti: nessun nuovo studente creato (solo selezione dall\'elen
 test('privacy: validazione file per la scansione (formati e 5MB coerenti con il server)', () => {
   assert.equal(documentFileError({ name: 'foto.jpg', type: 'image/jpeg', size: 100_000 }), null);
   assert.equal(documentFileError({ name: 'doc.pdf', type: 'application/pdf', size: 10_000 }), null);
+  assert.equal(documentFileError({ name: 'iphone.heic', type: 'image/heic', size: 100_000 }), null);
+  assert.equal(documentFileError({ name: 'iphone.heic', type: '', size: 100_000 }), null);
   assert.match(documentFileError({ name: 'note.docx', type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', size: 1000 })!, /non supportato/i);
   assert.match(documentFileError({ name: 'foto.jpg', type: 'image/jpeg', size: MAX_DOCUMENT_BYTES + 1 })!, /5 MB/i);
   assert.equal(formatFileSize(1500), '1 KB');
