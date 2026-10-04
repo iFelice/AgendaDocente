@@ -198,29 +198,36 @@ export const EventModal: React.FC<EventModalProps> = ({
     }
   };
 
-  const buildCurrentEvent = (): CalendarEvent => ({
-    ...eventToEdit,
-    ...linkedEvent,
-    id: eventToEdit ? eventToEdit.id : linkedEvent?.id || `ev-${Date.now()}`,
-    title: title.trim(), category, date,
-    deadlineDate: hasDeadline && deadlineDate ? deadlineDate : undefined,
-    startTime: isAllDay ? undefined : startTime,
-    endTime: isAllDay ? undefined : endTime,
-    isAllDay,
-    className: className.trim() || undefined,
-    subject: subject.trim() || undefined,
-    location: location.trim() || undefined,
-    notes: notes.trim() || undefined,
-    sourceType: eventToEdit?.sourceType || "manuale",
-    completed: eventToEdit?.completed || false,
-    syncedWithGoogle: isGoogleSourcedEvent ? false : (linkedEvent?.syncedWithGoogle ?? eventToEdit?.syncedWithGoogle ?? false),
-  });
+  const buildCurrentEvent = (): CalendarEvent => {
+    const isDeadlined = category === "scadenza" || hasDeadline;
+    const effectiveDeadline = isDeadlined && deadlineDate ? deadlineDate : (category === "scadenza" ? date : undefined);
+    return {
+      ...eventToEdit,
+      ...linkedEvent,
+      id: eventToEdit ? eventToEdit.id : linkedEvent?.id || `ev-${Date.now()}`,
+      title: title.trim(),
+      category,
+      date,
+      deadlineDate: effectiveDeadline,
+      startTime: isAllDay ? undefined : startTime,
+      endTime: isAllDay ? undefined : endTime,
+      isAllDay,
+      className: className.trim() || undefined,
+      subject: subject.trim() || undefined,
+      location: location.trim() || undefined,
+      notes: notes.trim() || undefined,
+      sourceType: eventToEdit?.sourceType || "manuale",
+      completed: eventToEdit?.completed || false,
+      syncedWithGoogle: isGoogleSourcedEvent ? false : (linkedEvent?.syncedWithGoogle ?? eventToEdit?.syncedWithGoogle ?? false),
+    };
+  };
 
   const validateCurrentEvent = () => {
     if (!title.trim()) { setValidationError("Inserisci un titolo."); return false; }
     const error = eventDateError({ date, startTime, endTime, isAllDay });
     if (error) { setValidationError(error); return false; }
-    if (hasDeadline && (!deadlineDate || !isValidDate(deadlineDate))) {
+    const isDeadlined = category === "scadenza" || hasDeadline;
+    if (isDeadlined && (!deadlineDate || !isValidDate(deadlineDate))) {
       setValidationError("Inserisci una data limite valida per la scadenza.");
       return false;
     }
@@ -364,11 +371,13 @@ export const EventModal: React.FC<EventModalProps> = ({
           {/* Deadline Section */}
           <div className="p-3 bg-stone-50 rounded-xl border border-stone-200 space-y-2">
             <div className="flex items-center min-h-[32px]">
-              <label className="flex items-center space-x-2 text-stone-700 cursor-pointer">
+              <label className={`flex items-center space-x-2 text-stone-700 ${category === "scadenza" ? "cursor-not-allowed opacity-90" : "cursor-pointer"}`}>
                 <input
                   type="checkbox"
-                  checked={hasDeadline}
+                  checked={category === "scadenza" ? true : hasDeadline}
+                  disabled={category === "scadenza"}
                   onChange={(e) => {
+                    if (category === "scadenza") return;
                     const checked = e.target.checked;
                     setHasDeadline(checked);
                     if (checked && !deadlineDate) {
@@ -380,13 +389,18 @@ export const EventModal: React.FC<EventModalProps> = ({
                 <span className="font-semibold text-stone-800">Ha una scadenza</span>
               </label>
             </div>
+            {category === "scadenza" && (
+              <p className="text-[11px] text-stone-500">
+                La tipologia “Scadenza Istituzionale” richiede una data limite.
+              </p>
+            )}
 
-            {hasDeadline && (
+            {(category === "scadenza" || hasDeadline) && (
               <div className="pt-1">
                 <label className="block font-semibold text-stone-700 mb-1">Data limite *</label>
                 <input
                   type="date"
-                  required={hasDeadline}
+                  required={category === "scadenza" || hasDeadline}
                   value={deadlineDate}
                   onChange={(e) => setDeadlineDate(e.target.value)}
                   className="w-full sm:w-auto p-2 border border-stone-300 rounded-lg text-xs bg-white focus:ring-1 focus:ring-emerald-600 focus:border-emerald-600"

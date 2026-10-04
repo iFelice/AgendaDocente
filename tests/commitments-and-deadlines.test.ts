@@ -9,6 +9,8 @@ import { TodayView, selectDayAgenda } from '../src/components/TodayView';
 import { EventModal } from '../src/components/EventModal';
 import { deriveFutureCommitments } from '../src/utils/futureCommitments';
 import { convertExtractedItemToEvent } from '../src/services/storage';
+import { findPossibleEventUpdate, getEventFieldDiff } from '../src/utils/eventMatching';
+import { CircularAnalyzerModal } from '../src/components/CircularAnalyzerModal';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -457,3 +459,212 @@ test('15. category scadenza auto-attiva deadline', async () => {
   assert.equal((savedEvent as any).category, 'scadenza');
   assert.ok((savedEvent as any).deadlineDate, 'deadlineDate è valorizzata');
 });
+
+// ---------------------------------------------------------------------------
+// 16. Test update circolare: aggiunta deadline e diff
+// ---------------------------------------------------------------------------
+test('16. update circolare: rilevamento e aggiunta deadline via matching diff', () => {
+  const existing = makeEvent({
+    id: 'ev-prisma',
+    title: 'Versamento quota Prisma',
+    category: 'promemoria',
+    date: '2026-10-14',
+    deadlineDate: undefined,
+  });
+
+  const candidate: Parameters<typeof getEventFieldDiff>[1] = {
+    title: 'Versamento quota Prisma',
+    date: '2026-10-14',
+    category: 'promemoria',
+    deadlineDate: '2026-10-14',
+    isDeadline: true,
+  };
+
+  const diff = getEventFieldDiff(existing, candidate);
+  assert.equal(diff.deadlineDate, true, 'diff.deadlineDate deve essere true quando il candidato introduce una deadline');
+  assert.equal(diff.title, false);
+  assert.equal(diff.date, false);
+
+  const updatedDeadlineDate = candidate.deadlineDate || (candidate.isDeadline === true ? candidate.date : undefined);
+  const updatedEvent: CalendarEvent = {
+    ...existing,
+    deadlineDate: updatedDeadlineDate,
+  };
+  assert.equal(updatedEvent.deadlineDate, '2026-10-14');
+  assert.equal(effectiveDeadlineDate(updatedEvent), '2026-10-14');
+});
+
+// ---------------------------------------------------------------------------
+// 17. Test update circolare: rimozione deadline obsoleta
+// ---------------------------------------------------------------------------
+test('17. update circolare: rimozione deadline obsoleta quando circolare non ha deadline', () => {
+  const existing = makeEvent({
+    id: 'ev-prisma',
+    title: 'Versamento quota Prisma',
+    category: 'promemoria',
+    date: '2026-10-14',
+    deadlineDate: '2026-10-14',
+  });
+
+  const candidate: Parameters<typeof getEventFieldDiff>[1] = {
+    title: 'Versamento quota Prisma',
+    date: '2026-10-14',
+    category: 'promemoria',
+    deadlineDate: undefined,
+    isDeadline: false,
+  };
+
+  const diff = getEventFieldDiff(existing, candidate);
+  assert.equal(diff.deadlineDate, true, 'diff.deadlineDate deve essere true quando il candidato non ha più deadline');
+
+  const updatedDeadlineDate = candidate.deadlineDate || (candidate.isDeadline === true ? candidate.date : undefined);
+  const updatedEvent: CalendarEvent = {
+    ...existing,
+    deadlineDate: updatedDeadlineDate,
+  };
+  assert.equal(updatedEvent.deadlineDate, undefined, 'deadlineDate deve essere rimossa (undefined)');
+  assert.equal(effectiveDeadlineDate(updatedEvent), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// 18. EventModal: category=scadenza disabilita la checkbox e la mantiene checked
+// ---------------------------------------------------------------------------
+test('18. EventModal: category=scadenza mantiene la checkbox checked e disabilitata', async () => {
+  let renderer: any;
+
+  await act(async () => {
+    renderer = create(React.createElement(EventModal, {
+      isOpen: true,
+      onClose: () => {},
+      eventToEdit: null,
+      profile,
+      onSave: () => {},
+    }));
+  });
+
+  const buttons = renderer.root.findAll((n: any) => n.type === 'button');
+  const scadenzaBtn = buttons.find((b: any) => textOf(b).includes('Scadenza Istituzionale'));
+  assert.ok(scadenzaBtn);
+
+  await act(async () => { scadenzaBtn.props.onClick(); });
+
+  const deadlineCheckbox = renderer.root.find((n: any) => n.type === 'input' && n.props.type === 'checkbox' && n.props.className?.includes('text-rose-700'));
+  assert.equal(deadlineCheckbox.props.checked, true);
+  assert.equal(deadlineCheckbox.props.disabled, true, 'la checkbox deve essere disabled quando category === "scadenza"');
+
+  const text = textOf(renderer);
+  assert.ok(text.includes('richiede una data limite'), 'mostra la nota esplicativa');
+});
+
+// ---------------------------------------------------------------------------
+// 19. EventModal: passaggio da Scadenza a GLO riabilita la checkbox e preserva deadline
+// ---------------------------------------------------------------------------
+test('19. EventModal: cambio da scadenza a GLO riabilita la checkbox e mantiene la deadline', async () => {
+  let renderer: any;
+
+  await act(async () => {
+    renderer = create(React.createElement(EventModal, {
+      isOpen: true,
+      onClose: () => {},
+      eventToEdit: null,
+      profile,
+      onSave: () => {},
+    }));
+  });
+
+  const buttons = renderer.root.findAll((n: any) => n.type === 'button');
+  const scadenzaBtn = buttons.find((b: any) => textOf(b).includes('Scadenza Istituzionale'));
+  const gloBtn = buttons.find((b: any) => textOf(b).includes('G.L.O.'));
+  assert.ok(scadenzaBtn);
+  assert.ok(gloBtn);
+
+  // Seleziona prima Scadenza
+  await act(async () => { scadenzaBtn.props.onClick(); });
+
+  let deadlineCheckbox = renderer.root.find((n: any) => n.type === 'input' && n.props.type === 'checkbox' && n.props.className?.includes('text-rose-700'));
+  assert.equal(deadlineCheckbox.props.checked, true);
+  assert.equal(deadlineCheckbox.props.disabled, true);
+
+  // Passa a GLO
+  await act(async () => { gloBtn.props.onClick(); });
+
+  deadlineCheckbox = renderer.root.find((n: any) => n.type === 'input' && n.props.type === 'checkbox' && n.props.className?.includes('text-rose-700'));
+  assert.equal(deadlineCheckbox.props.checked, true, 'la deadline rimane attiva al passaggio a GLO');
+  assert.equal(deadlineCheckbox.props.disabled, false, 'la checkbox ora è riabilitata e modificabile');
+});
+
+// ---------------------------------------------------------------------------
+// 20. EventModal: GLO può disattivare la deadline e salvare senza deadlineDate
+// ---------------------------------------------------------------------------
+test('20. EventModal: GLO può disattivare la deadline e salvare senza deadlineDate', async () => {
+  let savedEvent: CalendarEvent | null = null;
+  let renderer: any;
+
+  await act(async () => {
+    renderer = create(React.createElement(EventModal, {
+      isOpen: true,
+      onClose: () => {},
+      eventToEdit: null,
+      profile,
+      onSave: (ev) => { savedEvent = ev; },
+    }));
+  });
+
+  const buttons = renderer.root.findAll((n: any) => n.type === 'button');
+  const scadenzaBtn = buttons.find((b: any) => textOf(b).includes('Scadenza Istituzionale'));
+  const gloBtn = buttons.find((b: any) => textOf(b).includes('G.L.O.'));
+
+  // Scadenza -> poi GLO
+  await act(async () => { scadenzaBtn.props.onClick(); });
+  await act(async () => { gloBtn.props.onClick(); });
+
+  const deadlineCheckbox = renderer.root.find((n: any) => n.type === 'input' && n.props.type === 'checkbox' && n.props.className?.includes('text-rose-700'));
+  assert.equal(deadlineCheckbox.props.checked, true);
+
+  // Disattiva la spunta
+  await act(async () => { deadlineCheckbox.props.onChange({ target: { checked: false } }); });
+
+  const titleInput = renderer.root.find((n: any) => n.type === 'input' && n.props.placeholder?.includes('Consiglio di Classe'));
+  await act(async () => { titleInput.props.onChange({ target: { value: 'Incontro GLO finale' } }); });
+
+  const form = renderer.root.find((n: any) => n.type === 'form');
+  await act(async () => { form.props.onSubmit({ preventDefault: () => {} }); });
+
+  assert.ok(savedEvent);
+  assert.equal((savedEvent as any).category, 'glo');
+  assert.equal((savedEvent as any).deadlineDate, undefined, 'deadlineDate deve essere undefined');
+});
+
+// ---------------------------------------------------------------------------
+// 21. EventModal: salvataggio category=scadenza produce sempre deadlineDate valida
+// ---------------------------------------------------------------------------
+test('21. EventModal: salvataggio category=scadenza produce sempre deadlineDate valida', async () => {
+  let savedEvent: CalendarEvent | null = null;
+  let renderer: any;
+
+  await act(async () => {
+    renderer = create(React.createElement(EventModal, {
+      isOpen: true,
+      onClose: () => {},
+      eventToEdit: null,
+      profile,
+      onSave: (ev) => { savedEvent = ev; },
+    }));
+  });
+
+  const buttons = renderer.root.findAll((n: any) => n.type === 'button');
+  const scadenzaBtn = buttons.find((b: any) => textOf(b).includes('Scadenza Istituzionale'));
+  await act(async () => { scadenzaBtn.props.onClick(); });
+
+  const titleInput = renderer.root.find((n: any) => n.type === 'input' && n.props.placeholder?.includes('Consiglio di Classe'));
+  await act(async () => { titleInput.props.onChange({ target: { value: 'Invio Relazione Finale' } }); });
+
+  const form = renderer.root.find((n: any) => n.type === 'form');
+  await act(async () => { form.props.onSubmit({ preventDefault: () => {} }); });
+
+  assert.ok(savedEvent);
+  assert.equal((savedEvent as any).category, 'scadenza');
+  assert.ok((savedEvent as any).deadlineDate, 'deadlineDate deve essere impostata');
+  assert.equal((savedEvent as any).deadlineDate, (savedEvent as any).date);
+});
+

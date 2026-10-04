@@ -409,12 +409,16 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       const choice = match ? updateChoices[it.tempId] : undefined;
 
       if (match && choice === "update") {
+        const updatedDeadlineDate =
+          it.deadlineDate ||
+          (it.isDeadline === true ? it.date : undefined);
         // Aggiorna l'evento esistente preservando ID e metadati tecnici
         const updatedEvent: CalendarEvent = {
           ...match,
           title: it.title,
           category: it.category,
           date: it.date,
+          deadlineDate: updatedDeadlineDate,
           startTime: it.startTime || undefined,
           endTime: it.endTime || undefined,
           isAllDay: !it.startTime && !it.endTime,
@@ -977,6 +981,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                                       </div>
                                       {match.location && <div className="text-stone-500">📍 {match.location}</div>}
                                       {match.notes && <div className="text-stone-500 italic text-[11px]">{match.notes}</div>}
+                                      {match.deadlineDate && <div className="text-[11px] text-stone-500">Scadenza: {match.deadlineDate}</div>}
                                       <div className="text-[11px] text-stone-400 capitalize">
                                         Categoria: {match.category.replace("_", " ")}
                                       </div>
@@ -1006,6 +1011,11 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                                       {item.notes && (
                                         <div className={`text-[11px] italic ${diff.notes ? "bg-amber-100 text-amber-900 px-1 rounded block" : "text-stone-500"}`}>
                                           {item.notes}
+                                        </div>
+                                      )}
+                                      {(item.deadlineDate || item.isDeadline || match.deadlineDate) && (
+                                        <div className={`text-[11px] ${diff.deadlineDate ? "bg-amber-100 font-semibold px-1 rounded text-amber-900 inline-block" : "text-stone-500"}`}>
+                                          Scadenza: {item.deadlineDate || (item.isDeadline ? item.date : "Nessuna")}
                                         </div>
                                       )}
                                       <div className={`text-[11px] capitalize ${diff.category ? "bg-amber-100 font-semibold px-1 rounded text-amber-900 inline-block" : "text-stone-400"}`}>
