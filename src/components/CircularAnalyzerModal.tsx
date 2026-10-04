@@ -422,6 +422,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
           subject: it.subject || match.subject,
           location: it.location || match.location,
           notes: it.notes || match.notes,
+          completed: false,
           sourceCircularId: match.sourceCircularId || circularId,
           sourceCircularTitle: match.sourceCircularTitle || fileName || "Circolare importata",
           sourceItemId: match.sourceItemId || it.tempId,
