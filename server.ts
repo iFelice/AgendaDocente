@@ -59,6 +59,7 @@ import {
   type TeacherRowLabelMatch,
 } from "./src/utils/timetableAnalysis";
 import { parseCircularText, normalizeExtractedItems } from "./src/utils/circularParser";
+import { runPdfTextExtraction } from "./server/pdfTextExtraction";
 import http from "http";
 import path from "path";
 import { GoogleGenAI, Type } from "@google/genai";
@@ -526,6 +527,31 @@ app.get("/api/health", (req, res) => {
 /** Deadline storico dell'endpoint circolari: identico al budget del runner. */
 export const CIRCULAR_ANALYSIS_TIMEOUT_MS = 45_000;
 
+/**
+ * Budget MASSIMO riservato al tentativo Groq/Qwen text-only sul testo estratto
+ * di un PDF digitale. Gemini sul PDF originale resta il fallback fondamentale
+ * per i PDF (tabelle, layout, pagine senza text layer affidabile): Groq non
+ * può quindi potersi prendere tutti i 45 s del budget complessivo. Nessun
+ * nuovo timeout "globale": questo limita SOLO il singolo tentativo Groq,
+ * restando dentro `controller.signal` (che può sempre interrompere tutto).
+ */
+export const PDF_TEXT_GROQ_BUDGET_MS = 15_000;
+/** Sotto questa soglia un tentativo Groq non avrebbe senso: si salta direttamente a Gemini. */
+export const PDF_TEXT_GROQ_MIN_ATTEMPT_MS = 3_000;
+
+/**
+ * Istruzione aggiuntiva al prompt SOLO per il testo estratto da PDF
+ * multipagina: non indebolisce le regole già presenti sulle tabelle, aggiunge
+ * solo una cautela specifica al text-layer estratto (righe/colonne che il
+ * solo testo può aver disallineato).
+ */
+export const PDF_TEXT_PROMPT_HINT =
+  "Il documento può provenire dall'estrazione testuale di un PDF multipagina.\n" +
+  "Mantieni separate le attività appartenenti a date o righe differenti.\n" +
+  "Non dedurre colonne o associazioni che il testo estratto non rende affidabili.\n" +
+  "Se un orario o un destinatario non è associabile con certezza alla singola attività,\n" +
+  "lascialo vuoto anziché copiarlo da una riga vicina.";
+
 export interface GroqCircularRunResult {
   ok: boolean;
   status: number;
@@ -711,6 +737,7 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
     const variant = getCircularDiagnosticVariant();
     const summary = summarizeCircularPayload(req.body);
     const isImage = !!imageBase64 && typeof mimeType === "string" && ["image/jpeg", "image/png", "image/webp"].includes(mimeType.toLowerCase());
+    const isPdf = !!imageBase64 && typeof mimeType === "string" && mimeType.toLowerCase() === "application/pdf";
 
     // -------------------------------------------------------------------------
     // 1. VARIANTE DIAGNOSTICA G (esplicita: Groq isolato, nessun Gemini fallback)
@@ -778,6 +805,10 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
     // 2. PRODUZIONE DEFAULT (variant === "D" e immagine JPEG/PNG/WEBP): Groq primario
     // -------------------------------------------------------------------------
     let fallbackFrom: string | undefined = undefined;
+    // Budget passato al runner Gemini: resta il budget storico (45s) per tutti
+    // i percorsi, TRANNE il fallback PDF text-first più sotto, dove viene
+    // ridotto al tempo residuo dopo il tentativo Groq (punto 12 della PR).
+    let geminiBudgetMs: number = CIRCULAR_ANALYSIS_TIMEOUT_MS;
     if (variant === "D" && isImage) {
       const groqResult = await executeGroqCircularAnalysis({
         imageBase64,
@@ -817,6 +848,101 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
         status: groqResult.status === 429 ? 429 : 503,
       });
       fallbackFrom = "groq";
+    }
+
+    // -------------------------------------------------------------------------
+    // 2b. PRODUZIONE DEFAULT (variant === "D" e PDF digitale): estrazione testo
+    //     locale + Groq/Qwen text-only PRIMARY, con Gemini sul PDF ORIGINALE
+    //     come fallback (mai perso, mai sostituito dal solo testo).
+    // -------------------------------------------------------------------------
+    if (variant === "D" && isPdf) {
+      const extraction = await runPdfTextExtraction(imageBase64 as string);
+
+      if (extraction.status === "success") {
+        console.log(`[AI Circolari PDF] extraction=success pages=${extraction.pageCount ?? "-"} textChars=${extraction.textChars}`);
+
+        // Punto 13: Groq non può prendersi tutto il budget dei 45s, altrimenti
+        // non resterebbe nulla per il fallback Gemini (fondamentale sui PDF).
+        const remainingBeforeGroqMs = CIRCULAR_ANALYSIS_TIMEOUT_MS - (Date.now() - startedAt);
+        const groqAttemptBudgetMs = Math.min(
+          PDF_TEXT_GROQ_BUDGET_MS,
+          Math.max(0, remainingBeforeGroqMs - GEMINI_MIN_ATTEMPT_MS - GEMINI_RESPONSE_RESERVE_MS),
+        );
+
+        if (groqAttemptBudgetMs >= PDF_TEXT_GROQ_MIN_ATTEMPT_MS) {
+          // Il controller.signal globale resta sempre in grado di interrompere
+          // tutto; il timeout aggiuntivo limita SOLO questo tentativo Groq.
+          const groqSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(groqAttemptBudgetMs)]);
+          const pdfTextSystemInstruction = `${baseSystemInstruction}\n${PDF_TEXT_PROMPT_HINT}`;
+          const groqStartedAt = Date.now();
+          const groqResult = await executeGroqCircularAnalysis({
+            text: extraction.text,
+            signal: groqSignal,
+            baseSystemInstruction: pdfTextSystemInstruction,
+            summary,
+            variantLabel: "D-PDF-TEXT",
+          });
+          const groqDurationMs = Date.now() - groqStartedAt;
+
+          if (groqResult.ok) {
+            let items: any[] = [];
+            let normOk = false;
+            try {
+              items = normalizeExtractedItems(groqResult.items ?? [], teacherProfile, effectiveCampus);
+              normOk = true;
+            } catch {
+              normOk = false;
+            }
+            if (normOk) {
+              console.log(`[AI Circolari PDF] primary=groq-text esito=ok durationMs=${groqDurationMs}`);
+              logOutcome({ provider: "groq", esito: "ok", categoria: "ok", sorgente: groqResult.source, status: 200 });
+              return res.json({
+                success: true,
+                source: groqResult.source,
+                items,
+              });
+            }
+          }
+
+          console.log(`[AI Circolari PDF] primary=groq-text esito=failed categoria=${groqResult.categoria}`);
+          logOutcome({
+            provider: "groq",
+            esito: "fallito",
+            errorCode: groqResult.status === 429 ? "RATE_LIMITED" : "AI_UNAVAILABLE",
+            categoria: groqResult.categoria,
+            status: groqResult.status === 429 ? 429 : 503,
+          });
+          fallbackFrom = "groq-pdf-text";
+        } else {
+          console.log(`[AI Circolari PDF] primary=groq-text esito=skipped categoria=budget-insufficiente`);
+        }
+
+        // Punto 12: budget UNICO dei 45s. Gemini riceve SOLO il tempo residuo
+        // utile; se non ne resta abbastanza per un tentativo sensato si
+        // risponde con l'errore cloud esistente, senza avviare un tentativo
+        // destinato certamente ad essere abortito.
+        const remainingMs = CIRCULAR_ANALYSIS_TIMEOUT_MS - (Date.now() - startedAt);
+        if (geminiAttemptTimeoutMs(remainingMs) === 0) {
+          const failure = circularCloudFailure("budget-esaurito");
+          console.log(`[AI Circolari PDF] fallback=gemini-original-pdf remainingBudgetMs=${Math.max(0, remainingMs)} esito=skipped-budget`);
+          logOutcome({ provider: "gemini", fallbackFrom, esito: "fallito", errorCode: failure.errorCode, categoria: "budget-esaurito", status: failure.status });
+          return res.status(failure.status).json(circularFailureBody(failure.errorCode, failure.error));
+        }
+        console.log(`[AI Circolari PDF] fallback=gemini-original-pdf remainingBudgetMs=${Math.max(0, remainingMs)}`);
+        geminiBudgetMs = remainingMs;
+      } else if (extraction.status === "empty") {
+        // Testo insufficiente (es. PDF scansionato senza text layer): niente
+        // Groq, si va direttamente a Gemini sul PDF originale (nessuna
+        // regressione rispetto al comportamento storico).
+        console.log(`[AI Circolari PDF] extraction=empty`);
+        console.log(`[AI Circolari PDF] fallback=gemini-original-pdf`);
+      } else {
+        // Estrazione fallita (PDF non interpretabile): errore controllato, MAI
+        // un 500 per il parser. Si salta Groq e si prova Gemini sul PDF
+        // originale, esattamente come un PDF senza text layer.
+        console.log(`[AI Circolari PDF] extraction=failed`);
+        console.log(`[AI Circolari PDF] fallback=gemini-original-pdf`);
+      }
     }
 
     // -------------------------------------------------------------------------
@@ -907,8 +1033,10 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
     const effectiveMimeType = variant === "A" ? null : "application/json";
     const effectiveThinking = variant === "C" ? undefined : "low";
     const effectiveModels = variant === "D" ? geminiCandidateModels() : ["gemini-3.8-flash"];
-    // Se è un fallback successivo a Groq, usiamo massimo 1 tentativo per modello
-    const maxAttemptsPerModel = fallbackFrom === "groq" ? 1 : undefined;
+    // Se è un fallback successivo a Groq (immagine o PDF text-first), usiamo
+    // massimo 1 tentativo per modello: il budget residuo è più stretto e un
+    // modello successivo deve poter ricevere un tentativo vero.
+    const maxAttemptsPerModel = (fallbackFrom === "groq" || fallbackFrom === "groq-pdf-text") ? 1 : undefined;
 
     const run = await runGeminiJson({
       systemInstruction: effectiveSystemInstruction,
@@ -917,7 +1045,10 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
       responseMimeType: effectiveMimeType,
       signal: controller.signal,
       label: "AI Circolari",
-      budgetMs: CIRCULAR_ANALYSIS_TIMEOUT_MS,
+      // Storicamente sempre il budget pieno dei 45s; SOLO il fallback PDF
+      // text-first (punto 12 della PR) lo riduce al tempo residuo dopo Groq,
+      // per non inviare a Gemini un budget che eccede il deadline reale.
+      budgetMs: geminiBudgetMs,
       thinkingLevel: effectiveThinking,
       models: effectiveModels,
       maxAttemptsPerModel,
