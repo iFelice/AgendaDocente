@@ -90,10 +90,155 @@ const emptyPdfBase64 = buildEmptyPdf().toString('base64');
 const invalidPdfBase64 = buildInvalidPdf().toString('base64');
 
 // ---------------------------------------------------------------------------
-// A. PDF + testo sufficiente, Groq successo -> Groq chiamato, Gemini NON chiamato, 200
+// 1. Groq formalmente OK ma items vuoti -> Fallback Gemini sul PDF ORIGINALE
 // ---------------------------------------------------------------------------
 
-test('A. PDF digitale con testo sufficiente: Groq text-only primario, Gemini non chiamato', async () => {
+test('1. Groq formalmente OK ma items vuoti: fallback a Gemini sul PDF ORIGINALE', async () => {
+  const saved = {
+    GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT: process.env.GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT,
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+    GROQ_API_KEY: process.env.GROQ_API_KEY,
+  };
+  delete process.env.GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT;
+  process.env.GEMINI_API_KEY = 'AIzaSy_FAKE_TEST_KEY';
+  process.env.GROQ_API_KEY = 'gsk_TEST_GROQ_KEY_123';
+
+  let geminiCalls = 0;
+  let groqCalls = 0;
+  let capturedGeminiBody: any = null;
+  const callOrder: string[] = [];
+  const logs: string[] = [];
+  const originalLog = console.log;
+  console.log = (...args: any[]) => { logs.push(args.map(String).join(' ')); };
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (inputUrl: any, opts: any) => {
+    const sUrl = inputUrl.toString();
+    if (sUrl.includes('generativelanguage.googleapis.com')) {
+      geminiCalls++;
+      callOrder.push('gemini');
+      capturedGeminiBody = opts?.body ? JSON.parse(opts.body.toString()) : null;
+      return geminiMockResponse(JSON.stringify([sampleItem]));
+    }
+    if (sUrl.includes('api.groq.com')) {
+      groqCalls++;
+      callOrder.push('groq');
+      return groqMockResponse(JSON.stringify({ items: [] }));
+    }
+    return originalFetch(inputUrl, opts);
+  }) as typeof fetch;
+
+  try {
+    const json: any = await withServer(async (url) => {
+      const res = await originalFetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageBase64: multiPagePdfBase64, mimeType: 'application/pdf', profile: validProfile }),
+      });
+      assert.equal(res.status, 200);
+      return res.json();
+    });
+
+    // 1. Groq viene chiamato
+    assert.equal(groqCalls, 1, 'Groq text-only deve essere chiamato');
+    // 2. Gemini viene chiamato
+    assert.equal(geminiCalls, 1, 'Gemini deve intervenire come fallback');
+    // 3. Ordine: prima Groq, poi Gemini
+    assert.deepEqual(callOrder, ['groq', 'gemini'], 'Ordine: prima Groq, poi Gemini');
+    // 4. Gemini riceve il PDF ORIGINALE
+    assert.ok(capturedGeminiBody, 'Gemini deve ricevere un payload');
+    const part = capturedGeminiBody.contents[0].parts.find((p: any) => p.inlineData);
+    assert.ok(part, 'Gemini deve ricevere inlineData');
+    assert.equal(part.inlineData.mimeType, 'application/pdf');
+    assert.equal(part.inlineData.data, multiPagePdfBase64, 'Gemini deve ricevere il PDF ORIGINALE');
+    // 5. La risposta finale è quella prodotta da Gemini
+    assert.equal(json.success, true);
+    assert.equal(json.source, 'gemini-3.8-flash');
+    assert.equal(json.items.length, 1);
+    assert.equal(json.items[0].title, sampleItem.title);
+
+    // 6. Diagnostica: log sanitizzato quando Groq produce 0 impegni
+    const emptyLog = logs.find((l) => l.includes('[AI Circolari PDF] primary=groq-text esito=empty categoria=zero-items'));
+    assert.ok(emptyLog, `Log primario vuoto mancante: ${JSON.stringify(logs)}`);
+    const fallbackLog = logs.find((l) => l.includes('[AI Circolari PDF] fallback=gemini-original-pdf remainingBudgetMs='));
+    assert.ok(fallbackLog, `Log di fallback mancante: ${JSON.stringify(logs)}`);
+  } finally {
+    restoreEnv(saved);
+    globalThis.fetch = originalFetch;
+    console.log = originalLog;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 2. Groq restituisce elementi ma normalizzazione = zero -> Fallback Gemini
+// ---------------------------------------------------------------------------
+
+test('2. Groq restituisce elementi non validi/scartati dalla normalizzazione: fallback a Gemini sul PDF ORIGINALE', async () => {
+  const saved = {
+    GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT: process.env.GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT,
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+    GROQ_API_KEY: process.env.GROQ_API_KEY,
+  };
+  delete process.env.GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT;
+  process.env.GEMINI_API_KEY = 'AIzaSy_FAKE_TEST_KEY';
+  process.env.GROQ_API_KEY = 'gsk_TEST_GROQ_KEY_123';
+
+  let geminiCalls = 0;
+  let groqCalls = 0;
+  let capturedGeminiBody: any = null;
+  const callOrder: string[] = [];
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (inputUrl: any, opts: any) => {
+    const sUrl = inputUrl.toString();
+    if (sUrl.includes('generativelanguage.googleapis.com')) {
+      geminiCalls++;
+      callOrder.push('gemini');
+      capturedGeminiBody = opts?.body ? JSON.parse(opts.body.toString()) : null;
+      return geminiMockResponse(JSON.stringify([sampleItem]));
+    }
+    if (sUrl.includes('api.groq.com')) {
+      groqCalls++;
+      callOrder.push('groq');
+      // Elemento con struttura non valida che causa errore di normalizzazione
+      return groqMockResponse(JSON.stringify({ items: [{ title: null, category: 'collegio_docenti' }] }));
+    }
+    return originalFetch(inputUrl, opts);
+  }) as typeof fetch;
+
+  try {
+    const json: any = await withServer(async (url) => {
+      const res = await originalFetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageBase64: multiPagePdfBase64, mimeType: 'application/pdf', profile: validProfile }),
+      });
+      assert.equal(res.status, 200);
+      return res.json();
+    });
+
+    assert.equal(groqCalls, 1, 'Groq deve essere tentato');
+    assert.equal(geminiCalls, 1, 'Gemini deve intervenire dopo il fallimento di normalizzazione');
+    assert.deepEqual(callOrder, ['groq', 'gemini']);
+    assert.equal(json.success, true);
+    assert.equal(json.source, 'gemini-3.8-flash');
+    assert.equal(json.items.length, 1);
+
+    const part = capturedGeminiBody.contents[0].parts.find((p: any) => p.inlineData);
+    assert.ok(part);
+    assert.equal(part.inlineData.mimeType, 'application/pdf');
+    assert.equal(part.inlineData.data, multiPagePdfBase64);
+  } finally {
+    restoreEnv(saved);
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 3. PDF + testo sufficiente, Groq successo -> Groq chiamato, Gemini NON chiamato, 200
+// ---------------------------------------------------------------------------
+
+test('3. PDF digitale con testo sufficiente: Groq text-only primario, Gemini non chiamato', async () => {
   const saved = {
     GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT: process.env.GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT,
     GEMINI_API_KEY: process.env.GEMINI_API_KEY,
@@ -154,10 +299,116 @@ test('A. PDF digitale con testo sufficiente: Groq text-only primario, Gemini non
 });
 
 // ---------------------------------------------------------------------------
-// B. PDF + testo sufficiente, Groq fallisce -> Gemini sul PDF originale, 200
+// 4. PDF senza testo utile (es. scansione) -> Groq non chiamato, Gemini PDF chiamato
 // ---------------------------------------------------------------------------
 
-test('B. PDF digitale con testo sufficiente: Groq fallisce, Gemini riceve il PDF ORIGINALE', async () => {
+test('4. PDF senza testo utile (es. scansione): Groq non chiamato, Gemini chiamato sul PDF', async () => {
+  const saved = {
+    GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT: process.env.GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT,
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+    GROQ_API_KEY: process.env.GROQ_API_KEY,
+  };
+  delete process.env.GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT;
+  process.env.GEMINI_API_KEY = 'AIzaSy_FAKE_TEST_KEY';
+  process.env.GROQ_API_KEY = 'gsk_TEST_GROQ_KEY_123';
+
+  let geminiCalls = 0;
+  let groqCalls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (inputUrl: any, opts: any) => {
+    const sUrl = inputUrl.toString();
+    if (sUrl.includes('generativelanguage.googleapis.com')) {
+      geminiCalls++;
+      return geminiMockResponse(JSON.stringify([sampleItem]));
+    }
+    if (sUrl.includes('api.groq.com')) {
+      groqCalls++;
+      return groqMockResponse(JSON.stringify({ items: [sampleItem] }));
+    }
+    return originalFetch(inputUrl, opts);
+  }) as typeof fetch;
+
+  try {
+    const json: any = await withServer(async (url) => {
+      const res = await originalFetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageBase64: emptyPdfBase64, mimeType: 'application/pdf', profile: validProfile }),
+      });
+      assert.equal(res.status, 200);
+      return res.json();
+    });
+
+    assert.equal(json.success, true);
+    assert.equal(groqCalls, 0, 'PDF senza testo utile non deve chiamare Groq');
+    assert.equal(geminiCalls, 1, 'Gemini deve essere chiamato direttamente sul PDF');
+  } finally {
+    restoreEnv(saved);
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 5. Contenuto strutturato: il testo multipagina estratto arriva INTERO a Groq
+// ---------------------------------------------------------------------------
+
+test('5. Il payload inviato a Groq contiene tutto il testo estratto multipagina, non solo la prima pagina', async () => {
+  const saved = {
+    GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT: process.env.GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT,
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+    GROQ_API_KEY: process.env.GROQ_API_KEY,
+  };
+  delete process.env.GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT;
+  process.env.GEMINI_API_KEY = 'AIzaSy_FAKE_TEST_KEY';
+  process.env.GROQ_API_KEY = 'gsk_TEST_GROQ_KEY_123';
+
+  let capturedGroqBody: any = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (inputUrl: any, opts: any) => {
+    const sUrl = inputUrl.toString();
+    if (sUrl.includes('generativelanguage.googleapis.com')) {
+      return geminiMockResponse('[]');
+    }
+    if (sUrl.includes('api.groq.com')) {
+      capturedGroqBody = opts?.body ? JSON.parse(opts.body.toString()) : null;
+      return groqMockResponse(JSON.stringify({ items: [sampleItem] }));
+    }
+    return originalFetch(inputUrl, opts);
+  }) as typeof fetch;
+
+  try {
+    await withServer(async (url) => {
+      const res = await originalFetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageBase64: multiPagePdfBase64, mimeType: 'application/pdf', profile: validProfile }),
+      });
+      assert.equal(res.status, 200);
+      return res.json();
+    });
+
+    assert.ok(capturedGroqBody, 'Groq deve essere stato chiamato');
+    const userMessage = capturedGroqBody.messages.find((m: any) => m.role === 'user');
+    const sentText = userMessage.content[0].text as string;
+
+    // Deve contenere contenuto di TUTTE le pagine, non solo la prima.
+    assert.ok(sentText.includes('SETTEMBRE'));
+    assert.ok(sentText.includes('Collegio docenti'));
+    assert.ok(sentText.includes('OTTOBRE'));
+    assert.ok(sentText.includes('Consiglio di classe 3E'));
+    assert.ok(sentText.includes('NOVEMBRE'));
+    assert.ok(sentText.includes('GLO classe 2D'));
+  } finally {
+    restoreEnv(saved);
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 6. Groq fallisce con errore HTTP -> Gemini sul PDF originale, 200
+// ---------------------------------------------------------------------------
+
+test('6. PDF digitale con testo sufficiente: Groq fallisce con HTTP 503, Gemini riceve il PDF ORIGINALE', async () => {
   const saved = {
     GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT: process.env.GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT,
     GEMINI_API_KEY: process.env.GEMINI_API_KEY,
@@ -217,60 +468,10 @@ test('B. PDF digitale con testo sufficiente: Groq fallisce, Gemini riceve il PDF
 });
 
 // ---------------------------------------------------------------------------
-// C. PDF + testo insufficiente -> Groq NON chiamato, Gemini PDF chiamato
+// 7. Estrazione PDF fallisce (PDF non valido) -> niente 500, Gemini tentato
 // ---------------------------------------------------------------------------
 
-test('C. PDF senza testo utile (es. scansione): Groq non chiamato, Gemini chiamato sul PDF', async () => {
-  const saved = {
-    GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT: process.env.GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT,
-    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
-    GROQ_API_KEY: process.env.GROQ_API_KEY,
-  };
-  delete process.env.GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT;
-  process.env.GEMINI_API_KEY = 'AIzaSy_FAKE_TEST_KEY';
-  process.env.GROQ_API_KEY = 'gsk_TEST_GROQ_KEY_123';
-
-  let geminiCalls = 0;
-  let groqCalls = 0;
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async (inputUrl: any, opts: any) => {
-    const sUrl = inputUrl.toString();
-    if (sUrl.includes('generativelanguage.googleapis.com')) {
-      geminiCalls++;
-      return geminiMockResponse(JSON.stringify([sampleItem]));
-    }
-    if (sUrl.includes('api.groq.com')) {
-      groqCalls++;
-      return groqMockResponse(JSON.stringify({ items: [sampleItem] }));
-    }
-    return originalFetch(inputUrl, opts);
-  }) as typeof fetch;
-
-  try {
-    const json: any = await withServer(async (url) => {
-      const res = await originalFetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64: emptyPdfBase64, mimeType: 'application/pdf', profile: validProfile }),
-      });
-      assert.equal(res.status, 200);
-      return res.json();
-    });
-
-    assert.equal(json.success, true);
-    assert.equal(groqCalls, 0, 'PDF senza testo utile non deve chiamare Groq');
-    assert.equal(geminiCalls, 1, 'Gemini deve essere chiamato direttamente sul PDF');
-  } finally {
-    restoreEnv(saved);
-    globalThis.fetch = originalFetch;
-  }
-});
-
-// ---------------------------------------------------------------------------
-// D. Estrazione PDF fallisce (PDF non valido) -> niente 500, Gemini tentato
-// ---------------------------------------------------------------------------
-
-test('D. Estrazione testo fallisce (PDF non interpretabile): nessun 500, Gemini tentato sul PDF originale', async () => {
+test('7. Estrazione testo fallisce (PDF non interpretabile): nessun 500, Gemini tentato sul PDF originale', async () => {
   const saved = {
     GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT: process.env.GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT,
     GEMINI_API_KEY: process.env.GEMINI_API_KEY,
@@ -318,10 +519,10 @@ test('D. Estrazione testo fallisce (PDF non interpretabile): nessun 500, Gemini 
 });
 
 // ---------------------------------------------------------------------------
-// E. Groq consuma parte del budget -> Gemini riceve budget residuo, non un nuovo 45s pieno
+// 8. Groq consuma parte del budget -> Gemini riceve budget residuo, non un nuovo 45s pieno
 // ---------------------------------------------------------------------------
 
-test('E. Groq consuma parte del budget dei 45s: Gemini riceve il budget RESIDUO, non uno nuovo pieno', async () => {
+test('8. Groq consuma parte del budget dei 45s: Gemini riceve il budget RESIDUO, non uno nuovo pieno', async () => {
   const saved = {
     GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT: process.env.GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT,
     GEMINI_API_KEY: process.env.GEMINI_API_KEY,
@@ -405,61 +606,5 @@ test('E. Groq consuma parte del budget dei 45s: Gemini riceve il budget RESIDUO,
     globalThis.fetch = originalFetch;
     console.log = originalLog;
     console.warn = originalWarn;
-  }
-});
-
-// ---------------------------------------------------------------------------
-// 21. Contenuto strutturato: il testo multipagina estratto arriva INTERO a Groq
-// ---------------------------------------------------------------------------
-
-test('21. Il payload inviato a Groq contiene tutto il testo estratto multipagina, non solo la prima pagina', async () => {
-  const saved = {
-    GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT: process.env.GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT,
-    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
-    GROQ_API_KEY: process.env.GROQ_API_KEY,
-  };
-  delete process.env.GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT;
-  process.env.GEMINI_API_KEY = 'AIzaSy_FAKE_TEST_KEY';
-  process.env.GROQ_API_KEY = 'gsk_TEST_GROQ_KEY_123';
-
-  let capturedGroqBody: any = null;
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async (inputUrl: any, opts: any) => {
-    const sUrl = inputUrl.toString();
-    if (sUrl.includes('generativelanguage.googleapis.com')) {
-      return geminiMockResponse('[]');
-    }
-    if (sUrl.includes('api.groq.com')) {
-      capturedGroqBody = opts?.body ? JSON.parse(opts.body.toString()) : null;
-      return groqMockResponse(JSON.stringify({ items: [sampleItem] }));
-    }
-    return originalFetch(inputUrl, opts);
-  }) as typeof fetch;
-
-  try {
-    await withServer(async (url) => {
-      const res = await originalFetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64: multiPagePdfBase64, mimeType: 'application/pdf', profile: validProfile }),
-      });
-      assert.equal(res.status, 200);
-      return res.json();
-    });
-
-    assert.ok(capturedGroqBody, 'Groq deve essere stato chiamato');
-    const userMessage = capturedGroqBody.messages.find((m: any) => m.role === 'user');
-    const sentText = userMessage.content[0].text as string;
-
-    // Deve contenere contenuto di TUTTE le pagine, non solo la prima.
-    assert.ok(sentText.includes('SETTEMBRE'));
-    assert.ok(sentText.includes('Collegio docenti'));
-    assert.ok(sentText.includes('OTTOBRE'));
-    assert.ok(sentText.includes('Consiglio di classe 3E'));
-    assert.ok(sentText.includes('NOVEMBRE'));
-    assert.ok(sentText.includes('GLO classe 2D'));
-  } finally {
-    restoreEnv(saved);
-    globalThis.fetch = originalFetch;
   }
 });

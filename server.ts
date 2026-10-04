@@ -893,7 +893,7 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
             } catch {
               normOk = false;
             }
-            if (normOk) {
+            if (normOk && items.length > 0) {
               console.log(`[AI Circolari PDF] primary=groq-text esito=ok durationMs=${groqDurationMs}`);
               logOutcome({ provider: "groq", esito: "ok", categoria: "ok", sorgente: groqResult.source, status: 200 });
               return res.json({
@@ -902,17 +902,30 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
                 items,
               });
             }
+            if (normOk && items.length === 0) {
+              console.log(`[AI Circolari PDF] primary=groq-text esito=empty categoria=zero-items`);
+              logOutcome({
+                provider: "groq",
+                esito: "vuoto",
+                categoria: "zero-items",
+                status: 200,
+              });
+              fallbackFrom = "groq-pdf-text";
+            }
           }
 
-          console.log(`[AI Circolari PDF] primary=groq-text esito=failed categoria=${groqResult.categoria}`);
-          logOutcome({
-            provider: "groq",
-            esito: "fallito",
-            errorCode: groqResult.status === 429 ? "RATE_LIMITED" : "AI_UNAVAILABLE",
-            categoria: groqResult.categoria,
-            status: groqResult.status === 429 ? 429 : 503,
-          });
-          fallbackFrom = "groq-pdf-text";
+          if (!fallbackFrom) {
+            const categoria = groqResult.ok ? "json-non-valido" : groqResult.categoria;
+            console.log(`[AI Circolari PDF] primary=groq-text esito=failed categoria=${categoria}`);
+            logOutcome({
+              provider: "groq",
+              esito: "fallito",
+              errorCode: groqResult.status === 429 ? "RATE_LIMITED" : "AI_UNAVAILABLE",
+              categoria,
+              status: groqResult.status === 429 ? 429 : 503,
+            });
+            fallbackFrom = "groq-pdf-text";
+          }
         } else {
           console.log(`[AI Circolari PDF] primary=groq-text esito=skipped categoria=budget-insufficiente`);
         }
