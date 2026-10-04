@@ -4,7 +4,7 @@ import { persistenceErrorMessage } from "./services/persistenceErrors";
 import { isStudentActive } from "./utils/studentMatcher";
 import { deriveScheduledAssessmentCalendarItems } from "./utils/scheduledAssessmentCalendar";
 import { database, type LocalData } from "./services/db";
-import { localDateISO } from "./utils/dates";
+import { effectiveDeadlineDate, localDateISO } from "./utils/dates";
 import React, { useState, useEffect, useRef, lazy, Suspense, useCallback } from "react";
 import {
   CalendarEvent,
@@ -1076,7 +1076,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
   const todayIso = localDateISO();
   const todayEventsCount = events.filter((e) => e.date === todayIso && !e.completed).length;
   const pendingDeadlinesCount = events.filter(
-    (e) => (e.category === "scadenza" || e.category === "promemoria") && !e.completed
+    (e) => !!effectiveDeadlineDate(e) && !e.completed
   ).length;
 
   return (

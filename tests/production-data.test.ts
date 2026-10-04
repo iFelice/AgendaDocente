@@ -84,9 +84,9 @@ test('the day agenda selects lessons by the weekday of the chosen date, not of t
   const events = [
     { id: 'e1', title: 'Cda', date: '2027-02-28', type: 'riunione', completed: false, startTime: '18:00' } as unknown as CalendarEvent,
     { id: 'e2', title: 'Già fatto', date: '2027-02-28', type: 'riunione', completed: true, startTime: '09:00' } as unknown as CalendarEvent,
-    { id: 'd1', title: 'PEI', date: '2027-03-02', category: 'pei', completed: false } as unknown as CalendarEvent,
+    { id: 'd1', title: 'PEI', date: '2027-03-02', category: 'pei', deadlineDate: '2027-03-02', completed: false } as unknown as CalendarEvent,
     { id: 'd2', title: 'Scrutinio', date: '2027-03-03', category: 'scadenza', completed: false } as unknown as CalendarEvent,
-    { id: 'd3', title: 'GLO', date: '2027-03-04', category: 'promemoria', completed: false } as unknown as CalendarEvent,
+    { id: 'd3', title: 'GLO', date: '2027-03-04', category: 'promemoria', deadlineDate: '2027-03-04', completed: false } as unknown as CalendarEvent,
     { id: 'd4', title: 'Lontano', date: '2027-03-20', category: 'scadenza', completed: false } as unknown as CalendarEvent,
   ];
   // 28 February 2027 is a Sunday: weekend flag, no lessons, and civil (not UTC) date handling.

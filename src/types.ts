@@ -214,6 +214,7 @@ export interface CalendarEvent {
   title: string;
   category: EventCategory;
   date: string;                     // "YYYY-MM-DD"
+  deadlineDate?: string;            // "YYYY-MM-DD"
   startTime?: string;               // "15:00"
   endTime?: string;                 // "16:30"
   isAllDay: boolean;
@@ -243,6 +244,7 @@ export interface ExtractedItem {
   title: string;
   category: EventCategory;
   date: string;                     // "YYYY-MM-DD"
+  deadlineDate?: string;            // "YYYY-MM-DD"
   startTime?: string;
   endTime?: string;
   className?: string;

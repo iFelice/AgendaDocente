@@ -239,9 +239,11 @@ test('mobile Orario (TimetableEditor) container clips horizontal overflow and da
 });
 
 test('mobile Oggi (TodayView) cards use min-w-0 + truncation for lesson metadata', async () => {
+  const day = todayDayOfWeek();
   const renderer = await renderComponent(React.createElement(TodayView, {
     profile,
-    timetable: [baseSlot(todayDayOfWeek())],
+    timetable: [baseSlot(day)],
+    initialDateIso: `2026-10-0${4 + day}`,
     events: [],
     isProvisionalTimetable: true,
     isDefinitiveCompiled: false,

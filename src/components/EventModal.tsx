@@ -1,7 +1,6 @@
 import { usePersistenceAction } from "../hooks/usePersistenceAction";
 import type { GoogleCalendarListEntry } from "../services/googleCalendarService";
-import { eventDateError } from "../utils/dates";
-import { localDateISO } from "../utils/dates";
+import { eventDateError, isValidDate, localDateISO } from "../utils/dates";
 import React, { useState, useEffect } from "react";
 import { Clock, MapPin, X, Calendar, BookOpen, AlertCircle, Trash2, ChevronRight } from "lucide-react";
 import { CalendarEvent, EventCategory, TeacherProfile } from "../types";
@@ -81,6 +80,8 @@ export const EventModal: React.FC<EventModalProps> = ({
   const [title, setTitle] = useState("");
   const [category, setCategory] = useState<EventCategory>("consiglio_classe");
   const [date, setDate] = useState(localDateISO());
+  const [hasDeadline, setHasDeadline] = useState(false);
+  const [deadlineDate, setDeadlineDate] = useState("");
   const initialTimeFields = getEventModalTimeFields(eventToEdit ?? initialEventData);
   const [startTime, setStartTime] = useState(initialTimeFields.startTime);
   const [endTime, setEndTime] = useState(initialTimeFields.endTime);
@@ -115,6 +116,14 @@ export const EventModal: React.FC<EventModalProps> = ({
       setTitle(eventToEdit.title);
       setCategory(eventToEdit.category);
       setDate(eventToEdit.date);
+      const initialDeadline = eventToEdit.deadlineDate ?? (eventToEdit.category === "scadenza" ? eventToEdit.date : undefined);
+      if (initialDeadline) {
+        setHasDeadline(true);
+        setDeadlineDate(initialDeadline);
+      } else {
+        setHasDeadline(false);
+        setDeadlineDate(eventToEdit.date || localDateISO());
+      }
       setIsAllDay(!!eventToEdit.isAllDay);
       setClassName(eventToEdit.className || "");
       setSubject(eventToEdit.subject || "");
@@ -123,16 +132,28 @@ export const EventModal: React.FC<EventModalProps> = ({
     } else if (initialEventData) {
       setTitle(initialEventData.title || "");
       setCategory(initialEventData.category || "glo");
-      setDate(initialEventData.date || initialDate || localDateISO());
+      const evDate = initialEventData.date || initialDate || localDateISO();
+      setDate(evDate);
+      const initialDeadline = initialEventData.deadlineDate ?? (initialEventData.category === "scadenza" ? evDate : undefined);
+      if (initialDeadline) {
+        setHasDeadline(true);
+        setDeadlineDate(initialDeadline);
+      } else {
+        setHasDeadline(false);
+        setDeadlineDate(evDate);
+      }
       setIsAllDay(!!initialEventData.isAllDay);
       setClassName(initialEventData.className || profile.classes[0] || "1A");
       setSubject(initialEventData.subject || profile.primarySubjects[0] || "");
       setNotes(initialEventData.notes || "");
       setLinkedEvent(null);
     } else {
+      const defaultDate = initialDate || localDateISO();
       setTitle("");
       setCategory("consiglio_classe");
-      setDate(initialDate || localDateISO());
+      setDate(defaultDate);
+      setHasDeadline(false);
+      setDeadlineDate(defaultDate);
       setIsAllDay(false);
       setClassName(profile.classes[0] || "1A");
       setSubject(profile.primarySubjects[0] || "");
@@ -167,28 +188,51 @@ export const EventModal: React.FC<EventModalProps> = ({
 
   if (!isOpen) return null;
 
-  const buildCurrentEvent = (): CalendarEvent => ({
-    ...eventToEdit,
-    ...linkedEvent,
-    id: eventToEdit ? eventToEdit.id : linkedEvent?.id || `ev-${Date.now()}`,
-    title: title.trim(), category, date,
-    startTime: isAllDay ? undefined : startTime,
-    endTime: isAllDay ? undefined : endTime,
-    isAllDay,
-    className: className.trim() || undefined,
-    subject: subject.trim() || undefined,
-    location: location.trim() || undefined,
-    notes: notes.trim() || undefined,
-    sourceType: eventToEdit?.sourceType || "manuale",
-    completed: eventToEdit?.completed || false,
-    syncedWithGoogle: isGoogleSourcedEvent ? false : (linkedEvent?.syncedWithGoogle ?? eventToEdit?.syncedWithGoogle ?? false),
-  });
+  const handleSelectCategory = (catId: EventCategory) => {
+    setCategory(catId);
+    if (catId === "scadenza") {
+      setHasDeadline(true);
+      if (!deadlineDate) {
+        setDeadlineDate(date || localDateISO());
+      }
+    }
+  };
+
+  const buildCurrentEvent = (): CalendarEvent => {
+    const isDeadlined = category === "scadenza" || hasDeadline;
+    const effectiveDeadline = isDeadlined && deadlineDate ? deadlineDate : (category === "scadenza" ? date : undefined);
+    return {
+      ...eventToEdit,
+      ...linkedEvent,
+      id: eventToEdit ? eventToEdit.id : linkedEvent?.id || `ev-${Date.now()}`,
+      title: title.trim(),
+      category,
+      date,
+      deadlineDate: effectiveDeadline,
+      startTime: isAllDay ? undefined : startTime,
+      endTime: isAllDay ? undefined : endTime,
+      isAllDay,
+      className: className.trim() || undefined,
+      subject: subject.trim() || undefined,
+      location: location.trim() || undefined,
+      notes: notes.trim() || undefined,
+      sourceType: eventToEdit?.sourceType || "manuale",
+      completed: eventToEdit?.completed || false,
+      syncedWithGoogle: isGoogleSourcedEvent ? false : (linkedEvent?.syncedWithGoogle ?? eventToEdit?.syncedWithGoogle ?? false),
+    };
+  };
 
   const validateCurrentEvent = () => {
     if (!title.trim()) { setValidationError("Inserisci un titolo."); return false; }
     const error = eventDateError({ date, startTime, endTime, isAllDay });
-    setValidationError(error);
-    return !error;
+    if (error) { setValidationError(error); return false; }
+    const isDeadlined = category === "scadenza" || hasDeadline;
+    if (isDeadlined && (!deadlineDate || !isValidDate(deadlineDate))) {
+      setValidationError("Inserisci una data limite valida per la scadenza.");
+      return false;
+    }
+    setValidationError(null);
+    return true;
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -266,7 +310,7 @@ export const EventModal: React.FC<EventModalProps> = ({
                 <button
                   key={cat.id}
                   type="button"
-                  onClick={() => setCategory(cat.id)}
+                  onClick={() => handleSelectCategory(cat.id)}
                   className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
                     category === cat.id
                       ? "bg-emerald-700 text-white border-emerald-700 shadow-2xs"
@@ -300,7 +344,13 @@ export const EventModal: React.FC<EventModalProps> = ({
                 type="date"
                 required
                 value={date}
-                onChange={(e) => setDate(e.target.value)}
+                onChange={(e) => {
+                  const newDate = e.target.value;
+                  setDate(newDate);
+                  if (hasDeadline && !deadlineDate) {
+                    setDeadlineDate(newDate);
+                  }
+                }}
                 className="w-full p-2.5 border border-stone-300 rounded-lg text-xs bg-white"
               />
             </div>
@@ -313,9 +363,50 @@ export const EventModal: React.FC<EventModalProps> = ({
                   onChange={(e) => setIsAllDay(e.target.checked)}
                   className="rounded-sm text-emerald-700 focus:ring-emerald-500 w-4 h-4"
                 />
-                <span className="font-medium">Intera giornata / Scadenza</span>
+                <span className="font-medium">Intera giornata</span>
               </label>
             </div>
+          </div>
+
+          {/* Deadline Section */}
+          <div className="p-3 bg-stone-50 rounded-xl border border-stone-200 space-y-2">
+            <div className="flex items-center min-h-[32px]">
+              <label className={`flex items-center space-x-2 text-stone-700 ${category === "scadenza" ? "cursor-not-allowed opacity-90" : "cursor-pointer"}`}>
+                <input
+                  type="checkbox"
+                  checked={category === "scadenza" ? true : hasDeadline}
+                  disabled={category === "scadenza"}
+                  onChange={(e) => {
+                    if (category === "scadenza") return;
+                    const checked = e.target.checked;
+                    setHasDeadline(checked);
+                    if (checked && !deadlineDate) {
+                      setDeadlineDate(date || localDateISO());
+                    }
+                  }}
+                  className="rounded-sm text-rose-700 focus:ring-rose-500 w-4 h-4"
+                />
+                <span className="font-semibold text-stone-800">Ha una scadenza</span>
+              </label>
+            </div>
+            {category === "scadenza" && (
+              <p className="text-[11px] text-stone-500">
+                La tipologia “Scadenza Istituzionale” richiede una data limite.
+              </p>
+            )}
+
+            {(category === "scadenza" || hasDeadline) && (
+              <div className="pt-1">
+                <label className="block font-semibold text-stone-700 mb-1">Data limite *</label>
+                <input
+                  type="date"
+                  required={category === "scadenza" || hasDeadline}
+                  value={deadlineDate}
+                  onChange={(e) => setDeadlineDate(e.target.value)}
+                  className="w-full sm:w-auto p-2 border border-stone-300 rounded-lg text-xs bg-white focus:ring-1 focus:ring-emerald-600 focus:border-emerald-600"
+                />
+              </div>
+            )}
           </div>
 
           {validationError && <p role="alert" className="text-sm text-rose-700">{validationError}</p>}

@@ -20,7 +20,7 @@ function item(v: unknown): boolean {
   return record(v) && required(v.tempId) && required(v.title) && categories.includes(v.category) && text(v.date) && (v.date === '' || isValidDate(v.date))
     && optional(v.startTime, text) && optional(v.endTime, text) && ['VERDE','GIALLO','ROSSO'].includes(v.relevance)
     && text(v.relevanceReason) && bool(v.selectedForImport) && optional(v.isDeadline, bool)
-    && ['className','subject','location','notes','rawSnippet'].every(k => optional(v[k], text));
+    && ['className','subject','location','notes','rawSnippet','deadlineDate'].every(k => optional(v[k], text));
 }
 function timetable(v: unknown): boolean {
   return list(v, s => Number.isInteger(s.dayOfWeek) && s.dayOfWeek >= 1 && s.dayOfWeek <= 6 && Number.isInteger(s.periodNumber)
@@ -114,7 +114,7 @@ export function validateBackup(data: unknown): asserts data is Record<string, an
     || !optional(p.schools, v => Array.isArray(v) && v.every(s => record(s) && required(s.id) && text(s.name) && optional(s.institutionalEmail,text) && optional(s.campuses,strings) && optional(s.schoolLevel,l => ['infanzia','primaria','ssig','ssiig'].includes(l as string)) && optional(s.weeklyHours,number) && optional(s.isPrimary,bool) && optional(s.active,bool) && optional(s.dayPeriods,dayPeriodsValidator) && optional(s.timeSlotConfig,timeSlotConfigValidator)))) throw new Error('Profilo nel backup non valido.');
   if (!list(data.events, e => required(e.title) && isValidDate(e.date) && bool(e.isAllDay) && eventDateError({ date: e.date, isAllDay: e.isAllDay, startTime: e.startTime, endTime: e.endTime }) === null && categories.includes(e.category)
     && ['manuale','circolare','orario','google_calendar','registro'].includes(e.sourceType)
-    && ['startTime','endTime','className','subject','location','notes','sourceCircularTitle','sourceCircularId','sourceItemId','googleEventId','updatedAt','schoolId'].every(k => optional(e[k],text))
+    && ['startTime','endTime','className','subject','location','notes','sourceCircularTitle','sourceCircularId','sourceItemId','googleEventId','updatedAt','schoolId','deadlineDate'].every(k => optional(e[k],text))
     && optional(e.completed,bool) && optional(e.syncedWithGoogle,bool) && optional(e.reminderMinutesBefore,number))) throw new Error('Eventi nel backup non validi.');
   if (!list(data.circulars, c => text(c.title) && isValidDate(c.uploadDate) && ['pdf','image','text'].includes(c.fileType) && text(c.fileName)
     && number(c.extractedCount) && number(c.relevantCount) && optional(c.rawText,text) && optional(c.updatedAt,text) && optional(c.schoolId,required)

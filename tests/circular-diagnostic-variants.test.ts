@@ -70,6 +70,7 @@ const sampleItem = {
   title: 'Consiglio di Classe 1A',
   category: 'consiglio_classe',
   date: '2026-10-20',
+  deadlineDate: '',
   startTime: '15:30',
   endTime: '16:30',
   className: '1A',
@@ -104,7 +105,7 @@ test('1. env assente, vuoto o non valido ricade sempre sulla variante D (produzi
 // 2. Verifica statica dello Structured Outputs JSON Schema per Groq
 // ---------------------------------------------------------------------------
 
-test('2. Verifica statica dello Structured Outputs JSON Schema per Groq (15 campi required, strict=true, enum, additionalProperties=false)', () => {
+test('2. Verifica statica dello Structured Outputs JSON Schema per Groq (16 campi required, strict=true, enum, additionalProperties=false)', () => {
   assert.equal(GROQ_CIRCULAR_RESPONSE_SCHEMA.type, 'json_schema');
   assert.equal(GROQ_CIRCULAR_RESPONSE_SCHEMA.json_schema.name, 'circular_events');
   assert.equal(GROQ_CIRCULAR_RESPONSE_SCHEMA.json_schema.strict, true);
@@ -128,6 +129,7 @@ test('2. Verifica statica dello Structured Outputs JSON Schema per Groq (15 camp
     'subject',
     'location',
     'notes',
+    'deadlineDate',
     'isDeadline',
     'relevance',
     'relevanceReason',
@@ -137,11 +139,11 @@ test('2. Verifica statica dello Structured Outputs JSON Schema per Groq (15 camp
     'recipientClasses',
   ];
 
-  assert.equal(expectedFields.length, 15);
+  assert.equal(expectedFields.length, 16);
   for (const field of expectedFields) {
     assert.ok(itemSchema.properties[field], `Campo ${field} deve essere definito nelle properties`);
   }
-  assert.deepEqual(itemSchema.required, expectedFields, 'Tutti i 15 campi devono essere required');
+  assert.deepEqual(itemSchema.required, expectedFields, 'Tutti i 16 campi devono essere required');
   assert.deepEqual(itemSchema.properties.relevance.enum, ['VERDE', 'GIALLO', 'ROSSO']);
   assert.equal(itemSchema.properties.isDeadline.type, 'boolean');
 });

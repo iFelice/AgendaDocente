@@ -80,11 +80,14 @@ export function normalizeExtractedItems(input: unknown, profile: TeacherProfile,
       const normalized = str(v).replace('.', ':').replace(/^(\d):/, '0$1:');
       return isValidTime(normalized) ? normalized : undefined;
     };
+    const rawDeadline = str(raw.deadlineDate);
+    const deadlineDate = isValidDate(rawDeadline) ? rawDeadline : undefined;
     const item: ExtractedItem = {
       tempId: `extracted-${Date.now()}-${index}`,
       title: str(raw.title),
       category: normalizeCircularCategory(raw.category, str(raw.title), str(raw.rawSnippet)),
       date: isValidDate(raw.date) ? raw.date : '',
+      deadlineDate,
       startTime: time(raw.startTime), endTime: time(raw.endTime),
       className: str(raw.className), subject: isGenericSubject(str(raw.subject)) ? "" : str(raw.subject), location: str(raw.location),
       notes: str(raw.notes), rawSnippet: str(raw.rawSnippet),
@@ -92,7 +95,7 @@ export function normalizeExtractedItems(input: unknown, profile: TeacherProfile,
       // complete in formato canonico. I valori non validi vengono scartati.
       recipientGrades: normalizeRecipientGrades(raw.recipientGrades),
       recipientClasses: normalizeRecipientClasses(raw.recipientClasses),
-      isDeadline: raw.isDeadline === true || raw.category === 'scadenza',
+      isDeadline: raw.isDeadline === true || !!deadlineDate || raw.category === 'scadenza',
       relevance: ['VERDE', 'GIALLO', 'ROSSO'].includes(raw.relevance) ? raw.relevance : 'GIALLO',
       relevanceReason: str(raw.relevanceReason), selectedForImport: false,
     };
@@ -206,11 +209,14 @@ export function parseCircularText(text: string, profile: TeacherProfile, locatio
       : /formazion/.test(lower) ? 'formazione'
       : /ricevimento|genitori/.test(lower) ? 'ricevimento_genitori' : 'riunione';
     const title = (time ? content.replace(time[0], '') : content).replace(/^\s*[-–:|]+|[|]+\s*$/g, '').trim();
+    const isDeadline = category === 'scadenza';
+    const deadlineDate = isDeadline && isValidDate(currentDate) ? currentDate : undefined;
     items.push({ title: title || content, category, date: currentDate,
+      deadlineDate,
       startTime: time ? `${time[1].padStart(2,'0')}:${time[2]}` : undefined,
       endTime: time?.[3] ? `${time[3].padStart(2,'0')}:${time[4]}` : undefined,
       className: classes.join(', '), subject: detectSubjects(content, profile).join(', '),
-      rawSnippet: line, notes: line, isDeadline: category === 'scadenza', relevance: 'GIALLO',
+      rawSnippet: line, notes: line, isDeadline, relevance: 'GIALLO',
     });
   }
   return normalizeExtractedItems(items, profile, location);

@@ -1284,9 +1284,11 @@ export function convertExtractedItemToEvent(
 ): CalendarEvent {
   const error = extractedItemError(it);
   if (error) throw new Error(error);
+  const deadlineDate = it.deadlineDate || (it.isDeadline === true ? it.date : undefined);
   return {
     id: `ev-circ-${sourceCircularId}-${it.tempId}`,
     title: it.title, category: it.category, date: it.date,
+    deadlineDate: deadlineDate || undefined,
     startTime: it.startTime || undefined, endTime: it.endTime || undefined,
     // Nessun orario nel documento => impegno per l'intera giornata, anche se non è una scadenza.
     isAllDay: !it.startTime && !it.endTime,

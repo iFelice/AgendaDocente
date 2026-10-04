@@ -144,6 +144,7 @@ export function isTitleMatch(rawA: string, rawB: string): boolean {
 export interface EventFieldDiff {
   title: boolean;
   date: boolean;
+  deadlineDate: boolean;
   startTime: boolean;
   endTime: boolean;
   location: boolean;
@@ -157,13 +158,15 @@ export interface EventFieldDiff {
  */
 export function getEventFieldDiff(
   existing: CalendarEvent,
-  candidate: Pick<ExtractedItem, "title" | "date" | "startTime" | "endTime" | "location" | "notes" | "category" | "className">
+  candidate: Pick<ExtractedItem, "title" | "date" | "deadlineDate" | "isDeadline" | "startTime" | "endTime" | "location" | "notes" | "category" | "className">
 ): EventFieldDiff {
   const cleanStr = (s?: string) => (s ?? "").trim();
+  const candidateDeadline = candidate.deadlineDate || (candidate.isDeadline === true ? candidate.date : undefined);
 
   return {
     title: cleanStr(existing.title) !== cleanStr(candidate.title),
     date: cleanStr(existing.date) !== cleanStr(candidate.date),
+    deadlineDate: cleanStr(existing.deadlineDate) !== cleanStr(candidateDeadline),
     startTime: cleanStr(existing.startTime) !== cleanStr(candidate.startTime),
     endTime: cleanStr(existing.endTime) !== cleanStr(candidate.endTime),
     location: cleanStr(existing.location) !== cleanStr(candidate.location),

@@ -72,7 +72,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     { id: "settimana", label: "Settimana", icon: CalendarDays },
     { id: "mese", label: "Mese", icon: Calendar },
     { id: "impegni", label: "Note e impegni", icon: ListTodo },
-    { id: "scadenze", label: "Scadenze & PEI", icon: CheckSquare },
+    { id: "scadenze", label: "Scadenze", icon: CheckSquare },
     { id: "classi", label: "Classi & Alunni", icon: Users },
     { id: "registro", label: "Registro", icon: BookOpen },
     { id: "orario", label: "Orario Lezioni", icon: Grid },
