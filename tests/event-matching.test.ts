@@ -12,6 +12,7 @@ import {
   findPossibleEventUpdate,
 } from '../src/utils/eventMatching';
 import { CircularAnalyzerModal } from '../src/components/CircularAnalyzerModal';
+import { deriveFutureCommitments } from '../src/utils/futureCommitments';
 import { storage, emptyInstallation } from '../src/services/storage';
 import { database } from '../src/services/db';
 import type { CalendarEvent, ExtractedItem, TeacherProfile } from '../src/types';
@@ -493,12 +494,12 @@ test('9, 10, 11. "Aggiorna esistente": preserva ID, googleEventId, metadati e ag
     // 9. Preserva ID originale
     assert.equal(updated.id, 'ev-orig-12345');
 
-    // 10. Preserva googleEventId e metadati tecnici
+    // 10. Preserva googleEventId e metadati tecnici, riattiva completed
     assert.equal(updated.googleEventId, 'google-cal-event-999');
     assert.equal(updated.syncedWithGoogle, true);
     assert.equal(updated.schoolId, 'school-main');
     assert.equal(updated.reminderMinutesBefore, 30);
-    assert.equal(updated.completed, true);
+    assert.equal(updated.completed, false);
     assert.equal(updated.sourceCircularId, 'circ-initial-1', 'Preserva provenienza circolare originaria');
 
     // 11. Aggiorna orari, luogo e note
@@ -877,6 +878,98 @@ test('16. Circolare multi-impegno: update + create + ignore -> salva gli altri d
     assert.equal(importedNew[0].title, 'Formazione Docenti Privacy');
 
     assert.equal(closeCalled, true, 'Modale chiusa con successo');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('17. Regressione Prisma: evento circolare con completed:true viene riattivato (completed:false) all\'aggiornamento ed incluso in deriveFutureCommitments', async () => {
+  const existing: CalendarEvent = {
+    id: 'existing-prisma',
+    title: 'Svolgimento Giochi Matematici di Prisma',
+    category: 'promemoria',
+    date: '2026-11-26',
+    isAllDay: true,
+    sourceType: 'circolare',
+    completed: true,
+  };
+
+  let importedNew: CalendarEvent[] = [];
+  let importedUpdated: CalendarEvent[] = [];
+  let renderer: any;
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    return new Response(JSON.stringify({
+      success: true,
+      source: 'server',
+      items: [
+        {
+          title: 'Svolgimento Giochi Matematici di Prisma',
+          category: 'promemoria',
+          subject: 'Matematica',
+          date: '2026-11-26',
+          relevance: 'VERDE',
+        },
+      ],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }) as typeof fetch;
+
+  try {
+    await act(async () => {
+      renderer = create(
+        React.createElement(CircularAnalyzerModal, {
+          isOpen: true,
+          onClose: () => {},
+          profile,
+          existingEvents: [existing],
+          onImportEvents: (newEvents, _docMeta, updatedEvents) => {
+            importedNew = newEvents;
+            importedUpdated = updatedEvents || [];
+          },
+          initialFile: null,
+        })
+      );
+    });
+
+    const textTabBtn = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el).toLowerCase().includes('incolla testo'))[0];
+    await act(async () => { textTabBtn.props.onClick(); });
+
+    const textarea = renderer.root.findByType('textarea');
+    await act(async () => { textarea.props.onChange({ target: { value: '26/11/2026 Svolgimento Giochi Matematici di Prisma' } }); });
+
+    const runBtn = renderer.root.findByProps({ id: 'btn-run-analysis' });
+    await act(async () => {
+      runBtn.props.onClick();
+      await new Promise(r => setTimeout(r, 100));
+    });
+
+    // Scegli "Aggiorna esistente"
+    const updateBtn = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Aggiorna esistente')[0];
+    assert.ok(updateBtn, 'Pulsante Aggiorna esistente presente');
+    await act(async () => { updateBtn.props.onClick(); });
+
+    // Conferma importazione
+    const confirmBtn = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el).includes("all'Agenda"))[0];
+    await act(async () => { confirmBtn.props.onClick(); });
+
+    assert.equal(importedNew.length, 0, 'Nessun nuovo evento duplicato creato');
+    assert.equal(importedUpdated.length, 1, 'Esattamente un evento aggiornato');
+
+    const updated = importedUpdated[0];
+    assert.equal(updated.id, 'existing-prisma');
+    assert.equal(updated.completed, false, 'Stato completed reimpostato a false');
+    assert.equal(updated.sourceType, 'circolare');
+
+    // deriveFutureCommitments deve includere l'evento riattivato
+    const futureItems = deriveFutureCommitments({
+      events: [updated],
+      scheduledAssessments: [],
+      students: [],
+      todayIso: '2026-10-01',
+    });
+    assert.equal(futureItems.length, 1);
+    assert.equal(futureItems[0].id, 'event:existing-prisma');
   } finally {
     globalThis.fetch = originalFetch;
   }

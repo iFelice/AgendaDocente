@@ -8,6 +8,7 @@ import { create, act } from 'react-test-renderer';
 import {
   deriveFutureCommitments,
   derivePastCommitments,
+  deriveArchiveCommitments,
   groupFutureCommitments,
   civilWeekMonday,
   futureCommitmentGroupFor,
@@ -432,4 +433,72 @@ test('click su CalendarEvent storico riusa onEditEvent; le verifiche restano rea
   assert.deepEqual(opened, [target]);
   assert.equal(assessmentRow.props.onClick, undefined);
   await act(async () => renderer.unmount());
+});
+
+test('contratto Note e impegni ed Archivio: preserva quick note completed, circolare futura, esclusione orario ed eventi passati', () => {
+  const quickNoteCompleted: CalendarEvent = {
+    id: 'qn-completed',
+    title: 'Nota rapida completata',
+    category: 'promemoria',
+    date: addDaysISO(TODAY, 2),
+    isAllDay: true,
+    sourceType: 'manuale',
+    completed: true,
+  };
+
+  const circularFutureActive: CalendarEvent = {
+    id: 'circ-active',
+    title: 'Circolare futura attiva',
+    category: 'promemoria',
+    date: addDaysISO(TODAY, 3),
+    isAllDay: true,
+    sourceType: 'circolare',
+    completed: false,
+  };
+
+  const lessonOrario: CalendarEvent = {
+    id: 'lesson-orario',
+    title: 'Lezione orario ordinaria',
+    category: 'lezione',
+    date: addDaysISO(TODAY, 1),
+    isAllDay: false,
+    sourceType: 'orario',
+  };
+
+  const pastEvent: CalendarEvent = {
+    id: 'past-event',
+    title: 'Evento passato',
+    category: 'riunione',
+    date: addDaysISO(TODAY, -2),
+    isAllDay: false,
+    sourceType: 'manuale',
+  };
+
+  const allEvents = [quickNoteCompleted, circularFutureActive, lessonOrario, pastEvent];
+
+  // 1. deriveFutureCommitments (Note e impegni futuri)
+  const futureItems = deriveFutureCommitments({
+    events: allEvents,
+    scheduledAssessments: [],
+    students,
+    todayIso: TODAY,
+  });
+
+  // Solo l'evento circolare futuro completed:false deve comparire
+  assert.deepEqual(futureItems.map(i => i.id), ['event:circ-active']);
+
+  // 2. deriveArchiveCommitments (Archivio)
+  const archiveItems = deriveArchiveCommitments({
+    events: allEvents,
+    scheduledAssessments: [],
+    students,
+    todayIso: TODAY,
+  });
+
+  // Include la quick note completata futura e l'evento passato; esclude la lezione orario e l'evento circolare futuro non passato
+  const archiveIds = archiveItems.map(i => i.id);
+  assert.ok(archiveIds.includes('event:qn-completed'), 'Quick note completata futura inclusa in Archivio');
+  assert.ok(archiveIds.includes('event:past-event'), 'Evento passato incluso in Archivio');
+  assert.ok(!archiveIds.includes('event:lesson-orario'), 'Evento sourceType orario escluso da Archivio');
+  assert.ok(!archiveIds.includes('event:circ-active'), 'Evento circolare futuro non completato escluso da Archivio');
 });
