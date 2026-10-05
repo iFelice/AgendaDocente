@@ -218,8 +218,8 @@ test('errori transitori: due tentativi per modello con backoff, poi 503 con cate
   assert.deepEqual(calls.map((call) => call.model), GEMINI_CANDIDATE_MODELS_DEFAULT.flatMap((model) => [model, model]), 'due tentativi sullo stesso modello, poi il modello successivo');
   assert.deepEqual(waits, [1_000, 2_000], 'backoff esponenziale (non il fisso 500 ms che non aiuta con 429/503)');
   assert.deepEqual(result.attempts.map((a) => `${a.model}:${a.category}:${a.status}`), [
-    'gemini-3.5-flash:sovraccarico:503', 'gemini-3.5-flash:sovraccarico:503',
     'gemini-3.1-flash-lite:sovraccarico:503', 'gemini-3.1-flash-lite:sovraccarico:503',
+    'gemini-3.5-flash:sovraccarico:503', 'gemini-3.5-flash:sovraccarico:503',
   ]);
 });
 
@@ -358,7 +358,7 @@ test('chiave AI assente: categoria esplicita, messaggio invariato per l\'utente'
 test('diagnostica leggibile su Render: modello, tentativo, status, categoria, durata — mai il documento', async () => {
   const { logs } = await run((call, index) => (index === 0 ? apiError(429, 'Resource has been exhausted') : { text: '{"rows":[],"cells":[]}' }));
   const line = logs[0];
-  assert.match(line, /^\[AI Orari\] provider=gemini modello=gemini-3\.5-flash tentativo=1\/2 esito=fallito categoria=quota status=429 thinking=default timeoutMs=\d+ durataMs=\d+ items=0 finishReason=- outputTokens=-$/);
+  assert.match(line, /^\[AI Orari\] provider=gemini modello=gemini-3\.1-flash-lite tentativo=1\/2 esito=fallito categoria=quota status=429 thinking=default timeoutMs=\d+ durataMs=\d+ items=0 finishReason=- outputTokens=-$/);
   const all = logs.join('\n');
   for (const forbidden of ['BASE64_DOCUMENTO_SENTINELLA', 'iVBOR', 'Analizza la tabella', 'Estrai la tabella', 'responseSchema', 'Manganiello', 'properties']) {
     assert.ok(!all.includes(forbidden), `il log non deve contenere "${forbidden}"`);

@@ -26,8 +26,8 @@ function text(node: any): string {
   return (node.children ?? []).map(text).join(' ');
 }
 
-test('il timeout client circolari lascia margine al deadline PDF da 90 secondi', () => {
-  assert.equal(CIRCULAR_REQUEST_TIMEOUT_MS, 100_000);
+test('il timeout client circolari lascia margine al deadline PDF da 150 secondi', () => {
+  assert.equal(CIRCULAR_REQUEST_TIMEOUT_MS, 160_000);
 });
 
 test('il client mostra un messaggio esplicito quando un provider restituisce una lista vuota', async () => {
