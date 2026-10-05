@@ -18,6 +18,9 @@ test('extractPdfText: PDF digitale multipagina estrae il testo di tutte le pagin
   const result = await extractPdfText(base64);
 
   assert.equal(result.pageCount, 4);
+  assert.equal(result.pages.length, 4);
+  assert.ok(result.pages[0].includes('PIANO DELLE ATTIVITA'));
+  assert.ok(result.pages[3].includes('GLO classe 2D'));
   assert.ok(result.textChars > 0);
   assert.ok(result.text.includes('PIANO DELLE ATTIVITA'));
   assert.ok(result.text.includes('SETTEMBRE'));

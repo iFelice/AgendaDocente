@@ -359,7 +359,7 @@ test('5. Groq 429 -> Fallback a Gemini (1 sola chiamata Groq, Gemini ha successo
     assert.equal(res.status, 200);
     const json: any = await res.json();
     assert.equal(json.success, true);
-    assert.equal(json.source, 'gemini-3.8-flash');
+    assert.equal(json.source, 'gemini-3.5-flash');
     assert.equal(json.items.length, 1);
 
     assert.equal(groqCalls, 1, 'Groq 1 sola chiamata prima del fallback');
@@ -720,7 +720,7 @@ test('11. PDF in default produzione -> Groq 0 chiamate, Gemini diretto', async (
     assert.equal(res.status, 200);
     const json: any = await res.json();
     assert.equal(json.success, true);
-    assert.equal(json.source, 'gemini-3.8-flash');
+    assert.equal(json.source, 'gemini-3.5-flash');
 
     assert.equal(groqCalls, 0, 'PDF non deve chiamare Groq');
     assert.equal(geminiCalls, 1, 'PDF va direttamente a Gemini');

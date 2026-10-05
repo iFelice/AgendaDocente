@@ -138,7 +138,7 @@ test('classificazione completa: quota, sovraccarico, modello assente, chiave, ri
     [apiError(429, 'Resource has been exhausted (per-day quota).'), 'quota', true],
     [apiError(503, 'Model is currently unavailable.'), 'sovraccarico', true],
     [apiError(500, 'Internal error.'), 'sovraccarico', true],
-    [apiError(404, 'Publisher model `models/gemini-3.8-flash` was not found.'), 'modello-non-trovato', false],
+    [apiError(404, 'Publisher model `models/gemini-3.5-flash` was not found.'), 'modello-non-trovato', false],
     [apiError(401, 'API key not valid. Please pass a valid API key.'), 'chiave-o-permessi', false],
     [apiError(403, 'Permission denied on resource project.'), 'chiave-o-permessi', false],
     [apiError(400, 'Invalid JSON payload received.'), 'richiesta-non-valida', false],
@@ -195,11 +195,11 @@ test('regressione: 26 s non è più tagliata a 20 s; oltre la quota del modello 
 
   // Un solo modello candidato (configurazione possibile su Render): nessun tetto,
   // tutto il budget a lui, e la generazione da 26 s completa al primo colpo.
-  const solo = await run(slowThenFast, { models: ['gemini-3.8-flash'] });
+  const solo = await run(slowThenFast, { models: ['gemini-3.5-flash'] });
   assert.equal(attemptTimeout(solo.calls)[0], 45_000 - GEMINI_RESPONSE_RESERVE_MS);
   assert.equal(solo.result.ok, true);
   assert.equal(solo.calls.length, 1, 'nessuna cascata quando il modello ce la fa');
-  assert.deepEqual(solo.result.attempts, [{ model: 'gemini-3.8-flash', attempt: 1, category: 'ok', status: null, durationMs: 26_000, thinking: 'default' }]);
+  assert.deepEqual(solo.result.attempts, [{ model: 'gemini-3.5-flash', attempt: 1, category: 'ok', status: null, durationMs: 26_000, thinking: 'default' }]);
 });
 
 // ---------------------------------------------------------------------------
@@ -218,8 +218,8 @@ test('errori transitori: due tentativi per modello con backoff, poi 503 con cate
   assert.deepEqual(calls.map((call) => call.model), GEMINI_CANDIDATE_MODELS_DEFAULT.flatMap((model) => [model, model]), 'due tentativi sullo stesso modello, poi il modello successivo');
   assert.deepEqual(waits, [1_000, 2_000], 'backoff esponenziale (non il fisso 500 ms che non aiuta con 429/503)');
   assert.deepEqual(result.attempts.map((a) => `${a.model}:${a.category}:${a.status}`), [
-    'gemini-3.8-flash:sovraccarico:503', 'gemini-3.8-flash:sovraccarico:503',
-    'gemini-3.7-flash:sovraccarico:503', 'gemini-3.7-flash:sovraccarico:503',
+    'gemini-3.5-flash:sovraccarico:503', 'gemini-3.5-flash:sovraccarico:503',
+    'gemini-3.1-flash-lite:sovraccarico:503', 'gemini-3.1-flash-lite:sovraccarico:503',
   ]);
 });
 
@@ -358,7 +358,7 @@ test('chiave AI assente: categoria esplicita, messaggio invariato per l\'utente'
 test('diagnostica leggibile su Render: modello, tentativo, status, categoria, durata — mai il documento', async () => {
   const { logs } = await run((call, index) => (index === 0 ? apiError(429, 'Resource has been exhausted') : { text: '{"rows":[],"cells":[]}' }));
   const line = logs[0];
-  assert.match(line, /^\[AI Orari\] modello=gemini-3\.8-flash tentativo=1\/2 esito=fallito categoria=quota status=429 thinking=default timeoutMs=\d+ durataMs=\d+$/);
+  assert.match(line, /^\[AI Orari\] provider=gemini modello=gemini-3\.5-flash tentativo=1\/2 esito=fallito categoria=quota status=429 thinking=default timeoutMs=\d+ durataMs=\d+ items=0 finishReason=- outputTokens=-$/);
   const all = logs.join('\n');
   for (const forbidden of ['BASE64_DOCUMENTO_SENTINELLA', 'iVBOR', 'Analizza la tabella', 'Estrai la tabella', 'responseSchema', 'Manganiello', 'properties']) {
     assert.ok(!all.includes(forbidden), `il log non deve contenere "${forbidden}"`);
@@ -453,9 +453,9 @@ test('budget troppo basso: comportamento controllato, nessun tentativo sotto GEM
     clock.now += call.config.httpOptions.timeout as number;
     return apiError(503, 'Model is currently unavailable.');
   }, { budgetMs: 6_500 });
-  assert.equal(tight.calls.length, 1, 'un solo tentativo reale, poi si risponde 503');
-  assert.ok(attemptTimeout(tight.calls).every((timeout) => timeout >= GEMINI_MIN_ATTEMPT_MS), `nessun micro-tentativo: ${attemptTimeout(tight.calls).join(',')}`);
-  assert.equal(tight.result.category, 'sovraccarico');
+  assert.equal(tight.calls.length, 0, 'sotto 10 secondi nessun modello viene chiamato');
+  assert.equal(tight.result.category, 'budget-esaurito');
+  assert.ok(tight.logs.some((line) => line.includes('esito=skipped') && line.includes('budget-insufficiente')));
 });
 
 test('nessuna regressione sulle categorie: deadline, quota, overload, 404, 400', async () => {

@@ -485,8 +485,12 @@ export async function runGeminiJson(opts: RunGeminiJsonOptions): Promise<GeminiJ
       const durationMs = now() - startedAttempt;
       const category = outcome.category;
       const status = outcome.status;
-      attempts.push({ model, attempt, category, status, durationMs, thinking: useThinking ? "basso" : "default", finishReason: outcome.finishReason, outputTokens: outcome.outputTokens });
-      log(`[${opts.label}] provider=gemini modello=${model} tentativo=${attempt}/${maxAttemptsPerModel} esito=${category === "ok" ? "ok" : "fallito"} categoria=${category} status=${status ?? "-"} thinking=${useThinking ? "basso" : "default"} timeoutMs=${timeoutMs} durataMs=${durationMs} finishReason=${outcome.finishReason ?? "-"} outputTokens=${outcome.outputTokens ?? "-"}`);
+      attempts.push({
+        model, attempt, category, status, durationMs, thinking: useThinking ? "basso" : "default",
+        ...(outcome.finishReason ? { finishReason: outcome.finishReason } : {}),
+        ...(outcome.outputTokens !== undefined ? { outputTokens: outcome.outputTokens } : {}),
+      });
+      log(`[${opts.label}] provider=gemini modello=${model} tentativo=${attempt}/${maxAttemptsPerModel} esito=${category === "ok" ? "ok" : "fallito"} categoria=${category} status=${status ?? "-"} thinking=${useThinking ? "basso" : "default"} timeoutMs=${timeoutMs} durataMs=${durationMs} items=${category === "ok" ? "pending" : 0} finishReason=${outcome.finishReason ?? "-"} outputTokens=${outcome.outputTokens ?? "-"}`);
 
       if (category === "ok") return { ok: true, text: outcome.text, source: model, category: "ok", attempts };
       if (category === "annullata") return failed("annullata", "richiesta interrotta durante il tentativo");
@@ -703,7 +707,7 @@ export async function executeGroqCircularAnalysis(params: {
     }
   }
 
-  console.log(`[AI Circolari Diagnostic] variant=${variantLabel} provider=groq model=${groqModel} call=${groqCallSuccess ? "success" : "failed"} status=${groqHttpStatus} durationMs=${groqDurationMs} parse=${parseStatus} mime=${params.summary.mime} bytes=${params.summary.bytes}`);
+  console.log(`[AI Circolari Diagnostic] variant=${variantLabel} provider=groq model=${groqModel} call=${groqCallSuccess ? "success" : "failed"} status=${groqHttpStatus} durationMs=${groqDurationMs} parse=${parseStatus} items=${parseStatus === "success" ? groqParsed.length : 0} finishReason=${groqFinishReason ?? "-"} outputTokens=${groqOutputTokens ?? "-"} mime=${params.summary.mime} bytes=${params.summary.bytes}`);
 
   if (groqCallSuccess && parseStatus === "success") {
     return {
@@ -1225,7 +1229,10 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
     }
 
     const items = normalizeExtractedItems(parsed, teacherProfile, effectiveCampus);
-    if (source !== "local-heuristic") logOutcome({ provider: "gemini", fallbackFrom, esito: "ok", categoria: "ok", sorgente: source, status: 200 });
+    if (source !== "local-heuristic") {
+      console.log(`[AI Circolari Modello] provider=gemini modello=${usedModel} esito=ok durataMs=${lastAttempt?.durationMs ?? durationMs} items=${items.length} finishReason=${lastAttempt?.finishReason ?? "-"} outputTokens=${lastAttempt?.outputTokens ?? "-"}`);
+      logOutcome({ provider: "gemini", fallbackFrom, esito: "ok", categoria: "ok", sorgente: source, status: 200 });
+    }
 
     return res.json({
       success: true,
