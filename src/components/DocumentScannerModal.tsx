@@ -1,3 +1,4 @@
+import { normalizeCircularMimeType } from "../utils/circularUpload";
 import { useAnalysisProgress } from "../hooks/useAnalysisProgress";
 import { usePersistenceAction } from "../hooks/usePersistenceAction";
 import {
@@ -917,14 +918,16 @@ export const DocumentScannerModal: React.FC<DocumentScannerModalProps> = ({
     if (!file) return;
     if (captureFor === "circolare") {
       // Pipeline circolare esistente: la nuova UI alimenta l'analizzatore con token auto-start monouso.
-      if (!fileBase64 || !file.type) return;
+      if (!fileBase64) return;
+      const effectiveMime = normalizeCircularMimeType(file.type, file.name);
+      if (!effectiveMime) return;
       const autoStartToken = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
         ? `circ-auto-${crypto.randomUUID()}`
         : `circ-auto-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
       onOpenCircularWithFile({
         mode: "file",
         base64: fileBase64,
-        mimeType: file.type,
+        mimeType: effectiveMime,
         fileName: file.name,
         autoStartToken,
       });

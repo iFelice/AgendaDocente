@@ -75,7 +75,10 @@ test('stale event editors cannot overwrite edits or resurrect an event deleted i
 });
 
 for(const [type,size,expected] of [['image/gif',100,/Formato/],['application/pdf',5*1024*1024+1,/5 MB/],['text/plain',400001,/100.000/]] as const)test(`upload rejects ${type} size ${size} before FileReader`,()=>assert.match(circularUploadError({name:'file',type,size})!,expected));
-test('supported PDF/image/text inputs remain accepted',()=>{for(const type of ['application/pdf','image/png','image/jpeg','image/webp','text/plain'])assert.equal(circularUploadError({name:'file',type,size:100}),null);});
+test('supported PDF/image/text inputs remain accepted',()=>{
+  for(const type of ['application/pdf','image/png','image/jpeg','image/webp','text/plain','image/jpg','image/heic','image/heif'])assert.equal(circularUploadError({name:'file',type,size:100}),null);
+  for(const name of ['doc.pdf','foto.jpg','foto.jpeg','scansione.png','img.webp','foto.heic','foto.heif','testo.txt'])assert.equal(circularUploadError({name,type:'',size:100}),null);
+});
 
 function button(root:any,text:string){return root.findAllByType('button').find((node:any)=>node.children.some((child:any)=>typeof child==='string'&&child.includes(text)));}
 test('failed async event deletion keeps confirmation open and displays an error',async()=>{

@@ -782,10 +782,12 @@ test('10. Groq restituisce elementi non validi/scartati dalla normalizzazione: f
     GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT: process.env.GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT,
     GEMINI_API_KEY: process.env.GEMINI_API_KEY,
     GROQ_API_KEY: process.env.GROQ_API_KEY,
+    GEMINI_CANDIDATE_MODELS: process.env.GEMINI_CANDIDATE_MODELS,
   };
   delete process.env.GEMINI_CIRCULAR_DIAGNOSTIC_VARIANT;
   process.env.GEMINI_API_KEY = 'AIzaSy_FAKE_TEST_KEY';
   process.env.GROQ_API_KEY = 'gsk_TEST_GROQ_KEY_123';
+  process.env.GEMINI_CANDIDATE_MODELS = 'gemini-3.8-flash';
 
   let geminiTextCalls = 0;
   let geminiPdfCalls = 0;

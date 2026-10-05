@@ -1,4 +1,4 @@
-import { circularUploadError } from "../utils/circularUpload";
+import { circularUploadError, normalizeCircularMimeType } from "../utils/circularUpload";
 import { usePersistenceAction } from "../hooks/usePersistenceAction";
 import { convertExtractedItemToEvent } from "../services/storage";
 import { extractedItemError } from "../utils/circularParser";
@@ -225,6 +225,8 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     setFileName(file.name);
     setAnalysisError(null);
 
+    const normalizedMime = normalizeCircularMimeType(file.type, file.name);
+
     const reader = new FileReader();
     reader.onerror = () => {
       if (revision === inputRevision.current) {
@@ -235,14 +237,14 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     reader.onloadend = () => {
       if (revision === inputRevision.current) setIsReadingFile(false);
     };
-    if (file.type.startsWith("image/") || file.type === "application/pdf") {
+    if (normalizedMime.startsWith("image/") || normalizedMime === "application/pdf") {
       reader.onload = () => {
         if (revision !== inputRevision.current) return;
         const resultStr = reader.result as string;
         // Strip data:url prefix for raw base64
         const base64Data = resultStr.split(",")[1];
         setFileBase64(base64Data);
-        setFileMimeType(file.type);
+        setFileMimeType(normalizedMime);
       };
       reader.readAsDataURL(file);
     } else {
@@ -620,12 +622,12 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                       Trascina o seleziona il PDF o la foto della circolare
                     </span>
                     <span className="text-xs text-stone-400 mt-1">
-                      Supporta PDF, PNG, JPEG (anche foto scattate con smartphone)
+                      Supporta PDF, PNG, JPEG, HEIC (anche foto scattate con smartphone)
                     </span>
                     <input
                       id="circular-file-input"
                       type="file"
-                      accept=".pdf,.txt,text/plain,image/png,image/jpeg,image/webp"
+                      accept=".pdf,.jpg,.jpeg,.png,.webp,.heic,.heif,.txt,image/*,application/pdf,text/plain"
                       onChange={handleFileChange}
                       className="hidden"
                     />

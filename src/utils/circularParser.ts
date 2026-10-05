@@ -24,7 +24,7 @@ function yearForMonth(month: number, profile: TeacherProfile): number {
   return year ? Number(year[month >= 8 ? 1 : 2]) : new Date().getFullYear();
 }
 
-function extractDate(line: string, profile: TeacherProfile): { date: string; text: string } | null {
+export function extractDate(line: string, profile: TeacherProfile): { date: string; text: string } | null {
   // Remove clock times first: 09.00 must never be interpreted as a date.
   // Explicit dotted dates are protected before removing times.
   const explicit = /\b(\d{1,2})\/(\d{1,2})\/(\d{4}|\d{2})\b/.exec(line)
@@ -40,6 +40,48 @@ function extractDate(line: string, profile: TeacherProfile): { date: string; tex
   const year = match[3] ? Number(match[3].length === 2 ? `20${match[3]}` : match[3]) : yearForMonth(month, profile);
   const iso = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
   return { date: isValidDate(iso) ? iso : '', text: match[0] };
+}
+
+export function normalizeDateISO(val: unknown, profile?: TeacherProfile, fallbackText?: string): string {
+  if (typeof val === 'string') {
+    const trimmed = val.trim();
+    if (isValidDate(trimmed)) return trimmed;
+
+    // Check YYYY/MM/DD or YYYY.MM.DD
+    const isoSlashMatch = /^(\d{4})[/.](\d{1,2})[/.](\d{1,2})$/.exec(trimmed);
+    if (isoSlashMatch) {
+      const candidate = `${isoSlashMatch[1]}-${isoSlashMatch[2].padStart(2, '0')}-${isoSlashMatch[3].padStart(2, '0')}`;
+      if (isValidDate(candidate)) return candidate;
+    }
+
+    // Check DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY
+    const itMatch = /^(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{4}|\d{2})$/.exec(trimmed);
+    if (itMatch) {
+      const day = itMatch[1].padStart(2, '0');
+      const month = itMatch[2].padStart(2, '0');
+      const year = itMatch[3].length === 2 ? `20${itMatch[3]}` : itMatch[3];
+      const candidate = `${year}-${month}-${day}`;
+      if (isValidDate(candidate)) return candidate;
+    }
+
+    // Check textual Italian date e.g. "15 settembre 2026" or "15 settembre"
+    if (profile) {
+      const parsedFromVal = extractDate(trimmed, profile);
+      if (parsedFromVal && isValidDate(parsedFromVal.date)) {
+        return parsedFromVal.date;
+      }
+    }
+  }
+
+  // Fallback: extract date from fallbackText (e.g. rawSnippet or title)
+  if (fallbackText && typeof fallbackText === 'string' && profile) {
+    const parsed = extractDate(fallbackText, profile);
+    if (parsed && isValidDate(parsed.date)) {
+      return parsed.date;
+    }
+  }
+
+  return '';
 }
 
 /**
@@ -73,31 +115,64 @@ export function extractedItemError(item: Pick<ExtractedItem, 'title' | 'date' | 
 
 export function normalizeExtractedItems(input: unknown, profile: TeacherProfile, location?: string): ExtractedItem[] {
   if (!Array.isArray(input)) throw new Error("Risposta analisi non valida.");
-  return input.map((raw, index) => {
-    if (!raw || typeof raw !== 'object' || typeof raw.title !== 'string') throw new Error("Impegno estratto non valido.");
+  return input.map((rawInput, index) => {
+    if (!rawInput || typeof rawInput !== 'object') throw new Error("Impegno estratto non valido.");
+    const raw = rawInput as Record<string, any>;
     const str = (v: unknown) => typeof v === 'string' ? v.trim() : '';
+    const title = str(raw.title || raw.titolo || raw.evento || raw.attivita || raw.impegno);
+    if (!title) throw new Error("Impegno estratto non valido.");
+
     const time = (v: unknown) => {
       const normalized = str(v).replace('.', ':').replace(/^(\d):/, '0$1:');
       return isValidTime(normalized) ? normalized : undefined;
     };
-    const rawDeadline = str(raw.deadlineDate);
-    const deadlineDate = isValidDate(rawDeadline) ? rawDeadline : undefined;
+
+    let rawStart = raw.startTime ?? raw.oraInizio ?? raw.orario_inizio;
+    let rawEnd = raw.endTime ?? raw.oraFine ?? raw.orario_fine;
+    if (!rawStart && (raw.orario || raw.ora)) {
+      const timeStr = str(raw.orario || raw.ora);
+      const m = timePattern.exec(timeStr);
+      if (m) {
+        rawStart = `${m[1].padStart(2, '0')}:${m[2]}`;
+        if (m[3]) rawEnd = `${m[3].padStart(2, '0')}:${m[4]}`;
+      }
+    }
+
+    const rawDeadline = str(raw.deadlineDate || raw.scadenza || raw.dataScadenza || raw.data_limite);
+    const deadlineCandidate = rawDeadline ? normalizeDateISO(rawDeadline, profile) : '';
+    const deadlineDate = isValidDate(deadlineCandidate) ? deadlineCandidate : undefined;
+
+    const rawDateVal = raw.date ?? raw.data ?? raw.giorno;
+    const rawSnippet = str(raw.rawSnippet);
+    const notes = str(raw.notes || raw.note || raw.ordineDelGiorno || raw.odg);
+    const rawDateCandidate = normalizeDateISO(rawDateVal, profile, `${rawSnippet} ${title} ${notes}`);
+    const date = rawDateCandidate || deadlineDate || '';
+
+    const className = str(raw.className || raw.classe || raw.classi);
+    const subject = isGenericSubject(str(raw.subject || raw.materia || raw.disciplina)) ? "" : str(raw.subject || raw.materia || raw.disciplina);
+    const itemLocation = str(raw.location || raw.luogo || raw.sede || raw.aula);
+
     const item: ExtractedItem = {
       tempId: `extracted-${Date.now()}-${index}`,
-      title: str(raw.title),
-      category: normalizeCircularCategory(raw.category, str(raw.title), str(raw.rawSnippet)),
-      date: isValidDate(raw.date) ? raw.date : '',
+      title,
+      category: normalizeCircularCategory(raw.category || raw.categoria, title, rawSnippet),
+      date,
       deadlineDate,
-      startTime: time(raw.startTime), endTime: time(raw.endTime),
-      className: str(raw.className), subject: isGenericSubject(str(raw.subject)) ? "" : str(raw.subject), location: str(raw.location),
-      notes: str(raw.notes), rawSnippet: str(raw.rawSnippet),
+      startTime: time(rawStart),
+      endTime: time(rawEnd),
+      className,
+      subject,
+      location: itemLocation,
+      notes,
+      rawSnippet,
       // Destinatari strutturati dell'AI: anni 1..5 deduplicati/ordinati e classi
       // complete in formato canonico. I valori non validi vengono scartati.
       recipientGrades: normalizeRecipientGrades(raw.recipientGrades),
       recipientClasses: normalizeRecipientClasses(raw.recipientClasses),
-      isDeadline: raw.isDeadline === true || !!deadlineDate || raw.category === 'scadenza',
+      isDeadline: raw.isDeadline === true || !!deadlineDate || raw.category === 'scadenza' || raw.categoria === 'scadenza',
       relevance: ['VERDE', 'GIALLO', 'ROSSO'].includes(raw.relevance) ? raw.relevance : 'GIALLO',
-      relevanceReason: str(raw.relevanceReason), selectedForImport: false,
+      relevanceReason: str(raw.relevanceReason || raw.motivo),
+      selectedForImport: false,
     };
     // Only an excerpt containing this activity can provide row-local time evidence.
     // Ambiguous or evidence-free excerpts never keep a neighbouring interval by position:
@@ -112,15 +187,17 @@ export function normalizeExtractedItems(input: unknown, profile: TeacherProfile,
         const interval = intervals[0];
         item.startTime = `${interval[1].padStart(2, '0')}:${interval[2]}`;
         item.endTime = interval[3] ? `${interval[3].padStart(2, '0')}:${interval[4]}` : undefined;
-      } else {
-        // Zero or multiple candidate intervals: the row cannot support a unique time.
-        item.startTime = undefined; item.endTime = undefined;
+      } else if (intervals.length > 1) {
+        // Multiple candidate intervals: ambiguous excerpt cannot support a unique time.
+        item.startTime = undefined;
+        item.endTime = undefined;
       }
     }
     // Hard invariant: a closed interval with end <= start (e.g. a duplicated 12:30-12:30)
     // is always treated as incomplete evidence, never as a usable — or auto-selectable — time.
     if (item.startTime && item.endTime && item.endTime <= item.startTime) {
-      item.startTime = undefined; item.endTime = undefined;
+      item.startTime = undefined;
+      item.endTime = undefined;
     }
     const evaluation = evaluateItemRelevance(item, profile, location);
     // Sanificazione del className del modello: se il documento contiene già evidenza di

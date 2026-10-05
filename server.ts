@@ -455,8 +455,11 @@ export async function runGeminiJson(opts: RunGeminiJsonOptions): Promise<GeminiJ
       const remainingMs = opts.budgetMs - (now() - startedAt);
       if (geminiAttemptTimeoutMs(remainingMs) === 0) return failed(attempts.length === 0 ? "budget-esaurito" : lastCategory, "budget di tempo terminato");
       // Il tentativo non supera MAI la quota del modello: il tempo restante è del fallback.
-      const timeoutMs = Math.min(geminiAttemptTimeoutMs(remainingMs), modelBudgetMs - (now() - modelStartedAt));
-      if (timeoutMs < GEMINI_MIN_ATTEMPT_MS) break; // quota esaurita: testimone al modello successivo
+      const rawTimeoutMs = degradeRetry
+        ? Math.min(geminiAttemptTimeoutMs(remainingMs), Math.max(modelBudgetMs - (now() - modelStartedAt), GEMINI_MIN_ATTEMPT_MS))
+        : Math.min(geminiAttemptTimeoutMs(remainingMs), modelBudgetMs - (now() - modelStartedAt));
+      const timeoutMs = Math.min(geminiAttemptTimeoutMs(remainingMs), rawTimeoutMs);
+      if (timeoutMs < GEMINI_MIN_ATTEMPT_MS - 500) break; // quota esaurita: testimone al modello successivo
       if (attempt >= 2 && timeoutMs < GEMINI_RETRY_MIN_ATTEMPT_MS) {
         // Retry da pochi secondi: mai una micro-cascata. Si lascia il tempo al modello
         // successivo; se è l'ultimo non c'è altro da provare, si risponde e basta.
@@ -480,6 +483,7 @@ export async function runGeminiJson(opts: RunGeminiJsonOptions): Promise<GeminiJ
         // 400 con thinkingLevel: riprova subito lo stesso modello senza di esso.
         useThinking = false;
         degradeRetry = true;
+        opts.thinkingLevel = undefined;
         continue;
       }
       if (category === "chiave-o-permessi" || category === "richiesta-non-valida" || category === "non-configurato") {
@@ -603,8 +607,11 @@ export async function executeGroqCircularAnalysis(params: {
     return { ok: false, status: 503, categoria: "non-configurato", durationMs: 0 };
   }
 
+  const rawMime = params.mimeType?.toLowerCase();
+  const effectiveMime = (rawMime === "image/jpg" || rawMime === "image/pjpeg") ? "image/jpeg" : (rawMime === "image/x-png" ? "image/png" : params.mimeType);
+
   const GROQ_IMAGE_MIMES = ["image/jpeg", "image/png", "image/webp"];
-  if (params.imageBase64 && params.mimeType && !GROQ_IMAGE_MIMES.includes(params.mimeType.toLowerCase())) {
+  if (params.imageBase64 && effectiveMime && !GROQ_IMAGE_MIMES.includes(effectiveMime.toLowerCase())) {
     console.log(`[AI Circolari Diagnostic] variant=${variantLabel} provider=groq model=${groqModel} call=failed status=400 durationMs=0 parse=not_attempted mime=${params.summary.mime} bytes=${params.summary.bytes}`);
     return { ok: false, status: 400, categoria: "mime-non-supportato", durationMs: 0 };
   }
@@ -613,10 +620,10 @@ export async function executeGroqCircularAnalysis(params: {
   const promptText = params.text ? `Testo della circolare:\n${params.text}` : defaultPrompt;
   const groqSystemPrompt = `${params.baseSystemInstruction}\nRestituisci la risposta ESCLUSIVAMENTE come oggetto JSON con la proprietà "items" contenente l'elenco degli impegni estratti, in conformità allo schema JSON richiesto.`;
   const groqUserContent: any[] = [{ type: "text", text: promptText }];
-  if (params.imageBase64 && params.mimeType) {
+  if (params.imageBase64 && effectiveMime) {
     groqUserContent.push({
       type: "image_url",
-      image_url: { url: `data:${params.mimeType};base64,${params.imageBase64}` },
+      image_url: { url: `data:${effectiveMime};base64,${params.imageBase64}` },
     });
   }
 
@@ -809,8 +816,10 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
 
     const variant = getCircularDiagnosticVariant();
     const summary = summarizeCircularPayload(req.body);
-    const isImage = !!imageBase64 && typeof mimeType === "string" && ["image/jpeg", "image/png", "image/webp"].includes(mimeType.toLowerCase());
-    const isPdf = !!imageBase64 && typeof mimeType === "string" && mimeType.toLowerCase() === "application/pdf";
+    const rawMime = typeof mimeType === "string" ? mimeType.toLowerCase() : "";
+    const normalizedMime = (rawMime === "image/jpg" || rawMime === "image/pjpeg") ? "image/jpeg" : (rawMime === "image/x-png" ? "image/png" : mimeType);
+    const isImage = !!imageBase64 && typeof normalizedMime === "string" && ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"].includes(normalizedMime.toLowerCase());
+    const isPdf = !!imageBase64 && typeof normalizedMime === "string" && normalizedMime.toLowerCase() === "application/pdf";
 
     // -------------------------------------------------------------------------
     // 1. VARIANTE DIAGNOSTICA G (esplicita: Groq isolato, nessun Gemini fallback)
@@ -885,7 +894,7 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
     if (variant === "D" && isImage) {
       const groqResult = await executeGroqCircularAnalysis({
         imageBase64,
-        mimeType,
+        mimeType: normalizedMime,
         text,
         signal: controller.signal,
         baseSystemInstruction,
@@ -902,7 +911,7 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
         } catch {
           normOk = false;
         }
-        if (normOk) {
+        if (normOk && items.length > 0) {
           logOutcome({ provider: "groq", esito: "ok", categoria: "ok", sorgente: groqResult.source, status: 200 });
           return res.json({
             success: true,
@@ -910,17 +919,28 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
             items,
           });
         }
+        if (normOk && items.length === 0) {
+          logOutcome({
+            provider: "groq",
+            esito: "vuoto",
+            categoria: "zero-items",
+            status: 200,
+          });
+          fallbackFrom = "groq";
+        }
       }
 
-      // Groq fallito o parsing non riuscito: logghiamo il tentativo Groq e procediamo con fallback Gemini
-      logOutcome({
-        provider: "groq",
-        esito: "fallito",
-        errorCode: groqResult.status === 429 ? "RATE_LIMITED" : "AI_UNAVAILABLE",
-        categoria: groqResult.categoria,
-        status: groqResult.status === 429 ? 429 : 503,
-      });
-      fallbackFrom = "groq";
+      if (!fallbackFrom) {
+        // Groq fallito o parsing non riuscito: logghiamo il tentativo Groq e procediamo con fallback Gemini
+        logOutcome({
+          provider: "groq",
+          esito: "fallito",
+          errorCode: groqResult.status === 429 ? "RATE_LIMITED" : "AI_UNAVAILABLE",
+          categoria: groqResult.categoria,
+          status: groqResult.status === 429 ? 429 : 503,
+        });
+        fallbackFrom = "groq";
+      }
     }
 
     // -------------------------------------------------------------------------
@@ -1127,11 +1147,11 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
     const contents: any[] = [];
 
     // If an image or PDF base64 is provided, pass it as inlineData
-    if (imageBase64 && mimeType) {
+    if (imageBase64 && normalizedMime) {
       contents.push({
         inlineData: {
           data: imageBase64,
-          mimeType: mimeType,
+          mimeType: normalizedMime,
         },
       });
     }

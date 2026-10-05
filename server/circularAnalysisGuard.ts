@@ -90,7 +90,7 @@ export function circularFailureBody(errorCode: CircularErrorCode, error: string)
   return { success: false as const, items: [] as [], error, errorCode };
 }
 
-const SAFE_MIME = new Set(['application/pdf', 'image/png', 'image/jpeg', 'image/webp']);
+const SAFE_MIME = new Set(['application/pdf', 'image/png', 'image/jpeg', 'image/webp', 'image/heic', 'image/heif']);
 const CATEGORY_RE = /^[a-z0-9-]{1,40}$/;
 const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 

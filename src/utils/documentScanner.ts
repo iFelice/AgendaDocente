@@ -7,7 +7,7 @@
  *  - nessuna persistenza (niente IndexedDB/Firestore/backup/Storage).
  */
 
-export const SUPPORTED_DOCUMENT_MIME = ["image/jpeg", "image/png", "image/webp", "application/pdf"] as const;
+export const SUPPORTED_DOCUMENT_MIME = ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif", "application/pdf"] as const;
 export const MAX_DOCUMENT_BYTES = 5 * 1024 * 1024; // coerente con il limite server
 
 export interface DocumentFileMeta {
@@ -18,9 +18,11 @@ export interface DocumentFileMeta {
 
 /** Errore (o null) per un file non adatto al flusso di scansione. */
 export function documentFileError(file: DocumentFileMeta): string | null {
-  const isImage = file.type.startsWith("image/");
-  if (!isImage && file.type !== "application/pdf") {
-    return "Formato non supportato. Usa una foto (JPEG, PNG, WebP) o un PDF.";
+  const type = file.type || '';
+  const isImage = type.startsWith("image/") || /\.(jpe?g|png|webp|heic|heif)$/i.test(file.name);
+  const isPdf = type === "application/pdf" || /\.pdf$/i.test(file.name);
+  if (!isImage && !isPdf) {
+    return "Formato non supportato. Usa una foto (JPEG, PNG, WebP, HEIC) o un PDF.";
   }
   if (file.size > MAX_DOCUMENT_BYTES) {
     return "Documento troppo grande: massimo 5 MB.";
