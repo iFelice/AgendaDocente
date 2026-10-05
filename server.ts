@@ -113,7 +113,13 @@ function getGeminiClient(): GoogleGenAI | null {
  * devono superare il deadline dell'endpoint, altrimenti la risposta non viene
  * mai scritta.
  */
-export const GEMINI_CANDIDATE_MODELS_DEFAULT = ["gemini-3.5-flash", "gemini-3.1-flash-lite"];
+/**
+ * Ordine dei modelli candidati. Misure di produzione sul testo incollato (694
+ * caratteri): `gemini-3.1-flash-lite` 22 items in 16,9 s con esito corretto,
+ * `gemini-3.5-flash` 503 e poi deadline a 24 s senza risposta. Il modello più
+ * leggero è quindi il PRIMO, il più pesante resta come secondo tentativo.
+ */
+export const GEMINI_CANDIDATE_MODELS_DEFAULT = ["gemini-3.1-flash-lite", "gemini-3.5-flash"];
 /** Margine riservato alla scrittura della risposta dopo l'ultimo tentativo. */
 export const GEMINI_RESPONSE_RESERVE_MS = 2_000;
 /** Sotto questa soglia un tentativo cloud non può concludersi: si risponde 503. */
@@ -759,18 +765,13 @@ export const CIRCULAR_RESPONSE_SCHEMA = {
       className: { type: Type.STRING, description: "Sigla classe COMPLETA (anno + sezione) solo se presente nel documento (es. 1A, 2E, III E -> 3E), altrimenti stringa vuota. Non convertire numeri romani di anno di corso in sigle classe inventate: \"classi IV\" indica il quarto anno, NON la classe \"1V\" o \"4V\"." },
       subject: { type: Type.STRING, description: "Materia se specificata o stringa vuota" },
       location: { type: Type.STRING, description: "Luogo (es. Aula Magna, Google Meet, sede indicata nel documento)" },
-      notes: { type: Type.STRING, description: "Eventuali note o istruzioni (es. ordine del giorno, destinatari)" },
+      notes: { type: Type.STRING, description: "Solo se il documento contiene davvero un'informazione aggiuntiva utile (es. ordine del giorno, destinatari espliciti): MASSIMO 120 caratteri. Stringa vuota se non c'è nulla da aggiungere: non ripetere il titolo né il rawSnippet." },
       deadlineDate: {
         type: Type.STRING,
         description: "Data limite entro cui il docente deve completare un'azione (formato ISO YYYY-MM-DD). NON coincide automaticamente con la data dell'attività. Esempi: \"entro il 14 ottobre versare la quota\" -> deadlineDate 2026-10-14, \"il 26 novembre si svolgono i Giochi\" -> deadlineDate vuota. Lascia stringa vuota se assente.",
       },
       isDeadline: { type: Type.BOOLEAN, description: "True se è una scadenza perentoria o consegna entro una data" },
-      relevance: {
-        type: Type.STRING,
-        description: "VERDE (pertinente al docente), GIALLO (collegiale/generale), ROSSO (altre classi/materie/ordini)",
-      },
-      relevanceReason: { type: Type.STRING, description: "Spiegazione sintetica del perché è VERDE, GIALLO o ROSSO" },
-      rawSnippet: { type: Type.STRING, description: "Frase originale o riga di tabella da cui è estratto l'impegno" },
+      rawSnippet: { type: Type.STRING, description: "Frase originale o riga di tabella da cui è estratto l'impegno, MASSIMO 120 caratteri: tronca la riga conservando destinatari e orario, mai l'intera tabella." },
       recipientGrades: {
         type: Type.ARRAY,
         items: { type: Type.INTEGER },
@@ -782,20 +783,45 @@ export const CIRCULAR_RESPONSE_SCHEMA = {
         description: "Classi COMPLETE (anno + sezione) destinatarie dell'attività, in formato canonico. Esempi: \"classe III E\" -> [\"3E\"]; \"3D e 1C\" -> [\"3D\",\"1C\"]. Solo classi complete, mai anni di corso senza sezione. Array vuoto se assenti.",
       },
     },
-    required: ["title", "category", "date", "startTime", "endTime", "relevance", "relevanceReason"],
+    // `relevance` e `relevanceReason` NON sono più richiesti al modello: sono
+    // ricalcolati in modo deterministico da `evaluateItemRelevance`
+    // (src/utils/circularRelevance.ts) dentro `normalizeExtractedItems`, che
+    // sovrascrive sempre i valori in arrivo. Chiederli al modello costava
+    // output (il collo di bottiglia misurato: ~220 token per item) senza
+    // influire su nulla di visibile all'utente.
+    required: ["title", "category", "date", "startTime", "endTime"],
   },
 };
 
-export const PDF_PAGE_CONCURRENCY = 4;
-export const PDF_PAGE_TIMEOUT_MS = 30_000;
-export const PDF_TEXT_ANALYSIS_TIMEOUT_MS = 90_000;
-const PDF_PAGE_GROQ_RESERVE_MS = 10_000;
+/**
+ * Concorrenza del percorso PDF per pagina. Misura di produzione: con 4 pagine
+ * in volo 4 richieste su 7 venivano respinte con 429. Due alla volta costano
+ * qualche secondo in più ma non bruciano il budget in rifiuti di quota.
+ */
+export const PDF_PAGE_CONCURRENCY = 2;
+/** Budget Gemini di UNA pagina: deve bastare a un'estrazione reale (misurata ~17 s). */
+export const PDF_PAGE_TIMEOUT_MS = 40_000;
+/**
+ * Tetto cumulativo dei modelli NON ultimi su una pagina: il primo modello può
+ * prendersi fino a 25 s dei 40 s, il resto resta garantito al secondo.
+ */
+export const PDF_PAGE_FIRST_MODEL_BUDGET_MS = 25_000;
+/** Deadline complessivo del percorso PDF (il client attende 160 s). */
+export const PDF_TEXT_ANALYSIS_TIMEOUT_MS = 150_000;
+/** Budget della chiamata UNICA (PDF di una pagina o testo complessivo breve). */
+export const PDF_SINGLE_CALL_BUDGET_MS = 140_000;
+/** Sotto questa soglia di caratteri il PDF non viene suddiviso: una sola chiamata. */
+export const PDF_SINGLE_CALL_MAX_CHARS = 1_500;
+/** Backoff del solo retry immediato ammesso (503/429). */
+export const PDF_PAGE_RETRY_BACKOFF_MS = 700;
 
 interface PdfPageAnalysisResult {
   page: number;
   ok: boolean;
   items: any[];
   source?: string;
+  /** Token di output consumati dalla pagina (somma dei tentativi). */
+  outputTokens: number;
 }
 
 function pdfPageInput(pages: string[], index: number): string {
@@ -834,68 +860,96 @@ async function analyzeExtractedPdfPages(params: {
   summary: CircularPayloadSummary;
   teacherProfile: any;
   effectiveCampus?: string;
+  /** Budget di tempo di UNA unità di analisi (pagina o documento intero). */
+  pageBudgetMs?: number;
+  /** Tetto cumulativo concesso ai modelli non ultimi dentro quel budget. */
+  firstModelBudgetMs?: number;
+  /** Iniezione per i test: nessuna chiamata reale. */
+  sleep?: (ms: number) => Promise<void>;
 }): Promise<PdfPageAnalysisResult[]> {
   const results = new Array<PdfPageAnalysisResult>(params.pages.length);
+  const pageBudgetMs = params.pageBudgetMs ?? PDF_PAGE_TIMEOUT_MS;
+  const firstModelBudgetMs = params.firstModelBudgetMs ?? PDF_PAGE_FIRST_MODEL_BUDGET_MS;
+  const sleep = params.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const singleCall = params.pages.length === 1;
   let nextIndex = 0;
 
+  /**
+   * Una pagina è analizzata SOLO da Gemini: i modelli candidati nell'ordine
+   * configurato, un tentativo per modello più al massimo un retry immediato
+   * se il modello risponde 503 o 429. Nessun fallback Groq/Qwen: in produzione
+   * rispondeva `items=[]` con 7 token su ogni pagina, cioè cancellava la
+   * pagina invece di salvarla. Una pagina non riuscita è "non analizzata".
+   */
   const analyzePage = async (index: number): Promise<PdfPageAnalysisResult> => {
     const page = index + 1;
+    const label = `AI Circolari PDF pagina=${page}`;
     const pageStartedAt = Date.now();
     const pageController = new AbortController();
     const abortPage = () => pageController.abort();
     params.parentSignal.addEventListener("abort", abortPage, { once: true });
-    const pageDeadline = setTimeout(() => pageController.abort(), PDF_PAGE_TIMEOUT_MS);
-    const pageText = pdfPageInput(params.pages, index);
+    const pageDeadline = setTimeout(() => pageController.abort(), pageBudgetMs);
+    // Con una sola unità di analisi il testo è già completo: nessun blocco di
+    // contesto, che qui sarebbe solo una ripetizione del documento stesso.
+    const pageText = singleCall ? (params.pages[0] ?? "") : pdfPageInput(params.pages, index);
+    const models = geminiCandidateModels();
+    let outputTokens = 0;
+    let lastCategory = "nessun-tentativo";
     try {
-      const geminiBudget = PDF_PAGE_TIMEOUT_MS - PDF_PAGE_GROQ_RESERVE_MS;
-      const geminiRun = await runGeminiJson({
-        systemInstruction: `${params.baseSystemInstruction}\n${PDF_TEXT_PROMPT_HINT}\n${PDF_EXTRACTED_TEXT_GEMINI_HINT}\nRestituisci soltanto l'array JSON richiesto.`,
-        contents: [{ text: pageText }],
-        responseSchema: CIRCULAR_RESPONSE_SCHEMA,
-        signal: pageController.signal,
-        label: `AI Circolari PDF pagina=${page}`,
-        budgetMs: geminiBudget,
-        thinkingLevel: "low",
-        models: geminiCandidateModels(),
-        maxAttemptsPerModel: 2,
-      });
-      const decoded = geminiRun.ok ? parseGeminiJson(geminiRun.text, `AI Circolari PDF pagina=${page}`) : { ok: false as const };
-      if (geminiRun.ok && decoded.ok && Array.isArray(decoded.value)) {
-        try {
-          const items = normalizeExtractedItems(decoded.value as any[], params.teacherProfile, params.effectiveCampus);
-          const last = geminiRun.attempts[geminiRun.attempts.length - 1];
-          console.log(`[AI Circolari PDF Pagina] pagina=${page} provider=gemini modello=${geminiRun.source} esito=ok durataMs=${Date.now() - pageStartedAt} items=${items.length} finishReason=${last?.finishReason ?? "-"} outputTokens=${last?.outputTokens ?? "-"}`);
-          return { page, ok: true, items, source: geminiRun.source };
-        } catch {
-          // Output non normalizzabile: passa allo stesso fallback della pagina.
+      for (let modelIndex = 0; modelIndex < models.length; modelIndex += 1) {
+        const model = models[modelIndex];
+        const isLastModel = modelIndex === models.length - 1;
+        // Un tentativo + al massimo un retry immediato su 503/429.
+        for (let round = 0; round < 2; round += 1) {
+          if (pageController.signal.aborted) {
+            lastCategory = "annullata";
+            break;
+          }
+          const elapsedMs = Date.now() - pageStartedAt;
+          const remainingMs = pageBudgetMs - elapsedMs;
+          // I modelli non ultimi, insieme, non superano `firstModelBudgetMs`:
+          // il tempo restante è garantito all'ultimo candidato.
+          const budgetMs = isLastModel ? remainingMs : Math.min(remainingMs, firstModelBudgetMs - elapsedMs);
+          if (budgetMs < GEMINI_MIN_ATTEMPT_MS + GEMINI_RESPONSE_RESERVE_MS) {
+            console.log(`[AI Circolari PDF Pagina] pagina=${page} provider=gemini modello=${model} esito=skipped categoria=budget-insufficiente remainingMs=${Math.max(0, budgetMs)} items=0 finishReason=- outputTokens=-`);
+            break;
+          }
+          const run = await runGeminiJson({
+            systemInstruction: `${params.baseSystemInstruction}\n${PDF_TEXT_PROMPT_HINT}\n${PDF_EXTRACTED_TEXT_GEMINI_HINT}\nRestituisci soltanto l'array JSON richiesto.`,
+            contents: [{ text: pageText }],
+            responseSchema: CIRCULAR_RESPONSE_SCHEMA,
+            signal: pageController.signal,
+            label,
+            budgetMs,
+            thinkingLevel: "low",
+            models: [model],
+            maxAttemptsPerModel: 1,
+            sleep,
+          });
+          const last = run.attempts[run.attempts.length - 1];
+          outputTokens += last?.outputTokens ?? 0;
+          lastCategory = run.category;
+          const decoded = run.ok ? parseGeminiJson(run.text, label) : { ok: false as const };
+          if (run.ok && decoded.ok && Array.isArray(decoded.value)) {
+            try {
+              const items = normalizeExtractedItems(decoded.value as any[], params.teacherProfile, params.effectiveCampus);
+              console.log(`[AI Circolari PDF Pagina] pagina=${page} provider=gemini modello=${run.source} esito=ok durataMs=${Date.now() - pageStartedAt} items=${items.length} finishReason=${last?.finishReason ?? "-"} outputTokens=${last?.outputTokens ?? "-"}`);
+              return { page, ok: true, items, source: run.source, outputTokens };
+            } catch {
+              lastCategory = "output-non-normalizzabile";
+            }
+          }
+          const retryable = !run.ok && (run.category === "sovraccarico" || run.category === "quota");
+          if (round === 0 && retryable && !pageController.signal.aborted) {
+            console.log(`[AI Circolari PDF Pagina] pagina=${page} provider=gemini modello=${model} esito=retry categoria=${run.category} backoffMs=${PDF_PAGE_RETRY_BACKOFF_MS}`);
+            await sleep(PDF_PAGE_RETRY_BACKOFF_MS);
+            continue;
+          }
+          break;
         }
       }
-
-      const remainingMs = PDF_PAGE_TIMEOUT_MS - (Date.now() - pageStartedAt);
-      if (remainingMs < GEMINI_MIN_ATTEMPT_MS || pageController.signal.aborted) {
-        console.log(`[AI Circolari PDF Pagina] pagina=${page} provider=groq modello=qwen/qwen3.8-27b esito=skipped categoria=budget-insufficiente remainingMs=${Math.max(0, remainingMs)} items=0 finishReason=- outputTokens=-`);
-        return { page, ok: false, items: [] };
-      }
-      const groqTimer = setTimeout(() => pageController.abort(), remainingMs);
-      const groq = await executeGroqCircularAnalysis({
-        text: pageText,
-        signal: pageController.signal,
-        baseSystemInstruction: `${params.baseSystemInstruction}\n${PDF_TEXT_PROMPT_HINT}`,
-        summary: params.summary,
-        variantLabel: `D-PDF-PAGE-${page}`,
-      });
-      clearTimeout(groqTimer);
-      if (groq.ok) {
-        try {
-          const items = normalizeExtractedItems(groq.items ?? [], params.teacherProfile, params.effectiveCampus);
-          console.log(`[AI Circolari PDF Pagina] pagina=${page} provider=groq modello=${groq.source ?? "qwen/qwen3.8-27b"} esito=ok durataMs=${groq.durationMs} items=${items.length} finishReason=${groq.finishReason ?? "-"} outputTokens=${groq.outputTokens ?? "-"}`);
-          return { page, ok: true, items, source: groq.source };
-        } catch {
-          // La pagina è non analizzata se anche il fallback non è normalizzabile.
-        }
-      }
-      console.log(`[AI Circolari PDF Pagina] pagina=${page} provider=groq modello=${groq.source ?? "qwen/qwen3.8-27b"} esito=fallito categoria=${groq.categoria} durataMs=${groq.durationMs} items=0 finishReason=${groq.finishReason ?? "-"} outputTokens=${groq.outputTokens ?? "-"}`);
-      return { page, ok: false, items: [] };
+      console.log(`[AI Circolari PDF Pagina] pagina=${page} provider=gemini modello=- esito=fallito categoria=${lastCategory} durataMs=${Date.now() - pageStartedAt} items=0 finishReason=- outputTokens=${outputTokens || "-"}`);
+      return { page, ok: false, items: [], outputTokens };
     } finally {
       clearTimeout(pageDeadline);
       params.parentSignal.removeEventListener("abort", abortPage);
@@ -947,8 +1001,8 @@ Se una cella ORARI è unita verticalmente (merged/rowspan) e copre più righe, q
 È vietato ereditare l'orario di una riga adiacente, soprattutto se cambia ordine scolastico o destinatario. Una data condivisa verticalmente può valere per più righe; non propagare per questo destinatari, attività o orari.
 startTime e endTime devono formare un intervallo valido: se endTime <= startTime (es. 12:30-12:30 derivato da disallineamento di colonne) l'intervallo è inaffidabile e va riportato come coppia di stringhe vuote, mai copiato da righe vicine.
 Prima di restituire ogni oggetto ricontrolla l'allineamento visivo delle colonne. Se l'associazione dell'orario è incerta, lascia startTime/endTime vuoti, senza durata predefinita.
-rawSnippet deve contenere soltanto la riga/blocco dell'attività, con destinatari e orario originali (inclusa la cella ORARI unita che la copre), mai l'intera tabella o righe adiacenti.
-Riporta i destinatari espliciti in notes. subject contiene solo una disciplina specifica: espressioni generiche come tutte le materie o programmazione per materia non sono discipline e richiedono subject vuoto.
+rawSnippet deve contenere soltanto la riga/blocco dell'attività, con destinatari e orario originali (inclusa la cella ORARI unita che la copre), mai l'intera tabella o righe adiacenti: al massimo 120 caratteri, troncando se necessario.
+Riporta i destinatari espliciti in notes solo quando aggiungono un'informazione non già presente in title, date, orario o classe: al massimo 120 caratteri, altrimenti notes è stringa vuota. subject contiene solo una disciplina specifica: espressioni generiche come tutte le materie o programmazione per materia non sono discipline e richiedono subject vuoto.
 Quando un'attività ha destinatari dichiarati in un'intestazione o nel paragrafo immediatamente collegato (es. "classi I e III"), riportali in notes e/o rawSnippet anche se non sono ripetuti nella stessa frase della data: il destinatario deve appartenere allo stesso blocco logico dell'attività, non a sezioni diverse o non correlate del documento.
 Per ogni impegno individua anche i destinatari dell'attività e riportali nei campi strutturati recipientGrades (anni di corso, interi 1..5) e recipientClasses (classi complete anno+sezione, es. "3E").
 Se un'intestazione, un titolo, un paragrafo introduttivo o un blocco logicamente collegato dichiara destinatari validi per più date successive, riportali in recipientGrades e/o recipientClasses per OGNI impegno a cui si applicano, anche quando non sono ripetuti nella stessa riga della data. Esempio strutturale: "Giochi Matematici di Prisma - classi I e III" seguito da "14 ottobre versamento quota" e "26 novembre svolgimento gara" produce due impegni entrambi con recipientGrades: [1,3]. L'esempio vale solo come regola di struttura, non come contenuto da inventare.
@@ -1090,8 +1144,13 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
       const extraction = await runPdfTextExtraction(imageBase64 as string);
 
       if (extraction.status === "success") {
-        const pages = extraction.pages;
-        console.log(`[AI Circolari PDF] extraction=success pages=${pages.length} textChars=${extraction.textChars}`);
+        const extractedPages = extraction.pages;
+        // Suddividere un documento corto costa più di quanto rende: una sola
+        // pagina, o meno di PDF_SINGLE_CALL_MAX_CHARS complessivi, diventano
+        // UNA chiamata con l'intero budget.
+        const singleCall = extractedPages.length === 1 || extraction.textChars < PDF_SINGLE_CALL_MAX_CHARS;
+        const pages = singleCall ? [extractedPages.join("\n\n")] : extractedPages;
+        console.log(`[AI Circolari PDF] extraction=success pages=${extractedPages.length} textChars=${extraction.textChars} modalita=${singleCall ? "chiamata-unica" : "per-pagina"} concorrenza=${singleCall ? 1 : PDF_PAGE_CONCURRENCY}`);
         const pageResults = await analyzeExtractedPdfPages({
           pages,
           parentSignal: controller.signal,
@@ -1099,16 +1158,27 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
           summary,
           teacherProfile,
           effectiveCampus,
+          pageBudgetMs: singleCall ? PDF_SINGLE_CALL_BUDGET_MS : PDF_PAGE_TIMEOUT_MS,
+          firstModelBudgetMs: singleCall
+            ? Math.floor(PDF_SINGLE_CALL_BUDGET_MS * GEMINI_NON_LAST_MODEL_SHARE)
+            : PDF_PAGE_FIRST_MODEL_BUDGET_MS,
         });
         const succeeded = pageResults.filter((result) => result.ok);
         const failedPages = pageResults.filter((result) => !result.ok).map((result) => result.page);
         const items = deduplicateCircularItems(succeeded.flatMap((result) => result.items));
         const durationMs = Date.now() - startedAt;
-        console.log(`[AI Circolari PDF Riepilogo] pagineTotali=${pages.length} riuscite=${succeeded.length} fallite=${failedPages.length} itemsTotali=${items.length} durataMs=${durationMs}`);
-        if (succeeded.length === 0) {
+        const outputTokensTotali = pageResults.reduce((total, result) => total + (result.outputTokens ?? 0), 0);
+        console.log(`[AI Circolari PDF Riepilogo] pagineTotali=${pages.length} riuscite=${succeeded.length} fallite=${failedPages.length} itemsTotali=${items.length} outputTokensTotali=${outputTokensTotali} durataMs=${durationMs}`);
+        // Pagine non lette e nessun impegno: NON è "nessun impegno
+        // riconosciuto" (il documento non è stato letto), è un errore che dice
+        // quanto è andato perso e invita a riprovare o a incollare il testo.
+        if (failedPages.length > 0 && items.length === 0) {
           const failure = circularCloudFailure("sovraccarico");
+          const message = singleCall
+            ? "Il documento non è stato letto dal servizio AI. Riprova tra poco oppure incolla il testo della circolare."
+            : `${failedPages.length === 1 ? "1 pagina non è stata letta" : `${failedPages.length} pagine non sono state lette`} su ${pages.length}. Riprova tra poco oppure incolla il testo della circolare.`;
           logOutcome({ provider: "gemini", esito: "fallito", errorCode: failure.errorCode, categoria: "tutte-pagine-fallite", status: failure.status });
-          return res.status(failure.status).json(circularFailureBody(failure.errorCode, failure.error));
+          return res.status(failure.status).json(circularFailureBody(failure.errorCode, message));
         }
         const sources = [...new Set(succeeded.map((result) => result.source).filter(Boolean))];
         logOutcome({ provider: "gemini", esito: "ok", categoria: failedPages.length ? "parziale" : "ok", sorgente: sources.join(",") || "pdf-page-text", status: 200 });
@@ -1117,7 +1187,7 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
           source: sources.join(",") || "pdf-page-text",
           items,
           notice: failedPages.length
-            ? `Analisi parziale: pagine non analizzate: ${failedPages.join(", ")}.`
+            ? `Analisi parziale: pagine non analizzate: ${failedPages.join(", ")} (su ${pages.length}). Controllale nel documento originale.`
             : undefined,
         });
       } else if (extraction.status === "empty") {

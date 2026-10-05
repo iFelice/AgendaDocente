@@ -13,8 +13,17 @@ export interface AnalyzeResult {
   errorCode?: CircularAnalysisErrorCode;
 }
 
-/** Attesa della POST: 90 s lato server per i PDF per pagina, più margine client. */
-export const CIRCULAR_REQUEST_TIMEOUT_MS = 100_000;
+/** Attesa della POST: 150 s lato server per i PDF per pagina, più margine client. */
+export const CIRCULAR_REQUEST_TIMEOUT_MS = 160_000;
+
+/**
+ * Avanzamento del percorso PDF per pagina. Un vero "pagina 3 di 7" richiede un
+ * canale di progresso (stream/polling) che cambierebbe il formato della
+ * risposta: fuori perimetro. Resta quindi un'attesa dichiarata, coerente con
+ * il deadline server di 150 s.
+ */
+export const CIRCULAR_PDF_WAIT_MESSAGE =
+  "Analisi del PDF pagina per pagina: può richiedere fino a 2 minuti.";
 
 export const CIRCULAR_NETWORK_MESSAGE =
   "Impossibile raggiungere il servizio di analisi. Controlla la connessione e riprova.";

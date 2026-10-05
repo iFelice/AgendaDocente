@@ -32,7 +32,7 @@ import {
   RelevanceLevel,
   TeacherProfile,
 } from "../types";
-import { analyzeCircular } from "../services/aiService";
+import { analyzeCircular, CIRCULAR_PDF_WAIT_MESSAGE } from "../services/aiService";
 import { findPossibleEventUpdate, getEventFieldDiff } from "../utils/eventMatching";
 
 export type UpdateChoice = "update" | "create" | "ignore";
@@ -683,6 +683,12 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                 <strong>Analisi AI nel cloud.</strong> Avviando l’analisi, il PDF o l’immagine può essere inviato a Google Gemini per estrarre gli impegni. Il server dell’app non salva il file su disco. Evita documenti con dati personali non necessari.
                 <p className="mt-1">Anche il testo può essere analizzato nel cloud; se il servizio non è disponibile, resta attivo il parser testuale locale.</p>
               </div>
+              {isAnalyzing && fileMimeType === "application/pdf" && (
+                <div className="p-3 rounded-lg bg-sky-50 border border-sky-200 text-sky-900 text-xs flex items-center space-x-2" role="status">
+                  <RefreshCw className="w-4 h-4 flex-shrink-0 animate-spin" />
+                  <span>{CIRCULAR_PDF_WAIT_MESSAGE}</span>
+                </div>
+              )}
               {/* Action */}
               <div className="flex justify-end pt-2">
                 <button

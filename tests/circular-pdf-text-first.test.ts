@@ -100,7 +100,7 @@ async function mockedProviders(
   }
 }
 
-test('PDF digitale di 7 pagine: tutte analizzate per pagina con concorrenza massima 4', async () => {
+test('PDF digitale di 7 pagine: tutte analizzate per pagina con concorrenza massima 2', async () => {
   let active = 0;
   let maxActive = 0;
   const pages: number[] = [];
@@ -117,12 +117,12 @@ test('PDF digitale di 7 pagine: tutte analizzate per pagina con concorrenza mass
     assert.equal(result.json.items.length, 7);
     assert.equal(result.json.notice, undefined);
     assert.deepEqual(pages.sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7]);
-    assert.ok(maxActive <= 4);
+    assert.ok(maxActive <= 2);
     assert.ok(maxActive > 1);
   });
 });
 
-test('fallback per pagina: Gemini fallisce e Groq riesce sulla stessa pagina', async () => {
+test('percorso per pagina: nessun fallback Groq/Qwen, la pagina fallita resta non analizzata', async () => {
   const groqPages: number[] = [];
   await mockedProviders((provider, page) => {
     if (provider === 'gemini' && page === 3) return geminiResponse([], 400);
@@ -131,12 +131,13 @@ test('fallback per pagina: Gemini fallisce e Groq riesce sulla stessa pagina', a
   }, async () => {
     const result = await postPdf(sevenPagePdf());
     assert.equal(result.status, 200);
-    assert.deepEqual(groqPages, [3]);
-    assert.equal(result.json.items.some((value: any) => value.title === 'Groq pagina 3'), true);
+    assert.deepEqual(groqPages, [], 'Groq non viene mai chiamato dal percorso per pagina');
+    assert.equal(result.json.items.length, 6);
+    assert.match(result.json.notice, /pagine non analizzate: 3/);
   });
 });
 
-test('una pagina fallisce su entrambi: successo parziale con notice', async () => {
+test('una pagina fallisce: successo parziale con notice', async () => {
   await mockedProviders((provider, page) => {
     if (page === 4) return provider === 'gemini' ? geminiResponse([], 400) : groqResponse([], 503);
     return geminiResponse([item(`Evento pagina ${page}`)]);
@@ -148,12 +149,13 @@ test('una pagina fallisce su entrambi: successo parziale con notice', async () =
   });
 });
 
-test('tutte le pagine fallite: errore controllato', async () => {
+test('tutte le pagine fallite: errore controllato che dice quante pagine non sono state lette', async () => {
   await mockedProviders((provider) => provider === 'gemini' ? geminiResponse([], 400) : groqResponse([], 503), async () => {
     const result = await postPdf(sevenPagePdf());
     assert.equal(result.status, 503);
     assert.equal(result.json.success, false);
     assert.deepEqual(result.json.items, []);
+    assert.match(result.json.error, /7 pagine non sono state lette su 7/);
   });
 });
 
