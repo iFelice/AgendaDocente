@@ -199,15 +199,23 @@ test('bottom navigation exists only below 1280px (phones and tablets) and lists 
 
   const items = renderer.root.findAll((el: any) => hasClass(el, 'bottom-nav-item'));
   assert.equal(items.length, 5, 'exactly five destinations');
+  // Settimana/Mese are no longer bar destinations: they moved inside the
+  // "Viste calendario" sheet reachable from "Oggi" (see section 3 below).
   assert.deepEqual(
     MOBILE_NAV_ITEMS.map((item) => item.id),
-    ['oggi', 'settimana', 'mese', 'scadenze', 'altro'],
+    ['oggi', 'scadenze', 'impegni', 'orario', 'altro'],
   );
 
   const labels = items.map((item: any) =>
     item.findAll((el: any) => hasClass(el, 'bottom-nav-label')).map((l: any) => nodeText(l)).join('')
   );
-  assert.deepEqual(labels, ['Oggi', 'Settimana', 'Mese', 'Scadenze', 'Altro']);
+  // Short, non-truncated bar labels; the full names stay in the aria-label.
+  assert.deepEqual(labels, ['Oggi', 'Scadenze', 'Note', 'Orario', 'Altro']);
+  assert.deepEqual(MOBILE_NAV_ITEMS.map((item) => item.fullLabel), [
+    'Oggi', 'Scadenze', 'Note e impegni', 'Orario Lezioni', 'Altro',
+  ]);
+  assert.equal(byId(renderer, 'mobile-nav-impegni').props['aria-label'], 'Note e impegni');
+  assert.equal(byId(renderer, 'mobile-nav-orario').props['aria-label'], 'Orario Lezioni');
 
   // No horizontal overflow: equal flexible items whose labels truncate.
   const navRule = cssRule('.bottom-nav-item');
@@ -215,6 +223,26 @@ test('bottom navigation exists only below 1280px (phones and tablets) and lists 
   const labelRule = cssRule('.bottom-nav-label');
   assert.match(labelRule, /overflow: hidden;/);
   assert.match(labelRule, /text-overflow: ellipsis;/);
+});
+
+test('at 320px every bar label stays on one line, not truncated: short labels fit within equal-width items', () => {
+  // 320px viewport, .bottom-nav padding 0.5rem*2 = 16px, gap 0.25rem*4 = 16px
+  // between the five equal-width items => ~288px of content split in 5 ~57.6px
+  // slots. 11px bold text renders well under 7px per character, so every bar
+  // label (<= 8 characters) fits on a single line without relying on the
+  // ellipsis safety net.
+  const VIEWPORT = 320;
+  const HORIZONTAL_PADDING = 16;
+  const GAP_TOTAL = 0.25 * 16 * 4; // 4 gaps between 5 items, 0.25rem each
+  const perItem = (VIEWPORT - HORIZONTAL_PADDING - GAP_TOTAL) / 5;
+  const maxCharWidthPx = 7; // generous upper bound for 11px/600 weight digits+letters
+  for (const item of MOBILE_NAV_ITEMS) {
+    const estimatedWidth = item.label.length * maxCharWidthPx;
+    assert.ok(
+      estimatedWidth <= perItem,
+      `label "${item.label}" (${estimatedWidth}px est.) must fit in a ${perItem}px slot at 320px`,
+    );
+  }
 });
 
 test('bottom navigation is fixed, safe-area aware and uses >= 44px touch targets', () => {
@@ -242,9 +270,9 @@ test('the active destination is unambiguous and follows the current view', async
 test('tapping a destination switches the view', async () => {
   const calls: ViewMode[] = [];
   const renderer = await render(React.createElement(MobileNav, navProps({ onViewChange: (view: ViewMode) => calls.push(view) })));
-  await act(async () => { byId(renderer, 'mobile-nav-mese').props.onClick(); });
-  await act(async () => { byId(renderer, 'mobile-nav-settimana').props.onClick(); });
-  assert.deepEqual(calls, ['mese', 'settimana']);
+  await act(async () => { byId(renderer, 'mobile-nav-orario').props.onClick(); });
+  await act(async () => { byId(renderer, 'mobile-nav-impegni').props.onClick(); });
+  assert.deepEqual(calls, ['orario', 'impegni']);
 });
 
 test('the primary "+" action is a floating button that opens the quick-actions sheet', async () => {
@@ -318,14 +346,18 @@ test('"Altro" opens an accessible sheet with the secondary destinations', async 
   assert.equal(byId(renderer, 'mobile-nav-altro').props['aria-expanded'], true);
 
   const sheetText = flatText(dialog);
-  for (const label of ['Note e impegni', 'Orario Lezioni', 'Classi & Alunni', 'Archivio Circolari', 'Analizza Circolare', 'Profilo / Impostazioni', 'Accedi con Google', 'Guida rapida', 'Installa App']) {
+  for (const label of ['Classi & Alunni', 'Archivio Circolari', 'Analizza Circolare', 'Profilo / Impostazioni', 'Accedi con Google', 'Guida rapida', 'Installa App']) {
     assert.ok(sheetText.includes(label), `"${label}" must be reachable from Altro`);
   }
-  assert.deepEqual(MOBILE_MORE_VIEWS.map((item) => item.id), ['impegni', 'orario', 'classi', 'registro', 'circolari']);
+  // "Note e impegni" and "Orario Lezioni" moved to the bar: Altro now only
+  // keeps Classi, Registro, Circolari (same order as before, minus the two).
+  assert.ok(!sheetText.includes('Note e impegni'), '"Note e impegni" moved to the bottom bar');
+  assert.ok(!sheetText.includes('Orario Lezioni'), '"Orario Lezioni" moved to the bottom bar');
+  assert.deepEqual(MOBILE_MORE_VIEWS.map((item) => item.id), ['classi', 'registro', 'circolari']);
 
   // Choosing a destination closes the sheet and navigates.
-  await act(async () => { byId(renderer, 'mobile-more-orario').props.onClick(); });
-  assert.deepEqual(calls, ['orario']);
+  await act(async () => { byId(renderer, 'mobile-more-registro').props.onClick(); });
+  assert.deepEqual(calls, ['registro']);
   assert.equal(renderer.root.findAll((el: any) => el.props?.role === 'dialog').length, 0, 'the sheet closes after a choice');
 });
 
@@ -365,6 +397,148 @@ test('"Altro" exposes profile, Google account and the circular analyzer', async 
   await act(async () => { byId(renderer, 'mobile-more-circular-analyzer').props.onClick(); });
 
   assert.deepEqual([profileOpened, googleOpened, circularOpened], [1, 1, 1]);
+});
+
+// ---------------------------------------------------------------------------
+// 2.5 "Oggi": hybrid behaviour — jump to today, or open "Viste calendario"
+// ---------------------------------------------------------------------------
+
+test('away from "la giornata corrente" (another section): tapping "Oggi" jumps back to today, no sheet', async () => {
+  const calls: ViewMode[] = [];
+  let goToTodayCalls = 0;
+  const renderer = await render(React.createElement(MobileNav, navProps({
+    currentView: 'classi',
+    isOggiShowingToday: true,
+    onViewChange: (view: ViewMode) => calls.push(view),
+    onGoToToday: () => { goToTodayCalls += 1; },
+  })));
+
+  const oggi = byId(renderer, 'mobile-nav-oggi');
+  // No affordance for the sheet: this tap navigates, it does not open a popup.
+  assert.equal(oggi.props['aria-haspopup'], undefined);
+  assert.equal(oggi.props['aria-expanded'], undefined);
+  assert.equal(oggi.findAll((n: any) => n.props?.['data-testid'] === 'mobile-nav-oggi-chevron').length, 0, 'no chevron outside the "giornata corrente"');
+
+  await act(async () => { oggi.props.onClick(); });
+  assert.equal(goToTodayCalls, 1, 'tap delegates to the dedicated "go to today" callback');
+  assert.deepEqual(calls, [], 'no generic onViewChange(...) call: the single goToToday function owns this transition');
+  assert.equal(renderer.root.findAll((el: any) => el.props?.role === 'dialog').length, 0, 'no sheet opens');
+});
+
+test('vista Oggi su un altro giorno (non "la giornata corrente"): tapping "Oggi" also calls goToToday, not the sheet', async () => {
+  let goToTodayCalls = 0;
+  const renderer = await render(React.createElement(MobileNav, navProps({
+    currentView: 'oggi',
+    isOggiShowingToday: false, // Oggi is mounted, but showing another day (arrows/swipe)
+    onGoToToday: () => { goToTodayCalls += 1; },
+  })));
+
+  const oggi = byId(renderer, 'mobile-nav-oggi');
+  // Still the active destination (it owns the whole calendar group)...
+  assert.equal(oggi.props['aria-current'], 'page');
+  // ...but NOT "la giornata corrente": no popup affordance yet.
+  assert.equal(oggi.props['aria-haspopup'], undefined);
+  assert.equal(oggi.props['aria-expanded'], undefined);
+
+  await act(async () => { oggi.props.onClick(); });
+  assert.equal(goToTodayCalls, 1, 'first tap resets the date instead of opening the calendar-views sheet');
+  assert.equal(renderer.root.findAll((el: any) => el.props?.role === 'dialog').length, 0);
+});
+
+test('già sulla giornata corrente: tapping "Oggi" opens the "Viste calendario" sheet (Settimana/Mese), reusing the "Altro" sheet a11y', async () => {
+  keydownListeners.length = 0;
+  const calls: ViewMode[] = [];
+  const renderer = await render(React.createElement(MobileNav, navProps({
+    currentView: 'oggi',
+    isOggiShowingToday: true,
+    onViewChange: (view: ViewMode) => calls.push(view),
+  })));
+
+  const oggi = byId(renderer, 'mobile-nav-oggi');
+  // Affordance only in this exact state: chevron + aria-haspopup/aria-expanded.
+  assert.equal(oggi.props['aria-haspopup'], 'dialog');
+  assert.equal(oggi.props['aria-expanded'], false);
+  assert.equal(renderer.root.findAll((el: any) => el.props?.role === 'dialog').length, 0, 'closed by default');
+
+  await act(async () => { oggi.props.onClick(); });
+  assert.equal(byId(renderer, 'mobile-nav-oggi').props['aria-expanded'], true);
+
+  const dialog = renderer.root.findByProps({ role: 'dialog' });
+  assert.equal(dialog.props['aria-modal'], 'true');
+  assert.equal(dialog.props['aria-label'], 'Viste calendario');
+  assert.ok(hasClass(dialog, 'more-sheet'), 'reuses the same sheet styling as "Altro"');
+  const sheetText = flatText(dialog);
+  assert.ok(sheetText.includes('Settimana'));
+  assert.ok(sheetText.includes('Mese'));
+
+  // Escape closes it, same behaviour as "Altro".
+  assert.ok(keydownListeners.length > 0, 'the sheet listens for Escape');
+  await act(async () => { keydownListeners.forEach((listener) => listener({ key: 'Escape' })); });
+  assert.equal(renderer.root.findAll((el: any) => el.props?.role === 'dialog').length, 0, 'Escape closes the sheet');
+
+  // Reopen, then choose "Settimana": closes the sheet and navigates.
+  await act(async () => { byId(renderer, 'mobile-nav-oggi').props.onClick(); });
+  await act(async () => { byId(renderer, 'mobile-calendar-settimana').props.onClick(); });
+  assert.deepEqual(calls, ['settimana']);
+  assert.equal(renderer.root.findAll((el: any) => el.props?.role === 'dialog').length, 0, 'the sheet closes after a choice');
+
+  // Background tap also closes it (same affordance as "Altro").
+  await act(async () => { byId(renderer, 'mobile-nav-oggi').props.onClick(); });
+  const backdrop = renderer.root.findAll((el: any) => el.type === 'div' && hasClass(el, 'bg-stone-950/45'))[0];
+  await act(async () => { backdrop.props.onClick(); });
+  assert.equal(renderer.root.findAll((el: any) => el.props?.role === 'dialog').length, 0);
+});
+
+test('"Oggi" stays active (aria-current=page) for Settimana and Mese too: it is the calendar group entry point', async () => {
+  for (const currentView of ['oggi', 'settimana', 'mese'] as ViewMode[]) {
+    const renderer = await render(React.createElement(MobileNav, navProps({ currentView })));
+    assert.equal(byId(renderer, 'mobile-nav-oggi').props['aria-current'], 'page', `active for ${currentView}`);
+  }
+  for (const currentView of ['scadenze', 'impegni', 'orario', 'classi'] as ViewMode[]) {
+    const renderer = await render(React.createElement(MobileNav, navProps({ currentView })));
+    assert.ok(!byId(renderer, 'mobile-nav-oggi').props['aria-current'], `not active for ${currentView}`);
+  }
+});
+
+test('da Settimana/Mese: il primo tap su "Oggi" applica (a) andare a oggi, il secondo applica (b) aprire il foglio', async () => {
+  // First tap: currentView is "settimana" (not "oggi"), so it is NOT "la
+  // giornata corrente" yet — tapping "Oggi" must go through goToToday.
+  let goToTodayCalls = 0;
+  const fromWeek = await render(React.createElement(MobileNav, navProps({
+    currentView: 'settimana',
+    isOggiShowingToday: true,
+    onGoToToday: () => { goToTodayCalls += 1; },
+  })));
+  const oggiFromWeek = byId(fromWeek, 'mobile-nav-oggi');
+  assert.equal(oggiFromWeek.props['aria-haspopup'], undefined, 'no popup affordance while on Settimana');
+  await act(async () => { oggiFromWeek.props.onClick(); });
+  assert.equal(goToTodayCalls, 1, 'first tap (from Settimana) jumps to Oggi/today');
+
+  // Second tap: now simulate the resulting state (currentView "oggi", on
+  // today) — tapping again must open the calendar-views sheet.
+  const onToday = await render(React.createElement(MobileNav, navProps({
+    currentView: 'oggi',
+    isOggiShowingToday: true,
+  })));
+  const oggiOnToday = byId(onToday, 'mobile-nav-oggi');
+  assert.equal(oggiOnToday.props['aria-haspopup'], 'dialog', 'popup affordance appears once on the current day');
+  await act(async () => { oggiOnToday.props.onClick(); });
+  assert.ok(onToday.root.findByProps({ role: 'dialog' }), 'second tap opens "Viste calendario"');
+});
+
+test('i due fogli ("Altro" e "Viste calendario") non sono mai aperti insieme', async () => {
+  const renderer = await render(React.createElement(MobileNav, navProps({ currentView: 'oggi', isOggiShowingToday: true })));
+
+  await act(async () => { byId(renderer, 'mobile-nav-oggi').props.onClick(); });
+  assert.ok(renderer.root.findByProps({ 'aria-label': 'Viste calendario' }));
+
+  await act(async () => { byId(renderer, 'mobile-nav-altro').props.onClick(); });
+  assert.equal(renderer.root.findAll((el: any) => el.props?.['aria-label'] === 'Viste calendario').length, 0, 'opening Altro closes the calendar-views sheet');
+  assert.ok(renderer.root.findByProps({ 'aria-label': 'Altre funzioni' }));
+
+  await act(async () => { byId(renderer, 'mobile-nav-oggi').props.onClick(); });
+  assert.equal(renderer.root.findAll((el: any) => el.props?.['aria-label'] === 'Altre funzioni').length, 0, 'opening the calendar-views sheet closes Altro');
+  assert.ok(renderer.root.findByProps({ 'aria-label': 'Viste calendario' }));
 });
 
 // ---------------------------------------------------------------------------
