@@ -14,7 +14,7 @@ import {
   futureCommitmentGroupFor,
 } from '../src/utils/futureCommitments';
 import { FutureCommitmentsView } from '../src/components/FutureCommitmentsView';
-import { MOBILE_MORE_VIEWS } from '../src/components/MobileNav';
+import { MOBILE_NAV_ITEMS } from '../src/components/MobileNav';
 import type { CalendarEvent, Student, StudentScheduledAssessment } from '../src/types';
 import { addDaysISO } from '../src/utils/dates';
 
@@ -206,7 +206,9 @@ test('la view è raggiungibile da desktop (Navbar) e montata in App', () => {
 });
 
 test('la view è raggiungibile da mobile', () => {
-  assert.ok(MOBILE_MORE_VIEWS.some(item => item.id === 'impegni' && item.label === 'Note e impegni'));
+  // "Impegni" vive ora direttamente nella barra inferiore (non più nel foglio
+  // "Altro"): etichetta breve in barra, nome completo nell'aria-label.
+  assert.ok(MOBILE_NAV_ITEMS.some(item => item.id === 'impegni' && item.fullLabel === 'Note e impegni'));
 });
 
 test('nessuna regressione: Oggi/Settimana/Mese/Scadenze restano montate', () => {

@@ -177,6 +177,13 @@ export default function App({ initialData }: { initialData: LocalData }) {
   // essersi fermati al Registro) invece che riportare arbitrariamente a oggi.
   const [oggiTargetDate, setOggiTargetDate] = useState<string | undefined>();
   const handleTodaySelectedDate = useCallback((iso: string) => { setOggiTargetDate(iso); }, []);
+  // Forza il remount di TodayView quando si chiede "torna a oggi" mentre si è
+  // GIA' sulla vista Oggi (altrimenti currentView resterebbe "oggi" e la vista
+  // non riceverebbe alcun segnale per abbandonare il giorno su cui è ferma).
+  // Nessuna logica di "qual è oggi" duplicata: il remount fa semplicemente
+  // rieseguire l'inizializzazione già esistente di TodayView (default a
+  // localDateISO() quando non c'è una data esplicita).
+  const [oggiResetNonce, setOggiResetNonce] = useState(0);
   const [prefilledEventData, setPrefilledEventData] = useState<Partial<CalendarEvent> | null>(null);
 
   // Google Workspace / Institutional Account State
@@ -1011,6 +1018,19 @@ export default function App({ initialData }: { initialData: LocalData }) {
     // Registro) e non passa da qui.
     setSlotEditNav((nav) => clearSlotEdit(nav));
   };
+
+  // Unica funzione che riporta la vista Oggi sul giorno odierno: usata dal
+  // tap su "Oggi" della navigazione mobile quando non si è sulla "giornata
+  // corrente" (altra sezione, Settimana/Mese, o Oggi spostata su un altro
+  // giorno). Passa sempre da handleViewChange (stessi effetti collaterali di
+  // qualunque altra navigazione) e azzera oggiTargetDate: se la vista Oggi è
+  // già montata, oggiResetNonce forza il remount a riprendere il valore di
+  // default (oggi reale).
+  const goToToday = useCallback(() => {
+    handleViewChange("oggi");
+    setOggiTargetDate(undefined);
+    setOggiResetNonce((n) => n + 1);
+  }, []);
   const handleOpenRegister = (studentId: string, section: RegisterSection = "assessments") => {
     // L'origine è la vista in cui l'utente si trova al momento dell'apertura:
     // le uniche viste che aprono il Registro per uno studente sono le viste di
@@ -1074,6 +1094,10 @@ export default function App({ initialData }: { initialData: LocalData }) {
 
   // Stats for badges
   const todayIso = localDateISO();
+  // "Giornata corrente" per la navigazione mobile: vista Oggi E data mostrata
+  // = oggi. oggiTargetDate è undefined finché TodayView non ha ancora
+  // riportato la propria data (equivale a "oggi", il suo stesso default).
+  const isOggiShowingToday = oggiTargetDate === undefined || oggiTargetDate === todayIso;
   const todayEventsCount = events.filter((e) => e.date === todayIso && !e.completed).length;
   const pendingDeadlinesCount = events.filter(
     (e) => !!effectiveDeadlineDate(e) && !e.completed
@@ -1141,6 +1165,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
       <main className="app-main flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 pt-3 sm:pt-6">
         {currentView === "oggi" && (
           <TodayView
+            key={oggiResetNonce}
             profile={profile}
             timeSlotConfig={timeSlotConfig}
             timetable={timetable}
@@ -1304,6 +1329,8 @@ export default function App({ initialData }: { initialData: LocalData }) {
       <MobileNav
         currentView={currentView}
         onViewChange={handleViewChange}
+        isOggiShowingToday={isOggiShowingToday}
+        onGoToToday={goToToday}
         onOpenNewEvent={() => handleOpenNewEvent()}
         onOpenNewNote={handleOpenNewQuickNote}
         onOpenScanner={() => setIsScannerOpen(true)}
