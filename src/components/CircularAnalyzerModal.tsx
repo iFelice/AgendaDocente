@@ -85,6 +85,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [extractedItems, setExtractedItems] = useState<ExtractedItem[]>([]);
   const [analysisSource, setAnalysisSource] = useState<string>("");
+  const [analysisNotice, setAnalysisNotice] = useState<string | null>(null);
   const [defaultLocation, setDefaultLocation] = useState<string>("");
   const [relevanceFilter, setRelevanceFilter] = useState<"ALL_RELEVANT" | "VERDE" | "GIALLO" | "ROSSO" | "ALL">(
     "ALL_RELEVANT"
@@ -117,6 +118,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     const revision = ++inputRevision.current;
     setIsAnalyzing(true);
     setAnalysisError(null);
+    setAnalysisNotice(null);
 
     try {
       const result = await analyzeCircular({
@@ -131,9 +133,15 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       if (!result.success && (!result.items || result.items.length === 0)) {
         throw new Error(result.error || "Impossibile analizzare il documento.");
       }
+      if (result.items.length === 0) {
+        setExtractedItems([]);
+        setAnalysisError("Nessun impegno riconosciuto nel documento. Puoi riprovare o incollare il testo.");
+        return;
+      }
 
       setExtractedItems(result.items);
       setAnalysisSource(result.source);
+      setAnalysisNotice(result.notice ?? null);
       setStep("results");
     } catch (err: any) {
       console.warn("Avviso analisi circolare:", err?.message || err);
@@ -700,6 +708,12 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
           ) : (
             /* STEP 2: REVIEW & CONFIRMATION */
             <div className="space-y-4">
+              {analysisNotice && (
+                <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-center space-x-2" role="status">
+                  <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                  <span>{analysisNotice}</span>
+                </div>
+              )}
               {/* Summary Stats Header */}
               <div className="p-4 rounded-xl bg-stone-50 border border-stone-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                 <div>

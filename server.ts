@@ -113,11 +113,11 @@ function getGeminiClient(): GoogleGenAI | null {
  * devono superare il deadline dell'endpoint, altrimenti la risposta non viene
  * mai scritta.
  */
-export const GEMINI_CANDIDATE_MODELS_DEFAULT = ["gemini-3.8-flash", "gemini-3.7-flash"];
+export const GEMINI_CANDIDATE_MODELS_DEFAULT = ["gemini-3.5-flash", "gemini-3.1-flash-lite"];
 /** Margine riservato alla scrittura della risposta dopo l'ultimo tentativo. */
 export const GEMINI_RESPONSE_RESERVE_MS = 2_000;
 /** Sotto questa soglia un tentativo cloud non può concludersi: si risponde 503. */
-export const GEMINI_MIN_ATTEMPT_MS = 3_000;
+export const GEMINI_MIN_ATTEMPT_MS = 10_000;
 export const GEMINI_MAX_ATTEMPTS_PER_MODEL = 2;
 /**
  * Quota di budget utile concessa a un modello quando NE RESTANO ALTRI da provare.
@@ -329,6 +329,8 @@ export interface GeminiAttemptDiagnostic {
   status: number | null;
   durationMs: number;
   thinking: "basso" | "default";
+  finishReason?: string;
+  outputTokens?: number;
 }
 
 export interface GeminiJsonRunResult {
@@ -340,7 +342,11 @@ export interface GeminiJsonRunResult {
 }
 
 interface GeminiClientLike {
-  models: { generateContent(params: unknown): Promise<{ text?: string; candidates?: Array<{ finishReason?: string }> }> };
+  models: { generateContent(params: unknown): Promise<{
+    text?: string;
+    candidates?: Array<{ finishReason?: string }>;
+    usageMetadata?: { candidatesTokenCount?: number; outputTokenCount?: number };
+  }> };
 }
 
 export interface RunGeminiJsonOptions {
@@ -369,6 +375,8 @@ interface GeminiAttemptOutcome {
   text: string;
   category: GeminiFailureCategory | "ok";
   status: number | null;
+  finishReason?: string;
+  outputTokens?: number;
 }
 
 /** Un solo tentativo Gemini: esito + categoria. */
@@ -396,12 +404,14 @@ async function attemptGeminiGeneration(
       },
     });
     const text = (response?.text ?? "").trim();
+    const finishReason = String(response?.candidates?.[0]?.finishReason ?? "") || undefined;
+    const outputTokens = response?.usageMetadata?.candidatesTokenCount ?? response?.usageMetadata?.outputTokenCount;
     // Output bloccato o troncato: HTTP 200 ma nessuna risposta utilizzabile.
-    if (!text) return { ok: false, text: "", category: "output-vuoto", status: null };
-    if (String(response?.candidates?.[0]?.finishReason ?? "").toUpperCase() === "MAX_TOKENS") {
-      return { ok: false, text: "", category: "output-troncato", status: null };
+    if (!text) return { ok: false, text: "", category: "output-vuoto", status: null, finishReason, outputTokens };
+    if (finishReason?.toUpperCase() === "MAX_TOKENS") {
+      return { ok: false, text: "", category: "output-troncato", status: null, finishReason, outputTokens };
     }
-    return { ok: true, text, category: "ok", status: null };
+    return { ok: true, text, category: "ok", status: null, finishReason, outputTokens };
   } catch (error) {
     const classified = classifyGeminiError(error, { aborted: opts.signal.aborted });
     return { ok: false, text: "", category: classified.category, status: classified.status };
@@ -453,10 +463,16 @@ export async function runGeminiJson(opts: RunGeminiJsonOptions): Promise<GeminiJ
       else attempt += 1;
       if (opts.signal.aborted) return failed("annullata", "richiesta client interrotta o deadline scaduto");
       const remainingMs = opts.budgetMs - (now() - startedAt);
-      if (geminiAttemptTimeoutMs(remainingMs) === 0) return failed(attempts.length === 0 ? "budget-esaurito" : lastCategory, "budget di tempo terminato");
+      if (geminiAttemptTimeoutMs(remainingMs) === 0) {
+        log(`[${opts.label}] provider=gemini modello=${model} tentativo=${attempt}/${maxAttemptsPerModel} esito=skipped categoria=budget-insufficiente remainingMs=${Math.max(0, remainingMs)} minimoMs=${GEMINI_MIN_ATTEMPT_MS}`);
+        return failed(attempts.length === 0 ? "budget-esaurito" : lastCategory, "budget di tempo terminato");
+      }
       // Il tentativo non supera MAI la quota del modello: il tempo restante è del fallback.
       const timeoutMs = Math.min(geminiAttemptTimeoutMs(remainingMs), modelBudgetMs - (now() - modelStartedAt));
-      if (timeoutMs < GEMINI_MIN_ATTEMPT_MS) break; // quota esaurita: testimone al modello successivo
+      if (timeoutMs < GEMINI_MIN_ATTEMPT_MS) {
+        log(`[${opts.label}] provider=gemini modello=${model} tentativo=${attempt}/${maxAttemptsPerModel} esito=skipped categoria=budget-insufficiente remainingMs=${Math.max(0, timeoutMs)} minimoMs=${GEMINI_MIN_ATTEMPT_MS}`);
+        break;
+      } // quota esaurita: testimone al modello successivo
       if (attempt >= 2 && timeoutMs < GEMINI_RETRY_MIN_ATTEMPT_MS) {
         // Retry da pochi secondi: mai una micro-cascata. Si lascia il tempo al modello
         // successivo; se è l'ultimo non c'è altro da provare, si risponde e basta.
@@ -469,8 +485,8 @@ export async function runGeminiJson(opts: RunGeminiJsonOptions): Promise<GeminiJ
       const durationMs = now() - startedAttempt;
       const category = outcome.category;
       const status = outcome.status;
-      attempts.push({ model, attempt, category, status, durationMs, thinking: useThinking ? "basso" : "default" });
-      log(`[${opts.label}] modello=${model} tentativo=${attempt}/${maxAttemptsPerModel} esito=${category === "ok" ? "ok" : "fallito"} categoria=${category} status=${status ?? "-"} thinking=${useThinking ? "basso" : "default"} timeoutMs=${timeoutMs} durataMs=${durationMs}`);
+      attempts.push({ model, attempt, category, status, durationMs, thinking: useThinking ? "basso" : "default", finishReason: outcome.finishReason, outputTokens: outcome.outputTokens });
+      log(`[${opts.label}] provider=gemini modello=${model} tentativo=${attempt}/${maxAttemptsPerModel} esito=${category === "ok" ? "ok" : "fallito"} categoria=${category} status=${status ?? "-"} thinking=${useThinking ? "basso" : "default"} timeoutMs=${timeoutMs} durataMs=${durationMs} finishReason=${outcome.finishReason ?? "-"} outputTokens=${outcome.outputTokens ?? "-"}`);
 
       if (category === "ok") return { ok: true, text: outcome.text, source: model, category: "ok", attempts };
       if (category === "annullata") return failed("annullata", "richiesta interrotta durante il tentativo");
@@ -583,6 +599,8 @@ export interface GroqCircularRunResult {
   source?: string;
   durationMs: number;
   rawText?: string;
+  finishReason?: string;
+  outputTokens?: number;
 }
 
 export async function executeGroqCircularAnalysis(params: {
@@ -625,6 +643,8 @@ export async function executeGroqCircularAnalysis(params: {
   let groqCallSuccess = false;
   let groqHttpStatus = 503;
   let groqRawText = "";
+  let groqFinishReason: string | undefined;
+  let groqOutputTokens: number | undefined;
   try {
     groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
@@ -649,6 +669,9 @@ export async function executeGroqCircularAnalysis(params: {
     if (groqRes.ok) {
       const jsonBody: any = await groqRes.json().catch(() => null);
       groqRawText = String(jsonBody?.choices?.[0]?.message?.content ?? "").trim();
+      groqFinishReason = String(jsonBody?.choices?.[0]?.finish_reason ?? "") || undefined;
+      const completionTokens = Number(jsonBody?.usage?.completion_tokens);
+      groqOutputTokens = Number.isFinite(completionTokens) ? completionTokens : undefined;
       groqCallSuccess = !!groqRawText;
     }
   } catch (err: any) {
@@ -691,6 +714,8 @@ export async function executeGroqCircularAnalysis(params: {
       source: groqModel,
       durationMs: groqDurationMs,
       rawText: groqRawText,
+      finishReason: groqFinishReason,
+      outputTokens: groqOutputTokens,
     };
   }
 
@@ -757,9 +782,138 @@ export const CIRCULAR_RESPONSE_SCHEMA = {
   },
 };
 
+export const PDF_PAGE_CONCURRENCY = 4;
+export const PDF_PAGE_TIMEOUT_MS = 30_000;
+export const PDF_TEXT_ANALYSIS_TIMEOUT_MS = 90_000;
+const PDF_PAGE_GROQ_RESERVE_MS = 10_000;
+
+interface PdfPageAnalysisResult {
+  page: number;
+  ok: boolean;
+  items: any[];
+  source?: string;
+}
+
+function pdfPageInput(pages: string[], index: number): string {
+  const firstPageContext = pages[0]?.slice(0, 600) ?? "";
+  const previousPageContext = index > 0 ? (pages[index - 1]?.slice(-300) ?? "") : "";
+  return [
+    "CONTESTO (solo per intestazioni e tabelle che proseguono; NON estrarre impegni da questo blocco):",
+    `Inizio pagina 1:\n${firstPageContext}`,
+    previousPageContext ? `Fine pagina precedente:\n${previousPageContext}` : "",
+    "FINE CONTESTO. Estrai impegni ESCLUSIVAMENTE dalla pagina corrente seguente:",
+    pages[index] ?? "",
+  ].filter(Boolean).join("\n\n");
+}
+
+function exactCircularItemKey(item: any): string {
+  return JSON.stringify([
+    item?.date ?? "", item?.title ?? "", item?.startTime ?? "", item?.endTime ?? "",
+    item?.className ?? "", item?.recipientGrades ?? [], item?.recipientClasses ?? [],
+  ]);
+}
+
+export function deduplicateCircularItems(items: any[]): any[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const key = exactCircularItemKey(item);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function analyzeExtractedPdfPages(params: {
+  pages: string[];
+  parentSignal: AbortSignal;
+  baseSystemInstruction: string;
+  summary: CircularPayloadSummary;
+  teacherProfile: any;
+  effectiveCampus?: string;
+}): Promise<PdfPageAnalysisResult[]> {
+  const results = new Array<PdfPageAnalysisResult>(params.pages.length);
+  let nextIndex = 0;
+
+  const analyzePage = async (index: number): Promise<PdfPageAnalysisResult> => {
+    const page = index + 1;
+    const pageStartedAt = Date.now();
+    const pageController = new AbortController();
+    const abortPage = () => pageController.abort();
+    params.parentSignal.addEventListener("abort", abortPage, { once: true });
+    const pageDeadline = setTimeout(() => pageController.abort(), PDF_PAGE_TIMEOUT_MS);
+    const pageText = pdfPageInput(params.pages, index);
+    try {
+      const geminiBudget = PDF_PAGE_TIMEOUT_MS - PDF_PAGE_GROQ_RESERVE_MS;
+      const geminiRun = await runGeminiJson({
+        systemInstruction: `${params.baseSystemInstruction}\n${PDF_TEXT_PROMPT_HINT}\n${PDF_EXTRACTED_TEXT_GEMINI_HINT}\nRestituisci soltanto l'array JSON richiesto.`,
+        contents: [{ text: pageText }],
+        responseSchema: CIRCULAR_RESPONSE_SCHEMA,
+        signal: pageController.signal,
+        label: `AI Circolari PDF pagina=${page}`,
+        budgetMs: geminiBudget,
+        thinkingLevel: "low",
+        models: geminiCandidateModels(),
+        maxAttemptsPerModel: 2,
+      });
+      const decoded = geminiRun.ok ? parseGeminiJson(geminiRun.text, `AI Circolari PDF pagina=${page}`) : { ok: false as const };
+      if (geminiRun.ok && decoded.ok && Array.isArray(decoded.value)) {
+        try {
+          const items = normalizeExtractedItems(decoded.value as any[], params.teacherProfile, params.effectiveCampus);
+          const last = geminiRun.attempts[geminiRun.attempts.length - 1];
+          console.log(`[AI Circolari PDF Pagina] pagina=${page} provider=gemini modello=${geminiRun.source} esito=ok durataMs=${Date.now() - pageStartedAt} items=${items.length} finishReason=${last?.finishReason ?? "-"} outputTokens=${last?.outputTokens ?? "-"}`);
+          return { page, ok: true, items, source: geminiRun.source };
+        } catch {
+          // Output non normalizzabile: passa allo stesso fallback della pagina.
+        }
+      }
+
+      const remainingMs = PDF_PAGE_TIMEOUT_MS - (Date.now() - pageStartedAt);
+      if (remainingMs < GEMINI_MIN_ATTEMPT_MS || pageController.signal.aborted) {
+        console.log(`[AI Circolari PDF Pagina] pagina=${page} provider=groq modello=qwen/qwen3.8-27b esito=skipped categoria=budget-insufficiente remainingMs=${Math.max(0, remainingMs)} items=0 finishReason=- outputTokens=-`);
+        return { page, ok: false, items: [] };
+      }
+      const groqTimer = setTimeout(() => pageController.abort(), remainingMs);
+      const groq = await executeGroqCircularAnalysis({
+        text: pageText,
+        signal: pageController.signal,
+        baseSystemInstruction: `${params.baseSystemInstruction}\n${PDF_TEXT_PROMPT_HINT}`,
+        summary: params.summary,
+        variantLabel: `D-PDF-PAGE-${page}`,
+      });
+      clearTimeout(groqTimer);
+      if (groq.ok) {
+        try {
+          const items = normalizeExtractedItems(groq.items ?? [], params.teacherProfile, params.effectiveCampus);
+          console.log(`[AI Circolari PDF Pagina] pagina=${page} provider=groq modello=${groq.source ?? "qwen/qwen3.8-27b"} esito=ok durataMs=${groq.durationMs} items=${items.length} finishReason=${groq.finishReason ?? "-"} outputTokens=${groq.outputTokens ?? "-"}`);
+          return { page, ok: true, items, source: groq.source };
+        } catch {
+          // La pagina è non analizzata se anche il fallback non è normalizzabile.
+        }
+      }
+      console.log(`[AI Circolari PDF Pagina] pagina=${page} provider=groq modello=${groq.source ?? "qwen/qwen3.8-27b"} esito=fallito categoria=${groq.categoria} durataMs=${groq.durationMs} items=0 finishReason=${groq.finishReason ?? "-"} outputTokens=${groq.outputTokens ?? "-"}`);
+      return { page, ok: false, items: [] };
+    } finally {
+      clearTimeout(pageDeadline);
+      params.parentSignal.removeEventListener("abort", abortPage);
+    }
+  };
+
+  const worker = async () => {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= params.pages.length) return;
+      results[index] = await analyzePage(index);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(PDF_PAGE_CONCURRENCY, params.pages.length) }, worker));
+  return results;
+}
+
 app.post("/api/analyze-circular", ...circularAnalysisGuards(), async (req, res) => {
   const controller = new AbortController();
-  const deadline = setTimeout(() => controller.abort(), CIRCULAR_ANALYSIS_TIMEOUT_MS);
+  const requestIsPdf = String(req.body?.mimeType ?? "").toLowerCase() === "application/pdf";
+  const endpointTimeoutMs = requestIsPdf ? PDF_TEXT_ANALYSIS_TIMEOUT_MS : CIRCULAR_ANALYSIS_TIMEOUT_MS;
+  const deadline = setTimeout(() => controller.abort(), endpointTimeoutMs);
   const abort = () => controller.abort();
   const startedAt = Date.now();
   res.once("close", abort);
@@ -932,163 +1086,36 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
       const extraction = await runPdfTextExtraction(imageBase64 as string);
 
       if (extraction.status === "success") {
-        console.log(`[AI Circolari PDF] extraction=success pages=${extraction.pageCount ?? "-"} textChars=${extraction.textChars}`);
-
-        // Punto 13: Groq non può prendersi tutto il budget dei 45s, altrimenti
-        // non resterebbe nulla per il fallback Gemini (fondamentale sui PDF).
-        const remainingBeforeGroqMs = CIRCULAR_ANALYSIS_TIMEOUT_MS - (Date.now() - startedAt);
-        const groqAttemptBudgetMs = Math.min(
-          PDF_TEXT_GROQ_BUDGET_MS,
-          Math.max(0, remainingBeforeGroqMs - GEMINI_MIN_ATTEMPT_MS - GEMINI_RESPONSE_RESERVE_MS),
-        );
-
-        if (groqAttemptBudgetMs >= PDF_TEXT_GROQ_MIN_ATTEMPT_MS) {
-          // Il controller.signal globale resta sempre in grado di interrompere
-          // tutto; il timeout aggiuntivo limita SOLO questo tentativo Groq.
-          const groqSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(groqAttemptBudgetMs)]);
-          const pdfTextSystemInstruction = `${baseSystemInstruction}\n${PDF_TEXT_PROMPT_HINT}`;
-          const groqStartedAt = Date.now();
-          const groqResult = await executeGroqCircularAnalysis({
-            text: extraction.text,
-            signal: groqSignal,
-            baseSystemInstruction: pdfTextSystemInstruction,
-            summary,
-            variantLabel: "D-PDF-TEXT",
-          });
-          const groqDurationMs = Date.now() - groqStartedAt;
-
-          if (groqResult.ok) {
-            let items: any[] = [];
-            let normOk = false;
-            try {
-              items = normalizeExtractedItems(groqResult.items ?? [], teacherProfile, effectiveCampus);
-              normOk = true;
-            } catch {
-              normOk = false;
-            }
-            if (normOk && items.length > 0) {
-              console.log(`[AI Circolari PDF] primary=groq-text esito=ok durationMs=${groqDurationMs}`);
-              logOutcome({ provider: "groq", esito: "ok", categoria: "ok", sorgente: groqResult.source, status: 200 });
-              return res.json({
-                success: true,
-                source: groqResult.source,
-                items,
-              });
-            }
-            if (normOk && items.length === 0) {
-              console.log(`[AI Circolari PDF] primary=groq-text esito=empty categoria=zero-items`);
-              logOutcome({
-                provider: "groq",
-                esito: "vuoto",
-                categoria: "zero-items",
-                status: 200,
-              });
-              fallbackFrom = "groq-pdf-text";
-            }
-          }
-
-          if (!fallbackFrom) {
-            const categoria = groqResult.ok ? "json-non-valido" : groqResult.categoria;
-            console.log(`[AI Circolari PDF] primary=groq-text esito=failed categoria=${categoria}`);
-            logOutcome({
-              provider: "groq",
-              esito: "fallito",
-              errorCode: groqResult.status === 429 ? "RATE_LIMITED" : "AI_UNAVAILABLE",
-              categoria,
-              status: groqResult.status === 429 ? 429 : 503,
-            });
-            fallbackFrom = "groq-pdf-text";
-          }
-        } else {
-          console.log(`[AI Circolari PDF] primary=groq-text esito=skipped categoria=budget-insufficiente`);
-        }
-
-        // -------------------------------------------------------------------
-        // C-PDF2: Groq ha prodotto 0 elementi utili (o è fallito). PRIMA del
-        // PDF originale si tenta Gemini TEXT-ONLY sullo STESSO testo già
-        // estratto localmente (nessun nuovo recupero del PDF). Il PDF
-        // originale resta l'ULTIMO fallback: parte solo se anche questo
-        // passaggio fallisce o produce 0 elementi utili.
-        // -------------------------------------------------------------------
-        if (fallbackFrom === "groq-pdf-text") {
-          const remainingBeforeTextMs = CIRCULAR_ANALYSIS_TIMEOUT_MS - (Date.now() - startedAt);
-          // Budget RESIDUO dei 45s complessivi, con cap e riserva che
-          // garantiscono un tentativo sensato all'ultimo fallback sul PDF
-          // originale (stesso schema del cap Groq, nessun nuovo deadline).
-          const geminiTextBudgetMs = Math.min(
-            PDF_TEXT_GEMINI_TEXT_BUDGET_MS,
-            Math.max(0, remainingBeforeTextMs - GEMINI_MIN_ATTEMPT_MS - GEMINI_RESPONSE_RESERVE_MS),
-          );
-          if (geminiAttemptTimeoutMs(geminiTextBudgetMs) > 0) {
-            console.log(`[AI Circolari PDF] fallback=gemini-text-extracted budgetMs=${geminiTextBudgetMs}`);
-            const geminiTextStartedAt = Date.now();
-            const textRun = await runGeminiJson({
-              systemInstruction: `${baseSystemInstruction}\n${PDF_TEXT_PROMPT_HINT}\n${PDF_EXTRACTED_TEXT_GEMINI_HINT}\nRestituisci soltanto l'array JSON richiesto.`,
-              contents: [{ text: `Testo estratto dal PDF:\n${extraction.text}` }],
-              responseSchema: CIRCULAR_RESPONSE_SCHEMA,
-              signal: controller.signal,
-              label: "AI Circolari PDF-Text",
-              budgetMs: geminiTextBudgetMs,
-              thinkingLevel: "low",
-              models: geminiCandidateModels(),
-              // Budget intermedio stretto: un solo tentativo per modello, il
-              // retry appartiene all'ultimo fallback sul PDF originale.
-              maxAttemptsPerModel: 1,
-            });
-            const geminiTextDurationMs = Date.now() - geminiTextStartedAt;
-            const textModel = textRun.attempts[textRun.attempts.length - 1]?.model || geminiCandidateModels()[0];
-            const textTentativi = summarizeGeminiAttempts(textRun.attempts);
-            const textDecoded = textRun.ok ? parseGeminiJson(textRun.text, "AI Circolari PDF-Text") : { ok: false as const };
-            if (textRun.ok && textDecoded.ok && Array.isArray(textDecoded.value)) {
-              let items: any[] = [];
-              let normOk = false;
-              try {
-                items = normalizeExtractedItems(textDecoded.value as any[], teacherProfile, effectiveCampus);
-                normOk = true;
-              } catch {
-                normOk = false;
-              }
-              if (normOk && items.length > 0) {
-                console.log(`[AI Circolari PDF] fallback=gemini-text-extracted model=${textModel} esito=ok durationMs=${geminiTextDurationMs} items=${items.length}`);
-                logOutcome({ provider: "gemini", fallbackFrom, esito: "ok", categoria: "ok", sorgente: textRun.source, tentativi: textTentativi, status: 200 });
-                return res.json({
-                  success: true,
-                  source: textRun.source,
-                  items,
-                });
-              }
-              if (normOk) {
-                // Risposta formalmente valida ma [] (o tutto scartato): il
-                // fallback continua, esattamente come nel fix C-PDF1.1.
-                console.log(`[AI Circolari PDF] fallback=gemini-text-extracted model=${textModel} esito=empty categoria=zero-items durationMs=${geminiTextDurationMs} items=0`);
-                logOutcome({ provider: "gemini", fallbackFrom, esito: "vuoto", categoria: "zero-items", sorgente: textRun.source, tentativi: textTentativi, status: 200 });
-              } else {
-                console.log(`[AI Circolari PDF] fallback=gemini-text-extracted model=${textModel} esito=failed categoria=normalizzazione-fallita durationMs=${geminiTextDurationMs}`);
-                logOutcome({ provider: "gemini", fallbackFrom, esito: "fallito", errorCode: "AI_UNAVAILABLE", categoria: "normalizzazione-fallita", tentativi: textTentativi, status: 503 });
-              }
-            } else {
-              const textCategoria = textRun.ok ? "json-non-valido" : textRun.category;
-              console.log(`[AI Circolari PDF] fallback=gemini-text-extracted model=${textModel} esito=failed categoria=${textCategoria} durationMs=${geminiTextDurationMs}`);
-              logOutcome({ provider: "gemini", fallbackFrom, esito: "fallito", errorCode: "AI_UNAVAILABLE", categoria: textCategoria, tentativi: textTentativi, status: 503 });
-            }
-          } else {
-            console.log(`[AI Circolari PDF] fallback=gemini-text-extracted esito=skipped categoria=budget-insufficiente`);
-          }
-        }
-
-        // Punto 12: budget UNICO dei 45s. Gemini riceve SOLO il tempo residuo
-        // utile; se non ne resta abbastanza per un tentativo sensato si
-        // risponde con l'errore cloud esistente, senza avviare un tentativo
-        // destinato certamente ad essere abortito.
-        const remainingMs = CIRCULAR_ANALYSIS_TIMEOUT_MS - (Date.now() - startedAt);
-        if (geminiAttemptTimeoutMs(remainingMs) === 0) {
-          const failure = circularCloudFailure("budget-esaurito");
-          console.log(`[AI Circolari PDF] fallback=gemini-original-pdf remainingBudgetMs=${Math.max(0, remainingMs)} esito=skipped-budget`);
-          logOutcome({ provider: "gemini", fallbackFrom, esito: "fallito", errorCode: failure.errorCode, categoria: "budget-esaurito", status: failure.status });
+        const pages = extraction.pages;
+        console.log(`[AI Circolari PDF] extraction=success pages=${pages.length} textChars=${extraction.textChars}`);
+        const pageResults = await analyzeExtractedPdfPages({
+          pages,
+          parentSignal: controller.signal,
+          baseSystemInstruction,
+          summary,
+          teacherProfile,
+          effectiveCampus,
+        });
+        const succeeded = pageResults.filter((result) => result.ok);
+        const failedPages = pageResults.filter((result) => !result.ok).map((result) => result.page);
+        const items = deduplicateCircularItems(succeeded.flatMap((result) => result.items));
+        const durationMs = Date.now() - startedAt;
+        console.log(`[AI Circolari PDF Riepilogo] pagineTotali=${pages.length} riuscite=${succeeded.length} fallite=${failedPages.length} itemsTotali=${items.length} durataMs=${durationMs}`);
+        if (succeeded.length === 0) {
+          const failure = circularCloudFailure("sovraccarico");
+          logOutcome({ provider: "gemini", esito: "fallito", errorCode: failure.errorCode, categoria: "tutte-pagine-fallite", status: failure.status });
           return res.status(failure.status).json(circularFailureBody(failure.errorCode, failure.error));
         }
-        console.log(`[AI Circolari PDF] fallback=gemini-original-pdf remainingBudgetMs=${Math.max(0, remainingMs)}`);
-        geminiBudgetMs = remainingMs;
+        const sources = [...new Set(succeeded.map((result) => result.source).filter(Boolean))];
+        logOutcome({ provider: "gemini", esito: "ok", categoria: failedPages.length ? "parziale" : "ok", sorgente: sources.join(",") || "pdf-page-text", status: 200 });
+        return res.json({
+          success: true,
+          source: sources.join(",") || "pdf-page-text",
+          items,
+          notice: failedPages.length
+            ? `Analisi parziale: pagine non analizzate: ${failedPages.join(", ")}.`
+            : undefined,
+        });
       } else if (extraction.status === "empty") {
         // Testo insufficiente (es. PDF scansionato senza text layer): niente
         // Groq, si va direttamente a Gemini sul PDF originale (nessuna
