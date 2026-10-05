@@ -38,6 +38,8 @@ import { getDocumentProxy, extractText } from "unpdf";
 
 export interface PdfTextExtractionResult {
   text: string;
+  /** Testo normalizzato per pagina, nello stesso ordine del PDF. */
+  pages: string[];
   pageCount?: number;
   textChars: number;
 }
@@ -113,10 +115,11 @@ export async function extractPdfText(base64: string): Promise<PdfTextExtractionR
   const buffer = Buffer.from(base64, "base64");
   const pdf = await getDocumentProxy(new Uint8Array(buffer), { verbosity: 0 });
   const { totalPages, text } = await extractText(pdf, { mergePages: false });
-  const pages = Array.isArray(text) ? text : [text];
+  const pages = (Array.isArray(text) ? text : [text]).map(normalizePageText);
   const joined = joinPages(pages);
   return {
     text: joined,
+    pages,
     pageCount: totalPages,
     textChars: joined.length,
   };
@@ -132,7 +135,7 @@ export async function runPdfTextExtraction(base64: string): Promise<PdfTextExtra
   try {
     result = await extractPdfText(base64);
   } catch {
-    return { status: "failed", text: "", textChars: 0 };
+    return { status: "failed", text: "", pages: [], textChars: 0 };
   }
   const status: PdfTextExtractionStatus = isPdfTextSufficient(result.text) ? "success" : "empty";
   return { status, ...result };

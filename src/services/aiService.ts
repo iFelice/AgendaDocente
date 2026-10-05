@@ -8,12 +8,13 @@ export interface AnalyzeRequest {
 }
 export interface AnalyzeResult {
   success: boolean; source: string; items: ExtractedItem[]; error?: string;
+  notice?: string;
   /** Codice applicativo, mai mostrato nell'interfaccia. */
   errorCode?: CircularAnalysisErrorCode;
 }
 
-/** Attesa della POST. Il server chiude a 45 s; qui resta un margine. */
-export const CIRCULAR_REQUEST_TIMEOUT_MS = 60_000;
+/** Attesa della POST: 90 s lato server per i PDF per pagina, più margine client. */
+export const CIRCULAR_REQUEST_TIMEOUT_MS = 100_000;
 
 export const CIRCULAR_NETWORK_MESSAGE =
   "Impossibile raggiungere il servizio di analisi. Controlla la connessione e riprova.";
@@ -185,6 +186,7 @@ export async function analyzeCircular(req: AnalyzeRequest, options: AnalyzeCircu
       success: true,
       source: typeof data.source === "string" && data.source ? data.source : "server",
       items: normalizeExtractedItems(data.items, req.profile, req.defaultLocation),
+      notice: typeof data.notice === "string" && data.notice.trim() ? data.notice.trim() : undefined,
     };
   } catch {
     return finishFailure(req, "SERVER_ERROR");

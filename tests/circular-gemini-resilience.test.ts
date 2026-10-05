@@ -91,16 +91,16 @@ async function runTest(
 
 test('1. 3.8 successo -> 3.7 non chiamato', async () => {
   const { result, calls } = await runTest((call) => {
-    if (call.model === 'gemini-3.8-flash') {
+    if (call.model === 'gemini-3.5-flash') {
       return { text: '[{"title":"Collegio Docenti","category":"collegio_docenti","date":"2026-10-15"}]' };
     }
     return apiError(503, 'Unavailable');
   });
 
   assert.equal(result.ok, true);
-  assert.equal(result.source, 'gemini-3.8-flash');
+  assert.equal(result.source, 'gemini-3.5-flash');
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].model, 'gemini-3.8-flash');
+  assert.equal(calls[0].model, 'gemini-3.5-flash');
 });
 
 // ---------------------------------------------------------------------------
@@ -109,25 +109,25 @@ test('1. 3.8 successo -> 3.7 non chiamato', async () => {
 
 test('2. 3.8 503 persistente -> fallback 3.7', async () => {
   const { result, calls, logs } = await runTest((call) => {
-    if (call.model === 'gemini-3.8-flash') {
+    if (call.model === 'gemini-3.5-flash') {
       return apiError(503, 'Model is currently unavailable due to overload.');
     }
-    if (call.model === 'gemini-3.7-flash') {
+    if (call.model === 'gemini-3.1-flash-lite') {
       return { text: '[{"title":"Collegio Docenti","category":"collegio_docenti","date":"2026-10-15"}]' };
     }
     return apiError(500, 'Error');
   });
 
   assert.equal(result.ok, true);
-  assert.equal(result.source, 'gemini-3.7-flash');
+  assert.equal(result.source, 'gemini-3.1-flash-lite');
   assert.equal(calls.length, 3, '2 tentativi su 3.8-flash, poi 1 tentativo vincente su 3.7-flash');
-  assert.equal(calls[0].model, 'gemini-3.8-flash');
-  assert.equal(calls[1].model, 'gemini-3.8-flash');
-  assert.equal(calls[2].model, 'gemini-3.7-flash');
+  assert.equal(calls[0].model, 'gemini-3.5-flash');
+  assert.equal(calls[1].model, 'gemini-3.5-flash');
+  assert.equal(calls[2].model, 'gemini-3.1-flash-lite');
 
-  assert.ok(logs.some((l) => l.includes('modello=gemini-3.8-flash') && l.includes('tentativo=1/2')));
-  assert.ok(logs.some((l) => l.includes('modello=gemini-3.8-flash') && l.includes('tentativo=2/2')));
-  assert.ok(logs.some((l) => l.includes('modello=gemini-3.7-flash') && l.includes('tentativo=1/2')));
+  assert.ok(logs.some((l) => l.includes('modello=gemini-3.5-flash') && l.includes('tentativo=1/2')));
+  assert.ok(logs.some((l) => l.includes('modello=gemini-3.5-flash') && l.includes('tentativo=2/2')));
+  assert.ok(logs.some((l) => l.includes('modello=gemini-3.1-flash-lite') && l.includes('tentativo=1/2')));
 });
 
 // ---------------------------------------------------------------------------
@@ -136,21 +136,21 @@ test('2. 3.8 503 persistente -> fallback 3.7', async () => {
 
 test('3. 3.8 429 persistente -> fallback 3.7', async () => {
   const { result, calls } = await runTest((call) => {
-    if (call.model === 'gemini-3.8-flash') {
+    if (call.model === 'gemini-3.5-flash') {
       return apiError(429, 'Resource has been exhausted (rate limit).');
     }
-    if (call.model === 'gemini-3.7-flash') {
+    if (call.model === 'gemini-3.1-flash-lite') {
       return { text: '[{"title":"Collegio Docenti","category":"collegio_docenti","date":"2026-10-15"}]' };
     }
     return apiError(500, 'Error');
   });
 
   assert.equal(result.ok, true);
-  assert.equal(result.source, 'gemini-3.7-flash');
+  assert.equal(result.source, 'gemini-3.1-flash-lite');
   assert.equal(calls.length, 3);
-  assert.equal(calls[0].model, 'gemini-3.8-flash');
-  assert.equal(calls[1].model, 'gemini-3.8-flash');
-  assert.equal(calls[2].model, 'gemini-3.7-flash');
+  assert.equal(calls[0].model, 'gemini-3.5-flash');
+  assert.equal(calls[1].model, 'gemini-3.5-flash');
+  assert.equal(calls[2].model, 'gemini-3.1-flash-lite');
 });
 
 // ---------------------------------------------------------------------------
@@ -163,28 +163,28 @@ test('4. errore non retryable (400 / 401) -> nessun fallback a 3.7', async () =>
   assert.equal(unauth.result.ok, false);
   assert.equal(unauth.result.category, 'chiave-o-permessi');
   assert.equal(unauth.calls.length, 1, 'Nessun fallback su errore di autenticazione');
-  assert.equal(unauth.calls[0].model, 'gemini-3.8-flash');
+  assert.equal(unauth.calls[0].model, 'gemini-3.5-flash');
 
   // Test 400: payload invalido (richiesta-non-valida) -> nessuna chiamata al modello di fallback 3.7
   const invalid = await runTest(() => apiError(400, 'Invalid JSON payload.'));
   assert.equal(invalid.result.ok, false);
   assert.equal(invalid.result.category, 'richiesta-non-valida');
-  assert.ok(invalid.calls.every((c) => c.model === 'gemini-3.8-flash'), 'Nessuna chiamata a gemini-3.7-flash');
+  assert.ok(invalid.calls.every((c) => c.model === 'gemini-3.5-flash'), 'Nessuna chiamata a gemini-3.1-flash-lite');
 });
 
 // ---------------------------------------------------------------------------
 // 5. candidate models senza duplicati e con default prudente
 // ---------------------------------------------------------------------------
 
-test('5. candidate models default = [gemini-3.8-flash, gemini-3.7-flash] e deduplicazione env', () => {
-  assert.deepEqual(GEMINI_CANDIDATE_MODELS_DEFAULT, ['gemini-3.8-flash', 'gemini-3.7-flash']);
-  assert.deepEqual(geminiCandidateModels({}), ['gemini-3.8-flash', 'gemini-3.7-flash']);
+test('5. candidate models default = [gemini-3.5-flash, gemini-3.1-flash-lite] e deduplicazione env', () => {
+  assert.deepEqual(GEMINI_CANDIDATE_MODELS_DEFAULT, ['gemini-3.5-flash', 'gemini-3.1-flash-lite']);
+  assert.deepEqual(geminiCandidateModels({}), ['gemini-3.5-flash', 'gemini-3.1-flash-lite']);
 
   // Deduplicazione mantenendo l'ordine
   const deduplicated = geminiCandidateModels({
-    GEMINI_CANDIDATE_MODELS: 'gemini-3.8-flash, gemini-3.8-flash, gemini-3.7-flash',
+    GEMINI_CANDIDATE_MODELS: 'gemini-3.5-flash, gemini-3.5-flash, gemini-3.1-flash-lite',
   });
-  assert.deepEqual(deduplicated, ['gemini-3.8-flash', 'gemini-3.7-flash']);
+  assert.deepEqual(deduplicated, ['gemini-3.5-flash', 'gemini-3.1-flash-lite']);
 
   // Modelli singoli validi
   assert.deepEqual(geminiCandidateModels({ GEMINI_CANDIDATE_MODELS: 'gemini-2.5-flash' }), ['gemini-2.5-flash']);
@@ -196,7 +196,7 @@ test('5. candidate models default = [gemini-3.8-flash, gemini-3.7-flash] e dedup
 
 test('6. backoff presente tra retry transitori (nessun retry immediato)', async () => {
   const { calls, logs } = await runTest((call) => {
-    if (call.model === 'gemini-3.8-flash') {
+    if (call.model === 'gemini-3.5-flash') {
       return apiError(503, 'Unavailable');
     }
     return { text: '[]' };
@@ -206,7 +206,7 @@ test('6. backoff presente tra retry transitori (nessun retry immediato)', async 
   // Verifica che sia stato loggato ed eseguito il backoff
   const backoffLog = logs.find((l) => l.includes('backoffMs='));
   assert.ok(backoffLog, 'Deve essere presente un log esplicito del backoff');
-  assert.ok(backoffLog.includes('modello=gemini-3.8-flash'));
+  assert.ok(backoffLog.includes('modello=gemini-3.5-flash'));
   assert.ok(clock.now >= 1000, `Il tempo simulato è avanzato di almeno 1000ms: clock=${clock.now}`);
 });
 
@@ -228,7 +228,7 @@ test('7. thinkingLevel low nella configurazione inviata a Gemini', async () => {
 
 test('8. nessun contenuto circolare, OCR, base64, prompt o API key nei log', async () => {
   const { logs } = await runTest((call) => {
-    if (call.model === 'gemini-3.8-flash') {
+    if (call.model === 'gemini-3.5-flash') {
       return apiError(503, 'Unavailable');
     }
     return { text: '[{"title":"Test"}]' };
