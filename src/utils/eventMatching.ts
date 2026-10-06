@@ -177,6 +177,51 @@ export function getEventFieldDiff(
 }
 
 /**
+ * Un conflitto è "identico" quando l'impegno estratto non porta alcuna
+ * differenza rispetto all'impegno già in agenda:
+ * - stesso titolo, senza distinzione di maiuscole e spazi;
+ * - stessa data, stessi orari di inizio e fine, stessa categoria;
+ * - nessun campo non vuoto del nuovo (luogo, classe, note) diverso dal
+ *   corrispondente esistente. Un campo vuoto nel nuovo non è una differenza
+ *   e lo stesso testo spostato in un campo diverso (es. la sede finita nelle
+ *   note) non è una differenza.
+ *
+ * È la definizione usata per preselezionare "Ignora" sui doppioni già in
+ * agenda; non va confusa con `getEventFieldDiff`, che evidenzia le differenze
+ * simmetriche (inclusi i campi vuoti) nel confronto mostrato a schermo.
+ */
+export function isIdenticalEventUpdate(
+  existing: CalendarEvent,
+  candidate: Pick<
+    ExtractedItem,
+    "title" | "date" | "startTime" | "endTime" | "category" | "className" | "location" | "notes"
+  >
+): boolean {
+  const foldTitle = (raw?: string) => (raw ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+  const clean = (raw?: string) => (raw ?? "").trim();
+
+  if (foldTitle(existing.title) !== foldTitle(candidate.title)) return false;
+  if (clean(existing.date) !== clean(candidate.date)) return false;
+  if (clean(existing.startTime) !== clean(candidate.startTime)) return false;
+  if (clean(existing.endTime) !== clean(candidate.endTime)) return false;
+  if ((existing.category ?? "") !== (candidate.category ?? "")) return false;
+
+  // Testi già presenti nell'impegno esistente (luogo, classe, note): un valore
+  // del nuovo che li riproduce, anche in un campo diverso, non è una differenza.
+  const existingTexts = new Set(
+    [clean(existing.location), clean(existing.className), clean(existing.notes)].filter((t) => t.length > 0)
+  );
+  const carriesDifference = (value: string, corresponding?: string) =>
+    value.length > 0 && value !== clean(corresponding) && !existingTexts.has(value);
+
+  return (
+    !carriesDifference(clean(candidate.location), existing.location) &&
+    !carriesDifference(clean(candidate.className), existing.className) &&
+    !carriesDifference(clean(candidate.notes), existing.notes)
+  );
+}
+
+/**
  * Trova un eventuale evento esistente che rappresenta un possibile aggiornamento
  * dell'elemento estratto dalla circolare.
  *
