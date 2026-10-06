@@ -4,7 +4,11 @@ import { isValidDate, isValidTime } from "./dates";
 
 const categories: EventCategory[] = ["lezione", "consiglio_classe", "collegio_docenti", "dipartimento", "dipartimento_sostegno", "glo", "pei", "riunione", "ricevimento_genitori", "formazione", "uscita_didattica", "scadenza", "promemoria", "personale"];
 const datePattern = /\b(\d{1,2})[/.\-](\d{1,2})(?:[/.\-](\d{4}|\d{2}))?\b/g;
-const timePattern = /\b([01]?\d|2[0-3])[.:]([0-5]\d)(?:\s*(?:[-–—]|alle|a)\s*([01]?\d|2[0-3])[.:]([0-5]\d))?\b/i;
+// Gli orari delle tabelle usano ':' o '.' per i minuti e come separatore
+// dell'intervallo il trattino o la BARRA ("15:00/18:15", "17.00/20.15",
+// "09.30 - 12.00"), anche con spazi irregolari ("17.00 /20.15"): il primo
+// orario è l'inizio, il secondo la fine. "alle"/"a" restano validi.
+const timePattern = /\b([01]?\d|2[0-3])[.:]([0-5]\d)(?:\s*(?:[-–—/]|alle|a)\s*([01]?\d|2[0-3])[.:]([0-5]\d))?\b/i;
 const months = ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre"];
 
 /** Correzione minima e conservativa: attività straordinarie manifestamente non sono lezioni ordinarie. */
@@ -104,17 +108,40 @@ export function normalizeExtractedItems(input: unknown, profile: TeacherProfile,
     // a vertically merged ORARI cell shown once is re-attached above only through the
     // row excerpt, so an excerpt without exactly one interval cannot vouch for any time.
     const fold = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-    if (item.rawSnippet && fold(item.title) && fold(item.rawSnippet).includes(fold(item.title))) {
+    if (item.rawSnippet) {
       const rowDate = extractDate(item.rawSnippet, profile);
       const excerpt = rowDate ? item.rawSnippet.replace(rowDate.text, '') : item.rawSnippet;
       const intervals = [...excerpt.matchAll(new RegExp(timePattern.source, 'gi'))];
+      const snippetVouchesForRow = !!fold(item.title) && fold(item.rawSnippet).includes(fold(item.title));
       if (intervals.length === 1) {
         const interval = intervals[0];
-        item.startTime = `${interval[1].padStart(2, '0')}:${interval[2]}`;
-        item.endTime = interval[3] ? `${interval[3].padStart(2, '0')}:${interval[4]}` : undefined;
-      } else {
+        if (snippetVouchesForRow) {
+          item.startTime = `${interval[1].padStart(2, '0')}:${interval[2]}`;
+          item.endTime = interval[3] ? `${interval[3].padStart(2, '0')}:${interval[4]}` : undefined;
+        } else if (!item.startTime && interval[3]) {
+          // Recupero deterministico dopo la risposta del modello: startTime è vuoto
+          // (es. orario scritto con la barra o col punto che il modello non ha letto)
+          // e il rawSnippet contiene ESATTAMENTE un intervallo completo: lo compila
+          // da lì, nella forma HH:MM. Con zero o più intervalli non si inventa nulla.
+          item.startTime = `${interval[1].padStart(2, '0')}:${interval[2]}`;
+          item.endTime = `${interval[3].padStart(2, '0')}:${interval[4]}`;
+        }
+      } else if (snippetVouchesForRow) {
         // Zero or multiple candidate intervals: the row cannot support a unique time.
-        item.startTime = undefined; item.endTime = undefined;
+        // Unica eccezione: snippet a riga singola con più intervalli ("15:00/18:15 e
+        // 09.45/13.00") in cui il modello ha riportato ESATTAMENTE il primo intervallo
+        // (regola del prompt per la riga con due gruppi di destinatari): l'abbinamento
+        // è verificabile, l'orario si conserva e gli altri intervalli restano in notes.
+        const first = intervals[0];
+        const firstStart = first ? `${first[1].padStart(2, '0')}:${first[2]}` : undefined;
+        const firstEnd = first?.[3] ? `${first[3].padStart(2, '0')}:${first[4]}` : undefined;
+        const keepsModelFirstInterval = intervals.length > 1
+          && !item.rawSnippet.includes('\n')
+          && !!item.startTime && !!item.endTime
+          && item.startTime === firstStart && item.endTime === firstEnd;
+        if (!keepsModelFirstInterval) {
+          item.startTime = undefined; item.endTime = undefined;
+        }
       }
     }
     // Hard invariant: a closed interval with end <= start (e.g. a duplicated 12:30-12:30)
