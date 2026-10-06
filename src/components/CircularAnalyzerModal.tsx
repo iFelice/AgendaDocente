@@ -32,7 +32,12 @@ import {
   RelevanceLevel,
   TeacherProfile,
 } from "../types";
-import { analyzeCircular, CIRCULAR_PDF_WAIT_MESSAGE } from "../services/aiService";
+import {
+  analyzeCircular,
+  circularPartialNotice,
+  mergeCircularItems,
+  CIRCULAR_PDF_WAIT_MESSAGE,
+} from "../services/aiService";
 import { findPossibleEventUpdate, getEventFieldDiff } from "../utils/eventMatching";
 
 export type UpdateChoice = "update" | "create" | "ignore";
@@ -101,6 +106,13 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   const [extractedItems, setExtractedItems] = useState<ExtractedItem[]>([]);
   const [analysisSource, setAnalysisSource] = useState<string>("");
   const [analysisNotice, setAnalysisNotice] = useState<string | null>(null);
+  /**
+   * Pagine che il server non è riuscito ad analizzare: sono esattamente
+   * quelle che la ripresa rimanda. Vuoto = nessuna pagina mancante.
+   */
+  const [unanalyzedPages, setUnanalyzedPages] = useState<number[]>([]);
+  const [isResuming, setIsResuming] = useState<boolean>(false);
+  const [resumeError, setResumeError] = useState<string | null>(null);
   const [defaultLocation, setDefaultLocation] = useState<string>("");
   const [relevanceFilter, setRelevanceFilter] = useState<"ALL_RELEVANT" | "VERDE" | "GIALLO" | "ROSSO" | "ALL">(
     "ALL_RELEVANT"
@@ -136,6 +148,8 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     setIsAnalyzing(true);
     setAnalysisError(null);
     setAnalysisNotice(null);
+    setUnanalyzedPages([]);
+    setResumeError(null);
 
     try {
       const result = await analyzeCircular({
@@ -159,6 +173,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       setExtractedItems(result.items);
       setAnalysisSource(result.source);
       setAnalysisNotice(result.notice ?? null);
+      setUnanalyzedPages(result.unanalyzedPages ?? []);
       setMonthFilter("ALL");
       setIsHeaderCompact(false);
       setStep("results");
@@ -173,6 +188,55 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
 
   const handleRunAnalysis = () => {
     void executeAnalysis();
+  };
+
+  /**
+   * Ripresa delle sole pagine rimaste indietro. Rimanda lo STESSO file (ancora
+   * in memoria in questa finestra) chiedendo solo quelle pagine: i risultati
+   * già a schermo restano visibili e utilizzabili per tutta la richiesta, e
+   * l'esito si AGGIUNGE senza toccare modifiche, selezioni ed eliminazioni.
+   * Se la finestra è stata riaperta il file non c'è più: il pulsante non
+   * compare e resta il solo avviso.
+   */
+  const handleRetryMissingPages = async () => {
+    if (isResuming || unanalyzedPages.length === 0 || !fileBase64 || !fileMimeType) return;
+    const requestedPages = [...unanalyzedPages];
+    const revision = inputRevision.current;
+    setIsResuming(true);
+    setResumeError(null);
+
+    try {
+      const result = await analyzeCircular({
+        text: "",
+        imageBase64: fileBase64,
+        mimeType: fileMimeType,
+        profile,
+        defaultLocation: defaultLocation.trim() || undefined,
+        pages: requestedPages,
+      });
+
+      if (revision !== inputRevision.current) return;
+      if (!result.success) {
+        setResumeError(result.error || "Non è stato possibile rileggere le pagine mancanti. Riprova tra poco.");
+        return;
+      }
+
+      // Le pagine ancora mancanti sono quelle che il server dichiara non
+      // analizzate anche in questa ripresa: le altre sono state lette.
+      const stillMissing = requestedPages.filter((page) => (result.unanalyzedPages ?? []).includes(page));
+      setExtractedItems((prev) => mergeCircularItems(prev, result.items));
+      setUnanalyzedPages(stillMissing);
+      setAnalysisNotice(stillMissing.length > 0 ? circularPartialNotice(stillMissing) : null);
+      if (stillMissing.length > 0) {
+        setResumeError(null);
+      }
+    } catch (err: any) {
+      console.warn("Avviso ripresa pagine circolare:", err?.message || err);
+      if (revision !== inputRevision.current) return;
+      setResumeError("Non è stato possibile rileggere le pagine mancanti. Riprova tra poco.");
+    } finally {
+      if (revision === inputRevision.current) setIsResuming(false);
+    }
   };
 
   useEffect(() => {
@@ -208,6 +272,10 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     setDefaultLocation("");
     setExtractedItems([]);
     setAnalysisError(null);
+    setAnalysisNotice(null);
+    setUnanalyzedPages([]);
+    setResumeError(null);
+    setIsResuming(false);
     setSelectionWarning(null);
     setUpdateChoices({});
     setMonthFilter("ALL");
@@ -793,9 +861,31 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
             {/* Intestazione fissa: resta visibile (sfondo pieno) mentre l'elenco scorre */}
             <div className="shrink-0 bg-white border-b border-stone-200 px-4 sm:px-6 pt-3 pb-2 space-y-2">
               {analysisNotice && !isHeaderCompact && (
-                <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-center space-x-2" role="status">
+                <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-xs flex flex-col sm:flex-row sm:items-center gap-2" role="status">
+                  <div className="flex items-center space-x-2 flex-1 min-w-0">
+                    <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                    <span>{analysisNotice}</span>
+                  </div>
+                  {/* Il file è ancora in memoria in questa finestra: la ripresa è possibile.
+                      Riaprendo la finestra il file non c'è più e resta il solo avviso. */}
+                  {unanalyzedPages.length > 0 && !!fileBase64 && !!fileMimeType && (
+                    <button
+                      id="btn-retry-missing-pages"
+                      type="button"
+                      disabled={isResuming}
+                      onClick={() => { void handleRetryMissingPages(); }}
+                      className="shrink-0 self-start sm:self-auto px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-60 text-white font-semibold text-xs flex items-center space-x-1.5 transition-colors"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${isResuming ? "animate-spin" : ""}`} />
+                      <span>{isResuming ? "Rilettura in corso..." : "Riprova le pagine mancanti"}</span>
+                    </button>
+                  )}
+                </div>
+              )}
+              {resumeError && !isHeaderCompact && (
+                <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 text-xs flex items-center space-x-2" role="status">
                   <AlertCircle className="w-4 h-4 flex-shrink-0" />
-                  <span>{analysisNotice}</span>
+                  <span>{resumeError}</span>
                 </div>
               )}
               {/* Summary Stats Header (compresso durante lo scroll per restare entro ~30% dell'altezza) */}

@@ -1,0 +1,399 @@
+/**
+ * Ripresa delle pagine mancanti nel client (percorso PDF per pagina).
+ *
+ * Il server può rispondere 200 con un'analisi PARZIALE: `notice` testuale e,
+ * da questa PR, l'elenco strutturato `unanalyzedPages`. Qui si verifica che la
+ * finestra mostri il pulsante "Riprova le pagine mancanti", che il clic
+ * rimandi lo STESSO file chiedendo SOLO quelle pagine, e soprattutto che
+ * l'unione sia additiva: nessun impegno già a schermo viene sostituito, le
+ * modifiche manuali, le selezioni e le eliminazioni restano intatte, i
+ * duplicati esatti non vengono aggiunti.
+ *
+ * Nessuna chiamata di rete reale: la fetch globale è sostituita.
+ */
+import { after, test } from 'node:test';
+import assert from 'node:assert/strict';
+import React from 'react';
+import { act, create } from 'react-test-renderer';
+import { CircularAnalyzerModal } from '../src/components/CircularAnalyzerModal';
+import {
+  circularItemKey,
+  circularPartialNotice,
+  mergeCircularItems,
+  sanitizeUnanalyzedPages,
+} from '../src/services/aiService';
+import type { ExtractedItem, TeacherProfile } from '../src/types';
+
+(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+const originalFetch = globalThis.fetch;
+after(() => { globalThis.fetch = originalFetch; });
+
+const profile: TeacherProfile = {
+  id: 'teacher', fullName: 'Docente Test', schoolName: 'Scuola Test', schoolLevel: 'ssig',
+  schoolYear: '2026/2027', primarySubjects: ['Matematica'], classes: ['1A'], campuses: [], roles: [],
+};
+
+/** Impegno sintetico: nessun documento scolastico reale, nessun dato personale. */
+function item(title: string, extra: Record<string, unknown> = {}) {
+  return { title, category: 'riunione', date: '2026-12-10', startTime: '09:00', endTime: '11:00', ...extra };
+}
+
+interface ServerReply { items: any[]; unanalyzedPages?: number[]; notice?: string; status?: number; error?: string }
+
+interface Capture { body: any }
+
+/**
+ * Sostituisce la fetch: la prima risposta è l'analisi iniziale, le successive
+ * sono le riprese, nell'ordine. Ogni richiesta viene registrata.
+ */
+function mockServer(replies: ServerReply[]): Capture[] {
+  const captured: Capture[] = [];
+  let call = 0;
+  globalThis.fetch = (async (_url: any, init?: RequestInit) => {
+    captured.push({ body: JSON.parse(String(init?.body ?? '{}')) });
+    const reply = replies[Math.min(call, replies.length - 1)];
+    call += 1;
+    if (reply.status && reply.status >= 400) {
+      return new Response(JSON.stringify({ success: false, items: [], error: reply.error, errorCode: 'AI_UNAVAILABLE' }), {
+        status: reply.status, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify({
+      success: true, source: 'gemini-3.1-flash-lite', items: reply.items,
+      ...(reply.notice ? { notice: reply.notice } : {}),
+      ...(reply.unanalyzedPages ? { unanalyzedPages: reply.unanalyzedPages } : {}),
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }) as typeof fetch;
+  return captured;
+}
+
+function textOf(node: any): string {
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (!node || typeof node !== 'object') return '';
+  return (node.children ?? []).map(textOf).join(' ').replace(/\s+/g, ' ').trim();
+}
+
+const retryButton = (root: any) =>
+  root.findAll((n: any) => n.type === 'button' && n.props?.id === 'btn-retry-missing-pages')[0];
+
+const scrollContainer = (root: any) =>
+  root.findAll((n: any) => n.type === 'div' && typeof n.props.onScroll === 'function')[0];
+
+const titleInputs = (root: any) =>
+  scrollContainer(root).findAll((n: any) => n.type === 'input' && n.props.type === 'text' && !n.props.placeholder);
+
+const visibleTitles = (root: any) => titleInputs(root).map((n: any) => n.props.value);
+
+const checkboxes = (root: any) =>
+  scrollContainer(root).findAll((n: any) => n.type === 'input' && n.props.type === 'checkbox');
+
+const deleteButtons = (root: any) =>
+  scrollContainer(root).findAll((n: any) => n.type === 'button' && n.props?.title === 'Elimina questa riga estrapolata');
+
+async function click(node: any) {
+  assert.ok(node, 'elemento non trovato');
+  await act(async () => { node.props.onClick(); });
+}
+
+/** Finestra aperta su un PDF, con analisi avviata automaticamente. */
+async function renderPdfAnalysis(withFile = true) {
+  let renderer: any;
+  await act(async () => {
+    renderer = create(React.createElement(CircularAnalyzerModal, {
+      isOpen: true, onClose: () => {}, profile, onImportEvents: () => {},
+      initialFile: withFile
+        ? { base64: 'QUJD', mimeType: 'application/pdf', fileName: 'piano.pdf', autoStartToken: `resume-${Math.random()}` }
+        : null,
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 60));
+  });
+  return renderer;
+}
+
+// ---------------------------------------------------------------------------
+// 1. Unione pura (funzione, senza interfaccia)
+// ---------------------------------------------------------------------------
+
+const extracted = (over: Partial<ExtractedItem>): ExtractedItem => ({
+  tempId: 'id', title: 'Titolo', category: 'riunione', date: '2026-12-10',
+  relevance: 'GIALLO', relevanceReason: '', selectedForImport: false, ...over,
+});
+
+test('unione: i nuovi impegni si aggiungono in coda, gli esistenti non vengono toccati', () => {
+  const existing = [
+    extracted({ tempId: 'a', title: 'Pagina 1', selectedForImport: true }),
+    extracted({ tempId: 'b', title: 'Titolo corretto a mano' }),
+  ];
+  const merged = mergeCircularItems(existing, [extracted({ tempId: 'c', title: 'Pagina 4' })]);
+  assert.deepEqual(merged.map((i) => i.title), ['Pagina 1', 'Titolo corretto a mano', 'Pagina 4']);
+  assert.equal(merged[0], existing[0], 'la riga esistente è esattamente la stessa, non una copia');
+  assert.equal(merged[0].selectedForImport, true);
+});
+
+test('unione: un duplicato esatto non viene aggiunto', () => {
+  const existing = [extracted({ tempId: 'a', title: 'Collegio', startTime: '09:00', endTime: '11:00' })];
+  const merged = mergeCircularItems(existing, [
+    extracted({ tempId: 'z', title: 'Collegio', startTime: '09:00', endTime: '11:00' }),
+    extracted({ tempId: 'y', title: 'Collegio', startTime: '15:00', endTime: '17:00' }),
+  ]);
+  assert.equal(merged.length, 2, 'il duplicato esatto non viene aggiunto');
+  assert.deepEqual(merged.map((i) => i.title), ['Collegio', 'Collegio']);
+  // Orario diverso = impegno diverso: non è un duplicato e va aggiunto.
+  assert.deepEqual(merged.map((i) => i.startTime), ['09:00', '15:00']);
+});
+
+test('unione: nessuna riga nuova = stesso array, nessun re-render inutile', () => {
+  const existing = [extracted({ tempId: 'a', title: 'Collegio' })];
+  assert.equal(mergeCircularItems(existing, [extracted({ tempId: 'z', title: 'Collegio' })]), existing);
+});
+
+test('unione: un tempId in collisione viene reso univoco (selezioni ed eliminazioni restano distinte)', () => {
+  const existing = [extracted({ tempId: 'extracted-1-0', title: 'Pagina 1' })];
+  const merged = mergeCircularItems(existing, [extracted({ tempId: 'extracted-1-0', title: 'Pagina 4' })]);
+  assert.equal(merged.length, 2);
+  assert.notEqual(merged[0].tempId, merged[1].tempId);
+});
+
+test('la chiave di duplicato ignora tempId, selezione e note: solo i campi dell\'impegno', () => {
+  const base = extracted({ tempId: 'a', title: 'Collegio', notes: 'nota' });
+  const other = extracted({ tempId: 'b', title: 'Collegio', notes: 'altra nota', selectedForImport: true });
+  assert.equal(circularItemKey(base), circularItemKey(other));
+});
+
+test('unanalyzedPages malformato non produce mai una ripresa che il server rifiuterebbe', () => {
+  assert.equal(sanitizeUnanalyzedPages(undefined), undefined);
+  assert.equal(sanitizeUnanalyzedPages('4,5'), undefined);
+  assert.equal(sanitizeUnanalyzedPages([]), undefined);
+  assert.equal(sanitizeUnanalyzedPages([0, -3, 1.5, 'x']), undefined);
+  assert.deepEqual(sanitizeUnanalyzedPages([5, 2, 2, 0]), [2, 5]);
+});
+
+test('l\'avviso parziale è ricalcolato dalle pagine ancora mancanti', () => {
+  assert.match(circularPartialNotice([4, 5]), /pagine non analizzate: 4, 5/);
+  assert.match(circularPartialNotice([4]), /pagina non analizzata: 4/);
+});
+
+// ---------------------------------------------------------------------------
+// 2. Comparsa del pulsante
+// ---------------------------------------------------------------------------
+
+test('analisi parziale: accanto all\'avviso compare "Riprova le pagine mancanti"', async () => {
+  mockServer([{
+    items: [item('Collegio pagina 1'), item('Dipartimento pagina 2', { date: '2026-12-11' })],
+    unanalyzedPages: [4, 5],
+    notice: 'Analisi parziale: pagine non analizzate: 4, 5 (su 5). Controllale nel documento originale.',
+  }]);
+  const renderer = await renderPdfAnalysis();
+  const visible = textOf(renderer.root);
+  assert.match(visible, /pagine non analizzate: 4, 5/);
+  const button = retryButton(renderer.root);
+  assert.ok(button, 'il pulsante di ripresa deve comparire');
+  assert.match(textOf(button), /Riprova le pagine mancanti/);
+  assert.equal(button.props.disabled, false);
+});
+
+test('analisi completa: nessun avviso e nessun pulsante di ripresa', async () => {
+  mockServer([{ items: [item('Collegio pagina 1')] }]);
+  const renderer = await renderPdfAnalysis();
+  assert.equal(retryButton(renderer.root), undefined);
+  assert.doesNotMatch(textOf(renderer.root), /pagine non analizzate/);
+});
+
+test('finestra riaperta senza file: resta il solo avviso, nessun pulsante', async () => {
+  // Nessun initialFile: l'analisi parte dal testo incollato, il PDF non è più
+  // in memoria. Un avviso di analisi parziale non deve offrire una ripresa
+  // che il client non può eseguire.
+  mockServer([{
+    items: [item('Collegio pagina 1')],
+    unanalyzedPages: [3],
+    notice: 'Analisi parziale: pagine non analizzate: 3 (su 3). Controllale nel documento originale.',
+  }]);
+  let renderer: any;
+  await act(async () => {
+    renderer = create(React.createElement(CircularAnalyzerModal, {
+      isOpen: true, onClose: () => {}, profile, onImportEvents: () => {},
+      initialInputMode: 'text' as const,
+    }));
+  });
+  const textarea = renderer.root.findAll((n: any) => n.type === 'textarea')[0];
+  await act(async () => { textarea.props.onChange({ target: { value: 'Testo della circolare incollato dall\'utente.' } }); });
+  const run = renderer.root.findAll((n: any) => n.type === 'button' && n.props?.id === 'btn-run-analysis')[0];
+  await act(async () => { run.props.onClick(); await new Promise((r) => setTimeout(r, 60)); });
+
+  assert.match(textOf(renderer.root), /pagine non analizzate: 3/);
+  assert.equal(retryButton(renderer.root), undefined, 'senza file in memoria il pulsante non compare');
+});
+
+// ---------------------------------------------------------------------------
+// 3. Ripresa: richiesta, unione, aggiornamento dell'avviso
+// ---------------------------------------------------------------------------
+
+test('il clic rimanda lo stesso file chiedendo SOLO le pagine mancanti', async () => {
+  const captured = mockServer([
+    {
+      items: [item('Collegio pagina 1')],
+      unanalyzedPages: [4, 5],
+      notice: 'Analisi parziale: pagine non analizzate: 4, 5 (su 5). Controllale nel documento originale.',
+    },
+    { items: [item('Riunione pagina 4', { date: '2026-12-14' }), item('Riunione pagina 5', { date: '2026-12-15' })] },
+  ]);
+  const renderer = await renderPdfAnalysis();
+  await click(retryButton(renderer.root));
+  await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+
+  assert.equal(captured.length, 2);
+  assert.equal(captured[1].body.imageBase64, 'QUJD', 'lo stesso file, ancora in memoria');
+  assert.equal(captured[1].body.mimeType, 'application/pdf');
+  assert.deepEqual(captured[1].body.pages, [4, 5]);
+  assert.equal(captured[0].body.pages, undefined, 'la prima analisi non chiede pagine specifiche');
+});
+
+test('i nuovi impegni si aggiungono: modifiche, selezioni ed eliminazioni restano intatte', async () => {
+  mockServer([
+    {
+      items: [item('Collegio pagina 1'), item('Dipartimento pagina 2', { date: '2026-12-11' }), item('Da eliminare', { date: '2026-12-12' })],
+      unanalyzedPages: [4],
+      notice: 'Analisi parziale: pagine non analizzate: 4 (su 4). Controllale nel documento originale.',
+    },
+    { items: [item('Riunione pagina 4', { date: '2026-12-14' })] },
+  ]);
+  const renderer = await renderPdfAnalysis();
+  const root = renderer.root;
+  assert.deepEqual(visibleTitles(root), ['Collegio pagina 1', 'Dipartimento pagina 2', 'Da eliminare']);
+
+  // L'utente lavora sui risultati: modifica un titolo, seleziona una riga, ne elimina un'altra.
+  await act(async () => { titleInputs(root)[0].props.onChange({ target: { value: 'Collegio CORRETTO a mano' } }); });
+  await act(async () => { checkboxes(root)[1].props.onChange(); });
+  await click(deleteButtons(root)[2]);
+  assert.deepEqual(visibleTitles(root), ['Collegio CORRETTO a mano', 'Dipartimento pagina 2']);
+  assert.deepEqual(checkboxes(root).map((c: any) => c.props.checked), [false, true]);
+
+  await click(retryButton(root));
+  await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+
+  // La pagina ripresa si AGGIUNGE in coda: niente è stato sostituito o riordinato.
+  assert.deepEqual(visibleTitles(root), ['Collegio CORRETTO a mano', 'Dipartimento pagina 2', 'Riunione pagina 4']);
+  assert.deepEqual(checkboxes(root).map((c: any) => c.props.checked), [false, true, false]);
+  assert.ok(!textOf(root).includes('Da eliminare'), 'una riga eliminata non torna indietro');
+});
+
+test('ripresa senza nuovi impegni distinti: nessun duplicato in elenco', async () => {
+  mockServer([
+    {
+      items: [item('Collegio pagina 1')],
+      unanalyzedPages: [2],
+      notice: 'Analisi parziale: pagine non analizzate: 2 (su 2). Controllale nel documento originale.',
+    },
+    // La pagina 2 ripete lo stesso impegno della pagina 1 (tabella a cavallo).
+    { items: [item('Collegio pagina 1'), item('Novità pagina 2', { date: '2026-12-13' })] },
+  ]);
+  const renderer = await renderPdfAnalysis();
+  await click(retryButton(renderer.root));
+  await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+  assert.deepEqual(visibleTitles(renderer.root), ['Collegio pagina 1', 'Novità pagina 2']);
+});
+
+test('ripresa riuscita: avviso e pulsante spariscono quando le pagine mancanti sono zero', async () => {
+  mockServer([
+    {
+      items: [item('Collegio pagina 1')],
+      unanalyzedPages: [3],
+      notice: 'Analisi parziale: pagine non analizzate: 3 (su 3). Controllale nel documento originale.',
+    },
+    { items: [item('Riunione pagina 3', { date: '2026-12-13' })] },
+  ]);
+  const renderer = await renderPdfAnalysis();
+  assert.ok(retryButton(renderer.root));
+  await click(retryButton(renderer.root));
+  await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+
+  assert.equal(retryButton(renderer.root), undefined, 'il pulsante sparisce');
+  assert.doesNotMatch(textOf(renderer.root), /pagine non analizzate/);
+  assert.doesNotMatch(textOf(renderer.root), /pagina non analizzata/);
+});
+
+test('ripresa parziale: avviso e pulsante restano, aggiornati alle sole pagine ancora mancanti', async () => {
+  const captured = mockServer([
+    {
+      items: [item('Collegio pagina 1')],
+      unanalyzedPages: [4, 5, 6],
+      notice: 'Analisi parziale: pagine non analizzate: 4, 5, 6 (su 6). Controllale nel documento originale.',
+    },
+    { items: [item('Riunione pagina 4', { date: '2026-12-14' })], unanalyzedPages: [5, 6] },
+    { items: [item('Riunione pagina 5', { date: '2026-12-15' })], unanalyzedPages: [6] },
+  ]);
+  const renderer = await renderPdfAnalysis();
+  await click(retryButton(renderer.root));
+  await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+
+  let visible = textOf(renderer.root);
+  assert.match(visible, /pagine non analizzate: 5, 6/);
+  assert.doesNotMatch(visible, /pagine non analizzate: 4, 5, 6/);
+  assert.ok(retryButton(renderer.root), 'il pulsante resta finché mancano pagine');
+
+  await click(retryButton(renderer.root));
+  await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+
+  visible = textOf(renderer.root);
+  assert.match(visible, /pagina non analizzata: 6/);
+  assert.deepEqual(captured[1].body.pages, [4, 5, 6]);
+  assert.deepEqual(captured[2].body.pages, [5, 6]);
+  assert.deepEqual(visibleTitles(renderer.root), ['Collegio pagina 1', 'Riunione pagina 4', 'Riunione pagina 5']);
+});
+
+// ---------------------------------------------------------------------------
+// 4. Stato di caricamento e fallimento della ripresa
+// ---------------------------------------------------------------------------
+
+test('durante la ripresa i risultati restano visibili e il pulsante è disabilitato', async () => {
+  let release: (() => void) | null = null;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let call = 0;
+  globalThis.fetch = (async () => {
+    call += 1;
+    if (call === 1) {
+      return new Response(JSON.stringify({
+        success: true, source: 'gemini-3.1-flash-lite', items: [item('Collegio pagina 1')],
+        unanalyzedPages: [2], notice: 'Analisi parziale: pagine non analizzate: 2 (su 2).',
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    await gate;
+    return new Response(JSON.stringify({ success: true, source: 'gemini-3.1-flash-lite', items: [item('Riunione pagina 2', { date: '2026-12-12' })] }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  const renderer = await renderPdfAnalysis();
+  await act(async () => { retryButton(renderer.root).props.onClick(); });
+
+  // Richiesta in corso: risultati ancora a schermo, pulsante in caricamento.
+  const pending = retryButton(renderer.root);
+  assert.equal(pending.props.disabled, true);
+  assert.match(textOf(pending), /Rilettura in corso/);
+  assert.deepEqual(visibleTitles(renderer.root), ['Collegio pagina 1']);
+  assert.ok(checkboxes(renderer.root).length === 1, 'i risultati restano utilizzabili');
+
+  await act(async () => { release!(); await new Promise((r) => setTimeout(r, 30)); });
+  assert.deepEqual(visibleTitles(renderer.root), ['Collegio pagina 1', 'Riunione pagina 2']);
+  assert.equal(retryButton(renderer.root), undefined);
+});
+
+test('ripresa fallita: i risultati restano, l\'avviso e il pulsante non spariscono', async () => {
+  mockServer([
+    {
+      items: [item('Collegio pagina 1')],
+      unanalyzedPages: [2],
+      notice: 'Analisi parziale: pagine non analizzate: 2 (su 2). Controllale nel documento originale.',
+    },
+    { items: [], status: 503, error: 'Il documento non è stato elaborato dal servizio AI. Riprova tra poco.' },
+  ]);
+  const renderer = await renderPdfAnalysis();
+  await click(retryButton(renderer.root));
+  await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+
+  assert.deepEqual(visibleTitles(renderer.root), ['Collegio pagina 1'], 'nessun risultato perso');
+  assert.ok(retryButton(renderer.root), 'si può riprovare ancora');
+  assert.equal(retryButton(renderer.root).props.disabled, false);
+  assert.match(textOf(renderer.root), /pagine non analizzate: 2|pagina non analizzata: 2/);
+  assert.match(textOf(renderer.root), /non è stato elaborato dal servizio AI|rileggere le pagine mancanti/);
+});

@@ -16,13 +16,14 @@ import {
   CIRCULAR_RESPONSE_SCHEMA,
   PDF_PAGE_CONCURRENCY,
   PDF_PAGE_FIRST_MODEL_BUDGET_MS,
+  PDF_PAGE_RETRY_BACKOFF_MS,
   PDF_PAGE_TIMEOUT_MS,
   PDF_SINGLE_CALL_BUDGET_MS,
   PDF_SINGLE_CALL_MAX_CHARS,
   PDF_TEXT_ANALYSIS_TIMEOUT_MS,
   GEMINI_CANDIDATE_MODELS_DEFAULT,
 } from '../server';
-import { CIRCULAR_REQUEST_TIMEOUT_MS } from '../src/services/aiService';
+import { CIRCULAR_PDF_WAIT_MESSAGE, CIRCULAR_REQUEST_TIMEOUT_MS } from '../src/services/aiService';
 import { buildMinimalPdf } from './helpers/pdfFixtures';
 
 process.env.TEST_RATE_LIMIT = 'relaxed';
@@ -102,11 +103,14 @@ async function withServer<T>(run: (url: string) => Promise<T>): Promise<T> {
   }
 }
 
-async function postPdf(base64: string): Promise<{ status: number; json: any }> {
+async function postPdf(base64: string, pages?: number[]): Promise<{ status: number; json: any }> {
   return withServer(async (url) => {
     const response = await fetch(url, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ imageBase64: base64, mimeType: 'application/pdf', profile }),
+      body: JSON.stringify({
+        imageBase64: base64, mimeType: 'application/pdf', profile,
+        ...(pages === undefined ? {} : { pages }),
+      }),
     });
     return { status: response.status, json: await response.json() };
   });
@@ -226,44 +230,98 @@ test('concorrenza del percorso per pagina: mai più di 2 richieste in volo', asy
   );
 });
 
-test('budget: 40 s per pagina, al massimo 25 s al primo modello, il resto al secondo', async () => {
+test('budget: l\'intero budget di 40 s va al PRIMO modello, nessun passaggio al secondo', async () => {
+  // Misura di produzione: il secondo modello non ha MAI completato una pagina
+  // (solo 503/429), mentre il tetto di 25 s faceva finire in deadline il primo,
+  // che da solo riesce. Tenergli da parte un quarto del budget costava pagine.
   await mockedProviders(
     (call) => call.model === GEMINI_CANDIDATE_MODELS_DEFAULT[0]
       ? geminiResponse([], 500)
       : geminiResponse([compactItem(`Evento pagina ${call.page}`)]),
     async (calls) => {
       const result = await postPdf(sevenPagePdf());
-      assert.equal(result.status, 200);
-      assert.equal(result.json.items.length, 7);
-      const first = calls.filter((call) => call.model === GEMINI_CANDIDATE_MODELS_DEFAULT[0]);
+      // Il primo modello fallisce sempre e nessun altro modello viene provato.
+      assert.equal(result.status, 503);
       const second = calls.filter((call) => call.model === GEMINI_CANDIDATE_MODELS_DEFAULT[1]);
-      assert.equal(second.length, 7, 'il secondo modello riceve un tentativo su ogni pagina');
-      assert.ok(first.every((call) => call.timeoutMs <= PDF_PAGE_FIRST_MODEL_BUDGET_MS));
-      assert.ok(second.every((call) => call.timeoutMs >= 10_000), 'al secondo modello resta un tentativo vero');
+      assert.equal(second.length, 0, 'il percorso per pagina non chiama mai il secondo modello');
+      const first = calls.filter((call) => call.model === GEMINI_CANDIDATE_MODELS_DEFAULT[0]);
+      assert.ok(first.length > 0);
+      // Il primo tentativo di ogni pagina riceve il budget pieno, non il vecchio tetto.
+      assert.ok(
+        first.some((call) => call.timeoutMs > PDF_PAGE_FIRST_MODEL_BUDGET_MS),
+        'il primo modello non è più limitato al tetto dei modelli non ultimi',
+      );
+      assert.ok(first.every((call) => call.timeoutMs <= PDF_PAGE_TIMEOUT_MS));
       assert.equal(PDF_PAGE_TIMEOUT_MS, 40_000);
     },
   );
 });
 
-test('503 su una pagina: un solo retry immediato sullo stesso modello', async () => {
-  const perModel = new Map<string, number>();
+test('pagina che risponde in 35 s simulati: riuscita (il budget pieno le basta)', async () => {
+  await mockedProviders(
+    (call) => call.timeoutMs < 35_000
+      ? geminiResponse([], 504)
+      : geminiResponse([compactItem(`Evento pagina ${call.page}`)]),
+    async (calls) => {
+      const result = await postPdf(sevenPagePdf());
+      assert.equal(result.status, 200);
+      assert.equal(result.json.items.length, 7);
+      assert.equal(result.json.notice, undefined);
+      assert.equal(result.json.unanalyzedPages, undefined);
+      assert.equal(calls.length, 7, 'una sola chiamata per pagina');
+      assert.ok(calls.every((call) => call.timeoutMs >= 35_000), 'ogni pagina riceve almeno 35 s');
+      assert.ok(calls.every((call) => call.model === GEMINI_CANDIDATE_MODELS_DEFAULT[0]));
+    },
+  );
+});
+
+test('503 poi successo: un solo retry sullo stesso modello, mai il secondo modello', async () => {
+  const seenByPage = new Map<number, number>();
   await mockedProviders(
     (call) => {
-      const key = `${call.page}:${call.model}`;
-      const seen = (perModel.get(key) ?? 0) + 1;
-      perModel.set(key, seen);
-      if (call.page === 2) return geminiResponse([], 503);
+      const seen = (seenByPage.get(call.page) ?? 0) + 1;
+      seenByPage.set(call.page, seen);
+      // Solo la pagina 2 risponde 503 al primo colpo, poi riesce.
+      if (call.page === 2 && seen === 1) return geminiResponse([], 503);
       return geminiResponse([compactItem(`Evento pagina ${call.page}`)]);
     },
     async (calls) => {
       const result = await postPdf(sevenPagePdf());
       assert.equal(result.status, 200);
+      assert.equal(result.json.items.length, 7, 'la pagina 2 è recuperata dal retry');
+      assert.equal(result.json.notice, undefined);
       const page2 = calls.filter((call) => call.page === 2);
-      // 2 modelli × (1 tentativo + 1 retry) = al massimo 4 chiamate, mai di più.
-      assert.equal(page2.length, 4);
-      for (const model of GEMINI_CANDIDATE_MODELS_DEFAULT) {
-        assert.equal(page2.filter((call) => call.model === model).length, 2);
-      }
+      assert.equal(page2.length, 2, 'un tentativo + un solo retry');
+      assert.ok(
+        page2.every((call) => call.model === GEMINI_CANDIDATE_MODELS_DEFAULT[0]),
+        'il retry resta sullo stesso modello',
+      );
+      assert.equal(calls.filter((call) => call.model === GEMINI_CANDIDATE_MODELS_DEFAULT[1]).length, 0);
+      assert.equal(PDF_PAGE_RETRY_BACKOFF_MS, 2_000);
+    },
+  );
+});
+
+test('429 ripetuto: il retry è UNO solo, poi la pagina è dichiarata non analizzata', async () => {
+  await mockedProviders(
+    (call) => call.page === 3 ? geminiResponse([], 429) : geminiResponse([compactItem(`Evento pagina ${call.page}`)]),
+    async (calls) => {
+      const result = await postPdf(sevenPagePdf());
+      assert.equal(result.status, 200);
+      assert.equal(calls.filter((call) => call.page === 3).length, 2);
+      assert.deepEqual(result.json.unanalyzedPages, [3]);
+    },
+  );
+});
+
+test('deadline su una pagina: nessun retry nella stessa richiesta', async () => {
+  await mockedProviders(
+    (call) => call.page === 5 ? geminiResponse([], 504) : geminiResponse([compactItem(`Evento pagina ${call.page}`)]),
+    async (calls) => {
+      const result = await postPdf(sevenPagePdf());
+      assert.equal(result.status, 200);
+      assert.equal(calls.filter((call) => call.page === 5).length, 1, 'un deadline non viene mai ritentato');
+      assert.deepEqual(result.json.unanalyzedPages, [5]);
     },
   );
 });
@@ -351,10 +409,138 @@ test('PDF multipagina ma testo complessivo sotto 1500 caratteri: nessuna suddivi
 // 5. Deadline coerenti
 // ---------------------------------------------------------------------------
 
-test('deadline del percorso PDF 150 s, timeout client 160 s, chiamata unica dentro il deadline', () => {
-  assert.equal(PDF_TEXT_ANALYSIS_TIMEOUT_MS, 150_000);
-  assert.equal(CIRCULAR_REQUEST_TIMEOUT_MS, 160_000);
+test('deadline del percorso PDF 170 s, timeout client 180 s, chiamata unica dentro il deadline', () => {
+  assert.equal(PDF_TEXT_ANALYSIS_TIMEOUT_MS, 170_000);
+  assert.equal(CIRCULAR_REQUEST_TIMEOUT_MS, 180_000);
+  assert.ok(CIRCULAR_REQUEST_TIMEOUT_MS > PDF_TEXT_ANALYSIS_TIMEOUT_MS);
   assert.ok(PDF_SINGLE_CALL_BUDGET_MS < PDF_TEXT_ANALYSIS_TIMEOUT_MS);
   assert.equal(PDF_SINGLE_CALL_MAX_CHARS, 1_500);
+  assert.match(CIRCULAR_PDF_WAIT_MESSAGE, /fino a 3 minuti/);
   assert.deepEqual(GEMINI_CANDIDATE_MODELS_DEFAULT, ['gemini-3.1-flash-lite', 'gemini-3.5-flash']);
+});
+
+// ---------------------------------------------------------------------------
+// 6. Ripresa delle pagine mancanti (parametro `pages`)
+// ---------------------------------------------------------------------------
+
+test('pagine non analizzate esposte in modo strutturato, oltre al notice testuale', async () => {
+  await mockedProviders(
+    (call) => [2, 5].includes(call.page) ? geminiResponse([], 400) : geminiResponse([compactItem(`Evento pagina ${call.page}`)]),
+    async () => {
+      const result = await postPdf(sevenPagePdf());
+      assert.equal(result.status, 200);
+      assert.equal(result.json.items.length, 5);
+      assert.deepEqual(result.json.unanalyzedPages, [2, 5]);
+      assert.match(result.json.notice, /pagine non analizzate: 2, 5 \(su 7\)/);
+      // Nessun'altra aggiunta al formato della risposta.
+      assert.deepEqual(
+        Object.keys(result.json).sort(),
+        ['items', 'notice', 'source', 'success', 'unanalyzedPages'],
+      );
+    },
+  );
+});
+
+test('ripresa: con l\'elenco pagine vengono analizzate SOLO quelle, con il contesto', async () => {
+  await mockedProviders(
+    (call) => geminiResponse([compactItem(`Evento pagina ${call.page}`)]),
+    async (calls) => {
+      const result = await postPdf(sevenPagePdf(), [2, 5]);
+      assert.equal(result.status, 200);
+      assert.equal(result.json.items.length, 2);
+      assert.deepEqual(calls.map((call) => call.page).sort((a, b) => a - b), [2, 5]);
+      assert.equal(result.json.unanalyzedPages, undefined);
+      assert.equal(result.json.notice, undefined);
+      // Il contesto resta quello reale: inizio pagina 1 e coda della precedente.
+      const page5 = calls.find((call) => call.page === 5)!;
+      assert.ok(page5.body.includes('CONTESTO'), 'il blocco di contesto resta presente');
+      assert.ok(page5.body.includes('Inizio pagina 1'));
+      assert.ok(page5.body.includes('Fine pagina precedente'));
+      assert.ok(page5.body.includes('CURRENT_PAGE_4'), 'la coda della pagina 4 è nel contesto');
+    },
+  );
+});
+
+test('ripresa di una sola pagina: resta il percorso per pagina, non la chiamata unica', async () => {
+  await mockedProviders(
+    (call) => geminiResponse([compactItem(`Evento pagina ${call.page}`)]),
+    async (calls) => {
+      const result = await postPdf(sevenPagePdf(), [4]);
+      assert.equal(result.status, 200);
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].page, 4);
+      assert.ok(calls[0].timeoutMs <= PDF_PAGE_TIMEOUT_MS, 'budget di pagina, non quello della chiamata unica');
+      assert.ok(calls[0].body.includes('CONTESTO'));
+    },
+  );
+});
+
+test('ripresa parzialmente riuscita: le pagine ancora mancanti restano dichiarate', async () => {
+  await mockedProviders(
+    (call) => call.page === 5 ? geminiResponse([], 400) : geminiResponse([compactItem(`Evento pagina ${call.page}`)]),
+    async () => {
+      const result = await postPdf(sevenPagePdf(), [2, 5]);
+      assert.equal(result.status, 200);
+      assert.equal(result.json.items.length, 1);
+      assert.deepEqual(result.json.unanalyzedPages, [5]);
+      assert.match(result.json.notice, /pagine non analizzate: 5 \(su 2\)/);
+    },
+  );
+});
+
+test('ripresa: elenco pagine non valido -> 400 (fuori intervallo, duplicati, non interi)', async () => {
+  await mockedProviders(
+    () => geminiResponse([compactItem('Mai chiamato')]),
+    async (calls) => {
+      const pdf = sevenPagePdf();
+      const rejected: unknown[] = [
+        [8],              // fuori intervallo (il PDF ha 7 pagine)
+        [0],              // le pagine sono 1-based
+        [-1],             // negativo
+        [2, 2],           // duplicati
+        [1.5],            // non intero
+        ['2'],            // non numerico
+        [],               // elenco vuoto
+        Array.from({ length: 31 }, (_, i) => i + 1), // oltre il massimo di 30
+        'tutte',          // non è un array
+      ];
+      for (const pages of rejected) {
+        const result = await postPdf(pdf, pages as any);
+        assert.equal(result.status, 400, `atteso 400 per ${JSON.stringify(pages)}`);
+        assert.equal(result.json.success, false);
+        assert.deepEqual(result.json.items, []);
+        assert.equal(result.json.errorCode, 'INVALID_INPUT');
+      }
+      assert.equal(calls.length, 0, 'un elenco non valido non arriva mai al modello');
+    },
+  );
+});
+
+test('ripresa: il parametro pages è ammesso solo su un PDF', async () => {
+  await mockedProviders(
+    () => geminiResponse([compactItem('Mai chiamato')]),
+    async (calls) => {
+      const result = await withServer(async (url) => {
+        const response = await fetch(url, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: 'Collegio docenti 4 settembre 2026', profile, pages: [1] }),
+        });
+        return { status: response.status, json: await response.json() };
+      });
+      assert.equal(result.status, 400);
+      assert.equal(result.json.errorCode, 'INVALID_INPUT');
+      assert.equal(calls.length, 0);
+    },
+  );
+});
+
+test('ripresa: la validazione delle pagine precede qualsiasi chiamata al modello', async () => {
+  await mockedProviders(
+    () => geminiResponse([compactItem('Mai chiamato')]),
+    async (calls) => {
+      const result = await postPdf(sevenPagePdf(), [1, 2, 99]);
+      assert.equal(result.status, 400);
+      assert.equal(calls.length, 0);
+    },
+  );
 });

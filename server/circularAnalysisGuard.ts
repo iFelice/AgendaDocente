@@ -18,13 +18,39 @@ const text = (v: unknown, max = 256): v is string => typeof v === 'string' && v.
 const optional = (v: unknown, check: (v: unknown) => boolean) => v === undefined || check(v);
 const invalid = () => { throw new AnalysisInputError(400, 'Richiesta di analisi non valida.'); };
 
+/** Tetto di pagine richiedibili in una ripresa: oltre, è un'analisi completa. */
+export const CIRCULAR_REQUESTED_PAGES_MAX = 30;
+
+/**
+ * Forma del parametro opzionale `pages` (ripresa delle pagine mancanti):
+ * array non vuoto di interi 1-based, senza duplicati, al massimo 30. Il
+ * confronto con il numero reale di pagine del PDF avviene nell'endpoint, che
+ * è l'unico punto in cui il documento è già stato estratto.
+ */
+export function isValidRequestedPages(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length === 0 || value.length > CIRCULAR_REQUESTED_PAGES_MAX) return false;
+  const seen = new Set<number>();
+  for (const page of value) {
+    if (typeof page !== 'number' || !Number.isInteger(page) || page < 1) return false;
+    if (seen.has(page)) return false;
+    seen.add(page);
+  }
+  return true;
+}
+
 /**
  * Validazione payload di analyze-circular (forma storica, invariata):
- * testo e/o file, profilo docente, sede predefinita.
+ * testo e/o file, profilo docente, sede predefinita. In più il solo parametro
+ * opzionale `pages`, ammesso unicamente su un PDF.
  */
 export function validateAnalysisPayload(body: unknown): void {
   if (!record(body)) return invalid();
-  if (Object.keys(body).some(k => !['text', 'imageBase64', 'mimeType', 'profile', 'defaultLocation'].includes(k))) return invalid();
+  if (Object.keys(body).some(k => !['text', 'imageBase64', 'mimeType', 'profile', 'defaultLocation', 'pages'].includes(k))) return invalid();
+  if (body.pages !== undefined) {
+    // Le pagine esistono solo per un PDF: su testo o foto il parametro non ha senso.
+    if (String(body.mimeType ?? '').toLowerCase() !== 'application/pdf') return invalid();
+    if (!isValidRequestedPages(body.pages)) return invalid();
+  }
   if (typeof body.text === 'string' && body.text.length > ANALYSIS_LIMITS.textChars) throw new AnalysisInputError(413, 'Testo troppo lungo: massimo 100.000 caratteri.');
   if (!optional(body.text, v => text(v, ANALYSIS_LIMITS.textChars)) || !optional(body.defaultLocation, v => text(v))) return invalid();
   validateImageFields(body);
