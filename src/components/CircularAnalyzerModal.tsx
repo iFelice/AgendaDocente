@@ -3,7 +3,7 @@ import { usePersistenceAction } from "../hooks/usePersistenceAction";
 import { convertExtractedItemToEvent } from "../services/storage";
 import { extractedItemError } from "../utils/circularParser";
 import { formatRecipientsLabel } from "../utils/circularRelevance";
-import { localDateISO } from "../utils/dates";
+import { formatCivilDateIt, localDateISO } from "../utils/dates";
 import React, { useState, useEffect, useRef } from "react";
 import {
   AlertCircle,
@@ -38,9 +38,30 @@ import {
   mergeCircularItems,
   CIRCULAR_PDF_WAIT_MESSAGE,
 } from "../services/aiService";
-import { findPossibleEventUpdate, getEventFieldDiff } from "../utils/eventMatching";
+import { findPossibleEventUpdate, getEventFieldDiff, isIdenticalEventUpdate } from "../utils/eventMatching";
 
 export type UpdateChoice = "update" | "create" | "ignore";
+
+/** Etichette delle scelte usate sia nelle azioni in blocco sia negli annunci. */
+const CHOICE_BULK_LABELS: Record<UpdateChoice, string> = {
+  update: "Aggiorna esistenti",
+  create: "Aggiungi come nuovi",
+  ignore: "Ignora",
+};
+
+/** Millisecondi per cui resta disponibile l'"Annulla" dopo un'azione in blocco. */
+const BULK_UNDO_WINDOW_MS = 6000;
+
+/** Durata dell'evidenziazione della scheda raggiunta da "Vai al prossimo". */
+const CONFLICT_HIGHLIGHT_MS = 2000;
+
+/** Stato ripristinabile dall'"Annulla" di un'azione in blocco. */
+interface BulkChoiceUndo {
+  entries: Array<{ tempId: string; choice: UpdateChoice | undefined; selected: boolean }>;
+  announcement: string;
+  /** Il messaggio di blocco importazione, se attivo al momento dell'azione, torna visibile. */
+  restoreBlock: boolean;
+}
 
 interface CircularAnalyzerModalProps {
   isOpen: boolean;
@@ -122,11 +143,57 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   const [showRawSnippets, setShowRawSnippets] = useState<boolean>(false);
   const [selectionWarning, setSelectionWarning] = useState<string | null>(null);
   const [updateChoices, setUpdateChoices] = useState<Record<string, UpdateChoice>>({});
+  /** Annullamento dell'ultima azione in blocco: ripristina scelte e selezioni toccate. */
+  const [bulkChoiceUndo, setBulkChoiceUndo] = useState<BulkChoiceUndo | null>(null);
+  /** Modalità "Cambia per tutti": sovrascrive anche le scelte già fatte sui visibili. */
+  const [bulkOverrideMode, setBulkOverrideMode] = useState<boolean>(false);
+  /** Attivo dopo un tentativo di importazione con conflitti selezionati senza scelta. */
+  const [importBlocked, setImportBlocked] = useState<boolean>(false);
+  /** tempId della scheda evidenziata dal "Vai al prossimo" del messaggio di blocco. */
+  const [highlightedTempId, setHighlightedTempId] = useState<string | null>(null);
+  /** Overflow della riga dei mesi: alimenta la sfumatura sul bordo destro. */
+  const [monthRowMetrics, setMonthRowMetrics] = useState<{ hasOverflow: boolean; atEnd: boolean }>({
+    hasOverflow: false,
+    atEnd: true,
+  });
 
   const inputRevision = useRef(0);
   const handledAutoTokenRef = useRef<string | null>(null);
   const [isReadingFile, setIsReadingFile] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  const bulkUndoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Ultimo elemento raggiunto da "Vai al prossimo": il clic successivo parte da qui. */
+  const lastFocusedUnresolved = useRef<string | null>(null);
+  /** Schede dell'elenco risultati, per scrollare fino all'elemento evidenziato. */
+  const itemCardRefs = useRef<Map<string, HTMLElement>>(new Map());
+  /** Conflitti identici già preselezionati su "Ignora": non si ripetono dopo modifiche manuali. */
+  const processedIdenticalRef = useRef<Set<string>>(new Set());
+  const monthRowRef = useRef<HTMLDivElement | null>(null);
+
+  /**
+   * Azzera scelte, blocco e annullamento: usato alla riapertura del modale e a
+   * ogni nuova analisi, mai durante la ripresa delle pagine mancanti.
+   */
+  const resetChoiceUiState = () => {
+    setUpdateChoices({});
+    setSelectionWarning(null);
+    setImportBlocked(false);
+    setBulkChoiceUndo(null);
+    setBulkOverrideMode(false);
+    setHighlightedTempId(null);
+    setMonthRowMetrics({ hasOverflow: false, atEnd: true });
+    processedIdenticalRef.current = new Set();
+    lastFocusedUnresolved.current = null;
+    if (bulkUndoTimer.current) {
+      clearTimeout(bulkUndoTimer.current);
+      bulkUndoTimer.current = null;
+    }
+    if (highlightTimer.current) {
+      clearTimeout(highlightTimer.current);
+      highlightTimer.current = null;
+    }
+  };
 
   const handleModalClose = () => {
     inputRevision.current++;
@@ -174,6 +241,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       setAnalysisSource(result.source);
       setAnalysisNotice(result.notice ?? null);
       setUnanalyzedPages(result.unanalyzedPages ?? []);
+      resetChoiceUiState();
       setMonthFilter("ALL");
       setIsHeaderCompact(false);
       setStep("results");
@@ -276,8 +344,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     setUnanalyzedPages([]);
     setResumeError(null);
     setIsResuming(false);
-    setSelectionWarning(null);
-    setUpdateChoices({});
+    resetChoiceUiState();
     setMonthFilter("ALL");
     setIsHeaderCompact(false);
     setIsReadingFile(false);
@@ -304,7 +371,48 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     }
   }, [isOpen, initialFile, initialInputMode]);
 
-  if (!isOpen) return null;
+  // Doppioni identici: la scelta "Ignora" è derivata dal confronto, ma la
+  // deselezione va scritta una sola volta per elemento (poi comanda l'utente).
+  useEffect(() => {
+    if (!isOpen || step !== "results") return;
+    setExtractedItems((prev) => {
+      let changed = false;
+      const next = prev.map((it) => {
+        if (processedIdenticalRef.current.has(it.tempId)) return it;
+        const match = findPossibleEventUpdate(it, existingEvents);
+        if (!match || !isIdenticalEventUpdate(match, it)) return it;
+        processedIdenticalRef.current.add(it.tempId);
+        if (!it.selectedForImport) return it;
+        changed = true;
+        return { ...it, selectedForImport: false };
+      });
+      return changed ? next : prev;
+    });
+  }, [isOpen, step, extractedItems, existingEvents]);
+
+  // Il messaggio di blocco segue le scelte man mano fatte e sparisce a zero.
+  useEffect(() => {
+    if (!importBlocked) return;
+    const stillUnresolved = extractedItems.some((it) => {
+      if (!it.selectedForImport) return false;
+      const match = findPossibleEventUpdate(it, existingEvents);
+      if (!match) return false;
+      return !updateChoices[it.tempId] && !isIdenticalEventUpdate(match, it);
+    });
+    if (!stillUnresolved) {
+      setImportBlocked(false);
+      lastFocusedUnresolved.current = null;
+    }
+  }, [importBlocked, extractedItems, existingEvents, updateChoices]);
+
+  // Alla chiusura del componente non restano timer attivi.
+  useEffect(
+    () => () => {
+      if (bulkUndoTimer.current) clearTimeout(bulkUndoTimer.current);
+      if (highlightTimer.current) clearTimeout(highlightTimer.current);
+    },
+    []
+  );
 
   // Handle file processing for both file input and drag & drop
   const processCircularFile = (file: File) => {
@@ -454,14 +562,42 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   const selectedItems = extractedItems.filter((i) => i.selectedForImport);
   const selectedCount = selectedItems.length;
 
-  const toCreateCount = selectedItems.filter((it) => {
+  // Conflitti: abbinamento deterministico con un impegno già in agenda, calcolato
+  // una sola volta per render e riusato da conteggi, blocco importazione e schede.
+  const matchByTempId = new Map<string, CalendarEvent>();
+  const identicalConflictIds = new Set<string>();
+  for (const it of extractedItems) {
     const match = findPossibleEventUpdate(it, existingEvents);
-    return !match || updateChoices[it.tempId] === "create";
+    if (!match) continue;
+    matchByTempId.set(it.tempId, match);
+    if (isIdenticalEventUpdate(match, it)) identicalConflictIds.add(it.tempId);
+  }
+
+  /**
+   * Scelta effettiva su un conflitto: quella esplicita dell'utente oppure, per
+   * i soli conflitti identici senza scelta, il "Ignora" preimpostato.
+   */
+  const choiceOf = (item: ExtractedItem): UpdateChoice | undefined => {
+    if (!matchByTempId.has(item.tempId)) return undefined;
+    return updateChoices[item.tempId] ?? (identicalConflictIds.has(item.tempId) ? "ignore" : undefined);
+  };
+
+  // Conflitti selezionati senza scelta: sono esattamente quelli che fermano
+  // l'importazione. Gli impegni senza conflitto non chiedono alcuna scelta e i
+  // conflitti identici non bloccano mai (scelta preimpostata su "Ignora").
+  const selectedUnresolvedItems = selectedItems.filter(
+    (it) => matchByTempId.has(it.tempId) && choiceOf(it) === undefined
+  );
+  const importBlockActive = importBlocked && selectedUnresolvedItems.length > 0;
+
+  const toCreateCount = selectedItems.filter((it) => {
+    const match = matchByTempId.get(it.tempId);
+    return !match || choiceOf(it) === "create";
   }).length;
 
   const toUpdateCount = selectedItems.filter((it) => {
-    const match = findPossibleEventUpdate(it, existingEvents);
-    return !!match && updateChoices[it.tempId] === "update";
+    const match = matchByTempId.get(it.tempId);
+    return !!match && choiceOf(it) === "update";
   }).length;
 
   const isAllIgnored =
@@ -469,8 +605,8 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     toCreateCount === 0 &&
     toUpdateCount === 0 &&
     selectedItems.every((it) => {
-      const match = findPossibleEventUpdate(it, existingEvents);
-      return match && updateChoices[it.tempId] === "ignore";
+      const match = matchByTempId.get(it.tempId);
+      return match && choiceOf(it) === "ignore";
     });
 
   const countVerde = itemsInMonth.filter((i) => i.relevance === "VERDE").length;
@@ -511,6 +647,179 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     );
   };
 
+  // Conflitti attualmente visibili con i filtri attivi (pertinenza + mese), come
+  // "Seleziona: Pertinenti · Tutti · Nessuno".
+  const visibleConflicts = visibleItems.filter((it) => matchByTempId.has(it.tempId));
+  // Conflitti visibili senza scelta: i conflitti identici, preimpostati su
+  // "Ignora", non rientrano nel conteggio N né nell'azione in blocco.
+  const unresolvedVisibleConflicts = visibleConflicts.filter((it) => choiceOf(it) === undefined);
+  // Conflitti visibili con una scelta esplicita dell'utente: sono i soli che
+  // "Cambia per tutti" può sovrascrivere (gli identici invariati restano fuori).
+  const overridableVisibleConflicts = visibleConflicts.filter((it) => updateChoices[it.tempId] !== undefined);
+
+  // Scelta singola su un conflitto: la scelta implica la selezione (punto 1).
+  // Una modifica manuale successiva della casella non viene ri-allineata finché
+  // l'utente non cambia di nuovo la scelta sul conflitto.
+  const handleUpdateChoice = (tempId: string, choice: UpdateChoice) => {
+    setUpdateChoices((prev) => ({ ...prev, [tempId]: choice }));
+    setExtractedItems((prev) =>
+      prev.map((it) => (it.tempId === tempId ? { ...it, selectedForImport: choice !== "ignore" } : it))
+    );
+  };
+
+  /** Applica una scelta a un insieme di conflitti e prepara l'"Annulla". */
+  const applyBulkChoice = (targetIds: string[], choice: UpdateChoice) => {
+    if (targetIds.length === 0) return;
+    const idSet = new Set(targetIds);
+    const entries = extractedItems
+      .filter((it) => idSet.has(it.tempId))
+      .map((it) => ({ tempId: it.tempId, choice: updateChoices[it.tempId], selected: it.selectedForImport }));
+    setUpdateChoices((prev) => {
+      const next = { ...prev };
+      for (const id of targetIds) next[id] = choice;
+      return next;
+    });
+    setExtractedItems((prev) =>
+      prev.map((it) => (idSet.has(it.tempId) ? { ...it, selectedForImport: choice !== "ignore" } : it))
+    );
+    setBulkOverrideMode(false);
+    setBulkChoiceUndo({
+      entries,
+      announcement: `${CHOICE_BULK_LABELS[choice]} applicato a ${targetIds.length} ${
+        targetIds.length === 1 ? "impegno" : "impegni"
+      }.`,
+      restoreBlock: importBlockActive,
+    });
+    if (bulkUndoTimer.current) clearTimeout(bulkUndoTimer.current);
+    bulkUndoTimer.current = setTimeout(() => setBulkChoiceUndo(null), BULK_UNDO_WINDOW_MS);
+  };
+
+  /** Ripristina scelte e selezioni precedenti dei soli elementi toccati dall'azione in blocco. */
+  const undoBulkChoice = () => {
+    const undo = bulkChoiceUndo;
+    if (!undo) return;
+    if (bulkUndoTimer.current) {
+      clearTimeout(bulkUndoTimer.current);
+      bulkUndoTimer.current = null;
+    }
+    setUpdateChoices((prev) => {
+      const next = { ...prev };
+      for (const entry of undo.entries) {
+        if (entry.choice === undefined) delete next[entry.tempId];
+        else next[entry.tempId] = entry.choice;
+      }
+      return next;
+    });
+    const selectedById = new Map(undo.entries.map((e) => [e.tempId, e.selected]));
+    setExtractedItems((prev) =>
+      prev.map((it) =>
+        selectedById.has(it.tempId) ? { ...it, selectedForImport: selectedById.get(it.tempId)! } : it
+      )
+    );
+    setBulkChoiceUndo(null);
+    // Se l'azione era partita dal messaggio di blocco, il messaggio torna attivo.
+    setImportBlocked(undo.restoreBlock);
+  };
+
+  /** "Vai al prossimo": filtri su misura per l'elemento, scroll e evidenziazione della scheda. */
+  const handleGoToNextUnresolved = () => {
+    const list = selectedUnresolvedItems;
+    if (list.length === 0) return;
+    const currentIndex = list.findIndex((it) => it.tempId === lastFocusedUnresolved.current);
+    const target = list[currentIndex + 1] ?? list[0];
+    lastFocusedUnresolved.current = target.tempId;
+    if (!matchesRelevance(target)) setRelevanceFilter("ALL");
+    if (!matchesMonth(target)) setMonthFilter(monthKeyOf(target) ?? "NODATE");
+    setHighlightedTempId(target.tempId);
+    if (highlightTimer.current) clearTimeout(highlightTimer.current);
+    highlightTimer.current = setTimeout(() => setHighlightedTempId(null), CONFLICT_HIGHLIGHT_MS);
+  };
+
+  /** I tre pulsanti dell'azione in blocco (riga "Applica a tutti", override e azioni rapide). */
+  const bulkChoiceButtons = (targets: ExtractedItem[], scopeName: string) => {
+    const ids = targets.map((t) => t.tempId);
+    const count = targets.length;
+    const ariaLabel = (label: string) => `${label}: ${scopeName} (${count})`;
+    const cls =
+      "min-h-11 sm:min-h-0 px-2.5 py-1 rounded-lg border border-amber-300 bg-white text-amber-900 font-semibold hover:bg-amber-100 transition-colors";
+    return (
+      <>
+        <button
+          type="button"
+          className={cls}
+          aria-label={ariaLabel("Aggiorna esistenti")}
+          onClick={() => applyBulkChoice(ids, "update")}
+        >
+          Aggiorna esistenti
+        </button>
+        <button
+          type="button"
+          className={cls}
+          aria-label={ariaLabel("Aggiungi come nuovi")}
+          onClick={() => applyBulkChoice(ids, "create")}
+        >
+          Aggiungi come nuovi
+        </button>
+        <button
+          type="button"
+          className={cls}
+          aria-label={ariaLabel("Ignora")}
+          onClick={() => applyBulkChoice(ids, "ignore")}
+        >
+          Ignora
+        </button>
+      </>
+    );
+  };
+
+  // La modalità "Cambia per tutti" ha senso solo finché tutti i visibili sono risolti.
+  useEffect(() => {
+    if (bulkOverrideMode && unresolvedVisibleConflicts.length > 0) setBulkOverrideMode(false);
+  }, [bulkOverrideMode, unresolvedVisibleConflicts.length]);
+
+  // Porta in vista la scheda evidenziata da "Vai al prossimo", anche dopo il cambio filtri.
+  useEffect(() => {
+    if (!highlightedTempId) return;
+    const el = itemCardRefs.current.get(highlightedTempId) as unknown as
+      | { scrollIntoView?: (opts?: { behavior?: string; block?: string }) => void }
+      | undefined;
+    if (el && typeof el.scrollIntoView === "function") {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [highlightedTempId, relevanceFilter, effectiveMonthFilter]);
+
+  /** Misura l'overflow orizzontale della riga dei mesi per la sfumatura sul bordo destro. */
+  const measureMonthRow = () => {
+    const el = monthRowRef.current;
+    if (!el) return;
+    const scrollWidth = el.scrollWidth;
+    const clientWidth = el.clientWidth;
+    const scrollLeft = el.scrollLeft;
+    if (typeof scrollWidth !== "number" || typeof clientWidth !== "number" || typeof scrollLeft !== "number") return;
+    const hasOverflow = scrollWidth - clientWidth > 1;
+    const atEnd = scrollLeft + clientWidth >= scrollWidth - 1;
+    setMonthRowMetrics((prev) =>
+      prev.hasOverflow === hasOverflow && prev.atEnd === atEnd ? prev : { hasOverflow, atEnd }
+    );
+  };
+
+  // La riga dei mesi scorre senza barra visibile (dita, trackpad e tastiera restano
+  // attivi); la sfumatura destra compare solo quando restano mesi fuori vista.
+  useEffect(() => {
+    if (step !== "results") return;
+    measureMonthRow();
+    const el = monthRowRef.current as unknown as
+      | {
+          addEventListener?: (type: string, listener: () => void, opts?: { passive?: boolean }) => void;
+          removeEventListener?: (type: string, listener: () => void) => void;
+        }
+      | null;
+    if (!el || typeof el.addEventListener !== "function" || typeof el.removeEventListener !== "function") return;
+    const onMonthRowScroll = () => measureMonthRow();
+    el.addEventListener("scroll", onMonthRowScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onMonthRowScroll);
+  }, [step, extractedItems, relevanceFilter, effectiveMonthFilter]);
+
   // Compatta il riquadro del titolo durante lo scroll dell'elenco, così
   // l'intestazione fissa resta entro ~30% dell'altezza visibile sugli schermi stretti.
   const handleListScroll = (e: React.UIEvent<HTMLDivElement>) => {
@@ -531,19 +840,18 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     }
     setSelectionWarning(null);
 
-    // Verifica che per tutti gli impegni con possibile aggiornamento sia stata fatta una scelta esplicita
-    for (const it of selected) {
-      const match = findPossibleEventUpdate(it, existingEvents);
-      if (match && !updateChoices[it.tempId]) {
-        setSelectionWarning(`Effettua una scelta per l'impegno "${it.title}" (Possibile aggiornamento di un impegno esistente).`);
-        return;
-      }
+    // L'importazione si ferma solo se fra i SELEZIONATI restano conflitti senza
+    // scelta (i conflitti identici, preimpostati su "Ignora", non bloccano mai).
+    if (selectedUnresolvedItems.length > 0) {
+      setImportBlocked(true);
+      lastFocusedUnresolved.current = null;
+      return;
     }
+    setImportBlocked(false);
 
     const toImportOrUpdate = selected.filter((it) => {
-      const match = findPossibleEventUpdate(it, existingEvents);
-      const choice = match ? updateChoices[it.tempId] : undefined;
-      return !(match && choice === "ignore");
+      const match = matchByTempId.get(it.tempId);
+      return !(match && choiceOf(it) === "ignore");
     });
     const invalid = toImportOrUpdate.find((it) => extractedItemError(it));
     if (invalid) {
@@ -556,8 +864,8 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     const updatedEvents: CalendarEvent[] = [];
 
     for (const it of selected) {
-      const match = findPossibleEventUpdate(it, existingEvents);
-      const choice = match ? updateChoices[it.tempId] : undefined;
+      const match = matchByTempId.get(it.tempId) ?? null;
+      const choice = match ? choiceOf(it) : undefined;
 
       if (match && choice === "update") {
         const updatedDeadlineDate =
@@ -615,6 +923,8 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     if (!await save.run(() => onImportEvents(newEvents, docMeta, updatedEvents))) return;
     onClose();
   };
+
+  if (!isOpen) return null;
 
   return (
     <div className="app-modal fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-stone-950/50 backdrop-blur-xs">
@@ -1008,64 +1318,167 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                 </div>
               </div>
 
-              {/* Month filter row: scorre in orizzontale, si combina con la pertinenza */}
-              <div
-                role="group"
-                aria-label="Filtra per mese"
-                className="flex flex-nowrap items-center gap-1.5 overflow-x-auto pb-1"
-              >
-                <button
-                  onClick={() => setMonthFilter("ALL")}
-                  aria-pressed={effectiveMonthFilter === "ALL"}
-                  className={`min-h-11 sm:min-h-0 shrink-0 whitespace-nowrap px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
-                    effectiveMonthFilter === "ALL"
-                      ? "bg-stone-800 text-white shadow-xs"
-                      : "bg-stone-100 text-stone-700 hover:bg-stone-200"
-                  }`}
+              {/* Month filter row: scorre in orizzontale, si combina con la pertinenza.
+                  La barra di scorrimento è nascosta (dita, trackpad e tastiera continuano
+                  a funzionare); la sfumatura segnala gli altri mesi fuori vista a destra. */}
+              <div className="relative">
+                <div
+                  ref={monthRowRef}
+                  role="group"
+                  aria-label="Filtra per mese"
+                  className="flex flex-nowrap items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar"
                 >
-                  Tutti i mesi ({itemsInRelevance.length})
-                </button>
-                {monthKeys.map((key) => (
                   <button
-                    key={key}
-                    onClick={() => setMonthFilter(key)}
-                    aria-pressed={effectiveMonthFilter === key}
+                    onClick={() => setMonthFilter("ALL")}
+                    aria-pressed={effectiveMonthFilter === "ALL"}
                     className={`min-h-11 sm:min-h-0 shrink-0 whitespace-nowrap px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
-                      effectiveMonthFilter === key
+                      effectiveMonthFilter === "ALL"
                         ? "bg-stone-800 text-white shadow-xs"
                         : "bg-stone-100 text-stone-700 hover:bg-stone-200"
                     }`}
                   >
-                    {monthLabel(key)} ({monthCount(key)})
+                    Tutti i mesi ({itemsInRelevance.length})
                   </button>
-                ))}
-                {hasUndatedItems && (
-                  <button
-                    onClick={() => setMonthFilter("NODATE")}
-                    aria-pressed={effectiveMonthFilter === "NODATE"}
-                    className={`min-h-11 sm:min-h-0 shrink-0 whitespace-nowrap px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
-                      effectiveMonthFilter === "NODATE"
-                        ? "bg-stone-800 text-white shadow-xs"
-                        : "bg-amber-50 text-amber-800 hover:bg-amber-100 border border-amber-200"
-                    }`}
-                  >
-                    Senza data ({monthCount("NODATE")})
-                  </button>
+                  {monthKeys.map((key) => (
+                    <button
+                      key={key}
+                      onClick={() => setMonthFilter(key)}
+                      aria-pressed={effectiveMonthFilter === key}
+                      className={`min-h-11 sm:min-h-0 shrink-0 whitespace-nowrap px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                        effectiveMonthFilter === key
+                          ? "bg-stone-800 text-white shadow-xs"
+                          : "bg-stone-100 text-stone-700 hover:bg-stone-200"
+                      }`}
+                    >
+                      {monthLabel(key)} ({monthCount(key)})
+                    </button>
+                  ))}
+                  {hasUndatedItems && (
+                    <button
+                      onClick={() => setMonthFilter("NODATE")}
+                      aria-pressed={effectiveMonthFilter === "NODATE"}
+                      className={`min-h-11 sm:min-h-0 shrink-0 whitespace-nowrap px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                        effectiveMonthFilter === "NODATE"
+                          ? "bg-stone-800 text-white shadow-xs"
+                          : "bg-amber-50 text-amber-800 hover:bg-amber-100 border border-amber-200"
+                      }`}
+                    >
+                      Senza data ({monthCount("NODATE")})
+                    </button>
+                  )}
+                </div>
+                {monthRowMetrics.hasOverflow && !monthRowMetrics.atEnd && (
+                  <div
+                    aria-hidden="true"
+                    className="pointer-events-none absolute inset-y-0 right-0 w-10 bg-gradient-to-l from-white via-white/85 to-transparent"
+                  />
                 )}
               </div>
 
-              {/* In-Modal Warning if nothing selected */}
-              {selectionWarning && (
+              {/* Riga compatta dei possibili aggiornamenti: azione in blocco sui
+                  conflitti visibili non risolti; "Annulla" per qualche secondo
+                  dopo l'azione (ripristina scelte e selezioni dei soli toccati). */}
+              {(visibleConflicts.length > 0 || bulkChoiceUndo) && (
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 px-3 py-1.5 rounded-lg border border-amber-200 bg-amber-50/70 text-xs text-amber-900">
+                  {bulkChoiceUndo ? (
+                    <>
+                      <span className="font-semibold">{bulkChoiceUndo.announcement}</span>
+                      <button
+                        type="button"
+                        onClick={undoBulkChoice}
+                        aria-label="Annulla l'ultima azione in blocco e ripristina le scelte e le selezioni precedenti"
+                        className="min-h-11 sm:min-h-0 px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold transition-colors"
+                      >
+                        Annulla
+                      </button>
+                    </>
+                  ) : unresolvedVisibleConflicts.length > 0 ? (
+                    <>
+                      <span className="font-bold whitespace-nowrap">
+                        {unresolvedVisibleConflicts.length} possibili aggiornamenti
+                      </span>
+                      <span aria-hidden="true">·</span>
+                      <span className="font-medium">Applica a tutti:</span>
+                      {bulkChoiceButtons(unresolvedVisibleConflicts, "conflitti visibili non risolti")}
+                    </>
+                  ) : (
+                    <>
+                      <span className="font-bold text-emerald-800">Tutti risolti</span>
+                      {overridableVisibleConflicts.length > 0 &&
+                        (bulkOverrideMode ? (
+                          bulkChoiceButtons(overridableVisibleConflicts, "scelte già fatte sui conflitti visibili")
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setBulkOverrideMode(true)}
+                            aria-label="Cambia per tutti: sovrascrivi le scelte già fatte sui conflitti visibili"
+                            className="min-h-11 sm:min-h-0 px-2.5 py-1 rounded-lg border border-amber-300 bg-white text-amber-900 font-semibold hover:bg-amber-100 transition-colors"
+                          >
+                            Cambia per tutti
+                          </button>
+                        ))}
+                    </>
+                  )}
+                </div>
+              )}
+              {/* Stato dell'azione in blocco annunciato agli screen reader. */}
+              <p role="status" aria-live="polite" className="sr-only">
+                {bulkChoiceUndo ? bulkChoiceUndo.announcement : ""}
+              </p>
+
+              {/* Blocco importazione: fra i selezionati restano conflitti senza scelta.
+                  Il messaggio aggiorna N a ogni scelta, sparisce a zero e non nomina
+                  un solo impegno: elenca (fino a 3) oppure conta. */}
+              {importBlockActive ? (
+                <div
+                  role="alert"
+                  className="p-3 bg-amber-50 border border-amber-300 text-amber-900 text-xs rounded-xl space-y-2"
+                >
+                  <div className="flex items-start gap-2 font-semibold">
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                    <span>
+                      Restano {selectedUnresolvedItems.length} impegni selezionati da risolvere prima di
+                      importare.
+                    </span>
+                  </div>
+                  {selectedUnresolvedItems.length <= 3 && (
+                    <ul className="list-disc pl-7 space-y-0.5">
+                      {selectedUnresolvedItems.map((it) => (
+                        <li key={it.tempId} className="font-medium">
+                          {it.title} · {it.date ? formatCivilDateIt(it.date) : "senza data"}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
+                    <button
+                      type="button"
+                      id="btn-go-to-next-unresolved"
+                      onClick={handleGoToNextUnresolved}
+                      aria-label="Vai al prossimo impegno da risolvere: imposta i filtri, scorre fino alla scheda e la evidenzia"
+                      className="min-h-11 sm:min-h-0 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold transition-colors"
+                    >
+                      Vai al prossimo
+                    </button>
+                    <span className="font-medium">Per tutti gli {selectedUnresolvedItems.length}:</span>
+                    {bulkChoiceButtons(
+                      selectedUnresolvedItems,
+                      "impegni selezionati da risolvere, anche se nascosti dai filtri"
+                    )}
+                  </div>
+                </div>
+              ) : selectionWarning ? (
+                /* In-Modal Warning if nothing selected */
                 <div className="p-3 bg-amber-50 border border-amber-300 text-amber-900 text-xs rounded-xl flex items-center justify-between">
                   <span>{selectionWarning}</span>
                   <button
                     onClick={handleSelectAllRelevant}
-                    className="ml-3 px-2 py-1 bg-amber-600 text-white font-semibold rounded-md text-[11px] hover:bg-amber-700 whitespace-nowrap"
+                    className="ml-3 min-h-11 sm:min-h-0 px-2 py-1 bg-amber-600 text-white font-semibold rounded-md text-[11px] hover:bg-amber-700 whitespace-nowrap"
                   >
                     Seleziona Pertinenti
                   </button>
                 </div>
-              )}
+              ) : null}
             </div>
 
             {/* Items List (unica area scorrevole del passo risultati) */}
@@ -1080,18 +1493,25 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                     const isVerde = item.relevance === "VERDE";
                     const isGiallo = item.relevance === "GIALLO";
                     const isRosso = item.relevance === "ROSSO";
-                    const match = findPossibleEventUpdate(item, existingEvents);
+                    const match = matchByTempId.get(item.tempId) ?? null;
                     const diff = match ? getEventFieldDiff(match, item) : null;
-                    const choice = updateChoices[item.tempId];
+                    const choice = choiceOf(item);
+                    const isIdenticalConflict = identicalConflictIds.has(item.tempId);
+                    const isHighlighted = highlightedTempId === item.tempId;
 
                     return (
                       <div
                         key={item.tempId}
+                        ref={(el) => {
+                          if (el) itemCardRefs.current.set(item.tempId, el);
+                          else itemCardRefs.current.delete(item.tempId);
+                        }}
+                        data-conflict-highlight={isHighlighted ? "true" : undefined}
                         className={`p-4 rounded-xl border transition-all ${
                           item.selectedForImport
                             ? "border-emerald-500 bg-emerald-50/20 shadow-xs"
                             : "border-stone-200 bg-white opacity-85"
-                        }`}
+                        }${isHighlighted ? " ring-2 ring-amber-500 shadow-md" : ""}`}
                       >
                         <div className="flex items-start justify-between gap-3">
                           {/* Checkbox */}
@@ -1100,6 +1520,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                               type="checkbox"
                               checked={item.selectedForImport}
                               onChange={() => toggleItemSelection(item.tempId)}
+                              aria-label={`Seleziona "${item.title}" per l'importazione`}
                               className="mt-1 w-4 h-4 rounded-sm text-emerald-700 focus:ring-emerald-500 cursor-pointer"
                             />
 
@@ -1211,9 +1632,17 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                               {/* Possibile aggiornamento di un impegno esistente */}
                               {match && diff && (
                                 <div className="mt-3 p-3 rounded-xl border border-amber-300 bg-amber-50/70 space-y-3">
-                                  <div className="flex items-center gap-1.5 text-xs font-bold text-amber-900">
+                                  <div className="flex flex-wrap items-center gap-1.5 text-xs font-bold text-amber-900">
                                     <RefreshCw className="w-3.5 h-3.5 text-amber-600 shrink-0" />
                                     <span>Possibile aggiornamento di un impegno esistente</span>
+                                    {isIdenticalConflict && (
+                                      <span
+                                        title="L'impegno estratto non porta alcuna differenza rispetto a quanto già in agenda"
+                                        className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900 border border-emerald-300 font-semibold"
+                                      >
+                                        Già in agenda, identico
+                                      </span>
+                                    )}
                                   </div>
 
                                   {/* Confronto compatto mobile-first */}
@@ -1277,14 +1706,16 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                                     </div>
                                   </div>
 
-                                  {/* Selezione esplicita */}
+                                  {/* Selezione esplicita: la scelta implica la selezione
+                                      ("Aggiorna"/"Aggiungi" selezionano, "Ignora" deseleziona). */}
                                   <div className="pt-1">
                                     <span className="text-[11px] font-semibold text-stone-700 block mb-1.5">Scegli come procedere:</span>
-                                    <div className="flex flex-wrap gap-2">
+                                    <div className="flex flex-wrap gap-2" role="group" aria-label={`Scelta per l'impegno "${item.title}"`}>
                                       <button
                                         type="button"
-                                        onClick={() => setUpdateChoices((prev) => ({ ...prev, [item.tempId]: "update" }))}
-                                        className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
+                                        onClick={() => handleUpdateChoice(item.tempId, "update")}
+                                        aria-pressed={choice === "update"}
+                                        className={`min-h-11 sm:min-h-9 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
                                           choice === "update"
                                             ? "bg-emerald-700 border-emerald-800 text-white shadow-xs"
                                             : "bg-white border-stone-300 text-stone-700 hover:bg-stone-50"
@@ -1294,8 +1725,9 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                                       </button>
                                       <button
                                         type="button"
-                                        onClick={() => setUpdateChoices((prev) => ({ ...prev, [item.tempId]: "create" }))}
-                                        className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
+                                        onClick={() => handleUpdateChoice(item.tempId, "create")}
+                                        aria-pressed={choice === "create"}
+                                        className={`min-h-11 sm:min-h-9 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
                                           choice === "create"
                                             ? "bg-amber-600 border-amber-700 text-white shadow-xs"
                                             : "bg-white border-stone-300 text-stone-700 hover:bg-stone-50"
@@ -1305,8 +1737,9 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                                       </button>
                                       <button
                                         type="button"
-                                        onClick={() => setUpdateChoices((prev) => ({ ...prev, [item.tempId]: "ignore" }))}
-                                        className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
+                                        onClick={() => handleUpdateChoice(item.tempId, "ignore")}
+                                        aria-pressed={choice === "ignore"}
+                                        className={`min-h-11 sm:min-h-9 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
                                           choice === "ignore"
                                             ? "bg-stone-700 border-stone-800 text-white shadow-xs"
                                             : "bg-white border-stone-300 text-stone-700 hover:bg-stone-50"
@@ -1326,6 +1759,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                             type="button"
                             onClick={() => handleDeleteRow(item.tempId)}
                             title="Elimina questa riga estrapolata"
+                            aria-label={`Elimina la riga "${item.title}" dai risultati`}
                             className="p-1.5 text-stone-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors flex-shrink-0"
                           >
                             <Trash2 className="w-4 h-4" />

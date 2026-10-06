@@ -592,7 +592,7 @@ test('12. "Aggiungi come nuovo": crea un secondo evento distinto', async () => {
   }
 });
 
-test('13. "Ignora": non crea né aggiorna nulla, chiude modale con testo "Chiudi senza modifiche", nessun warning', async () => {
+test('13. "Ignora": non crea né aggiorna nulla, deseleziona l\'impegno (nuova semantica), nessun import', async () => {
   const existingEvent: CalendarEvent = {
     id: 'ev-exist-1',
     title: 'Collegio Docenti',
@@ -659,27 +659,34 @@ test('13. "Ignora": non crea né aggiorna nulla, chiude modale con testo "Chiudi
       await new Promise(r => setTimeout(r, 100));
     });
 
-    // Scegli "Ignora"
-    const ignoreBtn = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Ignora')[0];
+    // Scegli "Ignora" (pulsante della scheda: quelli in blocco non hanno aria-pressed)
+    const ignoreBtn = renderer.root.findAll(
+      (el: any) => el.type === 'button' && flatText(el) === 'Ignora' && el.props['aria-pressed'] !== undefined
+    )[0];
     assert.ok(ignoreBtn, 'Pulsante Ignora presente');
     await act(async () => { ignoreBtn.props.onClick(); });
 
-    // Verifica che il testo del pulsante sia "Chiudi senza modifiche"
+    // La scelta implica la deselezione: nessun impegno selezionato, pulsante di
+    // conferma disabilitato e nessuna importazione possibile.
+    const checkbox = renderer.root.findAll((el: any) => el.type === 'input' && el.props.type === 'checkbox')[0];
+    assert.equal(checkbox.props.checked, false, '"Ignora" deve deselezionare l\'impegno');
+    assert.ok(ignoreBtn.props.className.includes('bg-stone-700'), 'Scelta "Ignora" evidenziata sulla scheda');
+
     const confirmBtn = renderer.root.findByProps({ id: 'btn-confirm-circular-import' });
     assert.ok(confirmBtn, 'Pulsante conferma importazione presente');
-    assert.equal(flatText(confirmBtn), 'Chiudi senza modifiche');
+    assert.equal(flatText(confirmBtn), "Aggiungi 0 selezionati all'Agenda");
+    assert.equal(confirmBtn.props.disabled, true, 'Con zero selezionati la conferma è disabilitata');
 
-    // Clicca conferma
-    await act(async () => { confirmBtn.props.onClick(); });
-
-    // Nessun evento importato o aggiornato, onImportEvents non chiamato, modale chiusa
+    // Nessun evento importato o aggiornato, onImportEvents non chiamato, nessun
+    // blocco sui conflitti: la scelta c'è già.
     assert.equal(importCalled, false, 'onImportEvents NON deve essere chiamato');
     assert.equal(importedNew.length, 0);
     assert.equal(importedUpdated.length, 0);
-    assert.equal(closeCalled, true, 'onClose deve essere chiamato');
+    assert.equal(closeCalled, false);
 
     const warningText = flatText(renderer.root);
-    assert.ok(!warningText.includes('Nessuna modifica da salvare'), 'Nessun messaggio di warning bloccante');
+    assert.ok(!warningText.includes('Restano'), 'Nessun messaggio di blocco: la scelta è stata fatta');
+    assert.ok(!warningText.includes('Effettua una scelta'), 'Nessun avviso di scelta mancante');
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -850,15 +857,17 @@ test('16. Circolare multi-impegno: update + create + ignore -> salva gli altri d
       await new Promise(r => setTimeout(r, 100));
     });
 
-    // 1. Collegio -> scegli "Aggiorna esistente"
+    // 1. Collegio -> scegli "Aggiorna esistente" (pulsante della scheda)
     const updateBtns = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Aggiorna esistente');
     assert.ok(updateBtns.length >= 1, 'Pulsante Aggiorna presente per Collegio');
     await act(async () => { updateBtns[0].props.onClick(); });
 
-    // 2. Consiglio 1A (secondo match) -> scegli "Ignora"
-    const ignoreBtns = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Ignora');
-    assert.ok(ignoreBtns.length >= 2, 'Pulsanti Ignora presenti');
-    await act(async () => { ignoreBtns[1].props.onClick(); });
+    // 2. Consiglio 1A è identico all'impegno già in agenda: la nuova gestione lo
+    //    preseleziona su "Ignora", lo deseleziona e lo etichetta. Non serve clic manuale.
+    assert.ok(flatText(renderer.root).includes('Già in agenda, identico'), 'Etichetta conflitto identico visibile');
+    const checkboxes = renderer.root.findAll((el: any) => el.type === 'input' && el.props.type === 'checkbox');
+    // Ordine delle schede: Collegio, Formazione, Consiglio (l'identico è il terzo).
+    assert.equal(checkboxes[2].props.checked, false, 'Conflitto identico deselezionato in automatico');
 
     // Seleziona tutti per includere anche Formazione
     const selectAllBtn = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Tutti')[0];
