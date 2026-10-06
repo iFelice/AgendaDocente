@@ -799,21 +799,45 @@ export const CIRCULAR_RESPONSE_SCHEMA = {
  * qualche secondo in più ma non bruciano il budget in rifiuti di quota.
  */
 export const PDF_PAGE_CONCURRENCY = 2;
-/** Budget Gemini di UNA pagina: deve bastare a un'estrazione reale (misurata ~17 s). */
+/**
+ * Budget Gemini di UNA pagina: deve bastare a un'estrazione reale.
+ *
+ * Misura di produzione sullo stesso PDF di 7 pagine e lo stesso codice:
+ * mattina 7/7 pagine con `gemini-3.1-flash-lite` fra 8 e 18 s a pagina (50 s
+ * complessivi); sera 3/7 con flash-lite in deadline a 23 s su quattro pagine,
+ * perché il tetto cumulativo del primo modello gli lasciava solo 25 s dei 40.
+ * Il secondo modello, che quei 15 s doveva raccoglierli, in due giorni di log
+ * non ha MAI completato una pagina: solo 503 e 429. Il tetto costava quindi
+ * pagine senza comprare nulla, e l'intero budget va al primo modello.
+ */
 export const PDF_PAGE_TIMEOUT_MS = 40_000;
 /**
- * Tetto cumulativo dei modelli NON ultimi su una pagina: il primo modello può
- * prendersi fino a 25 s dei 40 s, il resto resta garantito al secondo.
+ * Tetto cumulativo dei modelli NON ultimi nella CHIAMATA UNICA (PDF di una
+ * pagina o testo breve), dove la cascata su due modelli resta invariata.
+ * Il percorso PER PAGINA non lo usa più: lì c'è un solo modello.
  */
 export const PDF_PAGE_FIRST_MODEL_BUDGET_MS = 25_000;
-/** Deadline complessivo del percorso PDF (il client attende 160 s). */
-export const PDF_TEXT_ANALYSIS_TIMEOUT_MS = 150_000;
+/** Deadline complessivo del percorso PDF (il client attende 180 s). */
+export const PDF_TEXT_ANALYSIS_TIMEOUT_MS = 170_000;
 /** Budget della chiamata UNICA (PDF di una pagina o testo complessivo breve). */
 export const PDF_SINGLE_CALL_BUDGET_MS = 140_000;
 /** Sotto questa soglia di caratteri il PDF non viene suddiviso: una sola chiamata. */
 export const PDF_SINGLE_CALL_MAX_CHARS = 1_500;
-/** Backoff del solo retry immediato ammesso (503/429). */
-export const PDF_PAGE_RETRY_BACKOFF_MS = 700;
+/** Backoff del solo retry immediato ammesso (503/429) nella chiamata unica. */
+export const PDF_SINGLE_CALL_RETRY_BACKOFF_MS = 700;
+/**
+ * Backoff del solo retry immediato ammesso su una pagina (503/429). Due secondi
+ * sono il tempo in cui un 503 di capacità si sblocca davvero; sotto, il retry
+ * ricade nella stessa finestra di sovraccarico e spreca il budget della pagina.
+ */
+export const PDF_PAGE_RETRY_BACKOFF_MS = 2_000;
+/**
+ * Sotto questo tempo residuo il retry della pagina non parte: un tentativo da
+ * meno di 10 s non è un tentativo, è solo budget bruciato prima del deadline.
+ */
+export const PDF_PAGE_RETRY_MIN_REMAINING_MS = 10_000;
+/** Numero massimo di pagine richiedibili esplicitamente in una ripresa. */
+export const PDF_REQUESTED_PAGES_MAX = 30;
 
 interface PdfPageAnalysisResult {
   page: number;
@@ -860,6 +884,14 @@ async function analyzeExtractedPdfPages(params: {
   summary: CircularPayloadSummary;
   teacherProfile: any;
   effectiveCampus?: string;
+  /**
+   * Numeri di pagina (1-based) da analizzare davvero. Assente = tutte. Il
+   * contesto (inizio pagina 1, coda della pagina precedente) resta costruito
+   * su `pages` completo anche quando si analizza un sottoinsieme.
+   */
+  targetPages?: number[];
+  /** Documento trattato come UNA sola unità di analisi (chiamata unica). */
+  singleCall?: boolean;
   /** Budget di tempo di UNA unità di analisi (pagina o documento intero). */
   pageBudgetMs?: number;
   /** Tetto cumulativo concesso ai modelli non ultimi dentro quel budget. */
@@ -867,22 +899,26 @@ async function analyzeExtractedPdfPages(params: {
   /** Iniezione per i test: nessuna chiamata reale. */
   sleep?: (ms: number) => Promise<void>;
 }): Promise<PdfPageAnalysisResult[]> {
-  const results = new Array<PdfPageAnalysisResult>(params.pages.length);
+  const singleCall = params.singleCall ?? params.pages.length === 1;
+  const targetPages = params.targetPages ?? params.pages.map((_, index) => index + 1);
+  const results = new Array<PdfPageAnalysisResult>(targetPages.length);
   const pageBudgetMs = params.pageBudgetMs ?? PDF_PAGE_TIMEOUT_MS;
   const firstModelBudgetMs = params.firstModelBudgetMs ?? PDF_PAGE_FIRST_MODEL_BUDGET_MS;
   const sleep = params.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  const singleCall = params.pages.length === 1;
-  let nextIndex = 0;
+  const retryBackoffMs = singleCall ? PDF_SINGLE_CALL_RETRY_BACKOFF_MS : PDF_PAGE_RETRY_BACKOFF_MS;
+  let nextSlot = 0;
 
   /**
-   * Una pagina è analizzata SOLO da Gemini: i modelli candidati nell'ordine
-   * configurato, un tentativo per modello più al massimo un retry immediato
-   * se il modello risponde 503 o 429. Nessun fallback Groq/Qwen: in produzione
-   * rispondeva `items=[]` con 7 token su ogni pagina, cioè cancellava la
-   * pagina invece di salvarla. Una pagina non riuscita è "non analizzata".
+   * Una pagina è analizzata SOLO da Gemini: nessun fallback Groq/Qwen (in
+   * produzione rispondeva `items=[]` con 7 token su ogni pagina, cioè
+   * cancellava la pagina invece di salvarla) e, nel percorso PER PAGINA,
+   * nessun passaggio al secondo modello: solo il PRIMO candidato, con
+   * l'INTERO budget della pagina, più al massimo un retry immediato se
+   * risponde 503 o 429. La chiamata unica conserva invece la cascata storica
+   * su entrambi i modelli. Una pagina non riuscita è "non analizzata".
    */
-  const analyzePage = async (index: number): Promise<PdfPageAnalysisResult> => {
-    const page = index + 1;
+  const analyzePage = async (page: number): Promise<PdfPageAnalysisResult> => {
+    const index = page - 1;
     const label = `AI Circolari PDF pagina=${page}`;
     const pageStartedAt = Date.now();
     const pageController = new AbortController();
@@ -892,7 +928,12 @@ async function analyzeExtractedPdfPages(params: {
     // Con una sola unità di analisi il testo è già completo: nessun blocco di
     // contesto, che qui sarebbe solo una ripetizione del documento stesso.
     const pageText = singleCall ? (params.pages[0] ?? "") : pdfPageInput(params.pages, index);
-    const models = geminiCandidateModels();
+    // Percorso per pagina: SOLO il primo candidato. Il secondo modello, in due
+    // giorni di log di produzione, non ha mai completato una pagina (solo 503 e
+    // 429): tenergli da parte un quarto del budget faceva fallire in deadline
+    // il primo modello, che da solo riesce. Chiamata unica: cascata invariata.
+    const candidates = geminiCandidateModels();
+    const models = singleCall ? candidates : candidates.slice(0, 1);
     let outputTokens = 0;
     let lastCategory = "nessun-tentativo";
     try {
@@ -939,10 +980,17 @@ async function analyzeExtractedPdfPages(params: {
               lastCategory = "output-non-normalizzabile";
             }
           }
+          // Solo 503/429 meritano il retry: un deadline si ripeterebbe uguale
+          // dentro la stessa richiesta, quindi nessun retry in quel caso.
           const retryable = !run.ok && (run.category === "sovraccarico" || run.category === "quota");
           if (round === 0 && retryable && !pageController.signal.aborted) {
-            console.log(`[AI Circolari PDF Pagina] pagina=${page} provider=gemini modello=${model} esito=retry categoria=${run.category} backoffMs=${PDF_PAGE_RETRY_BACKOFF_MS}`);
-            await sleep(PDF_PAGE_RETRY_BACKOFF_MS);
+            const remainingAfterMs = pageBudgetMs - (Date.now() - pageStartedAt);
+            if (remainingAfterMs < PDF_PAGE_RETRY_MIN_REMAINING_MS) {
+              console.log(`[AI Circolari PDF Pagina] pagina=${page} provider=gemini modello=${model} esito=skipped categoria=retry-senza-budget remainingMs=${Math.max(0, remainingAfterMs)} minimoMs=${PDF_PAGE_RETRY_MIN_REMAINING_MS}`);
+              break;
+            }
+            console.log(`[AI Circolari PDF Pagina] pagina=${page} provider=gemini modello=${model} esito=retry categoria=${run.category} backoffMs=${retryBackoffMs}`);
+            await sleep(retryBackoffMs);
             continue;
           }
           break;
@@ -958,13 +1006,33 @@ async function analyzeExtractedPdfPages(params: {
 
   const worker = async () => {
     while (true) {
-      const index = nextIndex++;
-      if (index >= params.pages.length) return;
-      results[index] = await analyzePage(index);
+      const slot = nextSlot++;
+      if (slot >= targetPages.length) return;
+      results[slot] = await analyzePage(targetPages[slot]);
     }
   };
-  await Promise.all(Array.from({ length: Math.min(PDF_PAGE_CONCURRENCY, params.pages.length) }, worker));
+  await Promise.all(Array.from({ length: Math.min(PDF_PAGE_CONCURRENCY, targetPages.length) }, worker));
   return results;
+}
+
+/**
+ * Pagine richieste esplicitamente dal client (ripresa delle pagine mancanti).
+ *
+ * `undefined` = parametro assente (analisi completa, comportamento storico).
+ * `null` = parametro presente ma non valido: l'endpoint risponde 400. La
+ * forma è validata già dal guard; qui si aggiunge l'unico vincolo che dipende
+ * dal documento, cioè che ogni numero esista davvero nel PDF estratto.
+ */
+export function resolveRequestedPages(raw: unknown, pageCount: number): number[] | null | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > PDF_REQUESTED_PAGES_MAX) return null;
+  const seen = new Set<number>();
+  for (const value of raw) {
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > pageCount) return null;
+    if (seen.has(value)) return null;
+    seen.add(value);
+  }
+  return [...seen].sort((a, b) => a - b);
 }
 
 app.post("/api/analyze-circular", ...circularAnalysisGuards(), async (req, res) => {
@@ -1148,14 +1216,27 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
 
       if (extraction.status === "success") {
         const extractedPages = extraction.pages;
+        // Ripresa: il client chiede SOLO le pagine rimaste indietro. Il testo
+        // viene estratto come sempre (il contesto deve restare quello reale),
+        // ma l'analisi tocca esclusivamente le pagine richieste.
+        const requestedPages = resolveRequestedPages(req.body?.pages, extractedPages.length);
+        if (requestedPages === null) {
+          logOutcome({ provider: "gemini", esito: "rifiutato", errorCode: "INVALID_INPUT", categoria: "pagine-non-valide", status: 400 });
+          return res.status(400).json(circularFailureBody("INVALID_INPUT", "Elenco delle pagine da analizzare non valido."));
+        }
+        const isResume = requestedPages !== undefined;
         // Suddividere un documento corto costa più di quanto rende: una sola
         // pagina, o meno di PDF_SINGLE_CALL_MAX_CHARS complessivi, diventano
-        // UNA chiamata con l'intero budget.
-        const singleCall = extractedPages.length === 1 || extraction.textChars < PDF_SINGLE_CALL_MAX_CHARS;
+        // UNA chiamata con l'intero budget. Una ripresa resta sempre per
+        // pagina: il contesto delle altre pagine deve restare disponibile.
+        const singleCall = !isResume && (extractedPages.length === 1 || extraction.textChars < PDF_SINGLE_CALL_MAX_CHARS);
         const pages = singleCall ? [extractedPages.join("\n\n")] : extractedPages;
+        const targetPages = requestedPages ?? pages.map((_, index) => index + 1);
         console.log(`[AI Circolari PDF] extraction=success pages=${extractedPages.length} textChars=${extraction.textChars} modalita=${singleCall ? "chiamata-unica" : "per-pagina"} concorrenza=${singleCall ? 1 : PDF_PAGE_CONCURRENCY}`);
         const pageResults = await analyzeExtractedPdfPages({
           pages,
+          targetPages,
+          singleCall,
           parentSignal: controller.signal,
           baseSystemInstruction,
           summary,
@@ -1171,7 +1252,7 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
         const items = deduplicateCircularItems(succeeded.flatMap((result) => result.items));
         const durationMs = Date.now() - startedAt;
         const outputTokensTotali = pageResults.reduce((total, result) => total + (result.outputTokens ?? 0), 0);
-        console.log(`[AI Circolari PDF Riepilogo] pagineTotali=${pages.length} riuscite=${succeeded.length} fallite=${failedPages.length} itemsTotali=${items.length} outputTokensTotali=${outputTokensTotali} durataMs=${durationMs}`);
+        console.log(`[AI Circolari PDF Riepilogo] pagineTotali=${pages.length} ripresa=${isResume ? "si" : "no"} pagineRichieste=${isResume ? targetPages.join("|") : "tutte"} riuscite=${succeeded.length} fallite=${failedPages.length} itemsTotali=${items.length} outputTokensTotali=${outputTokensTotali} durataMs=${durationMs}`);
         // Pagine non lette e nessun impegno: NON è "nessun impegno
         // riconosciuto" (il documento non è stato letto), è un errore che dice
         // quanto è andato perso e invita a riprovare o a incollare il testo.
@@ -1179,7 +1260,7 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
           const failure = circularCloudFailure("sovraccarico");
           const message = singleCall
             ? "Il documento non è stato letto dal servizio AI. Riprova tra poco oppure incolla il testo della circolare."
-            : `${failedPages.length === 1 ? "1 pagina non è stata letta" : `${failedPages.length} pagine non sono state lette`} su ${pages.length}. Riprova tra poco oppure incolla il testo della circolare.`;
+            : `${failedPages.length === 1 ? "1 pagina non è stata letta" : `${failedPages.length} pagine non sono state lette`} su ${targetPages.length}. Riprova tra poco oppure incolla il testo della circolare.`;
           logOutcome({ provider: "gemini", esito: "fallito", errorCode: failure.errorCode, categoria: "tutte-pagine-fallite", status: failure.status });
           return res.status(failure.status).json(circularFailureBody(failure.errorCode, message));
         }
@@ -1190,8 +1271,11 @@ Non filtrare prima dell'estrazione: la pertinenza sarà verificata dal codice e 
           source: sources.join(",") || "pdf-page-text",
           items,
           notice: failedPages.length
-            ? `Analisi parziale: pagine non analizzate: ${failedPages.join(", ")} (su ${pages.length}). Controllale nel documento originale.`
+            ? `Analisi parziale: pagine non analizzate: ${failedPages.join(", ")} (su ${targetPages.length}). Controllale nel documento originale.`
             : undefined,
+          // Unica aggiunta al formato della risposta: l'elenco strutturato
+          // delle pagine da riprendere, che il client rimanda tale e quale.
+          unanalyzedPages: failedPages.length ? failedPages : undefined,
         });
       } else if (extraction.status === "empty") {
         // Testo insufficiente (es. PDF scansionato senza text layer): niente
