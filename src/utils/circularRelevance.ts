@@ -272,7 +272,77 @@ const SUBJECT_ALIASES: Record<string, string[]> = {
   "religione": ["religione", "irc"], "sostegno": ["sostegno", "inclusione"],
   "fisica": ["fisica"], "chimica": ["chimica"], "informatica": ["informatica"],
   "latino": ["latino"], "greco": ["greco"], "filosofia": ["filosofia"],
+  "strumento musicale": ["strumento musicale"],
 };
+
+/**
+ * Sigle scolastiche delle materie usate nelle tabelle dei piani attività
+ * (es. colonna DOCENTI "SSIG ITA-L2-ARTE-IRC-SOS" o "MAT-TEC- MUS-SM").
+ *
+ * Una sigla di 2–4 lettere è ambigua nel testo corrente: viene riconosciuta
+ * SOLO se è scritta in maiuscolo nel documento e compare come elemento isolato
+ * o in un elenco separato da trattino, barra, virgola o spazio. Mai dentro
+ * parole più lunghe ("SOS" in "sospensione", "ITA" in "italia") né in frasi
+ * minuscole: per quelle restano validi gli alias per parola intera di
+ * SUBJECT_ALIASES ("arte" resta riconosciuto come parola a sé).
+ *
+ * `subjects` sono le materie canoniche a cui la sigla si espande: "L2"
+ * (lingue straniere) copre inglese, francese, spagnolo e tedesco, quindi un
+ * docente di una qualsiasi di quelle materie è pertinente a una riga "L2".
+ */
+export interface SubjectSiglaMatch {
+  /** Sigla come letta nel documento, maiuscola (es. "SOS"). */
+  sigla: string;
+  /** Etichetta leggibile della materia (es. "sostegno", "lingue straniere"). */
+  label: string;
+  /** Materie canoniche a cui la sigla si espande. */
+  subjects: string[];
+}
+
+const SUBJECT_SIGLE: Record<string, { label: string; subjects: string[] }> = {
+  SOS: { label: "sostegno", subjects: ["sostegno"] },
+  ITA: { label: "italiano", subjects: ["italiano"] },
+  MAT: { label: "matematica", subjects: ["matematica"] },
+  SCI: { label: "scienze", subjects: ["scienze"] },
+  ING: { label: "inglese", subjects: ["inglese"] },
+  FRA: { label: "francese", subjects: ["francese"] },
+  SPA: { label: "spagnolo", subjects: ["spagnolo"] },
+  TED: { label: "tedesco", subjects: ["tedesco"] },
+  STO: { label: "storia", subjects: ["storia"] },
+  GEO: { label: "geografia", subjects: ["geografia"] },
+  TEC: { label: "tecnologia", subjects: ["tecnologia"] },
+  ARTE: { label: "arte", subjects: ["arte"] },
+  MUS: { label: "musica", subjects: ["musica"] },
+  IRC: { label: "religione", subjects: ["religione"] },
+  REL: { label: "religione", subjects: ["religione"] },
+  SM: { label: "scienze motorie", subjects: ["scienze motorie"] },
+  L2: { label: "lingue straniere", subjects: ["inglese", "francese", "spagnolo", "tedesco", "lingue straniere"] },
+  STRUM: { label: "strumento musicale", subjects: ["strumento musicale"] },
+};
+
+// Token maiuscolo isolato: i lookaround vietano lettere/cifre adiacenti, così la
+// sigla non può stare dentro una parola più lunga; trattino, barra, virgola,
+// spazio (anche irregolari: "MAT-TEC- MUS-SM"), pipe o punteggiatura di cella
+// sono tutti separatori ammessi. L'assenza del flag "i" impone il maiuscolo.
+const SIGLA_PATTERN = new RegExp(
+  `(?<![\\p{L}\\p{N}])(${Object.keys(SUBJECT_SIGLE).sort((a, b) => b.length - a.length).join("|")})(?![\\p{L}\\p{N}])`,
+  "gu",
+);
+
+/** Sigle materie leggibili nel testo, nell'ordine in cui compaiono, deduplicate. */
+export function detectSubjectSigle(text: string): SubjectSiglaMatch[] {
+  if (!text) return [];
+  const matches: SubjectSiglaMatch[] = [];
+  const seen = new Set<string>();
+  for (const match of text.matchAll(SIGLA_PATTERN)) {
+    const sigla = match[1];
+    if (seen.has(sigla)) continue;
+    seen.add(sigla);
+    matches.push({ sigla, ...SUBJECT_SIGLE[sigla] });
+  }
+  return matches;
+}
+
 const normalizeSubject = (s: string) => {
   const lower = s.trim().toLowerCase();
   return Object.keys(SUBJECT_ALIASES).find(key => SUBJECT_ALIASES[key].includes(lower)) || lower;
@@ -282,8 +352,14 @@ const normalizeSubject = (s: string) => {
 export const isGenericSubject = (value: string): boolean => /^(?:tutt[ei](?: le| i)? (?:materie|discipline|docenti)|(?:programmazione )?(?:generale )?per materia|generale|materie|discipline|nessuna|non specificat[oa])$/i.test(value.trim());
 
 export function detectSubjects(text: string, profile?: TeacherProfile): string[] {
-  let remaining = text.toLowerCase();
   const result = new Set<string>();
+  // Sigle scolastiche in maiuscolo, isolate o in elenco (es. "ITA-L2-ARTE-IRC-SOS"):
+  // riconosciute sul testo originale, PRIMA degli alias per parola intera, così
+  // la materia espansa non può essere rilettta come parola minuscola.
+  for (const { subjects } of detectSubjectSigle(text)) {
+    for (const subject of subjects) result.add(subject);
+  }
+  let remaining = text.toLowerCase();
   const aliases = Object.entries(SUBJECT_ALIASES).flatMap(([key, values]) => values.map(alias => ({ key, alias })));
   for (const subject of profile?.primarySubjects || []) aliases.push({ key: normalizeSubject(subject), alias: subject.toLowerCase() });
   // Consume longer phrases first: "scienze motorie" must not also match "scienze".
@@ -307,8 +383,12 @@ export function evaluateItemRelevance(
   // documento) non deve contaminare la rilevazione quando il testo è già esplicito.
   const documentEvidence = `${item.title || ''} ${item.subject || ''} ${item.notes || ''} ${item.rawSnippet || ''}`;
   const modelClassEvidence = item.className || '';
-  const text = `${documentEvidence} ${modelClassEvidence}`;
-  const lower = text.toLowerCase();
+  // La colonna DOCENTI delle tabelle può finire anche nel campo `location` del
+  // modello (unico campo testivo non incluso nell'evidenza): ordine di scuola e
+  // materia letti da lì devono entrare nel testo del riconoscimento. NON invece
+  // nell'evidenza delle classi/anni: un luogo come "Aula 3B" non è una classe.
+  const recognitionText = `${documentEvidence} ${item.location || ''} ${modelClassEvidence}`;
+  const lower = recognitionText.toLowerCase();
   // Gerarchia delle evidenze sui destinatari:
   //   1. campi strutturati recipientClasses / recipientGrades (l'AI li ricava anche da
   //      intestazioni o paragrafi collegati, non ripetuti nella riga dell'evento);
@@ -351,11 +431,22 @@ export function evaluateItemRelevance(
   if (detected.length && !matched.length) return result('ROSSO', `Destinato alle classi ${detected.join(', ')}, non assegnate al docente.`);
   if (grades.length && !matchedGrades.length) return result('ROSSO', "Destinato a un altro anno di corso.");
 
-  const subjects = detectSubjects(text, profile);
-  const explicitSubjects = (item.subject || '').split(/[,;]/).map(s => s.trim()).filter(s => s && !isGenericSubject(s)).map(normalizeSubject);
+  const subjects = detectSubjects(recognitionText, profile);
+  const explicitSubjects = (item.subject || '').split(/[,;]/).map(s => s.trim()).filter(s => s && !isGenericSubject(s)).flatMap(part => {
+    // Anche il campo subject può riportare una sigla o l'elenco di sigle della
+    // colonna DOCENTI (es. "ITA-L2-ARTE-IRC-SOS"): si espande con le stesse
+    // regole del testo (maiuscolo isolato); le materie scritte per esteso
+    // restano alias normali, le materie sconosciute restano se stesse.
+    const detected = detectSubjects(part);
+    return detected.length ? detected : [normalizeSubject(part)];
+  });
   const targetedSubjects = explicitSubjects.length ? explicitSubjects : subjects;
   const ownSubjects = (profile.primarySubjects || []).flatMap(s => { const detected = detectSubjects(s); return detected.length ? detected : [normalizeSubject(s)]; });
   if (isSupportTeacherOf(profile)) ownSubjects.push('sostegno');
+  // Sigle materie leggibili nell'evidenza (es. "SOS (sostegno)"): il motivo
+  // mostrato al docente cita la sigla così com'era scritta nel documento.
+  const sigleRead = detectSubjectSigle(recognitionText);
+  const citesSigla = (m: SubjectSiglaMatch) => `${m.sigla} (${m.label})`;
   if (targetedSubjects.length && !targetedSubjects.some(s => ownSubjects.includes(s))) {
     // Per un docente di sostegno, una classe o un anno di corso già riconosciuti come
     // pertinenti (vedi i due controlli sopra) restano pertinenti anche quando l'attività
@@ -369,11 +460,23 @@ export function evaluateItemRelevance(
         : supportGradeReason(matchedGrades);
       return result('VERDE', reason);
     }
-    return result('ROSSO', `Destinato ad altra materia: ${targetedSubjects.join(', ')}.`);
+    // Con sigle riconosciute il motivo le cita come lette ("MAT (matematica)"),
+    // altrimenti resta l'elenco delle materie per esteso.
+    const citedSigle = sigleRead.filter(({ subjects: expanded }) => expanded.some(s => targetedSubjects.includes(s)));
+    const citedKeys = new Set(citedSigle.flatMap(({ subjects: expanded }) => expanded));
+    const subjectList = citedSigle.length
+      ? [...citedSigle.map(citesSigla), ...targetedSubjects.filter(s => !citedKeys.has(s))].join(', ')
+      : targetedSubjects.join(', ');
+    return result('ROSSO', `Destinato ad altra materia: ${subjectList}.`);
   }
   if (/facoltativ|chi non impegnato/.test(lower)) return result('GIALLO', "Partecipazione facoltativa o subordinata ad altri impegni.");
   if (matched.length) return result('VERDE', `Pertinente per ${matched.join(', ')}${targetedSubjects.length ? ' e per la materia del docente' : ''}.`);
-  if (targetedSubjects.some(s => ownSubjects.includes(s))) return result('VERDE', "Pertinente per la materia del docente.");
+  if (targetedSubjects.some(s => ownSubjects.includes(s))) {
+    const matchedSigle = sigleRead.filter(({ subjects: expanded }) => expanded.some(s => ownSubjects.includes(s) && targetedSubjects.includes(s)));
+    return result('VERDE', matchedSigle.length
+      ? `Destinatari per materia: ${matchedSigle.map(citesSigla).join(', ')} — pertinente per la materia del docente.`
+      : "Pertinente per la materia del docente.");
+  }
   if (item.category === 'collegio_docenti' || /tutti i docenti|docenti\s*[:=]?\s*tutti|collegio docenti/.test(lower)) return result('VERDE', "Destinato a tutti i docenti.");
   // A school level alone does not prove membership of a department or commission.
   if (/dipartiment|commission/.test(lower)) return result('GIALLO', "Verifica materia o appartenenza al gruppo prima di importare.");
