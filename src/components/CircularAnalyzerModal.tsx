@@ -65,6 +65,21 @@ interface CircularAnalyzerModalProps {
 /** Token di auto-start monouso già consumati per prevenire doppie analisi anche in StrictMode. */
 const consumedAutoStartTokens = new Set<string>();
 
+/** Etichette brevi dei mesi in italiano per i pulsanti del filtro mese. */
+const MONTH_SHORT_LABELS = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu", "Lug", "Ago", "Set", "Ott", "Nov", "Dic"];
+
+/**
+ * Chiave mese "YYYY-MM" di un impegno estratto, oppure null se la data
+ * non è valida (gli impegni senza data finiscono nel gruppo "Senza data").
+ */
+const monthKeyOf = (item: ExtractedItem): string | null => {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(item.date || "");
+  if (!match) return null;
+  const month = Number(match[2]);
+  if (month < 1 || month > 12) return null;
+  return `${match[1]}-${match[2]}`;
+};
+
 export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   isOpen,
   onClose,
@@ -90,6 +105,8 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   const [relevanceFilter, setRelevanceFilter] = useState<"ALL_RELEVANT" | "VERDE" | "GIALLO" | "ROSSO" | "ALL">(
     "ALL_RELEVANT"
   );
+  const [monthFilter, setMonthFilter] = useState<string>("ALL"); // "ALL" | "NODATE" | "YYYY-MM"
+  const [isHeaderCompact, setIsHeaderCompact] = useState<boolean>(false);
   const [showRawSnippets, setShowRawSnippets] = useState<boolean>(false);
   const [selectionWarning, setSelectionWarning] = useState<string | null>(null);
   const [updateChoices, setUpdateChoices] = useState<Record<string, UpdateChoice>>({});
@@ -142,6 +159,8 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       setExtractedItems(result.items);
       setAnalysisSource(result.source);
       setAnalysisNotice(result.notice ?? null);
+      setMonthFilter("ALL");
+      setIsHeaderCompact(false);
       setStep("results");
     } catch (err: any) {
       console.warn("Avviso analisi circolare:", err?.message || err);
@@ -191,6 +210,8 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     setAnalysisError(null);
     setSelectionWarning(null);
     setUpdateChoices({});
+    setMonthFilter("ALL");
+    setIsHeaderCompact(false);
     setIsReadingFile(false);
 
     if (initialFile && initialFile.base64 && initialFile.mimeType) {
@@ -310,24 +331,58 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     );
   };
 
-  // Filter items based on current active tab
-  const getFilteredItems = () => {
+  // Relevance predicate for the current active tab
+  const matchesRelevance = (i: ExtractedItem): boolean => {
     switch (relevanceFilter) {
       case "VERDE":
-        return extractedItems.filter((i) => i.relevance === "VERDE");
+        return i.relevance === "VERDE";
       case "GIALLO":
-        return extractedItems.filter((i) => i.relevance === "GIALLO");
+        return i.relevance === "GIALLO";
       case "ROSSO":
-        return extractedItems.filter((i) => i.relevance === "ROSSO");
+        return i.relevance === "ROSSO";
       case "ALL_RELEVANT":
-        return extractedItems.filter((i) => i.relevance === "VERDE" || i.relevance === "GIALLO");
+        return i.relevance === "VERDE" || i.relevance === "GIALLO";
       case "ALL":
       default:
-        return extractedItems;
+        return true;
     }
   };
 
-  const visibleItems = getFilteredItems();
+  // Mesi effettivamente presenti negli impegni estratti, in ordine cronologico.
+  const monthKeys = extractedItems
+    .map(monthKeyOf)
+    .filter((k): k is string => k !== null)
+    .filter((k, i, arr) => arr.indexOf(k) === i)
+    .sort();
+  const hasUndatedItems = extractedItems.some((i) => monthKeyOf(i) === null);
+  const spansMultipleYears = monthKeys.some((k) => k.slice(0, 4) !== monthKeys[0].slice(0, 4));
+  const monthLabel = (key: string): string => {
+    const [year, month] = key.split("-");
+    const base = MONTH_SHORT_LABELS[Number(month) - 1] || key;
+    return spansMultipleYears ? `${base} ${year}` : base;
+  };
+
+  // Se il mese selezionato non esiste più (es. righe eliminate), si torna a "Tutti i mesi".
+  const effectiveMonthFilter =
+    monthFilter === "ALL" ||
+    (monthFilter === "NODATE" && hasUndatedItems) ||
+    monthKeys.includes(monthFilter)
+      ? monthFilter
+      : "ALL";
+
+  const matchesMonth = (i: ExtractedItem): boolean => {
+    if (effectiveMonthFilter === "ALL") return true;
+    if (effectiveMonthFilter === "NODATE") return monthKeyOf(i) === null;
+    return monthKeyOf(i) === effectiveMonthFilter;
+  };
+
+  // I due filtri si combinano: la lista mostra solo gli impegni che li soddisfano entrambi.
+  const visibleItems = extractedItems.filter((i) => matchesRelevance(i) && matchesMonth(i));
+  // Conteggi incrociati: la pertinenza riflette il mese selezionato e viceversa.
+  const itemsInMonth = extractedItems.filter(matchesMonth);
+  const itemsInRelevance = extractedItems.filter(matchesRelevance);
+  const monthCount = (key: string): number =>
+    itemsInRelevance.filter((i) => (key === "NODATE" ? monthKeyOf(i) === null : monthKeyOf(i) === key)).length;
   const selectedItems = extractedItems.filter((i) => i.selectedForImport);
   const selectedCount = selectedItems.length;
 
@@ -350,29 +405,49 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       return match && updateChoices[it.tempId] === "ignore";
     });
 
-  const countVerde = extractedItems.filter((i) => i.relevance === "VERDE").length;
-  const countGiallo = extractedItems.filter((i) => i.relevance === "GIALLO").length;
-  const countRosso = extractedItems.filter((i) => i.relevance === "ROSSO").length;
+  const countVerde = itemsInMonth.filter((i) => i.relevance === "VERDE").length;
+  const countGiallo = itemsInMonth.filter((i) => i.relevance === "GIALLO").length;
+  const countRosso = itemsInMonth.filter((i) => i.relevance === "ROSSO").length;
 
-  // Bulk selection helpers. Invalid rows (missing or end<=start intervals) are never
-  // auto-selected: times must come from the document, not from a default or a neighbour.
+  // Bulk selection helpers, scoped to the items currently visible with the active
+  // filters: the selection of the other items is never touched. Invalid rows
+  // (missing or end<=start intervals) are never auto-selected: times must come
+  // from the document, not from a default or a neighbour.
+  const visibleIds = new Set(visibleItems.map((i) => i.tempId));
+
   const handleSelectAllRelevant = () => {
     setExtractedItems((prev) =>
-      prev.map((it) => ({
-        ...it,
-        selectedForImport: (it.relevance === "VERDE" || it.relevance === "GIALLO") && !extractedItemError(it),
-      }))
+      prev.map((it) =>
+        visibleIds.has(it.tempId)
+          ? {
+              ...it,
+              selectedForImport:
+                (it.relevance === "VERDE" || it.relevance === "GIALLO") && !extractedItemError(it),
+            }
+          : it
+      )
     );
     setSelectionWarning(null);
   };
 
   const handleSelectAll = () => {
-    setExtractedItems((prev) => prev.map((it) => ({ ...it, selectedForImport: true })));
+    setExtractedItems((prev) =>
+      prev.map((it) => (visibleIds.has(it.tempId) ? { ...it, selectedForImport: true } : it))
+    );
     setSelectionWarning(null);
   };
 
   const handleDeselectAll = () => {
-    setExtractedItems((prev) => prev.map((it) => ({ ...it, selectedForImport: false })));
+    setExtractedItems((prev) =>
+      prev.map((it) => (visibleIds.has(it.tempId) ? { ...it, selectedForImport: false } : it))
+    );
+  };
+
+  // Compatta il riquadro del titolo durante lo scroll dell'elenco, così
+  // l'intestazione fissa resta entro ~30% dell'altezza visibile sugli schermi stretti.
+  const handleListScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const compact = e.currentTarget.scrollTop > 24;
+    setIsHeaderCompact((prev) => (prev === compact ? prev : compact));
   };
 
   const handleDeleteRow = (tempId: string) => {
@@ -465,7 +540,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       fileName: fileName || "testo_incollato.txt",
       rawText: circularText || undefined,
       extractedCount: extractedItems.length,
-      relevantCount: countVerde + countGiallo,
+      relevantCount: extractedItems.filter((i) => i.relevance === "VERDE" || i.relevance === "GIALLO").length,
       extractedItems: extractedItems,
     };
 
@@ -502,8 +577,8 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
         </div>
 
         {/* Modal Body */}
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6">
-          {step === "input" ? (
+        {step === "input" ? (
+          <div className="flex-1 overflow-y-auto p-4 sm:p-6">
             <div className="space-y-6">
               {/* Profile Match & Default Location Configuration */}
               <div className="p-4 rounded-xl bg-stone-50 border border-stone-200 text-xs space-y-3">
@@ -711,52 +786,69 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                 </button>
               </div>
             </div>
-          ) : (
-            /* STEP 2: REVIEW & CONFIRMATION */
-            <div className="space-y-4">
-              {analysisNotice && (
+          </div>
+        ) : (
+          /* STEP 2: REVIEW & CONFIRMATION */
+          <div className="flex-1 flex flex-col min-h-0">
+            {/* Intestazione fissa: resta visibile (sfondo pieno) mentre l'elenco scorre */}
+            <div className="shrink-0 bg-white border-b border-stone-200 px-4 sm:px-6 pt-3 pb-2 space-y-2">
+              {analysisNotice && !isHeaderCompact && (
                 <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-center space-x-2" role="status">
                   <AlertCircle className="w-4 h-4 flex-shrink-0" />
                   <span>{analysisNotice}</span>
                 </div>
               )}
-              {/* Summary Stats Header */}
-              <div className="p-4 rounded-xl bg-stone-50 border border-stone-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                <div>
-                  <div className="flex items-center space-x-2">
-                    <span className="font-bold text-sm text-stone-900">Risultati Analisi Circolare</span>
-                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-semibold">
-                      Motore: {analysisSource}
-                    </span>
+              {/* Summary Stats Header (compresso durante lo scroll per restare entro ~30% dell'altezza) */}
+              {isHeaderCompact ? (
+                <div className="px-3 py-1.5 rounded-lg bg-stone-50 border border-stone-200 flex items-center justify-between gap-2">
+                  <span className="font-bold text-xs text-stone-900 truncate">Risultati Analisi Circolare</span>
+                  <span className="text-[11px] text-stone-500 whitespace-nowrap">
+                    {extractedItems.length} impegni nel documento
+                  </span>
+                </div>
+              ) : (
+                <div className="p-4 rounded-xl bg-stone-50 border border-stone-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <div>
+                    <div className="flex items-center space-x-2">
+                      <span className="font-bold text-sm text-stone-900">Risultati Analisi Circolare</span>
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-semibold">
+                        Motore: {analysisSource}
+                      </span>
+                    </div>
+                    <p className="text-xs text-stone-500 mt-0.5">
+                      Trovati {extractedItems.length} impegni complessivi nel documento.
+                    </p>
                   </div>
-                  <p className="text-xs text-stone-500 mt-0.5">
-                    Trovati {extractedItems.length} impegni complessivi nel documento.
-                  </p>
-                </div>
 
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => setShowRawSnippets(!showRawSnippets)}
-                    className="text-xs text-stone-600 hover:text-stone-900 border border-stone-200 px-2.5 py-1.5 rounded-lg bg-white flex items-center space-x-1"
-                  >
-                    {showRawSnippets ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                    <span>{showRawSnippets ? "Nascondi estratti" : "Mostra testo originale"}</span>
-                  </button>
-                  <button
-                    onClick={() => setStep("input")}
-                    className="text-xs text-stone-600 hover:text-stone-900 border border-stone-200 px-2.5 py-1.5 rounded-lg bg-white"
-                  >
-                    &larr; Altra circolare
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setShowRawSnippets(!showRawSnippets)}
+                      className="text-xs text-stone-600 hover:text-stone-900 border border-stone-200 px-2.5 py-1.5 rounded-lg bg-white flex items-center space-x-1"
+                    >
+                      {showRawSnippets ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                      <span>{showRawSnippets ? "Nascondi estratti" : "Mostra testo originale"}</span>
+                    </button>
+                    <button
+                      onClick={() => setStep("input")}
+                      className="text-xs text-stone-600 hover:text-stone-900 border border-stone-200 px-2.5 py-1.5 rounded-lg bg-white"
+                    >
+                      &larr; Altra circolare
+                    </button>
+                  </div>
                 </div>
-              </div>
+              )}
 
               {/* Filter Tabs by Relevance & Quick Selection */}
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200 pb-2">
-                <div className="flex flex-wrap items-center gap-1.5">
+                <div
+                  role="group"
+                  aria-label="Filtra per pertinenza"
+                  className="flex flex-nowrap items-center gap-1.5 overflow-x-auto max-w-full"
+                >
                   <button
                     onClick={() => setRelevanceFilter("ALL_RELEVANT")}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                    aria-pressed={relevanceFilter === "ALL_RELEVANT"}
+                    className={`min-h-11 sm:min-h-0 shrink-0 whitespace-nowrap px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
                       relevanceFilter === "ALL_RELEVANT"
                         ? "bg-emerald-700 text-white shadow-xs"
                         : "bg-stone-100 text-stone-700 hover:bg-stone-200"
@@ -766,7 +858,8 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                   </button>
                   <button
                     onClick={() => setRelevanceFilter("VERDE")}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                    aria-pressed={relevanceFilter === "VERDE"}
+                    className={`min-h-11 sm:min-h-0 shrink-0 whitespace-nowrap px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
                       relevanceFilter === "VERDE"
                         ? "bg-emerald-700 text-white shadow-xs"
                         : "bg-emerald-50 text-emerald-800 hover:bg-emerald-100 border border-emerald-200"
@@ -776,7 +869,8 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                   </button>
                   <button
                     onClick={() => setRelevanceFilter("GIALLO")}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                    aria-pressed={relevanceFilter === "GIALLO"}
+                    className={`min-h-11 sm:min-h-0 shrink-0 whitespace-nowrap px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
                       relevanceFilter === "GIALLO"
                         ? "bg-amber-600 text-white shadow-xs"
                         : "bg-amber-50 text-amber-800 hover:bg-amber-100 border border-amber-200"
@@ -786,7 +880,8 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                   </button>
                   <button
                     onClick={() => setRelevanceFilter("ROSSO")}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                    aria-pressed={relevanceFilter === "ROSSO"}
+                    className={`min-h-11 sm:min-h-0 shrink-0 whitespace-nowrap px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
                       relevanceFilter === "ROSSO"
                         ? "bg-rose-700 text-white shadow-xs"
                         : "bg-rose-50 text-rose-800 hover:bg-rose-100 border border-rose-200"
@@ -796,31 +891,77 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                   </button>
                 </div>
 
-                {/* Quick Selection Shortcuts */}
+                {/* Quick Selection Shortcuts (agiscono solo sugli impegni visibili con i filtri attivi) */}
                 <div className="flex items-center space-x-2 text-xs">
                   <span className="text-stone-400 font-medium">Seleziona:</span>
                   <button
                     onClick={handleSelectAllRelevant}
-                    className="text-emerald-700 font-semibold hover:underline"
-                    title="Seleziona solo impegni pertinenti (Verdi e Gialli)"
+                    className="min-h-11 sm:min-h-0 px-1 text-emerald-700 font-semibold hover:underline"
+                    title="Seleziona solo impegni pertinenti (Verdi e Gialli) tra quelli visibili"
                   >
                     Pertinenti
                   </button>
                   <span className="text-stone-300">•</span>
                   <button
                     onClick={handleSelectAll}
-                    className="text-stone-600 hover:text-stone-900 font-medium hover:underline"
+                    className="min-h-11 sm:min-h-0 px-1 text-stone-600 hover:text-stone-900 font-medium hover:underline"
                   >
                     Tutti
                   </button>
                   <span className="text-stone-300">•</span>
                   <button
                     onClick={handleDeselectAll}
-                    className="text-stone-500 hover:text-stone-800 font-medium hover:underline"
+                    className="min-h-11 sm:min-h-0 px-1 text-stone-500 hover:text-stone-800 font-medium hover:underline"
                   >
                     Nessuno
                   </button>
                 </div>
+              </div>
+
+              {/* Month filter row: scorre in orizzontale, si combina con la pertinenza */}
+              <div
+                role="group"
+                aria-label="Filtra per mese"
+                className="flex flex-nowrap items-center gap-1.5 overflow-x-auto pb-1"
+              >
+                <button
+                  onClick={() => setMonthFilter("ALL")}
+                  aria-pressed={effectiveMonthFilter === "ALL"}
+                  className={`min-h-11 sm:min-h-0 shrink-0 whitespace-nowrap px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                    effectiveMonthFilter === "ALL"
+                      ? "bg-stone-800 text-white shadow-xs"
+                      : "bg-stone-100 text-stone-700 hover:bg-stone-200"
+                  }`}
+                >
+                  Tutti i mesi ({itemsInRelevance.length})
+                </button>
+                {monthKeys.map((key) => (
+                  <button
+                    key={key}
+                    onClick={() => setMonthFilter(key)}
+                    aria-pressed={effectiveMonthFilter === key}
+                    className={`min-h-11 sm:min-h-0 shrink-0 whitespace-nowrap px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                      effectiveMonthFilter === key
+                        ? "bg-stone-800 text-white shadow-xs"
+                        : "bg-stone-100 text-stone-700 hover:bg-stone-200"
+                    }`}
+                  >
+                    {monthLabel(key)} ({monthCount(key)})
+                  </button>
+                ))}
+                {hasUndatedItems && (
+                  <button
+                    onClick={() => setMonthFilter("NODATE")}
+                    aria-pressed={effectiveMonthFilter === "NODATE"}
+                    className={`min-h-11 sm:min-h-0 shrink-0 whitespace-nowrap px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                      effectiveMonthFilter === "NODATE"
+                        ? "bg-stone-800 text-white shadow-xs"
+                        : "bg-amber-50 text-amber-800 hover:bg-amber-100 border border-amber-200"
+                    }`}
+                  >
+                    Senza data ({monthCount("NODATE")})
+                  </button>
+                )}
               </div>
 
               {/* In-Modal Warning if nothing selected */}
@@ -835,8 +976,10 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                   </button>
                 </div>
               )}
+            </div>
 
-              {/* Items List */}
+            {/* Items List (unica area scorrevole del passo risultati) */}
+            <div onScroll={handleListScroll} className="flex-1 overflow-y-auto p-4 sm:p-6">
               <div className="space-y-3">
                 {visibleItems.length === 0 ? (
                   <div className="py-12 text-center text-stone-400 text-xs">
@@ -1104,8 +1247,8 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                 )}
               </div>
             </div>
-          )}
-        </div>
+          </div>
+        )}
 
         {/* Modal Bottom Bar */}
         {step === "results" && (
