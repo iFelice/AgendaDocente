@@ -7,8 +7,14 @@ import {
   type GoogleCalendarApiEvent,
   type GoogleCalendarEventList,
 } from "./googleCalendarService";
-import { addDaysISO, localDateISO, parseCivilDate } from "../utils/dates";
-import { mergeGoogleCalendarEvents, mergeGoogleCalendarGroups, type GoogleCalendarEventGroup } from "../utils/googleCalendarImport";
+import { addDaysISO, localDateISO } from "../utils/dates";
+import {
+  mergeGoogleCalendarEvents,
+  mergeGoogleCalendarGroups,
+  removeImportedGoogleEventsBeyondDate,
+  type GoogleCalendarEventGroup,
+} from "../utils/googleCalendarImport";
+import { getSchoolYearBoundaries } from "../utils/schoolYear";
 import type { CalendarEvent, TeacherProfile } from "../types";
 
 export interface GoogleCalendarImportResult {
@@ -45,16 +51,47 @@ function isInaccessibleCalendarError(error: unknown): boolean {
   return /\b(403|404|410)\b/.test(message) || /not found|forbidden/i.test(message);
 }
 
-export function googleCalendarImportWindow(now: Date = new Date()): { timeMin: string; timeMax: string } {
+/**
+ * Finestra di importazione, SEMPRE limitata all'anno scolastico del profilo:
+ * - `timeMax` = 31 agosto dell'anno scolastico (ultimo giorno utile);
+ * - `timeMin` = il più recente fra (oggi − 30 giorni) e il 1 settembre dell'anno scolastico,
+ *   così a inizio anno non si importa il residuo dell'anno precedente.
+ *
+ * Un anno scolastico mancante o non valido ricade sull'anno corrente (regola esistente),
+ * quindi la finestra non è mai "un anno avanti" rispetto all'anno del profilo. Cambiando
+ * l'anno nel profilo, la sincronizzazione successiva usa subito i nuovi confini.
+ */
+export function googleCalendarImportWindow(
+  now: Date = new Date(),
+  schoolYear?: string | null,
+): { timeMin: string; timeMax: string } {
   const today = localDateISO(now);
-  const minDate = addDaysISO(today, -30);
-  const max = parseCivilDate(today);
-  max.setFullYear(max.getFullYear() + 1);
-  const maxDate = localDateISO(max);
+  const { start, end } = getSchoolYearBoundaries(schoolYear, now);
+  const lastMonth = addDaysISO(today, -30);
+  const minDate = lastMonth > start ? lastMonth : start;
   // Bounded civil-date window. UTC midnight may include at most a boundary hour,
   // while event mapping itself always uses Europe/Rome.
-  return { timeMin: `${minDate}T00:00:00Z`, timeMax: `${maxDate}T23:59:59Z` };
+  return { timeMin: `${minDate}T00:00:00Z`, timeMax: `${end}T23:59:59Z` };
 }
+
+/**
+ * Un anno scolastico già concluso (profilo non aggiornato) produce una finestra vuota:
+ * chiederla a Google sarebbe una richiesta non valida (minimo dopo il massimo), quindi
+ * la sincronizzazione non legge e non scrive nulla. Nessun evento viene toccato finché
+ * l'anno scolastico del profilo non torna a contenere la data odierna.
+ */
+function isEmptyImportWindow(range: { timeMin: string; timeMax: string }): boolean {
+  return range.timeMin > range.timeMax;
+}
+
+const EMPTY_IMPORT_RESULT: GoogleCalendarImportResult = {
+  added: 0,
+  updated: 0,
+  linked: 0,
+  ignoredCancelled: 0,
+  partial: false,
+  pagesRead: 0,
+};
 
 interface ImportDependencies {
   list?: (token: string, min: string, max: string) => Promise<GoogleCalendarEventList | GoogleCalendarApiEvent[]>;
@@ -62,6 +99,8 @@ interface ImportDependencies {
   write?: (events: CalendarEvent[]) => Promise<void>;
   atomic?: <T>(operation: () => Promise<T>) => Promise<T>;
   now?: Date;
+  /** Anno scolastico del profilo: governa la finestra e la pulizia oltre il 31 agosto. */
+  schoolYear?: string | null;
 }
 
 /**
@@ -73,7 +112,9 @@ export async function importGoogleCalendarEvents(
   dependencies: ImportDependencies = {},
 ): Promise<GoogleCalendarImportResult> {
   if (!accessToken) throw new Error("Riconnetti l’account Google per autorizzare il download degli eventi.");
-  const range = googleCalendarImportWindow(dependencies.now);
+  const range = googleCalendarImportWindow(dependencies.now, dependencies.schoolYear);
+  if (isEmptyImportWindow(range)) return { ...EMPTY_IMPORT_RESULT };
+  const schoolYearEnd = getSchoolYearBoundaries(dependencies.schoolYear, dependencies.now).end;
   const list = dependencies.list ?? listGoogleCalendarEvents;
   const remote = await list(accessToken, range.timeMin, range.timeMax);
   const partial = "partial" in remote ? !!remote.partial : false;
@@ -84,7 +125,11 @@ export async function importGoogleCalendarEvents(
 
   return atomic(async () => {
     const merged = mergeGoogleCalendarEvents(await read(), remote);
-    await write(merged.events);
+    // La riconciliazione per identità non rimuove mai nulla: gli eventi Google già
+    // salvati oltre il 31 agosto dell'anno scolastico vengono ripuliti qui, nella
+    // stessa unica scrittura atomica. Impegni manuali e da circolare restano intatti.
+    const events = removeImportedGoogleEventsBeyondDate(merged.events, schoolYearEnd);
+    await write(events);
     return {
       added: merged.added,
       updated: merged.updated,
@@ -108,6 +153,8 @@ interface MultiImportDependencies {
   write?: (events: CalendarEvent[]) => Promise<void>;
   atomic?: <T>(operation: () => Promise<T>) => Promise<T>;
   now?: Date;
+  /** Anno scolastico del profilo: governa la finestra e la pulizia oltre il 31 agosto. */
+  schoolYear?: string | null;
 }
 
 /**
@@ -143,7 +190,11 @@ export async function importSelectedGoogleCalendars(
       failedCalendarIds: [],
     };
   }
-  const range = googleCalendarImportWindow(dependencies.now);
+  const range = googleCalendarImportWindow(dependencies.now, dependencies.schoolYear);
+  if (isEmptyImportWindow(range)) {
+    return { ...EMPTY_IMPORT_RESULT, calendarsRequested: ids.length, calendarsImported: 0, inaccessibleCalendarIds: [], failedCalendarIds: [] };
+  }
+  const schoolYearEnd = getSchoolYearBoundaries(dependencies.schoolYear, dependencies.now).end;
   const list = dependencies.list ?? ((token, calendarId, min, max) => listCalendarEvents(token, calendarId, min, max));
 
   const groups: GoogleCalendarEventGroup[] = [];
@@ -178,7 +229,11 @@ export async function importSelectedGoogleCalendars(
 
   return atomic(async () => {
     const merged = mergeGoogleCalendarGroups(await read(), groups);
-    await write(merged.events);
+    // Un evento di un calendario non più leggibile resta salvato (nessuna rimozione
+    // basata sulla risposta remota), ma la pulizia oltre il 31 agosto è una proprietà
+    // della data locale e vale per tutti gli eventi di origine Google.
+    const events = removeImportedGoogleEventsBeyondDate(merged.events, schoolYearEnd);
+    await write(events);
     return {
       added: merged.added,
       updated: merged.updated,

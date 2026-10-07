@@ -290,7 +290,7 @@ test("App: single-flight multi-calendar, apertura sessione immediata, cooldown, 
   const app = readSource("src/App.tsx");
   // single flight: un solo import in volo copre tutti i calendari selezionati
   assert.match(app, /if \(autoImportInFlight\.current\) return autoImportInFlight\.current;/);
-  assert.match(app, /importSelectedGoogleCalendars\(token, calendarIds\)/);
+  assert.match(app, /importSelectedGoogleCalendars\(token, calendarIds, \{ schoolYear: profile\.schoolYear \}\)/);
   assert.match(app, /resolveImportCalendarIds\(profile\)/);
   // §22 primo import di sessione immediato, poi cooldown di 5 minuti
   assert.match(app, /const immediate = force \|\| !sessionImportDone\.current;/);

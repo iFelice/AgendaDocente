@@ -260,7 +260,10 @@ test('render: data a sinistra, intervalli completi senza troncamento e dettagli 
   let renderer: any;
   await act(async () => {
     renderer = create(React.createElement(FutureCommitmentsView, {
+      // Il 15/04/2027 sta nell'anno scolastico 2026/2027: la vista mostra gli impegni
+      // fino al 31 agosto dell'anno scolastico del profilo (qui passato esplicitamente).
       events: [range, startOnly, allDay], scheduledAssessments: [], students, todayIso: TODAY,
+      schoolYear: '2026/2027',
     }));
   });
 

@@ -319,7 +319,9 @@ export default function App({ initialData }: { initialData: LocalData }) {
     const request = (async () => {
       setGoogleAutoImportStatus("syncing");
       try {
-        const result = await importSelectedGoogleCalendars(token, calendarIds);
+        // L'anno scolastico del profilo governa la finestra: se l'utente lo cambia,
+        // questa callback si ricrea e la sincronizzazione successiva usa i nuovi confini.
+        const result = await importSelectedGoogleCalendars(token, calendarIds, { schoolYear: profile.schoolYear });
         sessionImportDone.current = true;
         lastSuccessfulImportAt.current = Date.now();
         setLastSuccessfulImportAtState(lastSuccessfulImportAt.current);
@@ -336,7 +338,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
     })();
     autoImportInFlight.current = request;
     return request;
-  }, [googleUser, googleAccessToken, isOnline, profile.googleCalendarImportIds]);
+  }, [googleUser, googleAccessToken, isOnline, profile.googleCalendarImportIds, profile.schoolYear]);
 
   // G1.2.4 — re-bootstrap from the persisted cache whenever no list is available in
   // memory: startup, backup restore and account-sync pulls all flow through `profile`.
@@ -1225,6 +1227,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
             events={events}
             scheduledAssessments={scheduledAssessments}
             students={students}
+            schoolYear={profile.schoolYear}
             onEditEvent={handleEditEvent}
             onEditNote={handleEditQuickNote}
             onCreateNote={handleOpenNewQuickNote}
