@@ -3,7 +3,7 @@ import { usePersistenceAction } from "../hooks/usePersistenceAction";
 import { convertExtractedItemToEvent } from "../services/storage";
 import { extractedItemError } from "../utils/circularParser";
 import { formatRecipientsLabel } from "../utils/circularRelevance";
-import { formatCivilDateIt, localDateISO } from "../utils/dates";
+import { localDateISO } from "../utils/dates";
 import React, { useState, useEffect, useRef } from "react";
 import {
   AlertCircle,
@@ -39,44 +39,44 @@ import {
   CIRCULAR_PDF_WAIT_MESSAGE,
 } from "../services/aiService";
 import {
-  findEventMatch,
-  getEventFieldDiff,
-  timeToMinutes,
+  assignDocumentMatches,
+  describeEventDifferences,
   isIdenticalEventUpdate,
-  type EventMatchResult,
+  type OccupiedEventMatch,
 } from "../utils/eventMatching";
 
-/** Intersezione effettiva; con il solo inizio non inventa un orario di fine. */
-function overlapLabel(a: ExtractedItem, b: CalendarEvent): string {
-  const start = Math.max(timeToMinutes(a.startTime)!, timeToMinutes(b.startTime)!);
-  const ends = [timeToMinutes(a.endTime), timeToMinutes(b.endTime)];
-  const format = (minutes: number) => `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
-  if (ends.some((end) => end === null)) return `Si sovrappongono alle ${format(start)} (orario di fine non disponibile).`;
-  return `Si sovrappongono dalle ${format(start)} alle ${format(Math.min(...ends as number[]))}`;
+/**
+ * Etichetta compatta di una sovrapposizione: "Si sovrappone a: Collegio Docenti
+ * 17:00–18:30", con "+N" quando gli impegni che si accavallano sono più di uno.
+ */
+function overlapLabelText(overlaps: CalendarEvent[]): string {
+  const [first, ...rest] = overlaps;
+  const time = first.startTime && first.endTime ? `${first.startTime}–${first.endTime}` : first.startTime || "";
+  const base = `Si sovrappone a: ${first.title}${time ? ` ${time}` : ""}`;
+  return rest.length > 0 ? `${base} +${rest.length}` : base;
 }
-
 
 export type UpdateChoice = "update" | "create" | "ignore";
 
-/** Etichette delle scelte usate sia nelle azioni in blocco sia negli annunci. */
+/** Etichette delle azioni rapide in blocco e degli annunci. */
 const CHOICE_BULK_LABELS: Record<UpdateChoice, string> = {
-  update: "Aggiorna esistenti",
-  create: "Aggiungi come nuovi",
-  ignore: "Ignora",
+  update: "Aggiorna tutti",
+  create: "Tieni tutti",
+  ignore: "Salta tutti",
 };
 
-/**
- * Vero quando l'elemento estratto è IDENTICO all'impegno già in agenda
- * riconosciuto per TITOLO: in quel caso "Ignora" è preimpostato.
- * Resta una regola del solo criterio del titolo: un impegno riconosciuto per il
- * solo orario (nome diverso) chiede sempre una scelta esplicita.
- */
-const isIdenticalTitleMatch = (
-  item: ExtractedItem,
-  existingEvents: CalendarEvent[] | undefined
-): boolean => {
-  const match = findEventMatch(item, existingEvents);
-  return !!match && match.kind === "titolo" && isIdenticalEventUpdate(match.event, item);
+/** Etichette brevi della scheda "da decidere": il significato esteso va in title/aria-label. */
+const CHOICE_CARD_LABELS: Record<UpdateChoice, string> = {
+  update: "Aggiorna",
+  create: "Tieni entrambi",
+  ignore: "Salta",
+};
+
+/** Significato esteso delle tre scelte della scheda (title e aria-label, nessun paragrafo a schermo). */
+const CHOICE_CARD_HINTS: Record<UpdateChoice, string> = {
+  update: "Aggiorna: sostituisci i dati dell'impegno già in agenda con quelli della circolare",
+  create: "Tieni entrambi: aggiungi questa riga come nuovo impegno e lascia invariato quello già in agenda",
+  ignore: "Salta: non importare questa riga e lascia invariato l'impegno già in agenda",
 };
 
 /** Millisecondi per cui resta disponibile l'"Annulla" dopo un'azione in blocco. */
@@ -179,6 +179,8 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   const [bulkOverrideMode, setBulkOverrideMode] = useState<boolean>(false);
   /** Attivo dopo un tentativo di importazione con conflitti selezionati senza scelta. */
   const [importBlocked, setImportBlocked] = useState<boolean>(false);
+  /** Gli impegni già in agenda e saltati (identici) restano fuori dall'elenco finché non si preme "Mostra". */
+  const [showIdentical, setShowIdentical] = useState<boolean>(false);
   /** tempId della scheda evidenziata dal "Vai al prossimo" del messaggio di blocco. */
   const [highlightedTempId, setHighlightedTempId] = useState<string | null>(null);
   /** Overflow della riga dei mesi: alimenta la sfumatura sul bordo destro. */
@@ -202,6 +204,34 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   const monthRowRef = useRef<HTMLDivElement | null>(null);
 
   /**
+   * Abbinamento UNO A UNO sull'INTERO documento (non riga per riga): un impegno
+   * già in agenda può essere assegnato per "titolo" o per "orario" a una sola
+   * riga, le righe che perdono la contesa vengono rivalutate sugli impegni
+   * rimasti liberi. Calcolato una volta per render e riusato da schede, conteggi,
+   * blocco dell'importazione e deselezione automatica degli identici.
+   * `matchesByTempId` contiene i soli abbinamenti che occupano un impegno; le
+   * sovrapposizioni non occupano nulla e vivono in `overlapsByTempId`.
+   */
+  const documentMatches = assignDocumentMatches(extractedItems, existingEvents);
+  const matchesByTempId = new Map<string, OccupiedEventMatch>();
+  const overlapsByTempId = new Map<string, CalendarEvent[]>();
+  /** Impegni già in agenda riprodotti tali e quali: saltati, fuori dall'elenco. */
+  const identicalTempIds = new Set<string>();
+  extractedItems.forEach((item, index) => {
+    const entry = documentMatches[index];
+    if (!entry) return;
+    if (entry.match) {
+      matchesByTempId.set(item.tempId, entry.match);
+      // "Saltato" è una regola del solo criterio del titolo: con lo stesso orario
+      // ma un nome diverso la scelta va sempre chiesta.
+      if (entry.match.kind === "titolo" && isIdenticalEventUpdate(entry.match.event, item)) {
+        identicalTempIds.add(item.tempId);
+      }
+    }
+    if (entry.overlaps.length > 0) overlapsByTempId.set(item.tempId, entry.overlaps);
+  });
+
+  /**
    * Azzera scelte, blocco e annullamento: usato alla riapertura del modale e a
    * ogni nuova analisi, mai durante la ripresa delle pagine mancanti.
    */
@@ -211,6 +241,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     setImportBlocked(false);
     setBulkChoiceUndo(null);
     setBulkOverrideMode(false);
+    setShowIdentical(false);
     setHighlightedTempId(null);
     setMonthRowMetrics({ hasOverflow: false, atEnd: true });
     processedIdenticalRef.current = new Set();
@@ -401,7 +432,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     }
   }, [isOpen, initialFile, initialInputMode]);
 
-  // Doppioni identici: la scelta "Ignora" è derivata dal confronto, ma la
+  // Doppioni identici: la scelta "Salta" è derivata dal confronto, ma la
   // deselezione va scritta una sola volta per elemento (poi comanda l'utente).
   useEffect(() => {
     if (!isOpen || step !== "results") return;
@@ -409,7 +440,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       let changed = false;
       const next = prev.map((it) => {
         if (processedIdenticalRef.current.has(it.tempId)) return it;
-        if (!isIdenticalTitleMatch(it, existingEvents)) return it;
+        if (!identicalTempIds.has(it.tempId)) return it;
         processedIdenticalRef.current.add(it.tempId);
         if (!it.selectedForImport) return it;
         changed = true;
@@ -422,13 +453,13 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   // Il messaggio di blocco segue le scelte man mano fatte e sparisce a zero.
   useEffect(() => {
     if (!importBlocked) return;
-    const stillUnresolved = extractedItems.some((it) => {
-      if (!it.selectedForImport) return false;
-      const match = findEventMatch(it, existingEvents);
-      if (!match) return false;
-      if (updateChoices[it.tempId]) return false;
-      return !(match.kind === "titolo" && isIdenticalEventUpdate(match.event, it));
-    });
+    const stillUnresolved = extractedItems.some(
+      (it) =>
+        it.selectedForImport &&
+        matchesByTempId.has(it.tempId) &&
+        !identicalTempIds.has(it.tempId) &&
+        !updateChoices[it.tempId]
+    );
     if (!stillUnresolved) {
       setImportBlocked(false);
       lastFocusedUnresolved.current = null;
@@ -584,6 +615,13 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
 
   // I due filtri si combinano: la lista mostra solo gli impegni che li soddisfano entrambi.
   const visibleItems = extractedItems.filter((i) => matchesRelevance(i) && matchesMonth(i));
+  // Riga riassuntiva degli identici: "N già in agenda, saltati · Mostra".
+  const identicalVisibleItems = visibleItems.filter((it) => identicalTempIds.has(it.tempId));
+  // L'elenco mostra gli identici solo dopo "Mostra".
+  const renderedItems = showIdentical
+    ? visibleItems
+    : visibleItems.filter((it) => !identicalTempIds.has(it.tempId));
+
   // Conteggi incrociati: la pertinenza riflette il mese selezionato e viceversa.
   const itemsInMonth = extractedItems.filter(matchesMonth);
   const itemsInRelevance = extractedItems.filter(matchesRelevance);
@@ -592,49 +630,35 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   const selectedItems = extractedItems.filter((i) => i.selectedForImport);
   const selectedCount = selectedItems.length;
 
-  // Conflitti: abbinamento deterministico con un impegno già in agenda, calcolato
-  // una sola volta per render e riusato da conteggi, blocco importazione e schede.
-  // Tre criteri, in ordine di precedenza: "titolo" (possibile aggiornamento) e
-  // "orario" (possibile doppione), poi "sovrapposizione" (impegni distinti).
-  const matchByTempId = new Map<string, EventMatchResult>();
-  const identicalConflictIds = new Set<string>();
-  for (const it of extractedItems) {
-    const match = findEventMatch(it, existingEvents);
-    if (!match) continue;
-    matchByTempId.set(it.tempId, match);
-    // L'etichetta "Già in agenda, identico" (che preseleziona "Ignora") resta
-    // una regola del solo criterio del titolo: con lo stesso orario ma un nome
-    // diverso la scelta va sempre richiesta.
-    if (match.kind === "titolo" && isIdenticalEventUpdate(match.event, it)) {
-      identicalConflictIds.add(it.tempId);
-    }
-  }
+  // Conflitti "da decidere": le righe abbinate per titolo (con differenze) o per
+  // orario. Le sovrapposizioni non chiedono più nulla, gli identici sono saltati
+  // in automatico (scelta preimpostata su "Salta").
+  const visibleConflicts = visibleItems.filter((it) => matchesByTempId.has(it.tempId));
 
   /**
-   * Scelta effettiva su un conflitto: quella esplicita dell'utente oppure, per
-   * i soli conflitti identici senza scelta, il "Ignora" preimpostato.
+   * Scelta effettiva su una riga abbinata: quella esplicita dell'utente oppure,
+   * per i soli identici, il "Salta" preimpostato.
    */
   const choiceOf = (item: ExtractedItem): UpdateChoice | undefined => {
-    if (!matchByTempId.has(item.tempId)) return undefined;
-    if (matchByTempId.get(item.tempId)?.kind === "sovrapposizione" && updateChoices[item.tempId] === "update") return undefined;
-    return updateChoices[item.tempId] ?? (identicalConflictIds.has(item.tempId) ? "ignore" : undefined);
+    if (!matchesByTempId.has(item.tempId)) return undefined;
+    return updateChoices[item.tempId] ?? (identicalTempIds.has(item.tempId) ? "ignore" : undefined);
   };
 
   // Conflitti selezionati senza scelta: sono esattamente quelli che fermano
-  // l'importazione. Gli impegni senza conflitto non chiedono alcuna scelta e i
-  // conflitti identici non bloccano mai (scelta preimpostata su "Ignora").
+  // l'importazione. Gli impegni senza abbinamento non chiedono alcuna scelta e gli
+  // identici non bloccano mai (scelta preimpostata su "Salta").
   const selectedUnresolvedItems = selectedItems.filter(
-    (it) => matchByTempId.has(it.tempId) && choiceOf(it) === undefined
+    (it) => matchesByTempId.has(it.tempId) && choiceOf(it) === undefined
   );
   const importBlockActive = importBlocked && selectedUnresolvedItems.length > 0;
 
   const toCreateCount = selectedItems.filter((it) => {
-    const match = matchByTempId.get(it.tempId);
+    const match = matchesByTempId.get(it.tempId);
     return !match || choiceOf(it) === "create";
   }).length;
 
   const toUpdateCount = selectedItems.filter((it) => {
-    const match = matchByTempId.get(it.tempId);
+    const match = matchesByTempId.get(it.tempId);
     return !!match && choiceOf(it) === "update";
   }).length;
 
@@ -643,7 +667,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     toCreateCount === 0 &&
     toUpdateCount === 0 &&
     selectedItems.every((it) => {
-      const match = matchByTempId.get(it.tempId);
+      const match = matchesByTempId.get(it.tempId);
       return match && choiceOf(it) === "ignore";
     });
 
@@ -651,11 +675,12 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   const countGiallo = itemsInMonth.filter((i) => i.relevance === "GIALLO").length;
   const countRosso = itemsInMonth.filter((i) => i.relevance === "ROSSO").length;
 
-  // Bulk selection helpers, scoped to the items currently visible with the active
-  // filters: the selection of the other items is never touched. Invalid rows
-  // (missing or end<=start intervals) are never auto-selected: times must come
-  // from the document, not from a default or a neighbour.
-  const visibleIds = new Set(visibleItems.map((i) => i.tempId));
+  // Bulk selection helpers, scoped to the items actually shown with the active
+  // filters: the selection of the other items is never touched (gli identici
+  // restano fuori finché non si preme "Mostra"). Invalid rows (missing or
+  // end<=start intervals) are never auto-selected: times must come from the
+  // document, not from a default or a neighbour.
+  const visibleIds = new Set(renderedItems.map((i) => i.tempId));
 
   const handleSelectAllRelevant = () => {
     setExtractedItems((prev) =>
@@ -685,50 +710,27 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     );
   };
 
-  // Conflitti attualmente visibili con i filtri attivi (pertinenza + mese), come
-  // "Seleziona: Pertinenti · Tutti · Nessuno".
-  const visibleConflicts = visibleItems.filter((it) => matchByTempId.has(it.tempId));
-  // Conflitti visibili senza scelta: i conflitti identici, preimpostati su
-  // "Ignora", non rientrano nel conteggio N né nell'azione in blocco.
+  // Righe "da decidere" attualmente visibili con i filtri attivi (pertinenza +
+  // mese), come "Seleziona: Pertinenti · Tutti · Nessuno".
+  // Gli identici, preimpostati su "Salta", non rientrano nel conteggio N né
+  // nell'azione in blocco; le sovrapposizioni non chiedono più nulla.
   const unresolvedVisibleConflicts = visibleConflicts.filter((it) => choiceOf(it) === undefined);
-  // Conflitti visibili con una scelta esplicita dell'utente: sono i soli che
+  // Righe visibili con una scelta esplicita dell'utente: sono le sole che
   // "Cambia per tutti" può sovrascrivere (gli identici invariati restano fuori).
   const overridableVisibleConflicts = visibleConflicts.filter((it) => updateChoices[it.tempId] !== undefined);
-  // Il conteggio distingue i tre criteri di riconoscimento: il titolo
-  // ("possibili aggiornamenti"), il solo orario e le sovrapposizioni.
-  const unresolvedTitleConflicts = unresolvedVisibleConflicts.filter(
-    (it) => matchByTempId.get(it.tempId)?.kind === "titolo"
-  );
-  const unresolvedTimeConflicts = unresolvedVisibleConflicts.filter(
-    (it) => matchByTempId.get(it.tempId)?.kind === "orario"
-  );
-
-  const unresolvedOverlapConflicts = unresolvedVisibleConflicts.filter(
-    (it) => matchByTempId.get(it.tempId)?.kind === "sovrapposizione"
-  );
-
-  // Scelta singola su un conflitto: la scelta implica la selezione (punto 1).
+  // Scelta singola su una riga "da decidere": la scelta implica la selezione.
   // Una modifica manuale successiva della casella non viene ri-allineata finché
-  // l'utente non cambia di nuovo la scelta sul conflitto.
+  // l'utente non cambia di nuovo la scelta.
   const handleUpdateChoice = (tempId: string, choice: UpdateChoice) => {
-    if (choice === "update" && matchByTempId.get(tempId)?.kind === "sovrapposizione") return;
     setUpdateChoices((prev) => ({ ...prev, [tempId]: choice }));
     setExtractedItems((prev) =>
       prev.map((it) => (it.tempId === tempId ? { ...it, selectedForImport: choice !== "ignore" } : it))
     );
   };
 
-  /** Applica una scelta a un insieme di conflitti e prepara l'"Annulla". */
+  /** Applica una scelta a un insieme di righe "da decidere" e prepara l'"Annulla". */
   const applyBulkChoice = (targetIds: string[], choice: UpdateChoice) => {
     if (targetIds.length === 0) return;
-    const skipped = choice === "update"
-      ? targetIds.filter((id) => matchByTempId.get(id)?.kind === "sovrapposizione")
-      : [];
-    targetIds = targetIds.filter((id) => !skipped.includes(id));
-    const unresolvedSkipped = skipped.filter((id) => {
-      const item = extractedItems.find((it) => it.tempId === id);
-      return item && choiceOf(item) === undefined;
-    }).length;
     const idSet = new Set(targetIds);
     const entries = extractedItems
       .filter((it) => idSet.has(it.tempId))
@@ -746,7 +748,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       entries,
       announcement: `${CHOICE_BULK_LABELS[choice]} applicato a ${targetIds.length} ${
         targetIds.length === 1 ? "impegno" : "impegni"
-      }.${skipped.length > 0 ? ` ${skipped.length} sovrapposizioni escluse: nessuna scelta modificata; ${unresolvedSkipped} restano da risolvere.` : ""}`,
+      }.`,
       restoreBlock: importBlockActive,
     });
     if (bulkUndoTimer.current) clearTimeout(bulkUndoTimer.current);
@@ -794,7 +796,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     highlightTimer.current = setTimeout(() => setHighlightedTempId(null), CONFLICT_HIGHLIGHT_MS);
   };
 
-  /** I tre pulsanti dell'azione in blocco (riga "Applica a tutti", override e azioni rapide). */
+  /** Le tre azioni rapide della riga in blocco e del messaggio di blocco. */
   const bulkChoiceButtons = (targets: ExtractedItem[], scopeName: string) => {
     const ids = targets.map((t) => t.tempId);
     const count = targets.length;
@@ -806,26 +808,26 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
         <button
           type="button"
           className={cls}
-          aria-label={ariaLabel("Aggiorna esistenti")}
+          aria-label={ariaLabel(CHOICE_BULK_LABELS.update)}
           onClick={() => applyBulkChoice(ids, "update")}
         >
-          Aggiorna esistenti
+          {CHOICE_BULK_LABELS.update}
         </button>
         <button
           type="button"
           className={cls}
-          aria-label={ariaLabel("Aggiungi come nuovi")}
+          aria-label={ariaLabel(CHOICE_BULK_LABELS.create)}
           onClick={() => applyBulkChoice(ids, "create")}
         >
-          Aggiungi come nuovi
+          {CHOICE_BULK_LABELS.create}
         </button>
         <button
           type="button"
           className={cls}
-          aria-label={ariaLabel("Ignora")}
+          aria-label={ariaLabel(CHOICE_BULK_LABELS.ignore)}
           onClick={() => applyBulkChoice(ids, "ignore")}
         >
-          Ignora
+          {CHOICE_BULK_LABELS.ignore}
         </button>
       </>
     );
@@ -899,8 +901,9 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     }
     setSelectionWarning(null);
 
-    // L'importazione si ferma solo se fra i SELEZIONATI restano conflitti senza
-    // scelta (i conflitti identici, preimpostati su "Ignora", non bloccano mai).
+    // L'importazione si ferma solo se fra i SELEZIONATI restano righe "da
+    // decidere" senza scelta (gli identici, preimpostati su "Salta", non
+    // bloccano mai); le sovrapposizioni non chiedono nulla.
     if (selectedUnresolvedItems.length > 0) {
       setImportBlocked(true);
       lastFocusedUnresolved.current = null;
@@ -909,7 +912,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     setImportBlocked(false);
 
     const toImportOrUpdate = selected.filter((it) => {
-      const match = matchByTempId.get(it.tempId);
+      const match = matchesByTempId.get(it.tempId);
       return !(match && choiceOf(it) === "ignore");
     });
     const invalid = toImportOrUpdate.find((it) => extractedItemError(it));
@@ -923,7 +926,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     const updatedEvents: CalendarEvent[] = [];
 
     for (const it of selected) {
-      const match = matchByTempId.get(it.tempId)?.event ?? null;
+      const match = matchesByTempId.get(it.tempId)?.event ?? null;
       const choice = match ? choiceOf(it) : undefined;
 
       if (match && choice === "update") {
@@ -1434,10 +1437,36 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                 )}
               </div>
 
-              {/* Riga compatta dei possibili aggiornamenti: azione in blocco sui
-                  conflitti visibili non risolti; "Annulla" per qualche secondo
+              {/* Riga riassuntiva degli impegni già in agenda e saltati in
+                  automatico (identici): fuori dall'elenco finché non si preme
+                  "Mostra", che li rende visibili e modificabili come gli altri. */}
+              {identicalVisibleItems.length > 0 && (
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-1.5 rounded-lg border border-stone-200 bg-stone-50 text-xs text-stone-600">
+                  <span className="font-semibold">
+                    {identicalVisibleItems.length} già in agenda, saltati
+                  </span>
+                  <span aria-hidden="true">·</span>
+                  <button
+                    type="button"
+                    id="btn-toggle-identical"
+                    onClick={() => setShowIdentical((prev) => !prev)}
+                    aria-pressed={showIdentical}
+                    aria-label={
+                      showIdentical
+                        ? "Nascondi gli impegni già in agenda, saltati in automatico"
+                        : "Mostra gli impegni già in agenda, saltati in automatico"
+                    }
+                    className="min-h-11 sm:min-h-0 px-1.5 py-0.5 rounded-md font-semibold text-stone-700 hover:bg-stone-200 underline"
+                  >
+                    {showIdentical ? "Nascondi" : "Mostra"}
+                  </button>
+                </div>
+              )}
+
+              {/* Riga delle righe da decidere: un solo conteggio, azione in blocco
+                  sui conflitti visibili non risolti; "Annulla" per qualche secondo
                   dopo l'azione (ripristina scelte e selezioni dei soli toccati). */}
-              {(visibleConflicts.length > 0 || bulkChoiceUndo) && (
+              {(unresolvedVisibleConflicts.length > 0 || overridableVisibleConflicts.length > 0 || bulkChoiceUndo) && (
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 px-3 py-1.5 rounded-lg border border-amber-200 bg-amber-50/70 text-xs text-amber-900">
                   {bulkChoiceUndo ? (
                     <>
@@ -1453,35 +1482,27 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                     </>
                   ) : unresolvedVisibleConflicts.length > 0 ? (
                     <>
-                      {/* I due criteri di riconoscimento si contano separati
-                          (es. "5 possibili aggiornamenti · 3 stesso orario"). */}
                       <span className="font-bold whitespace-nowrap">
-                        {[
-                          unresolvedTitleConflicts.length > 0 ? `${unresolvedTitleConflicts.length} possibili aggiornamenti` : null,
-                          unresolvedTimeConflicts.length > 0 ? `${unresolvedTimeConflicts.length} ${unresolvedTitleConflicts.length || unresolvedOverlapConflicts.length ? "stesso orario" : "impegni allo stesso orario"}` : null,
-                          unresolvedOverlapConflicts.length > 0 ? `${unresolvedOverlapConflicts.length} sovrapposizioni` : null,
-                        ].filter(Boolean).join(" · ")}
+                        {unresolvedVisibleConflicts.length} da decidere
                       </span>
                       <span aria-hidden="true">·</span>
-                      <span className="font-medium">Applica a tutti:</span>
                       {bulkChoiceButtons(unresolvedVisibleConflicts, "conflitti visibili non risolti")}
                     </>
                   ) : (
                     <>
                       <span className="font-bold text-emerald-800">Tutti risolti</span>
-                      {overridableVisibleConflicts.length > 0 &&
-                        (bulkOverrideMode ? (
-                          bulkChoiceButtons(overridableVisibleConflicts, "scelte già fatte sui conflitti visibili")
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => setBulkOverrideMode(true)}
-                            aria-label="Cambia per tutti: sovrascrivi le scelte già fatte sui conflitti visibili"
-                            className="min-h-11 sm:min-h-0 px-2.5 py-1 rounded-lg border border-amber-300 bg-white text-amber-900 font-semibold hover:bg-amber-100 transition-colors"
-                          >
-                            Cambia per tutti
-                          </button>
-                        ))}
+                      {bulkOverrideMode ? (
+                        bulkChoiceButtons(overridableVisibleConflicts, "scelte già fatte sui conflitti visibili")
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setBulkOverrideMode(true)}
+                          aria-label="Cambia per tutti: sovrascrivi le scelte già fatte sui conflitti visibili"
+                          className="min-h-11 sm:min-h-0 px-2.5 py-1 rounded-lg border border-amber-300 bg-white text-amber-900 font-semibold hover:bg-amber-100 transition-colors"
+                        >
+                          Cambia per tutti
+                        </button>
+                      )}
                     </>
                   )}
                 </div>
@@ -1491,46 +1512,30 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                 {bulkChoiceUndo ? bulkChoiceUndo.announcement : ""}
               </p>
 
-              {/* Blocco importazione: fra i selezionati restano conflitti senza scelta.
-                  Il messaggio aggiorna N a ogni scelta, sparisce a zero e non nomina
-                  un solo impegno: elenca (fino a 3) oppure conta. */}
+              {/* Blocco importazione: fra i selezionati restano righe da decidere.
+                  Una riga sola, N si aggiorna a ogni scelta e sparisce a zero. */}
               {importBlockActive ? (
                 <div
                   role="alert"
-                  className="p-3 bg-amber-50 border border-amber-300 text-amber-900 text-xs rounded-xl space-y-2"
+                  className="p-3 bg-amber-50 border border-amber-300 text-amber-900 text-xs rounded-xl flex flex-wrap items-center gap-x-2 gap-y-1.5"
                 >
-                  <div className="flex items-start gap-2 font-semibold">
-                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                    <span>
-                      Restano {selectedUnresolvedItems.length} impegni selezionati da risolvere prima di
-                      importare.
-                    </span>
-                  </div>
-                  {selectedUnresolvedItems.length <= 3 && (
-                    <ul className="list-disc pl-7 space-y-0.5">
-                      {selectedUnresolvedItems.map((it) => (
-                        <li key={it.tempId} className="font-medium">
-                          {it.title} · {it.date ? formatCivilDateIt(it.date) : "senza data"}
-                        </li>
-                      ))}
-                    </ul>
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span className="font-semibold">
+                    Restano {selectedUnresolvedItems.length} impegni da decidere
+                  </span>
+                  <button
+                    type="button"
+                    id="btn-go-to-next-unresolved"
+                    onClick={handleGoToNextUnresolved}
+                    aria-label="Vai al prossimo impegno da decidere: imposta i filtri, scorre fino alla scheda e la evidenzia"
+                    className="min-h-11 sm:min-h-0 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold transition-colors"
+                  >
+                    Vai al prossimo
+                  </button>
+                  {bulkChoiceButtons(
+                    selectedUnresolvedItems,
+                    "impegni selezionati da decidere, anche se nascosti dai filtri"
                   )}
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
-                    <button
-                      type="button"
-                      id="btn-go-to-next-unresolved"
-                      onClick={handleGoToNextUnresolved}
-                      aria-label="Vai al prossimo impegno da risolvere: imposta i filtri, scorre fino alla scheda e la evidenzia"
-                      className="min-h-11 sm:min-h-0 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold transition-colors"
-                    >
-                      Vai al prossimo
-                    </button>
-                    <span className="font-medium">Per tutti gli {selectedUnresolvedItems.length}:</span>
-                    {bulkChoiceButtons(
-                      selectedUnresolvedItems,
-                      "impegni selezionati da risolvere, anche se nascosti dai filtri"
-                    )}
-                  </div>
                 </div>
               ) : selectionWarning ? (
                 /* In-Modal Warning if nothing selected */
@@ -1549,24 +1554,23 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
             {/* Items List (unica area scorrevole del passo risultati) */}
             <div onScroll={handleListScroll} className="flex-1 overflow-y-auto p-4 sm:p-6">
               <div className="space-y-3">
-                {visibleItems.length === 0 ? (
+                {renderedItems.length === 0 ? (
                   <div className="py-12 text-center text-stone-400 text-xs">
-                    Nessun impegno in questa categoria.
+                    {visibleItems.length > 0
+                      ? "Gli impegni di questa categoria sono già tutti in agenda: premi “Mostra” per rivederli."
+                      : "Nessun impegno in questa categoria."}
                   </div>
                 ) : (
-                  visibleItems.map((item) => {
+                  renderedItems.map((item) => {
                     const isVerde = item.relevance === "VERDE";
                     const isGiallo = item.relevance === "GIALLO";
                     const isRosso = item.relevance === "ROSSO";
-                    const matchResult = matchByTempId.get(item.tempId) ?? null;
-                    const match = matchResult?.event ?? null;
-                    // Criterio che ha riconosciuto l'impegno: il titolo
-                    // ("possibile aggiornamento") o il solo orario.
-                    const matchKind = matchResult?.kind ?? null;
-                    const otherSameTimeCount = matchResult && matchResult.kind !== "titolo" ? matchResult.others : 0;
-                    const diff = match ? getEventFieldDiff(match, item) : null;
+                    const match = matchesByTempId.get(item.tempId) ?? null;
+                    // Unica riga per una riga abbinata: solo i campi che differiscono.
+                    const differences = match ? describeEventDifferences(match.event, item) : [];
+                    const overlaps = overlapsByTempId.get(item.tempId) ?? [];
                     const choice = choiceOf(item);
-                    const isIdenticalConflict = identicalConflictIds.has(item.tempId);
+                    const isIdenticalConflict = identicalTempIds.has(item.tempId);
                     const isHighlighted = highlightedTempId === item.tempId;
 
                     return (
@@ -1679,6 +1683,17 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                                 : !item.startTime && !item.endTime && (
                                   <p className="text-xs text-stone-500" role="status">Senza orario: verrà aggiunto come impegno per l'intera giornata.</p>
                                 )}
+                              {/* Sovrapposizione (impegni diversi alla stessa ora): solo
+                                  un'etichetta compatta, nessuna scelta e nessun blocco.
+                                  Le righe già abbinate a un impegno hanno la loro scheda. */}
+                              {!match && overlaps.length > 0 && (
+                                <p
+                                  className="text-[11px] font-medium text-amber-800"
+                                  title="Impegni già in agenda nella stessa fascia oraria: sono impegni diversi, non un doppione."
+                                >
+                                  {overlapLabelText(overlaps)}
+                                </p>
+                              )}
                               {/* Destinatari strutturati rilevati dall'AI (verifica manuale rapida) */}
                               {formatRecipientsLabel(item) && (
                                 <p className="text-[11px] text-stone-500">
@@ -1699,150 +1714,59 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                                 </div>
                               )}
 
-                              {/* Impegno già in agenda riconosciuto per titolo
-                                  (possibile aggiornamento) o per orario. */}
-                              {match && diff && (
-                                <div className="mt-3 p-3 rounded-xl border border-amber-300 bg-amber-50/70 space-y-3">
+                              {/* Scheda compatta "da decidere": una riga di titolo,
+                                  solo i campi che differiscono e tre scelte brevi. */}
+                              {match && (
+                                <div className="mt-3 p-3 rounded-xl border border-amber-300 bg-amber-50/70 space-y-2">
                                   <div className="flex flex-wrap items-center gap-1.5 text-xs font-bold text-amber-900">
                                     <RefreshCw className="w-3.5 h-3.5 text-amber-600 shrink-0" />
                                     <span>
-                                      {matchKind === "sovrapposizione"
-                                        ? "Sovrapposizione con un impegno già in agenda"
-                                        : matchKind === "orario"
-                                        ? "Stesso orario di un impegno già in agenda"
-                                        : "Possibile aggiornamento di un impegno esistente"}
+                                      {isIdenticalConflict
+                                        ? "Già in agenda, identico"
+                                        : match.kind === "orario"
+                                        ? "Forse è lo stesso impegno"
+                                        : "Già in agenda con dati diversi"}
                                     </span>
-                                    {isIdenticalConflict && (
-                                      <span
-                                        title="L'impegno estratto non porta alcuna differenza rispetto a quanto già in agenda"
-                                        className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900 border border-emerald-300 font-semibold"
-                                      >
-                                        Già in agenda, identico
-                                      </span>
-                                    )}
                                   </div>
 
-                                  {/* Riconosciuto per orario: può essere lo stesso
-                                      impegno della circolare con un nome diverso. */}
-                                  {(matchKind === "orario" || matchKind === "sovrapposizione") && (
-                                    <p className="text-[11px] leading-snug text-amber-900">
-                                      {matchKind === "sovrapposizione"
-                                        ? overlapLabel(item, match)
-                                        : "In agenda c'è già un impegno a quest'ora: potrebbe essere lo stesso della circolare, con un nome diverso."}
-                                      {otherSameTimeCount > 0 && (
-                                        <span className="font-semibold">
-                                          {" "}
-                                          {otherSameTimeCount === 1
-                                            ? "Ce n'è anche un altro alla stessa ora."
-                                            : `E altri ${otherSameTimeCount} alla stessa ora.`}
-                                        </span>
-                                      )}
-                                    </p>
+                                  {differences.length > 0 && (
+                                    <ul className="space-y-0.5 text-xs text-amber-900">
+                                      {differences.map((difference) => (
+                                        <li key={difference.field} className="leading-snug">
+                                          <span className="font-semibold">{`${difference.label}: `}</span>
+                                          {difference.from}
+                                          <span aria-hidden="true">{" → "}</span>
+                                          <span className="font-semibold">{difference.to}</span>
+                                        </li>
+                                      ))}
+                                    </ul>
                                   )}
 
-                                  {/* Confronto compatto mobile-first */}
-                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                                    {/* Esistente */}
-                                    <div className="bg-white border border-stone-200 rounded-lg p-2.5 space-y-1">
-                                      <span className="text-[10px] uppercase font-bold text-stone-500 tracking-wider block">
-                                        Esistente in agenda
-                                      </span>
-                                      <div className="font-semibold text-stone-800">{match.title}</div>
-                                      <div className="text-stone-600">
-                                        <span>{match.date}</span>
-                                        {(match.startTime || match.endTime) && (
-                                          <span className="ml-1.5 font-mono">
-                                            {match.startTime || "--:--"}{match.endTime ? ` - ${match.endTime}` : ""}
-                                          </span>
-                                        )}
-                                      </div>
-                                      {match.location && <div className="text-stone-500">📍 {match.location}</div>}
-                                      {match.notes && <div className="text-stone-500 italic text-[11px]">{match.notes}</div>}
-                                      {match.deadlineDate && <div className="text-[11px] text-stone-500">Scadenza: {match.deadlineDate}</div>}
-                                      <div className="text-[11px] text-stone-400 capitalize">
-                                        Categoria: {match.category.replace("_", " ")}
-                                      </div>
-                                    </div>
-
-                                    {/* Dalla nuova circolare */}
-                                    <div className="bg-white border border-amber-300 rounded-lg p-2.5 space-y-1">
-                                      <span className="text-[10px] uppercase font-bold text-amber-700 tracking-wider block">
-                                        Dalla nuova circolare
-                                      </span>
-                                      <div className={`font-semibold ${diff.title ? "text-amber-900 font-bold bg-amber-100/70 px-1 rounded inline-block" : "text-stone-800"}`}>
-                                        {item.title}
-                                      </div>
-                                      <div className="text-stone-600">
-                                        <span className={diff.date ? "bg-amber-100 font-semibold px-1 rounded text-amber-900" : ""}>{item.date}</span>
-                                        {(item.startTime || item.endTime) && (
-                                          <span className={`ml-1.5 font-mono ${diff.startTime || diff.endTime ? "bg-amber-100 font-bold px-1 rounded text-amber-900" : ""}`}>
-                                            {item.startTime || "--:--"}{item.endTime ? ` - ${item.endTime}` : ""}
-                                          </span>
-                                        )}
-                                      </div>
-                                      {item.location && (
-                                        <div className={`text-stone-600 ${diff.location ? "bg-amber-100 font-semibold px-1 rounded text-amber-900 inline-block" : ""}`}>
-                                          📍 {item.location}
-                                        </div>
-                                      )}
-                                      {item.notes && (
-                                        <div className={`text-[11px] italic ${diff.notes ? "bg-amber-100 text-amber-900 px-1 rounded block" : "text-stone-500"}`}>
-                                          {item.notes}
-                                        </div>
-                                      )}
-                                      {(item.deadlineDate || item.isDeadline || match.deadlineDate) && (
-                                        <div className={`text-[11px] ${diff.deadlineDate ? "bg-amber-100 font-semibold px-1 rounded text-amber-900 inline-block" : "text-stone-500"}`}>
-                                          Scadenza: {item.deadlineDate || (item.isDeadline ? item.date : "Nessuna")}
-                                        </div>
-                                      )}
-                                      <div className={`text-[11px] capitalize ${diff.category ? "bg-amber-100 font-semibold px-1 rounded text-amber-900 inline-block" : "text-stone-400"}`}>
-                                        Categoria: {item.category.replace("_", " ")}
-                                      </div>
-                                    </div>
-                                  </div>
-
-                                  {/* Selezione esplicita: la scelta implica la selezione
-                                      ("Aggiorna"/"Aggiungi" selezionano, "Ignora" deseleziona). */}
-                                  <div className="pt-1">
-                                    <span className="text-[11px] font-semibold text-stone-700 block mb-1.5">Scegli come procedere:</span>
-                                    <div className="flex flex-wrap gap-2" role="group" aria-label={`Scelta per l'impegno "${item.title}"`}>
-                                      {matchKind !== "sovrapposizione" && <button
-                                        type="button"
-                                        onClick={() => handleUpdateChoice(item.tempId, "update")}
-                                        aria-pressed={choice === "update"}
-                                        className={`min-h-11 sm:min-h-9 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
-                                          choice === "update"
-                                            ? "bg-emerald-700 border-emerald-800 text-white shadow-xs"
-                                            : "bg-white border-stone-300 text-stone-700 hover:bg-stone-50"
-                                        }`}
-                                      >
-                                        Aggiorna esistente
-                                      </button>}
+                                  {/* La scelta implica la selezione: "Aggiorna"/"Tieni
+                                      entrambi" selezionano, "Salta" deseleziona. Il
+                                      significato esteso resta in title e aria-label. */}
+                                  <div className="flex flex-wrap gap-2" role="group" aria-label={`Scelta per l'impegno "${item.title}"`}>
+                                    {(["update", "create", "ignore"] as const).map((option) => (
                                       <button
+                                        key={option}
                                         type="button"
-                                        onClick={() => handleUpdateChoice(item.tempId, "create")}
-                                        aria-pressed={choice === "create"}
+                                        onClick={() => handleUpdateChoice(item.tempId, option)}
+                                        aria-pressed={choice === option}
+                                        title={CHOICE_CARD_HINTS[option]}
+                                        aria-label={CHOICE_CARD_HINTS[option]}
                                         className={`min-h-11 sm:min-h-9 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
-                                          choice === "create"
-                                            ? "bg-amber-600 border-amber-700 text-white shadow-xs"
+                                          choice === option
+                                            ? option === "update"
+                                              ? "bg-emerald-700 border-emerald-800 text-white shadow-xs"
+                                              : option === "create"
+                                              ? "bg-amber-600 border-amber-700 text-white shadow-xs"
+                                              : "bg-stone-700 border-stone-800 text-white shadow-xs"
                                             : "bg-white border-stone-300 text-stone-700 hover:bg-stone-50"
                                         }`}
                                       >
-                                        {matchKind === "sovrapposizione" ? "Aggiungi comunque" : "Aggiungi come nuovo"}
+                                        {CHOICE_CARD_LABELS[option]}
                                       </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => handleUpdateChoice(item.tempId, "ignore")}
-                                        aria-pressed={choice === "ignore"}
-                                        className={`min-h-11 sm:min-h-9 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
-                                          choice === "ignore"
-                                            ? "bg-stone-700 border-stone-800 text-white shadow-xs"
-                                            : "bg-white border-stone-300 text-stone-700 hover:bg-stone-50"
-                                        }`}
-                                      >
-                                        Ignora
-                                      </button>
-                                    </div>
+                                    ))}
                                   </div>
                                 </div>
                               )}

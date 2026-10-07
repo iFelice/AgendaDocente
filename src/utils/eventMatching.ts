@@ -1,4 +1,5 @@
 import type { CalendarEvent, EventCategory, ExtractedItem } from "../types";
+import { formatCivilDateIt, isValidDate } from "./dates";
 
 /** Categorie specifiche per le quali un disallineamento indica attività distinte. */
 const SPECIFIC_CATEGORIES = new Set<EventCategory>([
@@ -286,6 +287,125 @@ export function getEventFieldDiff(
   };
 }
 
+/** Valore assente in una riga di differenza (campo vuoto da un lato). */
+const EMPTY_FIELD = "—";
+
+/** Etichetta breve di un campo che differisce fra agenda e circolare. */
+export interface EventFieldDifference {
+  /** Chiave tecnica del campo confrontato ("time" accorpa inizio e fine). */
+  field: "title" | "date" | "deadlineDate" | "time" | "location" | "notes" | "category" | "className";
+  /** Etichetta mostrata a schermo ("Orario", "Luogo", …). */
+  label: string;
+  /** Valore già in agenda, oppure "—" se assente. */
+  from: string;
+  /** Valore della riga della circolare, oppure "—" se assente. */
+  to: string;
+}
+
+/** Intervallo orario leggibile: "16:00–18:30", un solo estremo, oppure "—". */
+function timeRangeLabel(start?: string | null, end?: string | null): string {
+  const from = (start ?? "").trim();
+  const to = (end ?? "").trim();
+  if (!from && !to) return EMPTY_FIELD;
+  if (from && to) return `${from}–${to}`;
+  return from || to;
+}
+
+/** Data civile in formato italiano; stringa non valida o assente -> "—". */
+function dateLabel(iso?: string | null): string {
+  const clean = (iso ?? "").trim();
+  if (!clean) return EMPTY_FIELD;
+  return isValidDate(clean) ? formatCivilDateIt(clean) : clean;
+}
+
+/** Categoria leggibile ("collegio_docenti" -> "collegio docenti"). */
+function categoryLabel(category?: EventCategory): string {
+  return (category ?? "").replace(/_/g, " ") || EMPTY_FIELD;
+}
+
+/**
+ * Solo le differenze fra l'impegno già in agenda e la riga della circolare,
+ * nell'ordine in cui vanno mostrate nella scheda compatta:
+ * "Orario: 16:00–18:30 → 17:00–18:30", "Luogo: — → Telematica", …
+ *
+ * I campi uguali non compaiono: il confronto è quello simmetrico di
+ * `getEventFieldDiff`, quindi un campo vuoto da un lato e valorizzato
+ * dall'altro è una differenza. Inizio e fine orario sono una riga sola.
+ */
+export function describeEventDifferences(
+  existing: CalendarEvent,
+  candidate: Pick<
+    ExtractedItem,
+    "title" | "date" | "deadlineDate" | "isDeadline" | "startTime" | "endTime" | "location" | "notes" | "category" | "className"
+  >
+): EventFieldDifference[] {
+  const diff = getEventFieldDiff(existing, candidate);
+  const candidateDeadline = candidate.deadlineDate || (candidate.isDeadline === true ? candidate.date : undefined);
+  const differences: EventFieldDifference[] = [];
+
+  if (diff.startTime || diff.endTime) {
+    differences.push({
+      field: "time",
+      label: "Orario",
+      from: timeRangeLabel(existing.startTime, existing.endTime),
+      to: timeRangeLabel(candidate.startTime, candidate.endTime),
+    });
+  }
+  if (diff.date) {
+    differences.push({ field: "date", label: "Data", from: dateLabel(existing.date), to: dateLabel(candidate.date) });
+  }
+  if (diff.location) {
+    differences.push({
+      field: "location",
+      label: "Luogo",
+      from: (existing.location ?? "").trim() || EMPTY_FIELD,
+      to: (candidate.location ?? "").trim() || EMPTY_FIELD,
+    });
+  }
+  if (diff.title) {
+    differences.push({
+      field: "title",
+      label: "Titolo",
+      from: (existing.title ?? "").trim() || EMPTY_FIELD,
+      to: (candidate.title ?? "").trim() || EMPTY_FIELD,
+    });
+  }
+  if (diff.className) {
+    differences.push({
+      field: "className",
+      label: "Classe",
+      from: (existing.className ?? "").trim() || EMPTY_FIELD,
+      to: (candidate.className ?? "").trim() || EMPTY_FIELD,
+    });
+  }
+  if (diff.category) {
+    differences.push({
+      field: "category",
+      label: "Categoria",
+      from: categoryLabel(existing.category),
+      to: categoryLabel(candidate.category),
+    });
+  }
+  if (diff.deadlineDate) {
+    differences.push({
+      field: "deadlineDate",
+      label: "Scadenza",
+      from: dateLabel(existing.deadlineDate),
+      to: dateLabel(candidateDeadline),
+    });
+  }
+  if (diff.notes) {
+    differences.push({
+      field: "notes",
+      label: "Note",
+      from: (existing.notes ?? "").trim() || EMPTY_FIELD,
+      to: (candidate.notes ?? "").trim() || EMPTY_FIELD,
+    });
+  }
+
+  return differences;
+}
+
 /**
  * Un conflitto è "identico" quando l'impegno estratto non porta alcuna
  * differenza rispetto all'impegno già in agenda:
@@ -458,6 +578,151 @@ export function findEventMatch(
   }
 
   return { event: best.existing, kind, others: overlapping.length - 1 };
+}
+
+/** Abbinamento che OCCUPA un impegno già in agenda: la sola sovrapposizione non compare qui. */
+export interface OccupiedEventMatch {
+  event: CalendarEvent;
+  /** "titolo" = possibile aggiornamento; "orario" = possibile stesso impegno con un altro nome. */
+  kind: "titolo" | "orario";
+}
+
+/** Esito dell'abbinamento per UNA riga del documento. */
+export interface DocumentMatchEntry {
+  /**
+   * Impegno già in agenda che la riga aggiorna o riconosce, oppure null quando
+   * la riga è un impegno nuovo (o solo sovrapposto a qualcosa).
+   */
+  match: OccupiedEventMatch | null;
+  /**
+   * Impegni già in agenda con cui la riga si sovrappone davvero, dal più
+   * significativo: stesso inizio+fine, poi stesso inizio, poi sovrapposizione
+   * più lunga, poi ordine in agenda. L'impegno abbinato alla riga è escluso
+   * (la scheda lo mostra già); le sovrapposizioni non bloccano mai nulla.
+   */
+  overlaps: CalendarEvent[];
+}
+
+/**
+ * Graduatoria con cui una riga rivendica un impegno già in agenda quando
+ * l'impegno è conteso: stesso inizio+fine (0), stesso inizio (1), poi la
+ * sovrapposizione più lunga; a parità vale l'ordine nel documento.
+ */
+function claimRank(candidate: EventMatchCandidate, event: CalendarEvent): { tier: number; overlap: number } {
+  const candidateWindow = timeWindowOf(candidate);
+  const eventWindow = timeWindowOf(event);
+  const candidateStart = candidateWindow?.start ?? null;
+  const eventStart = eventWindow?.start ?? null;
+  const sameStart = candidateStart !== null && candidateStart === eventStart;
+
+  if (sameStart && (candidateWindow?.end ?? null) === (eventWindow?.end ?? null)) return { tier: 0, overlap: 0 };
+  if (sameStart) return { tier: 1, overlap: 0 };
+
+  const overlap = candidateWindow && eventWindow ? overlapMinutes(candidateWindow, eventWindow) : 0;
+  return { tier: 2, overlap };
+}
+
+/** Impegni in agenda che si sovrappongono davvero alla riga, in ordine di rilevanza. */
+function overlappingEvents(
+  candidate: EventMatchCandidate,
+  existingEvents: CalendarEvent[],
+  exclude?: CalendarEvent | null
+): CalendarEvent[] {
+  if (isDeadlineLike(candidate) || isLessonLike(candidate)) return [];
+  const candidateWindow = timeWindowOf(candidate);
+  if (!candidateWindow) return [];
+
+  return existingEvents
+    .map((event, index) => ({ event, index, window: timeWindowOf(event) }))
+    .filter((entry) => entry.window !== null && entry.event !== exclude)
+    .filter((entry) => entry.event.date === candidate.date)
+    .filter((entry) => !isDeadlineLike(entry.event) && !isLessonLike(entry.event))
+    .filter((entry) => windowsOverlap(candidateWindow, entry.window as TimeWindow))
+    .sort((a, b) => {
+      const rankA = claimRank(candidate, a.event);
+      const rankB = claimRank(candidate, b.event);
+      if (rankA.tier !== rankB.tier) return rankA.tier - rankB.tier;
+      if (rankA.overlap !== rankB.overlap) return rankB.overlap - rankA.overlap;
+      return a.index - b.index;
+    })
+    .map((entry) => entry.event);
+}
+
+/**
+ * Abbinamento UNO A UNO sull'intero documento: ogni impegno già in agenda può
+ * essere assegnato per "titolo" o per "orario" a UNA sola riga.
+ *
+ * L'assegnazione è globale (non riga per riga): fra le righe che rivendicano lo
+ * stesso impegno vince quella con stesso inizio+fine, poi quella con lo stesso
+ * inizio, poi la sovrapposizione più lunga, poi l'ordine nel documento. Le righe
+ * che perdono vengono rivalutate sugli impegni rimasti liberi: se non ne resta
+ * nessuno sono impegni nuovi. Il tipo "sovrapposizione" non occupa l'impegno
+ * (più righe possono sovrapporsi allo stesso) e resta fuori dall'abbinamento.
+ */
+export function assignDocumentMatches(
+  candidates: EventMatchCandidate[],
+  existingEvents: CalendarEvent[] | undefined | null
+): DocumentMatchEntry[] {
+  const entries: DocumentMatchEntry[] = candidates.map(() => ({ match: null, overlaps: [] }));
+  const allEvents = existingEvents ?? [];
+  if (candidates.length === 0 || allEvents.length === 0) return entries;
+
+  let available = [...allEvents];
+  let pending = candidates.map((_, index) => index);
+
+  while (pending.length > 0 && available.length > 0) {
+    // Rivendicazioni della riga sull'insieme ancora libero: la sola
+    // sovrapposizione non rivendica nulla e non entra nel giro.
+    const claims = pending
+      .map((row) => ({ row, match: findEventMatch(candidates[row], available) }))
+      .filter(
+        (entry): entry is { row: number; match: EventMatchResult & { kind: "titolo" | "orario" } } =>
+          !!entry.match && entry.match.kind !== "sovrapposizione"
+      );
+    if (claims.length === 0) break;
+
+    const byEvent = new Map<CalendarEvent, { row: number; match: EventMatchResult & { kind: "titolo" | "orario" } }[]>();
+    for (const claim of claims) {
+      const group = byEvent.get(claim.match.event);
+      if (group) group.push(claim);
+      else byEvent.set(claim.match.event, [claim]);
+    }
+
+    // Le righe che perdono una contesa restano in gioco sui soli impegni
+    // rimasti liberi: se non ne resta nessuno sono impegni nuovi.
+    const leftOver: number[] = [];
+    for (const group of byEvent.values()) {
+      const winner =
+        group.length === 1
+          ? group[0]
+          : group.reduce((best, claim) => {
+              const rankBest = claimRank(candidates[best.row], best.match.event);
+              const rankClaim = claimRank(candidates[claim.row], claim.match.event);
+              if (rankClaim.tier !== rankBest.tier) return rankClaim.tier < rankBest.tier ? claim : best;
+              if (rankClaim.overlap !== rankBest.overlap) return rankClaim.overlap > rankBest.overlap ? claim : best;
+              return claim.row < best.row ? claim : best;
+            });
+      entries[winner.row] = { match: { event: winner.match.event, kind: winner.match.kind }, overlaps: [] };
+      for (const claim of group) if (claim !== winner) leftOver.push(claim.row);
+    }
+
+    const taken = new Set<CalendarEvent>();
+    for (const entry of entries) if (entry.match) taken.add(entry.match.event);
+    available = available.filter((event) => !taken.has(event));
+    pending = leftOver;
+  }
+
+  // Sovrapposizioni: valgono per tutte le righe, anche verso impegni già
+  // abbinati ad altre righe, e non tolgono nulla all'abbinamento.
+  for (let index = 0; index < candidates.length; index++) {
+    entries[index].overlaps = overlappingEvents(
+      candidates[index],
+      allEvents,
+      entries[index].match?.event ?? null
+    );
+  }
+
+  return entries;
 }
 
 /**

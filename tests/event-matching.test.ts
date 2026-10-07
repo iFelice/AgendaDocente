@@ -12,6 +12,8 @@ import {
   getEventFieldDiff,
   findPossibleEventUpdate,
   findEventMatch,
+  assignDocumentMatches,
+  describeEventDifferences,
 } from '../src/utils/eventMatching';
 import { CircularAnalyzerModal } from '../src/components/CircularAnalyzerModal';
 import { deriveFutureCommitments } from '../src/utils/futureCommitments';
@@ -319,20 +321,21 @@ test('8. UI: nessuna azione preselezionata alla comparsa di un possibile aggiorn
     });
 
     const text = flatText(renderer.root);
-    assert.ok(text.includes('Possibile aggiornamento di un impegno esistente'));
-    assert.ok(text.includes('Esistente in agenda'));
-    assert.ok(text.includes('Dalla nuova circolare'));
-    assert.ok(text.includes('17:00 - 18:00'));
-    assert.ok(text.includes('15:00 - 16:30'));
+    // Scheda compatta: una riga di titolo e SOLO le differenze (orario e luogo).
+    assert.ok(text.includes('Già in agenda con dati diversi'), 'riga di titolo della scheda');
+    assert.equal(text.includes('Esistente in agenda'), false, 'niente riquadro a due colonne');
+    assert.equal(text.includes('Dalla nuova circolare'), false, 'niente riquadro a due colonne');
+    assert.ok(text.includes('Orario: 17:00–18:00 → 15:00–16:30'), 'differenza dell\'orario');
+    assert.ok(text.includes('Luogo: — → Aula Magna'), 'differenza del luogo');
 
     // Verifica che nessuno dei 3 pulsanti sia evidenziato/preselezionato
-    const updateBtn = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Aggiorna esistente')[0];
-    const createBtn = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Aggiungi come nuovo')[0];
-    const ignoreBtn = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Ignora')[0];
+    const updateBtn = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Aggiorna')[0];
+    const createBtn = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Tieni entrambi')[0];
+    const ignoreBtn = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Salta')[0];
 
     assert.ok(!updateBtn.props.className.includes('bg-emerald-700'), 'Aggiorna non deve essere preselezionato');
-    assert.ok(!createBtn.props.className.includes('bg-amber-600'), 'Crea non deve essere preselezionato');
-    assert.ok(!ignoreBtn.props.className.includes('bg-stone-700'), 'Ignora non deve essere preselezionato');
+    assert.ok(!createBtn.props.className.includes('bg-amber-600'), 'Tieni entrambi non deve essere preselezionato');
+    assert.ok(!ignoreBtn.props.className.includes('bg-stone-700'), 'Salta non deve essere preselezionato');
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -402,7 +405,7 @@ test('14. Senza scelta esplicita per un possibile aggiornamento: import bloccato
 
     assert.equal(imported, false, 'Non deve importare finché la scelta non è esplicita');
     const warningText = flatText(renderer.root);
-    assert.ok(warningText.includes('Effettua una scelta') || warningText.includes('Possibile aggiornamento'), 'Messaggio di avviso visibile');
+    assert.ok(warningText.includes('Restano 1 impegni da decidere'), 'Messaggio di avviso visibile');
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -480,9 +483,9 @@ test('9, 10, 11. "Aggiorna esistente": preserva ID, googleEventId, metadati e ag
       await new Promise(r => setTimeout(r, 100));
     });
 
-    // Scegli "Aggiorna esistente"
-    const updateBtn = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Aggiorna esistente')[0];
-    assert.ok(updateBtn, 'Pulsante Aggiorna esistente presente');
+    // Scegli "Aggiorna"
+    const updateBtn = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Aggiorna')[0];
+    assert.ok(updateBtn, 'Pulsante Aggiorna presente');
     await act(async () => { updateBtn.props.onClick(); });
 
     // Conferma importazione
@@ -577,9 +580,9 @@ test('12. "Aggiungi come nuovo": crea un secondo evento distinto', async () => {
       await new Promise(r => setTimeout(r, 100));
     });
 
-    // Scegli "Aggiungi come nuovo"
-    const createBtn = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Aggiungi come nuovo')[0];
-    assert.ok(createBtn, 'Pulsante Aggiungi come nuovo presente');
+    // Scegli "Tieni entrambi"
+    const createBtn = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Tieni entrambi')[0];
+    assert.ok(createBtn, 'Pulsante Tieni entrambi presente');
     await act(async () => { createBtn.props.onClick(); });
 
     // Conferma importazione
@@ -594,7 +597,7 @@ test('12. "Aggiungi come nuovo": crea un secondo evento distinto', async () => {
   }
 });
 
-test('13. "Ignora": non crea né aggiorna nulla, deseleziona l\'impegno (nuova semantica), nessun import', async () => {
+test('13. "Salta": non crea né aggiorna nulla, deseleziona l\'impegno (nuova semantica), nessun import', async () => {
   const existingEvent: CalendarEvent = {
     id: 'ev-exist-1',
     title: 'Collegio Docenti',
@@ -661,18 +664,18 @@ test('13. "Ignora": non crea né aggiorna nulla, deseleziona l\'impegno (nuova s
       await new Promise(r => setTimeout(r, 100));
     });
 
-    // Scegli "Ignora" (pulsante della scheda: quelli in blocco non hanno aria-pressed)
+    // Scegli "Salta" (pulsante della scheda: quelli in blocco non hanno aria-pressed)
     const ignoreBtn = renderer.root.findAll(
-      (el: any) => el.type === 'button' && flatText(el) === 'Ignora' && el.props['aria-pressed'] !== undefined
+      (el: any) => el.type === 'button' && flatText(el) === 'Salta' && el.props['aria-pressed'] !== undefined
     )[0];
-    assert.ok(ignoreBtn, 'Pulsante Ignora presente');
+    assert.ok(ignoreBtn, 'Pulsante Salta presente');
     await act(async () => { ignoreBtn.props.onClick(); });
 
     // La scelta implica la deselezione: nessun impegno selezionato, pulsante di
     // conferma disabilitato e nessuna importazione possibile.
     const checkbox = renderer.root.findAll((el: any) => el.type === 'input' && el.props.type === 'checkbox')[0];
     assert.equal(checkbox.props.checked, false, '"Ignora" deve deselezionare l\'impegno');
-    assert.ok(ignoreBtn.props.className.includes('bg-stone-700'), 'Scelta "Ignora" evidenziata sulla scheda');
+    assert.ok(ignoreBtn.props.className.includes('bg-stone-700'), 'Scelta "Salta" evidenziata sulla scheda');
 
     const confirmBtn = renderer.root.findByProps({ id: 'btn-confirm-circular-import' });
     assert.ok(confirmBtn, 'Pulsante conferma importazione presente');
@@ -859,24 +862,28 @@ test('16. Circolare multi-impegno: update + create + ignore -> salva gli altri d
       await new Promise(r => setTimeout(r, 100));
     });
 
-    // 1. Collegio -> scegli "Aggiorna esistente" (pulsante della scheda)
-    const updateBtns = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Aggiorna esistente');
+    // 1. Collegio -> scegli "Aggiorna" (pulsante della scheda)
+    const updateBtns = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Aggiorna');
     assert.ok(updateBtns.length >= 1, 'Pulsante Aggiorna presente per Collegio');
     await act(async () => { updateBtns[0].props.onClick(); });
 
     // 2. Consiglio 1A è identico all'impegno già in agenda: la nuova gestione lo
-    //    preseleziona su "Ignora", lo deseleziona e lo etichetta. Non serve clic manuale.
-    assert.ok(flatText(renderer.root).includes('Già in agenda, identico'), 'Etichetta conflitto identico visibile');
+    //    salta (deselezionato) e lo toglie dall'elenco, riassumendolo in una riga.
+    assert.ok(flatText(renderer.root).includes('1 già in agenda, saltati'), 'riga riassuntiva dell\'identico');
+    assert.equal(
+      renderer.root.findAll((el: any) => el.type === 'input' && el.props.type === 'text' && el.props.value === 'Consiglio di Classe 1A').length,
+      0,
+      'Conflitto identico fuori dall\'elenco, senza clic manuale'
+    );
     const checkboxes = renderer.root.findAll((el: any) => el.type === 'input' && el.props.type === 'checkbox');
-    // Ordine delle schede: Collegio, Formazione, Consiglio (l'identico è il terzo).
-    assert.equal(checkboxes[2].props.checked, false, 'Conflitto identico deselezionato in automatico');
+    assert.equal(checkboxes.length, 2, 'in elenco restano Collegio e Formazione');
 
-    // Seleziona tutti per includere anche Formazione
+    // Seleziona tutti (i visibili) per includere anche Formazione
     const selectAllBtn = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Tutti')[0];
     await act(async () => { selectAllBtn.props.onClick(); });
 
     const confirmBtn = renderer.root.findByProps({ id: 'btn-confirm-circular-import' });
-    assert.equal(flatText(confirmBtn), "Aggiungi 3 selezionati all'Agenda");
+    assert.equal(flatText(confirmBtn), "Aggiungi 2 selezionati all'Agenda");
 
     // Conferma importazione
     await act(async () => { confirmBtn.props.onClick(); });
@@ -955,9 +962,15 @@ test('17. Regressione Prisma: evento circolare con completed:true viene riattiva
       await new Promise(r => setTimeout(r, 100));
     });
 
-    // Scegli "Aggiorna esistente"
-    const updateBtn = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Aggiorna esistente')[0];
-    assert.ok(updateBtn, 'Pulsante Aggiorna esistente presente');
+    // L'impegno è identico a quello in agenda: per riattivarlo lo si rivela con
+    // "Mostra" e poi si sceglie "Aggiorna".
+    assert.ok(flatText(renderer.root).includes('1 già in agenda, saltati'), 'saltato in automatico');
+    const revealBtn = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Mostra')[0];
+    await act(async () => { revealBtn.props.onClick(); });
+
+    // Scegli "Aggiorna"
+    const updateBtn = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Aggiorna')[0];
+    assert.ok(updateBtn, 'Pulsante Aggiorna presente');
     await act(async () => { updateBtn.props.onClick(); });
 
     // Conferma importazione
@@ -1338,4 +1351,140 @@ test('precedenza titolo > orario > sovrapposizione e spareggio', () => {
     assert.equal(findEventMatch({ ...candidate, ...excluded }, [overlap]), null);
     assert.equal(findEventMatch(candidate, [{ ...overlap, ...excluded }]), null);
   }
+});
+
+// ---------------------------------------------------------------------------
+// ABBINAMENTO UNO A UNO SULL'INTERO DOCUMENTO
+// ---------------------------------------------------------------------------
+
+const makeRow = (overrides: Partial<ExtractedItem> = {}) =>
+  makeExtractedItem({ tempId: `row-${Math.random()}`, title: 'Collegio Docenti', category: 'collegio_docenti', date: '2026-10-12', ...overrides });
+
+test('28. abbinamento uno a uno: la riga con stesso inizio+fine occupa l\'impegno, l\'altra è nuova', () => {
+  const existing = makeExisting({
+    id: 'ev-collegio', title: 'Collegio Docenti', category: 'collegio_docenti',
+    startTime: '17:00', endTime: '18:30',
+  });
+  const rows = [
+    makeRow({ tempId: 'r1', startTime: '16:00', endTime: '17:00' }),
+    makeRow({ tempId: 'r2', startTime: '17:00', endTime: '18:30' }),
+  ];
+
+  const entries = assignDocumentMatches(rows, [existing]);
+  assert.equal(entries[0].match, null, 'la prima riga non occupa l\'impegno: lo perde nella contesa');
+  assert.deepEqual(entries[0].overlaps, [], 'orari contigui: nemmeno una sovrapposizione');
+  assert.equal(entries[1].match?.event.id, 'ev-collegio', 'vince la riga con stesso inizio+fine');
+  assert.equal(entries[1].match?.kind, 'titolo');
+  assert.equal(entries[1].overlaps.length, 0);
+
+  // La stessa riga, da sola, avrebbe occupato l'impegno: la differenza la fa l'assegnazione globale.
+  assert.equal(assignDocumentMatches([rows[0]], [existing])[0].match?.event.id, 'ev-collegio');
+});
+
+test('29. abbinamento uno a uno: stesso inizio, poi sovrapposizione più lunga, poi ordine nel documento', () => {
+  const existing = makeExisting({
+    id: 'ev-collegio', title: 'Collegio Docenti', category: 'collegio_docenti',
+    startTime: '15:00', endTime: '16:30',
+  });
+
+  // Stesso inizio: batte la riga che pure si sovrappone di più ed è più avanti nel documento.
+  const bySameStart = assignDocumentMatches(
+    [makeRow({ tempId: 'r1', startTime: '15:15', endTime: '16:00' }), makeRow({ tempId: 'r2', startTime: '15:00', endTime: '16:00' })],
+    [existing]
+  );
+  assert.equal(bySameStart[0].match, null, 'perde chi non ha lo stesso inizio');
+  assert.equal(bySameStart[1].match?.event.id, 'ev-collegio');
+
+  // Nessuno stesso inizio: vince la sovrapposizione più lunga (50 contro 30 minuti),
+  // anche se è la seconda riga del documento.
+  const byOverlap = assignDocumentMatches(
+    [makeRow({ tempId: 'r1', startTime: '16:00', endTime: '16:30' }), makeRow({ tempId: 'r2', startTime: '15:40', endTime: '17:00' })],
+    [existing]
+  );
+  assert.equal(byOverlap[1].match?.event.id, 'ev-collegio', 'vince la sovrapposizione più lunga');
+  assert.equal(byOverlap[0].match, null);
+
+  // Stessa sovrapposizione: vince l'ordine nel documento (nessuna sovrapposizione, stesso giorno e titolo).
+  const byOrder = assignDocumentMatches(
+    [makeRow({ tempId: 'r1', startTime: '08:00', endTime: '09:00' }), makeRow({ tempId: 'r2', startTime: '08:00', endTime: '09:00' })],
+    [existing]
+  );
+  assert.equal(byOrder[0].match?.event.id, 'ev-collegio', 'a parità vince la prima riga del documento');
+  assert.equal(byOrder[1].match, null);
+});
+
+test('30. abbinamento uno a uno: la riga che perde la contesa viene rivalutata sugli impegni liberi', () => {
+  const events = [
+    makeExisting({ id: 'ev-collegio', title: 'Collegio Docenti', category: 'collegio_docenti', startTime: '15:00', endTime: '16:30' }),
+    makeExisting({ id: 'ev-riunione', title: 'Riunione Organizzativa', category: 'riunione', startTime: '16:00', endTime: '17:00' }),
+  ];
+  const rows = [
+    makeRow({ tempId: 'r1', startTime: '16:00', endTime: '17:00' }),
+    makeRow({ tempId: 'r2', startTime: '15:00', endTime: '16:30' }),
+  ];
+
+  const entries = assignDocumentMatches(rows, events);
+  assert.equal(entries[1].match?.event.id, 'ev-collegio', 'la riga con stesso inizio+fine occupa il collegio');
+  // La riga che ha perso la contesa ripiega sull'altro impegno ancora libero.
+  assert.equal(entries[0].match?.event.id, 'ev-riunione');
+  assert.equal(entries[0].match?.kind, 'orario');
+});
+
+test('31. sovrapposizioni: non occupano l\'impegno e valgono per tutte le righe', () => {
+  const existing = makeExisting({
+    id: 'ev-cdc', title: 'Consiglio di Classe 1A', category: 'consiglio_classe', className: '1A',
+    startTime: '15:00', endTime: '15:45',
+  });
+  const rows = [
+    makeExtractedItem({ tempId: 'glo', title: 'GLO alunno', category: 'glo', className: '1A', date: '2026-10-12', startTime: '15:00', endTime: '16:00' }),
+    makeExtractedItem({ tempId: 'pei', title: 'PEI alunno', category: 'pei', className: '1A', date: '2026-10-12', startTime: '15:15', endTime: '16:00' }),
+    // Questa riga riproduce l'impegno: lo occupa, ma non toglie la sovrapposizione alle altre.
+    makeExtractedItem({ tempId: 'cdc', title: 'Consiglio di Classe 1A', category: 'consiglio_classe', className: '1A', date: '2026-10-12', startTime: '15:00', endTime: '15:45' }),
+  ];
+
+  const entries = assignDocumentMatches(rows, [existing]);
+  assert.equal(entries[0].match, null);
+  assert.deepEqual(entries[0].overlaps.map((e) => e.id), ['ev-cdc']);
+  assert.equal(entries[1].match, null);
+  assert.deepEqual(entries[1].overlaps.map((e) => e.id), ['ev-cdc']);
+  assert.equal(entries[2].match?.event.id, 'ev-cdc', 'la riga identica occupa l\'impegno');
+  assert.deepEqual(entries[2].overlaps, [], 'l\'impegno abbinato non è anche una sovrapposizione');
+});
+
+test('32. describeEventDifferences: solo le differenze, una riga per campo e "—" per i valori assenti', () => {
+  const existing = makeExisting({
+    id: 'ev-collegio', title: 'Collegio Docenti', category: 'collegio_docenti',
+    date: '2026-10-12', startTime: '17:00', endTime: '18:00',
+  });
+
+  assert.deepEqual(
+    describeEventDifferences(existing, {
+      title: 'Collegio Docenti', category: 'collegio_docenti', date: '2026-10-12',
+      startTime: '15:00', endTime: '16:30', location: 'Telematica',
+    }),
+    [
+      { field: 'time', label: 'Orario', from: '17:00–18:00', to: '15:00–16:30' },
+      { field: 'location', label: 'Luogo', from: '—', to: 'Telematica' },
+    ],
+    'i campi uguali non compaiono; il campo vuoto da un lato è una differenza'
+  );
+
+  // Un impegno riprodotto tale e quale non ha differenze da mostrare.
+  assert.deepEqual(
+    describeEventDifferences(existing, {
+      title: 'Collegio Docenti', category: 'collegio_docenti', date: '2026-10-12',
+      startTime: '17:00', endTime: '18:00',
+    }),
+    []
+  );
+
+  // Titolo, classe, categoria, scadenza e note diversi: una riga per campo.
+  assert.deepEqual(
+    describeEventDifferences(existing, {
+      title: 'Collegio dei Docenti Straordinario', category: 'formazione', date: '2026-10-13',
+      deadlineDate: '2026-10-20', className: '1A', notes: 'Ordine del giorno nuovo',
+      startTime: '17:00', endTime: '18:00', isDeadline: true,
+    }).map((difference) => difference.label),
+    ['Data', 'Titolo', 'Classe', 'Categoria', 'Scadenza', 'Note']
+  );
 });
