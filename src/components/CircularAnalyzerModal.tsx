@@ -36,6 +36,8 @@ import {
   analyzeCircular,
   circularPartialNotice,
   mergeCircularItems,
+  CIRCULAR_AUTO_RESUME_DELAY_MS,
+  CIRCULAR_AUTO_RESUME_MAX_ATTEMPTS,
   CIRCULAR_PDF_WAIT_MESSAGE,
 } from "../services/aiService";
 import {
@@ -163,6 +165,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
    */
   const [unanalyzedPages, setUnanalyzedPages] = useState<number[]>([]);
   const [isResuming, setIsResuming] = useState<boolean>(false);
+  const [autoResumeAttempt, setAutoResumeAttempt] = useState<number | null>(null);
   const [resumeError, setResumeError] = useState<string | null>(null);
   const [defaultLocation, setDefaultLocation] = useState<string>("");
   const [relevanceFilter, setRelevanceFilter] = useState<"ALL_RELEVANT" | "VERDE" | "GIALLO" | "ROSSO" | "ALL">(
@@ -190,6 +193,15 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   });
 
   const inputRevision = useRef(0);
+  const automaticResumeSequenceRef = useRef(0);
+  const automaticResumeRef = useRef<{
+    id: number;
+    revision: number;
+    stopped: boolean;
+    timer: ReturnType<typeof setTimeout> | null;
+    cancelDelay: (() => void) | null;
+    controller: AbortController | null;
+  } | null>(null);
   const handledAutoTokenRef = useRef<string | null>(null);
   const [isReadingFile, setIsReadingFile] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
@@ -256,7 +268,120 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     }
   };
 
+  const cancelAutomaticResume = (updateState = true) => {
+    const session = automaticResumeRef.current;
+    if (session) {
+      session.stopped = true;
+      if (session.timer) clearTimeout(session.timer);
+      session.timer = null;
+      session.cancelDelay?.();
+      session.controller?.abort();
+      automaticResumeRef.current = null;
+    }
+    if (updateState) {
+      setAutoResumeAttempt(null);
+      setIsResuming(false);
+    }
+  };
+
+  const isCurrentAutomaticResume = (session: NonNullable<typeof automaticResumeRef.current>) =>
+    automaticResumeRef.current === session && !session.stopped && session.revision === inputRevision.current;
+
+  const pauseAutomaticResume = (session: NonNullable<typeof automaticResumeRef.current>) =>
+    new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        session.timer = null;
+        session.cancelDelay = null;
+        resolve(true);
+      }, CIRCULAR_AUTO_RESUME_DELAY_MS);
+      session.timer = timer;
+      session.cancelDelay = () => {
+        clearTimeout(timer);
+        session.timer = null;
+        session.cancelDelay = null;
+        resolve(false);
+      };
+    });
+
+  /** Avvia al massimo tre riprese additive automatiche delle sole pagine ancora mancanti. */
+  const startAutomaticResume = (
+    initialPages: number[], revision: number, resumeFileBase64?: string, resumeMimeType?: string
+  ) => {
+    if (initialPages.length === 0 || !resumeFileBase64 || !resumeMimeType) return;
+    cancelAutomaticResume(false);
+    const session: NonNullable<typeof automaticResumeRef.current> = {
+      id: ++automaticResumeSequenceRef.current,
+      revision,
+      stopped: false,
+      timer: null,
+      cancelDelay: null,
+      controller: null,
+    };
+    automaticResumeRef.current = session;
+
+    void (async () => {
+      let pagesToRetry = [...initialPages];
+      try {
+        for (let attempt = 1; attempt <= CIRCULAR_AUTO_RESUME_MAX_ATTEMPTS && pagesToRetry.length > 0; attempt++) {
+          if (!isCurrentAutomaticResume(session)) break;
+          setAutoResumeAttempt(attempt);
+          if (attempt > 1 && !(await pauseAutomaticResume(session))) break;
+          if (!isCurrentAutomaticResume(session)) break;
+
+          const requestedPages = [...pagesToRetry];
+          const controller = new AbortController();
+          session.controller = controller;
+          setIsResuming(true);
+          let result;
+          try {
+            result = await analyzeCircular({
+              text: "",
+              imageBase64: resumeFileBase64,
+              mimeType: resumeMimeType,
+              profile,
+              defaultLocation: defaultLocation.trim() || undefined,
+              pages: requestedPages,
+            }, { signal: controller.signal });
+          } catch (err: any) {
+            if (!isCurrentAutomaticResume(session)) break;
+            console.warn("Avviso ripresa automatica pagine circolare:", err?.message || err);
+            setResumeError("Non è stato possibile rileggere le pagine mancanti. Riprovo tra poco.");
+            session.controller = null;
+            setIsResuming(false);
+            continue;
+          }
+
+          if (!isCurrentAutomaticResume(session)) break;
+          session.controller = null;
+          setIsResuming(false);
+          if (!result.success) {
+            setResumeError(result.error || "Non è stato possibile rileggere le pagine mancanti.");
+            if (result.errorCode === "RATE_LIMITED") break;
+            continue;
+          }
+
+          // Gli elementi esistenti non vengono mai sostituiti: le modifiche,
+          // selezioni ed eliminazioni dell'utente sopravvivono alla ripresa.
+          pagesToRetry = requestedPages.filter((page) => (result.unanalyzedPages ?? []).includes(page));
+          setExtractedItems((prev) => mergeCircularItems(prev, result.items));
+          setUnanalyzedPages(pagesToRetry);
+          setAnalysisNotice(pagesToRetry.length > 0 ? circularPartialNotice(pagesToRetry) : null);
+          setResumeError(null);
+        }
+      } finally {
+        if (automaticResumeRef.current === session) {
+          automaticResumeRef.current = null;
+          setAutoResumeAttempt(null);
+          setIsResuming(false);
+        }
+      }
+    })();
+  };
+
+  const stopAutomaticResume = () => cancelAutomaticResume();
+
   const handleModalClose = () => {
+    cancelAutomaticResume();
     inputRevision.current++;
     onClose();
   };
@@ -272,6 +397,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       return;
     }
 
+    cancelAutomaticResume();
     const revision = ++inputRevision.current;
     setIsAnalyzing(true);
     setAnalysisError(null);
@@ -292,7 +418,8 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       if (!result.success && (!result.items || result.items.length === 0)) {
         throw new Error(result.error || "Impossibile analizzare il documento.");
       }
-      if (result.items.length === 0) {
+      const missingPages = result.unanalyzedPages ?? [];
+      if (result.items.length === 0 && missingPages.length === 0) {
         setExtractedItems([]);
         setAnalysisError("Nessun impegno riconosciuto nel documento. Puoi riprovare o incollare il testo.");
         return;
@@ -301,11 +428,12 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       setExtractedItems(result.items);
       setAnalysisSource(result.source);
       setAnalysisNotice(result.notice ?? null);
-      setUnanalyzedPages(result.unanalyzedPages ?? []);
+      setUnanalyzedPages(missingPages);
       resetChoiceUiState();
       setMonthFilter("ALL");
       setIsHeaderCompact(false);
       setStep("results");
+      if (missingPages.length > 0) startAutomaticResume(missingPages, revision, base64ToAnalyze, mimeTypeToAnalyze);
     } catch (err: any) {
       console.warn("Avviso analisi circolare:", err?.message || err);
       if (revision !== inputRevision.current) return;
@@ -320,15 +448,11 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   };
 
   /**
-   * Ripresa delle sole pagine rimaste indietro. Rimanda lo STESSO file (ancora
-   * in memoria in questa finestra) chiedendo solo quelle pagine: i risultati
-   * già a schermo restano visibili e utilizzabili per tutta la richiesta, e
-   * l'esito si AGGIUNGE senza toccare modifiche, selezioni ed eliminazioni.
-   * Se la finestra è stata riaperta il file non c'è più: il pulsante non
-   * compare e resta il solo avviso.
+   * Ripresa manuale delle sole pagine rimaste indietro, dopo la fine o
+   * l'interruzione del ciclo automatico.
    */
   const handleRetryMissingPages = async () => {
-    if (isResuming || unanalyzedPages.length === 0 || !fileBase64 || !fileMimeType) return;
+    if (isResuming || automaticResumeRef.current || unanalyzedPages.length === 0 || !fileBase64 || !fileMimeType) return;
     const requestedPages = [...unanalyzedPages];
     const revision = inputRevision.current;
     setIsResuming(true);
@@ -356,9 +480,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       setExtractedItems((prev) => mergeCircularItems(prev, result.items));
       setUnanalyzedPages(stillMissing);
       setAnalysisNotice(stillMissing.length > 0 ? circularPartialNotice(stillMissing) : null);
-      if (stillMissing.length > 0) {
-        setResumeError(null);
-      }
+      setResumeError(null);
     } catch (err: any) {
       console.warn("Avviso ripresa pagine circolare:", err?.message || err);
       if (revision !== inputRevision.current) return;
@@ -370,6 +492,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
 
   useEffect(() => {
     if (!isOpen) {
+      cancelAutomaticResume();
       inputRevision.current++;
       handledAutoTokenRef.current = null;
       return;
@@ -393,6 +516,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       handledAutoTokenRef.current = null;
     }
 
+    cancelAutomaticResume();
     inputRevision.current++;
     setStep("input");
     const effectiveMode = initialFile?.mode ?? initialInputMode ?? "file";
@@ -405,6 +529,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     setUnanalyzedPages([]);
     setResumeError(null);
     setIsResuming(false);
+    setAutoResumeAttempt(null);
     resetChoiceUiState();
     setMonthFilter("ALL");
     setIsHeaderCompact(false);
@@ -471,6 +596,14 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     () => () => {
       if (bulkUndoTimer.current) clearTimeout(bulkUndoTimer.current);
       if (highlightTimer.current) clearTimeout(highlightTimer.current);
+      const session = automaticResumeRef.current;
+      if (session) {
+        session.stopped = true;
+        if (session.timer) clearTimeout(session.timer);
+        session.cancelDelay?.();
+        session.controller?.abort();
+        automaticResumeRef.current = null;
+      }
     },
     []
   );
@@ -1238,9 +1371,24 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                     <AlertCircle className="w-4 h-4 flex-shrink-0" />
                     <span>{analysisNotice}</span>
                   </div>
-                  {/* Il file è ancora in memoria in questa finestra: la ripresa è possibile.
-                      Riaprendo la finestra il file non c'è più e resta il solo avviso. */}
-                  {unanalyzedPages.length > 0 && !!fileBase64 && !!fileMimeType && (
+                  {autoResumeAttempt !== null && (
+                    <div className="shrink-0 self-start sm:self-auto flex items-center gap-2">
+                      <span aria-live="polite">Rileggo le pagine mancanti · tentativo {autoResumeAttempt} di {CIRCULAR_AUTO_RESUME_MAX_ATTEMPTS}</span>
+                      <button
+                        id="btn-stop-auto-resume"
+                        type="button"
+                        aria-label="Interrompi la rilettura automatica"
+                        onClick={stopAutomaticResume}
+                        className="px-3 py-1.5 rounded-lg border border-amber-400 bg-white hover:bg-amber-100 text-amber-900 font-semibold text-xs flex items-center gap-1.5 transition-colors"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                        <span>Interrompi</span>
+                      </button>
+                    </div>
+                  )}
+                  {/* Dopo il ciclo automatico resta disponibile la ripresa manuale.
+                      Se la finestra è stata riaperta il file non c'è più e resta il solo avviso. */}
+                  {unanalyzedPages.length > 0 && !!fileBase64 && !!fileMimeType && autoResumeAttempt === null && (
                     <button
                       id="btn-retry-missing-pages"
                       type="button"

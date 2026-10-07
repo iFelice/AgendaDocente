@@ -152,7 +152,14 @@ export interface AnalyzeCircularOptions {
   /** Solo test: non cambia il contratto della POST. */
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  /** Annulla una richiesta di ripresa senza modificare il payload inviato al server. */
+  signal?: AbortSignal;
 }
+
+/** Riprese automatiche massime dopo una risposta parziale. */
+export const CIRCULAR_AUTO_RESUME_MAX_ATTEMPTS = 3;
+/** Pausa fra due richieste di ripresa automatiche consecutive. */
+export const CIRCULAR_AUTO_RESUME_DELAY_MS = 4_000;
 
 /**
  * Timeout portabile. `AbortSignal.timeout` manca su iOS Safari < 16: chiamarlo
@@ -246,20 +253,31 @@ export async function analyzeCircular(req: AnalyzeRequest, options: AnalyzeCircu
   // navigator.onLine non è una prova che il backend risponda: la POST parte sempre.
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   const timeout = createCircularTimeout(options.timeoutMs ?? CIRCULAR_REQUEST_TIMEOUT_MS);
+  const requestController = new AbortController();
+  const abortForTimeout = () => requestController.abort();
+  const abortForCaller = () => requestController.abort();
+  timeout.signal.addEventListener("abort", abortForTimeout, { once: true });
+  options.signal?.addEventListener("abort", abortForCaller, { once: true });
+  if (timeout.signal.aborted || options.signal?.aborted) requestController.abort();
+  const clearRequestSignals = () => {
+    timeout.signal.removeEventListener("abort", abortForTimeout);
+    options.signal?.removeEventListener("abort", abortForCaller);
+    timeout.clear();
+  };
   let response: Response;
   try {
     response = await fetchImpl("/api/analyze-circular", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(req),
-      signal: timeout.signal,
+      signal: requestController.signal,
     });
   } catch (error) {
     const expired = timeout.expired();
-    timeout.clear();
+    clearRequestSignals();
     return finishFailure(req, isCircularClientTimeout(error, expired) ? "CLIENT_TIMEOUT" : "NETWORK");
   }
-  timeout.clear();
+  clearRequestSignals();
   // Risposta arrivata, anche se non è JSON: non è un errore di rete.
   const data = await response.json().catch(() => ({})) as Record<string, unknown>;
   if (!response.ok || data.success !== true) {
