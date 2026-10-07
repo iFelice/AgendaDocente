@@ -8,8 +8,10 @@ import {
   areCategoriesCompatible,
   areClassesCompatible,
   isTitleMatch,
+  significantTitleWords,
   getEventFieldDiff,
   findPossibleEventUpdate,
+  findEventMatch,
 } from '../src/utils/eventMatching';
 import { CircularAnalyzerModal } from '../src/components/CircularAnalyzerModal';
 import { deriveFutureCommitments } from '../src/utils/futureCommitments';
@@ -982,4 +984,324 @@ test('17. Regressione Prisma: evento circolare con completed:true viene riattiva
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+// ---------------------------------------------------------------------------
+// RICONOSCIMENTO: DOPPIONE DA CIRCOLARE (singolare/plurale) E CRITERIO DELL'ORARIO
+// ---------------------------------------------------------------------------
+
+/** Impegno in agenda riconoscibile: data, orario e categoria confrontabili. */
+const makeExisting = (overrides: Partial<CalendarEvent> = {}): CalendarEvent => ({
+  id: 'ev-1',
+  title: 'Impegno',
+  category: 'riunione',
+  date: '2026-10-12',
+  startTime: '15:00',
+  endTime: '15:45',
+  isAllDay: false,
+  sourceType: 'manuale',
+  ...overrides,
+});
+
+test('18. Caso riprodotto: "Consigli di Classe" riconosce "Consiglio di Classe 3D" per titolo', () => {
+  const existingEvent: CalendarEvent = {
+    id: 'ev-consiglio-3d',
+    title: 'Consiglio di Classe 3D',
+    category: 'consiglio_classe',
+    className: '3D',
+    date: '2026-10-12',
+    startTime: '15:00',
+    endTime: '15:45',
+    isAllDay: false,
+    sourceType: 'circolare',
+  };
+
+  const candidate: ExtractedItem = makeExtractedItem({
+    tempId: 'temp-consigli',
+    title: 'Consigli di Classe',
+    category: 'consiglio_classe',
+    className: '3D',
+    date: '2026-10-12',
+    startTime: '15:00',
+    endTime: '15:45',
+  });
+
+  // La sigla di classe non entra nel confronto dei titoli e le parole vanno alla radice.
+  assert.deepEqual(significantTitleWords(existingEvent.title), ['consigl', 'class']);
+  assert.deepEqual(significantTitleWords(candidate.title), ['consigl', 'class']);
+  assert.equal(isTitleMatch(candidate.title, existingEvent.title), true, 'singolare/plurale devono coincidere');
+
+  const match = findEventMatch(candidate, [existingEvent]);
+  assert.ok(match, 'Deve riconoscere l\'impegno già in agenda');
+  assert.equal(match.kind, 'titolo', 'Riconoscimento per titolo (possibile aggiornamento)');
+  assert.equal(match.event.id, 'ev-consiglio-3d');
+  assert.equal(findPossibleEventUpdate(candidate, [existingEvent])?.id, 'ev-consiglio-3d');
+});
+
+test('19. Classi diverse (3D in agenda, 1C dalla circolare): nessun riconoscimento', () => {
+  const existingEvent: CalendarEvent = {
+    id: 'ev-consiglio-3d',
+    title: 'Consiglio di Classe 3D',
+    category: 'consiglio_classe',
+    className: '3D',
+    date: '2026-10-12',
+    startTime: '15:00',
+    endTime: '15:45',
+    isAllDay: false,
+    sourceType: 'circolare',
+  };
+
+  const candidate: ExtractedItem = makeExtractedItem({
+    tempId: 'temp-consigli-1c',
+    title: 'Consigli di Classe 1C',
+    category: 'consiglio_classe',
+    className: '1C',
+    date: '2026-10-12',
+    startTime: '15:00',
+    endTime: '15:45',
+  });
+
+  assert.equal(findPossibleEventUpdate(candidate, [existingEvent]), null, 'Nessun aggiornamento per titolo');
+  assert.equal(findEventMatch(candidate, [existingEvent]), null, 'La stessa ora non basta: la classe è diversa');
+});
+
+test('20. "Consiglio di Classe" vs "Consiglio di Istituto": nessuna corrispondenza per titolo', () => {
+  assert.equal(isTitleMatch('Consiglio di Classe', 'Consiglio di Istituto'), false);
+  assert.equal(isTitleMatch('Consiglio di Istituto', 'Consiglio di Classe'), false);
+
+  // Senza orari (nessuna sovrapposizione possibile) non resta alcun riconoscimento.
+  const existingEvent: CalendarEvent = {
+    id: 'ev-istituto',
+    title: 'Consiglio di Istituto',
+    category: 'consiglio_classe',
+    date: '2026-10-12',
+    isAllDay: false,
+    sourceType: 'manuale',
+  };
+  const candidate: ExtractedItem = makeExtractedItem({
+    tempId: 'temp-classe',
+    title: 'Consiglio di Classe',
+    category: 'consiglio_classe',
+    date: '2026-10-12',
+  });
+
+  assert.equal(findPossibleEventUpdate(candidate, [existingEvent]), null);
+  assert.equal(findEventMatch(candidate, [existingEvent]), null);
+});
+
+test('21. Spareggio per titolo fra più candidati: stesso inizio+fine, poi stesso inizio', () => {
+  const e1 = makeExisting({ id: 'ev-17', title: 'Collegio Docenti', category: 'collegio_docenti', startTime: '17:00', endTime: '18:00' });
+  const e2 = makeExisting({ id: 'ev-15', title: 'Collegio Docenti', category: 'collegio_docenti', startTime: '15:00', endTime: '16:30' });
+  const e3 = makeExisting({ id: 'ev-1530', title: 'Collegio Docenti', category: 'collegio_docenti', startTime: '15:30', endTime: '16:00' });
+
+  // Stesso inizio+fine del nuovo.
+  assert.equal(
+    findPossibleEventUpdate(
+      makeExtractedItem({ tempId: 't1', title: 'Collegio Docenti', category: 'collegio_docenti', date: '2026-10-12', startTime: '15:00', endTime: '16:30' }),
+      [e1, e2]
+    )?.id,
+    'ev-15'
+  );
+
+  // Nessuno con inizio+fine identici: vince lo stesso inizio.
+  assert.equal(
+    findPossibleEventUpdate(
+      makeExtractedItem({ tempId: 't2', title: 'Collegio Docenti', category: 'collegio_docenti', date: '2026-10-12', startTime: '15:00', endTime: '16:00' }),
+      [e1, e2, e3]
+    )?.id,
+    'ev-15'
+  );
+
+  // Nessuno con lo stesso inizio: resta l'ambiguità, nessuna associazione.
+  assert.equal(
+    findPossibleEventUpdate(
+      makeExtractedItem({ tempId: 't3', title: 'Collegio Docenti', category: 'collegio_docenti', date: '2026-10-12', startTime: '14:00', endTime: '15:00' }),
+      [e1, e2, e3]
+    ),
+    null
+  );
+
+  // Senza orario nel nuovo non c'è spareggio: resta l'ambiguità.
+  assert.equal(
+    findPossibleEventUpdate(
+      makeExtractedItem({ tempId: 't4', title: 'Collegio Docenti', category: 'collegio_docenti', date: '2026-10-12' }),
+      [e1, e2]
+    ),
+    null
+  );
+});
+
+test('22. Titoli diversi ma stesso giorno e orario sovrapposto: riconoscimento per orario', () => {
+  const existingEvent = makeExisting({
+    id: 'ev-dirigente',
+    title: 'Incontro con il Dirigente',
+    category: 'riunione',
+    startTime: '15:00',
+    endTime: '15:45',
+  });
+
+  const candidate = makeExtractedItem({
+    tempId: 'temp-colloquio',
+    title: 'Colloquio col Dirigente',
+    category: 'riunione',
+    date: '2026-10-12',
+    startTime: '15:15',
+    endTime: '15:40',
+  });
+
+  assert.equal(findPossibleEventUpdate(candidate, [existingEvent]), null, 'Il titolo non corrisponde');
+
+  const match = findEventMatch(candidate, [existingEvent]);
+  assert.ok(match, 'Deve segnalare l\'impegno già in agenda alla stessa ora');
+  assert.equal(match.kind, 'orario');
+  assert.equal(match.event.id, 'ev-dirigente');
+  assert.equal(match.others, 0);
+});
+
+test('23. Orari contigui (15:00-15:45 e 15:45-16:30): nessun riconoscimento per orario', () => {
+  const events = [
+    makeExisting({ id: 'ev-prima', title: 'Incontro con il Dirigente', startTime: '15:00', endTime: '15:45' }),
+    makeExisting({ id: 'ev-dopo', title: 'Altro impegno', startTime: '16:30', endTime: '17:30' }),
+  ];
+
+  // 15:45-16:30 è contiguo al primo e non tocca il secondo.
+  const inMezzo = makeExtractedItem({
+    tempId: 'temp-mezzo',
+    title: 'Colloquio col Dirigente',
+    category: 'riunione',
+    date: '2026-10-12',
+    startTime: '15:45',
+    endTime: '16:30',
+  });
+  assert.equal(findEventMatch(inMezzo, events), null);
+
+  // 16:20-17:00 si sovrappone solo al secondo.
+  const sulSecondo = makeExtractedItem({
+    tempId: 'temp-secondo',
+    title: 'Colloquio col Dirigente',
+    category: 'riunione',
+    date: '2026-10-12',
+    startTime: '16:20',
+    endTime: '17:00',
+  });
+  const match = findEventMatch(sulSecondo, events);
+  assert.equal(match?.kind, 'orario');
+  assert.equal(match?.event.id, 'ev-dopo');
+});
+
+test('24. Nuovo con il solo orario di inizio: uguaglianza o inizio compreso nell\'intervallo', () => {
+  const existingEvent = makeExisting({ id: 'ev-dirigente', title: 'Incontro con il Dirigente', startTime: '15:00', endTime: '15:45' });
+
+  const dentro = makeExtractedItem({
+    tempId: 't1', title: 'Colloquio col Dirigente', category: 'riunione', date: '2026-10-12', startTime: '15:10',
+  });
+  assert.equal(findEventMatch(dentro, [existingEvent])?.kind, 'orario', 'inizio compreso nell\'intervallo esistente');
+
+  const uguale = makeExtractedItem({
+    tempId: 't2', title: 'Colloquio col Dirigente', category: 'riunione', date: '2026-10-12', startTime: '15:00',
+  });
+  assert.equal(findEventMatch(uguale, [existingEvent])?.kind, 'orario', 'stessa ora di inizio');
+
+  const fuori = makeExtractedItem({
+    tempId: 't3', title: 'Colloquio col Dirigente', category: 'riunione', date: '2026-10-12', startTime: '15:50',
+  });
+  assert.equal(findEventMatch(fuori, [existingEvent]), null, 'dopo la fine non c\'è sovrapposizione');
+});
+
+test('25. Lezioni, scadenze, tutto il giorno e senza orario restano fuori dal confronto', () => {
+  const candidate = makeExtractedItem({
+    tempId: 'temp-x', title: 'Colloquio col Dirigente', category: 'riunione', date: '2026-10-12',
+    startTime: '15:15', endTime: '15:40',
+  });
+
+  // Lezione dell'orario (CalendarEvent con categoria "lezione"): esclusa.
+  const lezione = makeExisting({ id: 'ev-lezione', title: 'Matematica 3D', category: 'lezione', startTime: '15:00', endTime: '15:45' });
+  assert.equal(findEventMatch(candidate, [lezione]), null, 'la lezione non entra nel confronto');
+
+  // Impegno tutto il giorno: escluso.
+  const allDay = makeExisting({ id: 'ev-allday', title: 'Altro', isAllDay: true, startTime: undefined, endTime: undefined });
+  assert.equal(findEventMatch(candidate, [allDay]), null);
+
+  // Impegno senza orario: escluso.
+  const senzaOrario = makeExisting({ id: 'ev-senza', title: 'Altro', startTime: undefined, endTime: undefined });
+  assert.equal(findEventMatch(candidate, [senzaOrario]), null);
+
+  // Scadenza: esclusa.
+  const scadenza = makeExisting({ id: 'ev-scadenza', title: 'Consegna documenti', category: 'scadenza', startTime: '15:00', endTime: '15:45' });
+  assert.equal(findEventMatch(candidate, [scadenza]), null);
+
+  // Nuovo senza orario: nessun confronto possibile.
+  const senzaOrarioCandidate = makeExtractedItem({
+    tempId: 'temp-y', title: 'Colloquio col Dirigente', category: 'riunione', date: '2026-10-12',
+  });
+  assert.equal(findEventMatch(senzaOrarioCandidate, [makeExisting({ id: 'ev-dirigente', title: 'Incontro con il Dirigente' })]), null);
+
+  // Nuovo che è una scadenza: nessun confronto sugli orari.
+  const scadenzaCandidate = makeExtractedItem({
+    tempId: 'temp-z', title: 'Consegna registro', category: 'riunione', date: '2026-10-12',
+    startTime: '15:15', endTime: '15:40', isDeadline: true,
+  });
+  assert.equal(findEventMatch(scadenzaCandidate, [makeExisting({ id: 'ev-dirigente', title: 'Incontro con il Dirigente' })]), null);
+});
+
+test('26. Più impegni sovrapposti: scelto il migliore e contati gli altri', () => {
+  const events = [
+    makeExisting({ id: 'ev-parziale', title: 'Incontro parziale', startTime: '15:30', endTime: '16:30' }),
+    makeExisting({ id: 'ev-uguale', title: 'Incontro uguale', startTime: '15:15', endTime: '15:40' }),
+    makeExisting({ id: 'ev-lungo', title: 'Incontro lungo', startTime: '15:00', endTime: '16:00' }),
+  ];
+
+  const candidate = makeExtractedItem({
+    tempId: 'temp-overlap', title: 'Colloquio col Dirigente', category: 'riunione', date: '2026-10-12',
+    startTime: '15:15', endTime: '15:40',
+  });
+
+  const match = findEventMatch(candidate, events);
+  assert.ok(match);
+  assert.equal(match.kind, 'orario');
+  assert.equal(match.event.id, 'ev-uguale', 'vince lo stesso inizio+fine');
+  assert.equal(match.others, 2, 'gli altri due restano segnalati nel conteggio');
+
+  // Senza corrispondenza esatta di inizio+fine vince lo stesso inizio.
+  const candidate2 = makeExtractedItem({
+    tempId: 'temp-overlap-2', title: 'Colloquio col Dirigente', category: 'riunione', date: '2026-10-12',
+    startTime: '15:00', endTime: '15:45',
+  });
+  const match2 = findEventMatch(candidate2, [
+    makeExisting({ id: 'ev-a', title: 'A', startTime: '15:00', endTime: '18:00' }),
+    makeExisting({ id: 'ev-b', title: 'B', startTime: '15:20', endTime: '15:30' }),
+  ]);
+  assert.equal(match2?.event.id, 'ev-a', 'stesso inizio batte la sovrapposizione più corta');
+  assert.equal(match2?.others, 1);
+
+  // A parità di inizio e fine diversa vince la sovrapposizione più lunga.
+  const match3 = findEventMatch(
+    makeExtractedItem({
+      tempId: 'temp-overlap-3', title: 'Colloquio col Dirigente', category: 'riunione', date: '2026-10-12',
+      startTime: '15:20', endTime: '16:00',
+    }),
+    [
+      makeExisting({ id: 'ev-breve', title: 'Breve', startTime: '15:30', endTime: '15:35' }),
+      makeExisting({ id: 'ev-ampio', title: 'Ampio', startTime: '15:40', endTime: '17:00' }),
+    ]
+  );
+  assert.equal(match3?.event.id, 'ev-ampio', 'sovrapposizione più lunga (20 min contro 5)');
+  assert.equal(match3?.others, 1);
+});
+
+test('27. Il criterio del titolo ha la precedenza su quello dell\'orario', () => {
+  const events = [
+    makeExisting({ id: 'ev-altro', title: 'Incontro con il Dirigente', startTime: '15:00', endTime: '15:45' }),
+    makeExisting({ id: 'ev-titolo', title: 'Colloquio col Dirigente', startTime: '15:10', endTime: '15:20' }),
+  ];
+
+  const candidate = makeExtractedItem({
+    tempId: 'temp-prec', title: 'Colloquio col Dirigente', category: 'riunione', date: '2026-10-12',
+    startTime: '15:05', endTime: '15:50',
+  });
+
+  const match = findEventMatch(candidate, events);
+  assert.ok(match);
+  assert.equal(match.kind, 'titolo');
+  assert.equal(match.event.id, 'ev-titolo', 'anche se l\'altro si sovrappone di più');
 });

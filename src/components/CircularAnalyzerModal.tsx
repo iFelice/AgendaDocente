@@ -38,7 +38,12 @@ import {
   mergeCircularItems,
   CIRCULAR_PDF_WAIT_MESSAGE,
 } from "../services/aiService";
-import { findPossibleEventUpdate, getEventFieldDiff, isIdenticalEventUpdate } from "../utils/eventMatching";
+import {
+  findEventMatch,
+  getEventFieldDiff,
+  isIdenticalEventUpdate,
+  type EventMatchResult,
+} from "../utils/eventMatching";
 
 export type UpdateChoice = "update" | "create" | "ignore";
 
@@ -47,6 +52,20 @@ const CHOICE_BULK_LABELS: Record<UpdateChoice, string> = {
   update: "Aggiorna esistenti",
   create: "Aggiungi come nuovi",
   ignore: "Ignora",
+};
+
+/**
+ * Vero quando l'elemento estratto è IDENTICO all'impegno già in agenda
+ * riconosciuto per TITOLO: in quel caso "Ignora" è preimpostato.
+ * Resta una regola del solo criterio del titolo: un impegno riconosciuto per il
+ * solo orario (nome diverso) chiede sempre una scelta esplicita.
+ */
+const isIdenticalTitleMatch = (
+  item: ExtractedItem,
+  existingEvents: CalendarEvent[] | undefined
+): boolean => {
+  const match = findEventMatch(item, existingEvents);
+  return !!match && match.kind === "titolo" && isIdenticalEventUpdate(match.event, item);
 };
 
 /** Millisecondi per cui resta disponibile l'"Annulla" dopo un'azione in blocco. */
@@ -379,8 +398,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       let changed = false;
       const next = prev.map((it) => {
         if (processedIdenticalRef.current.has(it.tempId)) return it;
-        const match = findPossibleEventUpdate(it, existingEvents);
-        if (!match || !isIdenticalEventUpdate(match, it)) return it;
+        if (!isIdenticalTitleMatch(it, existingEvents)) return it;
         processedIdenticalRef.current.add(it.tempId);
         if (!it.selectedForImport) return it;
         changed = true;
@@ -395,9 +413,10 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     if (!importBlocked) return;
     const stillUnresolved = extractedItems.some((it) => {
       if (!it.selectedForImport) return false;
-      const match = findPossibleEventUpdate(it, existingEvents);
+      const match = findEventMatch(it, existingEvents);
       if (!match) return false;
-      return !updateChoices[it.tempId] && !isIdenticalEventUpdate(match, it);
+      if (updateChoices[it.tempId]) return false;
+      return !(match.kind === "titolo" && isIdenticalEventUpdate(match.event, it));
     });
     if (!stillUnresolved) {
       setImportBlocked(false);
@@ -564,13 +583,20 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
 
   // Conflitti: abbinamento deterministico con un impegno già in agenda, calcolato
   // una sola volta per render e riusato da conteggi, blocco importazione e schede.
-  const matchByTempId = new Map<string, CalendarEvent>();
+  // Due criteri, in ordine di precedenza: "titolo" (possibile aggiornamento) e
+  // "orario" (stesso orario, possibile doppione con un nome diverso).
+  const matchByTempId = new Map<string, EventMatchResult>();
   const identicalConflictIds = new Set<string>();
   for (const it of extractedItems) {
-    const match = findPossibleEventUpdate(it, existingEvents);
+    const match = findEventMatch(it, existingEvents);
     if (!match) continue;
     matchByTempId.set(it.tempId, match);
-    if (isIdenticalEventUpdate(match, it)) identicalConflictIds.add(it.tempId);
+    // L'etichetta "Già in agenda, identico" (che preseleziona "Ignora") resta
+    // una regola del solo criterio del titolo: con lo stesso orario ma un nome
+    // diverso la scelta va sempre richiesta.
+    if (match.kind === "titolo" && isIdenticalEventUpdate(match.event, it)) {
+      identicalConflictIds.add(it.tempId);
+    }
   }
 
   /**
@@ -656,6 +682,14 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   // Conflitti visibili con una scelta esplicita dell'utente: sono i soli che
   // "Cambia per tutti" può sovrascrivere (gli identici invariati restano fuori).
   const overridableVisibleConflicts = visibleConflicts.filter((it) => updateChoices[it.tempId] !== undefined);
+  // Il conteggio distingue i due criteri di riconoscimento: il titolo
+  // ("possibili aggiornamenti") e il solo orario ("stesso orario").
+  const unresolvedTitleConflicts = unresolvedVisibleConflicts.filter(
+    (it) => matchByTempId.get(it.tempId)?.kind === "titolo"
+  );
+  const unresolvedTimeConflicts = unresolvedVisibleConflicts.filter(
+    (it) => matchByTempId.get(it.tempId)?.kind === "orario"
+  );
 
   // Scelta singola su un conflitto: la scelta implica la selezione (punto 1).
   // Una modifica manuale successiva della casella non viene ri-allineata finché
@@ -864,7 +898,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     const updatedEvents: CalendarEvent[] = [];
 
     for (const it of selected) {
-      const match = matchByTempId.get(it.tempId) ?? null;
+      const match = matchByTempId.get(it.tempId)?.event ?? null;
       const choice = match ? choiceOf(it) : undefined;
 
       if (match && choice === "update") {
@@ -1394,8 +1428,20 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                     </>
                   ) : unresolvedVisibleConflicts.length > 0 ? (
                     <>
+                      {/* I due criteri di riconoscimento si contano separati
+                          (es. "5 possibili aggiornamenti · 3 stesso orario"). */}
                       <span className="font-bold whitespace-nowrap">
-                        {unresolvedVisibleConflicts.length} possibili aggiornamenti
+                        {unresolvedTitleConflicts.length > 0 && unresolvedTimeConflicts.length > 0 ? (
+                          <>
+                            {unresolvedTitleConflicts.length} possibili aggiornamenti
+                            <span aria-hidden="true"> · </span>
+                            {unresolvedTimeConflicts.length} stesso orario
+                          </>
+                        ) : unresolvedTitleConflicts.length > 0 ? (
+                          <>{unresolvedTitleConflicts.length} possibili aggiornamenti</>
+                        ) : (
+                          <>{unresolvedTimeConflicts.length} impegni allo stesso orario</>
+                        )}
                       </span>
                       <span aria-hidden="true">·</span>
                       <span className="font-medium">Applica a tutti:</span>
@@ -1493,7 +1539,12 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                     const isVerde = item.relevance === "VERDE";
                     const isGiallo = item.relevance === "GIALLO";
                     const isRosso = item.relevance === "ROSSO";
-                    const match = matchByTempId.get(item.tempId) ?? null;
+                    const matchResult = matchByTempId.get(item.tempId) ?? null;
+                    const match = matchResult?.event ?? null;
+                    // Criterio che ha riconosciuto l'impegno: il titolo
+                    // ("possibile aggiornamento") o il solo orario.
+                    const matchKind = matchResult?.kind ?? null;
+                    const otherSameTimeCount = matchResult?.kind === "orario" ? matchResult.others : 0;
                     const diff = match ? getEventFieldDiff(match, item) : null;
                     const choice = choiceOf(item);
                     const isIdenticalConflict = identicalConflictIds.has(item.tempId);
@@ -1629,12 +1680,17 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                                 </div>
                               )}
 
-                              {/* Possibile aggiornamento di un impegno esistente */}
+                              {/* Impegno già in agenda riconosciuto per titolo
+                                  (possibile aggiornamento) o per orario. */}
                               {match && diff && (
                                 <div className="mt-3 p-3 rounded-xl border border-amber-300 bg-amber-50/70 space-y-3">
                                   <div className="flex flex-wrap items-center gap-1.5 text-xs font-bold text-amber-900">
                                     <RefreshCw className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                                    <span>Possibile aggiornamento di un impegno esistente</span>
+                                    <span>
+                                      {matchKind === "orario"
+                                        ? "Stesso orario di un impegno già in agenda"
+                                        : "Possibile aggiornamento di un impegno esistente"}
+                                    </span>
                                     {isIdenticalConflict && (
                                       <span
                                         title="L'impegno estratto non porta alcuna differenza rispetto a quanto già in agenda"
@@ -1644,6 +1700,23 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                                       </span>
                                     )}
                                   </div>
+
+                                  {/* Riconosciuto per orario: può essere lo stesso
+                                      impegno della circolare con un nome diverso. */}
+                                  {matchKind === "orario" && (
+                                    <p className="text-[11px] leading-snug text-amber-900">
+                                      In agenda c'è già un impegno a quest'ora: potrebbe essere lo
+                                      stesso della circolare, con un nome diverso.
+                                      {otherSameTimeCount > 0 && (
+                                        <span className="font-semibold">
+                                          {" "}
+                                          {otherSameTimeCount === 1
+                                            ? "Ce n'è anche un altro alla stessa ora."
+                                            : `E altri ${otherSameTimeCount} alla stessa ora.`}
+                                        </span>
+                                      )}
+                                    </p>
+                                  )}
 
                                   {/* Confronto compatto mobile-first */}
                                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
