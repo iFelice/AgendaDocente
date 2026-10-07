@@ -228,14 +228,9 @@ const ORDINAL_GRADE_LABEL: Record<number, string> = { 1: '1°', 2: '2°', 3: '3�
  */
 function supportGradeReason(matchedGrades: number[]): string {
   const sorted = Array.from(new Set(matchedGrades)).sort((a, b) => a - b);
-  if (sorted.length === 1) {
-    return `Pertinente per il ${ORDINAL_GRADE_LABEL[sorted[0]] ?? `${sorted[0]}°`} anno, in cui il docente ha una classe assegnata.`;
-  }
-  const labels = sorted.map(g => ORDINAL_GRADE_LABEL[g] ?? `${g}°`);
-  const joined = labels.length === 2
-    ? `${labels[0]} e ${labels[1]}`
-    : `${labels.slice(0, -1).join(', ')} e ${labels[labels.length - 1]}`;
-  return `Pertinente per le classi del ${joined} anno assegnate al docente di sostegno.`;
+  return sorted.length === 1
+    ? relevanceReasonTemplates.supportGradeSingular.format(sorted[0])
+    : relevanceReasonTemplates.supportGradePlural.format(sorted);
 }
 
 export interface RelevanceEvaluation {
@@ -319,6 +314,105 @@ const SUBJECT_SIGLE: Record<string, { label: string; subjects: string[] }> = {
   L2: { label: "lingue straniere", subjects: ["inglese", "francese", "spagnolo", "tedesco", "lingue straniere"] },
   STRUM: { label: "strumento musicale", subjects: ["strumento musicale"] },
 };
+
+function formatSubjectSigla(match: Pick<SubjectSiglaMatch, "sigla" | "label">): string {
+  return `${match.sigla} (${match.label})`;
+}
+
+type RelevanceReasonVariable = {
+  pattern: string;
+  format(value: unknown): string;
+};
+
+type RelevanceReasonTemplate = {
+  format(...values: unknown[]): string;
+  matches(text: string): boolean;
+};
+
+function relevanceReasonVariable<Value>(pattern: string, format: (value: Value) => string): RelevanceReasonVariable {
+  return { pattern, format: value => format(value as Value) };
+}
+
+const REGEXP_META_CHARACTERS = new Set([".", "*", "+", "?", "^", "$", "{", "}", "(", ")", "|", "[", "]"]);
+
+function escapeRegExp(value: string): string {
+  return Array.from(value, character => REGEXP_META_CHARACTERS.has(character) ? `\\${character}` : character).join("");
+}
+
+/**
+ * Una definizione è sia il generatore sia il matcher: i segmenti letterali del
+ * template vengono compilati in un'espressione ancorata e gli slot dichiarano
+ * il formato dei soli valori variabili. Così ogni motivo generato è riconosciuto
+ * come stringa intera, senza mantenere una seconda lista di frasi.
+ */
+function defineRelevanceReason(strings: TemplateStringsArray, ...variables: RelevanceReasonVariable[]): RelevanceReasonTemplate {
+  if (strings.length !== variables.length + 1) throw new Error("Template motivo di pertinenza non valido.");
+  let pattern = "^";
+  for (let index = 0; index < strings.length; index++) {
+    pattern += escapeRegExp(strings[index]);
+    if (variables[index]) pattern += `(?:${variables[index].pattern})`;
+  }
+  const matcher = new RegExp(`${pattern}$`);
+
+  return {
+    format: (...values) => {
+      if (values.length !== variables.length) throw new Error("Valori motivo di pertinenza non validi.");
+      return strings.reduce((text, literal, index) =>
+        text + literal + (variables[index] ? variables[index].format(values[index]) : ""), "");
+    },
+    matches: text => matcher.exec(text)?.[0] === text,
+  };
+}
+
+const REASON_CLASS_PATTERN = String.raw`[1-5][A-Z]`;
+const REASON_CLASS_LIST_PATTERN = `${REASON_CLASS_PATTERN}(?:, ${REASON_CLASS_PATTERN})*`;
+const REASON_GRADE_PATTERN = String.raw`[1-5]°`;
+const REASON_GRADE_LIST_PATTERN = `${REASON_GRADE_PATTERN}(?:, ${REASON_GRADE_PATTERN})* e ${REASON_GRADE_PATTERN}`;
+const REASON_SUBJECT_PATTERN = ".+";
+const REASON_SIGLA_ATOM_PATTERN = Object.entries(SUBJECT_SIGLE)
+  .map(([sigla, value]) => escapeRegExp(formatSubjectSigla({ sigla, label: value.label })))
+  .join("|");
+const REASON_SIGLA_LIST_PATTERN = `(?:${REASON_SIGLA_ATOM_PATTERN})(?:, (?:${REASON_SIGLA_ATOM_PATTERN}))*`;
+
+const reasonClassList = relevanceReasonVariable<readonly string[]>(REASON_CLASS_LIST_PATTERN, classes => classes.join(", "));
+const reasonGrade = relevanceReasonVariable<number>(REASON_GRADE_PATTERN, grade => ORDINAL_GRADE_LABEL[grade] ?? `${grade}°`);
+const reasonGradeList = relevanceReasonVariable<readonly number[]>(REASON_GRADE_LIST_PATTERN, grades => {
+  const labels = grades.map(grade => ORDINAL_GRADE_LABEL[grade] ?? `${grade}°`);
+  return labels.length === 2
+    ? `${labels[0]} e ${labels[1]}`
+    : `${labels.slice(0, -1).join(", ")} e ${labels[labels.length - 1]}`;
+});
+const reasonSubjectList = relevanceReasonVariable<string>(REASON_SUBJECT_PATTERN, value => value);
+const reasonSiglaList = relevanceReasonVariable<readonly SubjectSiglaMatch[]>(REASON_SIGLA_LIST_PATTERN,
+  matches => matches.map(formatSubjectSigla).join(", "));
+
+const relevanceReasonTemplates = {
+  otherSchool: defineRelevanceReason`Destinato a un altro ordine scolastico.`,
+  staff: defineRelevanceReason`Riservato allo staff di dirigenza.`,
+  coordinators: defineRelevanceReason`Riservato ai coordinatori delle classi indicate.`,
+  unassignedClasses: defineRelevanceReason`Destinato alle classi ${reasonClassList}, non assegnate al docente.`,
+  otherGrade: defineRelevanceReason`Destinato a un altro anno di corso.`,
+  supportGradeSingular: defineRelevanceReason`Pertinente per il ${reasonGrade} anno, in cui il docente ha una classe assegnata.`,
+  supportGradePlural: defineRelevanceReason`Pertinente per le classi del ${reasonGradeList} anno assegnate al docente di sostegno.`,
+  supportClass: defineRelevanceReason`Pertinente per ${reasonClassList}; docente di sostegno della classe.`,
+  otherSubject: defineRelevanceReason`Destinato ad altra materia: ${reasonSubjectList}.`,
+  optional: defineRelevanceReason`Partecipazione facoltativa o subordinata ad altri impegni.`,
+  relevantClasses: defineRelevanceReason`Pertinente per ${reasonClassList}.`,
+  relevantClassesAndSubject: defineRelevanceReason`Pertinente per ${reasonClassList} e per la materia del docente.`,
+  subjectSigle: defineRelevanceReason`Destinatari per materia: ${reasonSiglaList} — pertinente per la materia del docente.`,
+  subject: defineRelevanceReason`Pertinente per la materia del docente.`,
+  allTeachers: defineRelevanceReason`Destinato a tutti i docenti.`,
+  verifyGroup: defineRelevanceReason`Verifica materia o appartenenza al gruppo prima di importare.`,
+  relevantSchoolLevel: defineRelevanceReason`Ordine scolastico pertinente: verifica i destinatari dell'attività.`,
+  unspecifiedRecipients: defineRelevanceReason`Destinatari non sufficientemente specificati: verifica la pertinenza.`,
+};
+
+const allRelevanceReasonTemplates = Object.values(relevanceReasonTemplates);
+
+/** Riconosce in modo esatto e case-sensitive tutti i motivi prodotti dal valutatore. */
+export function isRelevanceReasonText(text: string): boolean {
+  return typeof text === "string" && allRelevanceReasonTemplates.some(template => template.matches(text));
+}
 
 // Token maiuscolo isolato: i lookaround vietano lettere/cifre adiacenti, così la
 // sigla non può stare dentro una parola più lunga; trattino, barra, virgola,
@@ -425,11 +519,11 @@ export function evaluateItemRelevance(
     /\bssig\b|secondaria di (?:primo|i|1[°º]?) grado/.test(lower) ? 'ssig' : '',
     /\bssiig\b|secondaria di (?:secondo|ii|2[°º]?) grado/.test(lower) ? 'ssiig' : '',
   ].filter(Boolean);
-  if (levels.length && profile.schoolLevel && !levels.includes(profile.schoolLevel)) return result('ROSSO', "Destinato a un altro ordine scolastico.");
-  if (/staff|collaboratori del dirigente/.test(lower) && !(profile.roles || []).some(r => r.role === 'collaboratore_dirigente' || /staff|dirigent/i.test(`${r.description || ''} ${r.label || ''}`))) return result('ROSSO', "Riservato allo staff di dirigenza.");
-  if (/riservat[oaie].*coordinator|soli coordinatori/.test(lower) && !(profile.roles || []).some(r => r.role === 'coordinatore' && (!r.targetClass || matched.includes(r.targetClass)))) return result('ROSSO', "Riservato ai coordinatori delle classi indicate.");
-  if (detected.length && !matched.length) return result('ROSSO', `Destinato alle classi ${detected.join(', ')}, non assegnate al docente.`);
-  if (grades.length && !matchedGrades.length) return result('ROSSO', "Destinato a un altro anno di corso.");
+  if (levels.length && profile.schoolLevel && !levels.includes(profile.schoolLevel)) return result('ROSSO', relevanceReasonTemplates.otherSchool.format());
+  if (/staff|collaboratori del dirigente/.test(lower) && !(profile.roles || []).some(r => r.role === 'collaboratore_dirigente' || /staff|dirigent/i.test(`${r.description || ''} ${r.label || ''}`))) return result('ROSSO', relevanceReasonTemplates.staff.format());
+  if (/riservat[oaie].*coordinator|soli coordinatori/.test(lower) && !(profile.roles || []).some(r => r.role === 'coordinatore' && (!r.targetClass || matched.includes(r.targetClass)))) return result('ROSSO', relevanceReasonTemplates.coordinators.format());
+  if (detected.length && !matched.length) return result('ROSSO', relevanceReasonTemplates.unassignedClasses.format(detected));
+  if (grades.length && !matchedGrades.length) return result('ROSSO', relevanceReasonTemplates.otherGrade.format());
 
   const subjects = detectSubjects(recognitionText, profile);
   const explicitSubjects = (item.subject || '').split(/[,;]/).map(s => s.trim()).filter(s => s && !isGenericSubject(s)).flatMap(part => {
@@ -446,7 +540,6 @@ export function evaluateItemRelevance(
   // Sigle materie leggibili nell'evidenza (es. "SOS (sostegno)"): il motivo
   // mostrato al docente cita la sigla così com'era scritta nel documento.
   const sigleRead = detectSubjectSigle(recognitionText);
-  const citesSigla = (m: SubjectSiglaMatch) => `${m.sigla} (${m.label})`;
   if (targetedSubjects.length && !targetedSubjects.some(s => ownSubjects.includes(s))) {
     // Per un docente di sostegno, una classe o un anno di corso già riconosciuti come
     // pertinenti (vedi i due controlli sopra) restano pertinenti anche quando l'attività
@@ -455,33 +548,34 @@ export function evaluateItemRelevance(
     // curricolari, il cui filtro materia non cambia).
     const supportRelevantByClassOrGrade = isSupportTeacherOf(profile) && (matched.length > 0 || matchedGrades.length > 0);
     if (supportRelevantByClassOrGrade) {
-      const reason = matched.length
-        ? `Pertinente per ${matched.join(', ')}; docente di sostegno della classe.`
-        : supportGradeReason(matchedGrades);
-      return result('VERDE', reason);
+      return result('VERDE', matched.length
+        ? relevanceReasonTemplates.supportClass.format(matched)
+        : supportGradeReason(matchedGrades));
     }
     // Con sigle riconosciute il motivo le cita come lette ("MAT (matematica)"),
     // altrimenti resta l'elenco delle materie per esteso.
     const citedSigle = sigleRead.filter(({ subjects: expanded }) => expanded.some(s => targetedSubjects.includes(s)));
     const citedKeys = new Set(citedSigle.flatMap(({ subjects: expanded }) => expanded));
     const subjectList = citedSigle.length
-      ? [...citedSigle.map(citesSigla), ...targetedSubjects.filter(s => !citedKeys.has(s))].join(', ')
+      ? [...citedSigle.map(formatSubjectSigla), ...targetedSubjects.filter(s => !citedKeys.has(s))].join(', ')
       : targetedSubjects.join(', ');
-    return result('ROSSO', `Destinato ad altra materia: ${subjectList}.`);
+    return result('ROSSO', relevanceReasonTemplates.otherSubject.format(subjectList));
   }
-  if (/facoltativ|chi non impegnato/.test(lower)) return result('GIALLO', "Partecipazione facoltativa o subordinata ad altri impegni.");
-  if (matched.length) return result('VERDE', `Pertinente per ${matched.join(', ')}${targetedSubjects.length ? ' e per la materia del docente' : ''}.`);
+  if (/facoltativ|chi non impegnato/.test(lower)) return result('GIALLO', relevanceReasonTemplates.optional.format());
+  if (matched.length) return result('VERDE', targetedSubjects.length
+    ? relevanceReasonTemplates.relevantClassesAndSubject.format(matched)
+    : relevanceReasonTemplates.relevantClasses.format(matched));
   if (targetedSubjects.some(s => ownSubjects.includes(s))) {
     const matchedSigle = sigleRead.filter(({ subjects: expanded }) => expanded.some(s => ownSubjects.includes(s) && targetedSubjects.includes(s)));
     return result('VERDE', matchedSigle.length
-      ? `Destinatari per materia: ${matchedSigle.map(citesSigla).join(', ')} — pertinente per la materia del docente.`
-      : "Pertinente per la materia del docente.");
+      ? relevanceReasonTemplates.subjectSigle.format(matchedSigle)
+      : relevanceReasonTemplates.subject.format());
   }
-  if (item.category === 'collegio_docenti' || /tutti i docenti|docenti\s*[:=]?\s*tutti|collegio docenti/.test(lower)) return result('VERDE', "Destinato a tutti i docenti.");
+  if (item.category === 'collegio_docenti' || /tutti i docenti|docenti\s*[:=]?\s*tutti|collegio docenti/.test(lower)) return result('VERDE', relevanceReasonTemplates.allTeachers.format());
   // A school level alone does not prove membership of a department or commission.
-  if (/dipartiment|commission/.test(lower)) return result('GIALLO', "Verifica materia o appartenenza al gruppo prima di importare.");
-  if (levels.length) return result('GIALLO', "Ordine scolastico pertinente: verifica i destinatari dell'attività.");
-  return result('GIALLO', "Destinatari non sufficientemente specificati: verifica la pertinenza.");
+  if (/dipartiment|commission/.test(lower)) return result('GIALLO', relevanceReasonTemplates.verifyGroup.format());
+  if (levels.length) return result('GIALLO', relevanceReasonTemplates.relevantSchoolLevel.format());
+  return result('GIALLO', relevanceReasonTemplates.unspecifiedRecipients.format());
 }
 
 const GRADE_TO_ROMAN: Record<number, string> = { 1: 'I', 2: 'II', 3: 'III', 4: 'IV', 5: 'V' };
