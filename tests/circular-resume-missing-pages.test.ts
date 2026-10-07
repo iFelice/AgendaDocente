@@ -19,8 +19,11 @@ import { CircularAnalyzerModal } from '../src/components/CircularAnalyzerModal';
 import {
   circularItemKey,
   circularPartialNotice,
+  circularTotalPagesFromNotice,
   mergeCircularItems,
   sanitizeUnanalyzedPages,
+  CIRCULAR_AUTO_RESUME_DELAY_MS,
+  CIRCULAR_AUTO_RESUME_MAX_ATTEMPTS,
 } from '../src/services/aiService';
 import type { ExtractedItem, TeacherProfile } from '../src/types';
 
@@ -38,7 +41,7 @@ function item(title: string, extra: Record<string, unknown> = {}) {
   return { title, category: 'riunione', date: '2026-12-10', startTime: '09:00', endTime: '11:00', ...extra };
 }
 
-interface ServerReply { items: any[]; unanalyzedPages?: number[]; notice?: string; status?: number; error?: string }
+interface ServerReply { items: any[]; unanalyzedPages?: number[]; notice?: string; status?: number; error?: string; errorCode?: string }
 
 interface Capture { body: any }
 
@@ -54,7 +57,7 @@ function mockServer(replies: ServerReply[]): Capture[] {
     const reply = replies[Math.min(call, replies.length - 1)];
     call += 1;
     if (reply.status && reply.status >= 400) {
-      return new Response(JSON.stringify({ success: false, items: [], error: reply.error, errorCode: 'AI_UNAVAILABLE' }), {
+      return new Response(JSON.stringify({ success: false, items: [], error: reply.error, errorCode: reply.errorCode ?? 'AI_UNAVAILABLE' }), {
         status: reply.status, headers: { 'Content-Type': 'application/json' },
       });
     }
@@ -76,8 +79,31 @@ function textOf(node: any): string {
 const retryButton = (root: any) =>
   root.findAll((n: any) => n.type === 'button' && n.props?.id === 'btn-retry-missing-pages')[0];
 
+const stopAutoResumeButton = (root: any) =>
+  root.findAll((n: any) => n.type === 'button' && n.props?.id === 'btn-stop-auto-resume')[0];
+
+/** Accelera solo i timer da 4 secondi, registrandoli per verificare la pausa prevista. */
+function accelerateAutomaticResumeDelays() {
+  const originalSetTimeout = globalThis.setTimeout;
+  const scheduledDelays: number[] = [];
+  globalThis.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: any[]) => {
+    const delay = Number(timeout ?? 0);
+    if (delay === CIRCULAR_AUTO_RESUME_DELAY_MS) {
+      scheduledDelays.push(delay);
+      return originalSetTimeout(handler, 0, ...args);
+    }
+    return originalSetTimeout(handler, timeout, ...args);
+  }) as typeof setTimeout;
+  return {
+    scheduledDelays,
+    restore: () => { globalThis.setTimeout = originalSetTimeout; },
+  };
+}
+
 const scrollContainer = (root: any) =>
-  root.findAll((n: any) => n.type === 'div' && typeof n.props.onScroll === 'function')[0];
+  root.findAll((n: any) => n.type === 'div'
+    && typeof n.props.onScroll === 'function'
+    && /overflow-y-auto/.test(n.props.className ?? ''))[0];
 
 const titleInputs = (root: any) =>
   scrollContainer(root).findAll((n: any) => n.type === 'input' && n.props.type === 'text' && !n.props.placeholder);
@@ -168,41 +194,56 @@ test('unanalyzedPages malformato non produce mai una ripresa che il server rifiu
   assert.deepEqual(sanitizeUnanalyzedPages([5, 2, 2, 0]), [2, 5]);
 });
 
-test('l\'avviso parziale è ricalcolato dalle pagine ancora mancanti', () => {
-  assert.match(circularPartialNotice([4, 5]), /pagine non analizzate: 4, 5/);
-  assert.match(circularPartialNotice([4]), /pagina non analizzata: 4/);
+test('notice server: il totale si ricava una volta e l\'avviso client ha singolare e plurale', () => {
+  assert.equal(circularTotalPagesFromNotice('Analisi parziale: pagine non analizzate: 3, 5 (su 7).'), 7);
+  assert.equal(circularTotalPagesFromNotice('Avviso privo del totale'), undefined);
+  assert.equal(circularPartialNotice([7], 7), 'Manca 1 pagina su 7: la 7.');
+  assert.equal(circularPartialNotice([5, 3], 7), 'Mancano 2 pagine su 7: la 3 e la 5.');
+  assert.equal(circularPartialNotice([1, 3, 5], 7), 'Mancano 3 pagine su 7: la 1, la 3 e la 5.');
 });
 
 // ---------------------------------------------------------------------------
-// 2. Comparsa del pulsante
+// 2. Ripresa automatica, arresti e conservazione dei risultati
 // ---------------------------------------------------------------------------
 
-test('analisi parziale: accanto all\'avviso compare "Riprova le pagine mancanti"', async () => {
-  mockServer([{
-    items: [item('Collegio pagina 1'), item('Dipartimento pagina 2', { date: '2026-12-11' })],
-    unanalyzedPages: [4, 5],
-    notice: 'Analisi parziale: pagine non analizzate: 4, 5 (su 5). Controllale nel documento originale.',
-  }]);
+test('dopo una risposta parziale la ripresa parte da sola e chiede solo le pagine mancanti', async () => {
+  const captured = mockServer([
+    {
+      items: [item('Collegio pagina 1')],
+      unanalyzedPages: [4, 5],
+      notice: 'Analisi parziale: pagine non analizzate: 4, 5 (su 5). Controllale nel documento originale.',
+    },
+    { items: [item('Riunione pagina 4', { date: '2026-12-14' }), item('Riunione pagina 5', { date: '2026-12-15' })] },
+  ]);
   const renderer = await renderPdfAnalysis();
-  const visible = textOf(renderer.root);
-  assert.match(visible, /pagine non analizzate: 4, 5/);
-  const button = retryButton(renderer.root);
-  assert.ok(button, 'il pulsante di ripresa deve comparire');
-  assert.match(textOf(button), /Riprova le pagine mancanti/);
-  assert.equal(button.props.disabled, false);
+  try {
+    assert.equal(captured.length, 2, 'la seconda richiesta parte senza clic manuale');
+    assert.equal(captured[0].body.pages, undefined, 'la prima analisi non chiede pagine specifiche');
+    assert.equal(captured[1].body.imageBase64, 'QUJD', 'viene rimandato lo stesso file');
+    assert.equal(captured[1].body.mimeType, 'application/pdf');
+    assert.deepEqual(captured[1].body.pages, [4, 5]);
+    assert.deepEqual(visibleTitles(renderer.root), ['Collegio pagina 1', 'Riunione pagina 4', 'Riunione pagina 5']);
+    assert.equal(stopAutoResumeButton(renderer.root), undefined, 'il ciclo termina quando non mancano più pagine');
+    assert.equal(retryButton(renderer.root), undefined, 'non resta una ripresa manuale se l\'analisi è completa');
+  } finally {
+    await act(async () => renderer.unmount());
+  }
 });
 
-test('analisi completa: nessun avviso e nessun pulsante di ripresa', async () => {
-  mockServer([{ items: [item('Collegio pagina 1')] }]);
+test('analisi completa: non avvia riprese e non mostra un avviso', async () => {
+  const captured = mockServer([{ items: [item('Collegio pagina 1')] }]);
   const renderer = await renderPdfAnalysis();
-  assert.equal(retryButton(renderer.root), undefined);
-  assert.doesNotMatch(textOf(renderer.root), /pagine non analizzate/);
+  try {
+    assert.equal(captured.length, 1);
+    assert.equal(retryButton(renderer.root), undefined);
+    assert.equal(stopAutoResumeButton(renderer.root), undefined);
+    assert.doesNotMatch(textOf(renderer.root), /pagine non analizzate/);
+  } finally {
+    await act(async () => renderer.unmount());
+  }
 });
 
-test('finestra riaperta senza file: resta il solo avviso, nessun pulsante', async () => {
-  // Nessun initialFile: l'analisi parte dal testo incollato, il PDF non è più
-  // in memoria. Un avviso di analisi parziale non deve offrire una ripresa
-  // che il client non può eseguire.
+test('finestra senza file: resta l\'avviso ma non parte né compare una ripresa', async () => {
   mockServer([{
     items: [item('Collegio pagina 1')],
     unanalyzedPages: [3],
@@ -215,185 +256,166 @@ test('finestra riaperta senza file: resta il solo avviso, nessun pulsante', asyn
       initialInputMode: 'text' as const,
     }));
   });
-  const textarea = renderer.root.findAll((n: any) => n.type === 'textarea')[0];
-  await act(async () => { textarea.props.onChange({ target: { value: 'Testo della circolare incollato dall\'utente.' } }); });
-  const run = renderer.root.findAll((n: any) => n.type === 'button' && n.props?.id === 'btn-run-analysis')[0];
-  await act(async () => { run.props.onClick(); await new Promise((r) => setTimeout(r, 60)); });
+  try {
+    const textarea = renderer.root.findAll((n: any) => n.type === 'textarea')[0];
+    await act(async () => { textarea.props.onChange({ target: { value: 'Testo della circolare incollato dall\'utente.' } }); });
+    const run = renderer.root.findAll((n: any) => n.type === 'button' && n.props?.id === 'btn-run-analysis')[0];
+    await act(async () => { run.props.onClick(); await new Promise((r) => setTimeout(r, 60)); });
 
-  assert.match(textOf(renderer.root), /pagine non analizzate: 3/);
-  assert.equal(retryButton(renderer.root), undefined, 'senza file in memoria il pulsante non compare');
+    assert.match(textOf(renderer.root), /Manca 1 pagina su 3: la 3\./);
+    assert.equal(retryButton(renderer.root), undefined, 'senza file in memoria non compare il pulsante');
+    assert.equal(stopAutoResumeButton(renderer.root), undefined);
+  } finally {
+    await act(async () => renderer.unmount());
+  }
 });
 
-// ---------------------------------------------------------------------------
-// 3. Ripresa: richiesta, unione, aggiornamento dell'avviso
-// ---------------------------------------------------------------------------
-
-test('il clic rimanda lo stesso file chiedendo SOLO le pagine mancanti', async () => {
-  const captured = mockServer([
-    {
-      items: [item('Collegio pagina 1')],
-      unanalyzedPages: [4, 5],
-      notice: 'Analisi parziale: pagine non analizzate: 4, 5 (su 5). Controllale nel documento originale.',
-    },
-    { items: [item('Riunione pagina 4', { date: '2026-12-14' }), item('Riunione pagina 5', { date: '2026-12-15' })] },
-  ]);
-  const renderer = await renderPdfAnalysis();
-  await click(retryButton(renderer.root));
-  await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
-
-  assert.equal(captured.length, 2);
-  assert.equal(captured[1].body.imageBase64, 'QUJD', 'lo stesso file, ancora in memoria');
-  assert.equal(captured[1].body.mimeType, 'application/pdf');
-  assert.deepEqual(captured[1].body.pages, [4, 5]);
-  assert.equal(captured[0].body.pages, undefined, 'la prima analisi non chiede pagine specifiche');
-});
-
-test('i nuovi impegni si aggiungono: modifiche, selezioni ed eliminazioni restano intatte', async () => {
-  mockServer([
-    {
-      items: [item('Collegio pagina 1'), item('Dipartimento pagina 2', { date: '2026-12-11' }), item('Da eliminare', { date: '2026-12-12' })],
-      unanalyzedPages: [4],
-      notice: 'Analisi parziale: pagine non analizzate: 4 (su 4). Controllale nel documento originale.',
-    },
-    { items: [item('Riunione pagina 4', { date: '2026-12-14' })] },
-  ]);
-  const renderer = await renderPdfAnalysis();
-  const root = renderer.root;
-  assert.deepEqual(visibleTitles(root), ['Collegio pagina 1', 'Dipartimento pagina 2', 'Da eliminare']);
-
-  // L'utente lavora sui risultati: modifica un titolo, seleziona una riga, ne elimina un'altra.
-  await act(async () => { titleInputs(root)[0].props.onChange({ target: { value: 'Collegio CORRETTO a mano' } }); });
-  await act(async () => { checkboxes(root)[1].props.onChange(); });
-  await click(deleteButtons(root)[2]);
-  assert.deepEqual(visibleTitles(root), ['Collegio CORRETTO a mano', 'Dipartimento pagina 2']);
-  assert.deepEqual(checkboxes(root).map((c: any) => c.props.checked), [false, true]);
-
-  await click(retryButton(root));
-  await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
-
-  // La pagina ripresa si AGGIUNGE in coda: niente è stato sostituito o riordinato.
-  assert.deepEqual(visibleTitles(root), ['Collegio CORRETTO a mano', 'Dipartimento pagina 2', 'Riunione pagina 4']);
-  assert.deepEqual(checkboxes(root).map((c: any) => c.props.checked), [false, true, false]);
-  assert.ok(!textOf(root).includes('Da eliminare'), 'una riga eliminata non torna indietro');
-});
-
-test('ripresa senza nuovi impegni distinti: nessun duplicato in elenco', async () => {
-  mockServer([
-    {
-      items: [item('Collegio pagina 1')],
-      unanalyzedPages: [2],
-      notice: 'Analisi parziale: pagine non analizzate: 2 (su 2). Controllale nel documento originale.',
-    },
-    // La pagina 2 ripete lo stesso impegno della pagina 1 (tabella a cavallo).
-    { items: [item('Collegio pagina 1'), item('Novità pagina 2', { date: '2026-12-13' })] },
-  ]);
-  const renderer = await renderPdfAnalysis();
-  await click(retryButton(renderer.root));
-  await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
-  assert.deepEqual(visibleTitles(renderer.root), ['Collegio pagina 1', 'Novità pagina 2']);
-});
-
-test('ripresa riuscita: avviso e pulsante spariscono quando le pagine mancanti sono zero', async () => {
-  mockServer([
-    {
-      items: [item('Collegio pagina 1')],
-      unanalyzedPages: [3],
-      notice: 'Analisi parziale: pagine non analizzate: 3 (su 3). Controllale nel documento originale.',
-    },
-    { items: [item('Riunione pagina 3', { date: '2026-12-13' })] },
-  ]);
-  const renderer = await renderPdfAnalysis();
-  assert.ok(retryButton(renderer.root));
-  await click(retryButton(renderer.root));
-  await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
-
-  assert.equal(retryButton(renderer.root), undefined, 'il pulsante sparisce');
-  assert.doesNotMatch(textOf(renderer.root), /pagine non analizzate/);
-  assert.doesNotMatch(textOf(renderer.root), /pagina non analizzata/);
-});
-
-test('ripresa parziale: avviso e pulsante restano, aggiornati alle sole pagine ancora mancanti', async () => {
-  const captured = mockServer([
-    {
-      items: [item('Collegio pagina 1')],
-      unanalyzedPages: [4, 5, 6],
-      notice: 'Analisi parziale: pagine non analizzate: 4, 5, 6 (su 6). Controllale nel documento originale.',
-    },
-    { items: [item('Riunione pagina 4', { date: '2026-12-14' })], unanalyzedPages: [5, 6] },
-    { items: [item('Riunione pagina 5', { date: '2026-12-15' })], unanalyzedPages: [6] },
-  ]);
-  const renderer = await renderPdfAnalysis();
-  await click(retryButton(renderer.root));
-  await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
-
-  let visible = textOf(renderer.root);
-  assert.match(visible, /pagine non analizzate: 5, 6/);
-  assert.doesNotMatch(visible, /pagine non analizzate: 4, 5, 6/);
-  assert.ok(retryButton(renderer.root), 'il pulsante resta finché mancano pagine');
-
-  await click(retryButton(renderer.root));
-  await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
-
-  visible = textOf(renderer.root);
-  assert.match(visible, /pagina non analizzata: 6/);
-  assert.deepEqual(captured[1].body.pages, [4, 5, 6]);
-  assert.deepEqual(captured[2].body.pages, [5, 6]);
-  assert.deepEqual(visibleTitles(renderer.root), ['Collegio pagina 1', 'Riunione pagina 4', 'Riunione pagina 5']);
-});
-
-// ---------------------------------------------------------------------------
-// 4. Stato di caricamento e fallimento della ripresa
-// ---------------------------------------------------------------------------
-
-test('durante la ripresa i risultati restano visibili e il pulsante è disabilitato', async () => {
-  let release: (() => void) | null = null;
-  const gate = new Promise<void>((resolve) => { release = resolve; });
+test('tentativi automatici: notice aggiornato, risultati utilizzabili e modifiche utente conservate', async () => {
+  const accelerated = accelerateAutomaticResumeDelays();
+  const captured: Capture[] = [];
   let call = 0;
-  globalThis.fetch = (async () => {
-    call += 1;
-    if (call === 1) {
+  let releaseFirst: (() => void) | null = null;
+  let releaseSecond: (() => void) | null = null;
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
+  const jsonResponse = (body: any) => new Response(JSON.stringify(body), {
+    status: 200, headers: { 'Content-Type': 'application/json' },
+  });
+  globalThis.fetch = (async (_url: any, init?: RequestInit) => {
+    captured.push({ body: JSON.parse(String(init?.body ?? '{}')) });
+    const current = call++;
+    if (current === 0) {
+      return jsonResponse({
+        success: true, source: 'server',
+        items: [item('Collegio pagina 1'), item('Dipartimento pagina 2', { date: '2026-12-11' }), item('Da eliminare', { date: '2026-12-12' })],
+        unanalyzedPages: [4, 5], notice: 'Analisi parziale: pagine non analizzate: 4, 5 (su 5).',
+      });
+    }
+    if (current === 1) {
+      await firstGate;
+      return jsonResponse({
+        success: true, source: 'server', items: [item('Riunione pagina 4', { date: '2026-12-14' })],
+        unanalyzedPages: [5], notice: 'Analisi parziale: pagine non analizzate: 5 (su 2).',
+      });
+    }
+    await secondGate;
+    return jsonResponse({
+      success: true, source: 'server', items: [item('Riunione pagina 5', { date: '2026-12-15' })],
+    });
+  }) as typeof fetch;
+
+  let renderer: any;
+  try {
+    renderer = await renderPdfAnalysis();
+    const root = renderer.root;
+    assert.equal(captured.length, 2, 'il primo tentativo automatico è partito senza clic');
+    assert.deepEqual(captured[1].body.pages, [4, 5]);
+    assert.match(textOf(root), /Mancano 2 pagine su 5: la 4 e la 5\./, 'avviso plurale iniziale');
+    assert.match(textOf(root), /Rileggo le pagine mancanti · tentativo 1 di 3/);
+    assert.ok(stopAutoResumeButton(root), 'Interrompi è disponibile durante la richiesta');
+    assert.equal(retryButton(root), undefined, 'il pulsante manuale non compete con il ciclo automatico');
+
+    // Durante la richiesta, i risultati già arrivati restano modificabili.
+    await act(async () => { titleInputs(root)[0].props.onChange({ target: { value: 'Collegio CORRETTO a mano' } }); });
+    await act(async () => { checkboxes(root)[1].props.onChange(); });
+    await click(deleteButtons(root)[2]);
+    assert.deepEqual(checkboxes(root).map((checkbox: any) => checkbox.props.checked), [false, true]);
+
+    // La prima ripresa lascia la pagina 5 mancante: dopo 4 secondi parte il secondo giro.
+    await act(async () => { releaseFirst!(); await new Promise((resolve) => setTimeout(resolve, 30)); });
+    assert.equal(captured.length, 3);
+    assert.deepEqual(captured[2].body.pages, [5]);
+    assert.match(textOf(root), /Manca 1 pagina su 5: la 5\./, 'avviso aggiornato mantenendo il totale della prima risposta');
+    assert.match(textOf(root), /Rileggo le pagine mancanti · tentativo 2 di 3/);
+    assert.ok(stopAutoResumeButton(root));
+
+    await act(async () => { releaseSecond!(); await new Promise((resolve) => setTimeout(resolve, 30)); });
+    assert.deepEqual(visibleTitles(root), [
+      'Collegio CORRETTO a mano', 'Dipartimento pagina 2', 'Riunione pagina 4', 'Riunione pagina 5',
+    ]);
+    assert.deepEqual(checkboxes(root).map((checkbox: any) => checkbox.props.checked), [false, true, false, false]);
+    assert.ok(!textOf(root).includes('Da eliminare'), 'una riga eliminata non viene ripristinata');
+    assert.deepEqual(accelerated.scheduledDelays, [CIRCULAR_AUTO_RESUME_DELAY_MS], 'pausa di 4 secondi fra i giri');
+  } finally {
+    if (releaseFirst) releaseFirst();
+    if (releaseSecond) releaseSecond();
+    if (renderer) await act(async () => renderer.unmount());
+    accelerated.restore();
+  }
+});
+
+test('il ciclo automatico si ferma dopo al massimo tre riprese e lascia il pulsante manuale', async () => {
+  const accelerated = accelerateAutomaticResumeDelays();
+  const captured = mockServer([
+    { items: [item('Pagina iniziale')], unanalyzedPages: [4, 5, 6], notice: 'Pagine non analizzate: 4, 5, 6 (su 6).' },
+    { items: [item('Pagina 4')], unanalyzedPages: [5, 6] },
+    { items: [item('Pagina 5')], unanalyzedPages: [6] },
+    { items: [item('Riprova pagina 6')], unanalyzedPages: [6] },
+  ]);
+  let renderer: any;
+  try {
+    renderer = await renderPdfAnalysis();
+    assert.equal(captured.length, CIRCULAR_AUTO_RESUME_MAX_ATTEMPTS + 1, 'una richiesta iniziale più tre riprese');
+    assert.deepEqual(captured.slice(1).map((entry) => entry.body.pages), [[4, 5, 6], [5, 6], [6]]);
+    assert.equal(stopAutoResumeButton(renderer.root), undefined, 'il ciclo automatico è terminato');
+    assert.ok(retryButton(renderer.root), 'resta disponibile la ripresa manuale');
+    assert.equal(retryButton(renderer.root).props.disabled, false);
+    assert.match(textOf(renderer.root), /Manca 1 pagina su 6: la 6\./, 'il totale della prima risposta è conservato fino all\'ultimo giro');
+    assert.deepEqual(accelerated.scheduledDelays, [CIRCULAR_AUTO_RESUME_DELAY_MS, CIRCULAR_AUTO_RESUME_DELAY_MS]);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    accelerated.restore();
+  }
+});
+
+test('un errore HTTP 429 interrompe le riprese automatiche e lascia la ripresa manuale', async () => {
+  const captured = mockServer([
+    { items: [item('Pagina iniziale')], unanalyzedPages: [2], notice: 'Pagine non analizzate: 2 (su 2).' },
+    { items: [], status: 429, errorCode: 'RATE_LIMITED', error: 'Il servizio è temporaneamente occupato.' },
+  ]);
+  const renderer = await renderPdfAnalysis();
+  try {
+    assert.equal(captured.length, 2, 'dopo il 429 non partono altri tentativi');
+    assert.equal(stopAutoResumeButton(renderer.root), undefined);
+    assert.ok(retryButton(renderer.root), 'l\'utente può riprovare manualmente più tardi');
+    assert.match(textOf(renderer.root), /temporaneamente occupato/);
+  } finally {
+    await act(async () => renderer.unmount());
+  }
+});
+
+test('Interrompi annulla la ripresa automatica in corso senza perdere i risultati', async () => {
+  const captured: Capture[] = [];
+  let call = 0;
+  globalThis.fetch = (async (_url: any, init?: RequestInit) => {
+    captured.push({ body: JSON.parse(String(init?.body ?? '{}')) });
+    if (call++ === 0) {
       return new Response(JSON.stringify({
-        success: true, source: 'gemini-3.1-flash-lite', items: [item('Collegio pagina 1')],
-        unanalyzedPages: [2], notice: 'Analisi parziale: pagine non analizzate: 2 (su 2).',
+        success: true, source: 'server', items: [item('Collegio pagina 1')],
+        unanalyzedPages: [2], notice: 'Pagine non analizzate: 2 (su 2).',
       }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }
-    await gate;
-    return new Response(JSON.stringify({ success: true, source: 'gemini-3.1-flash-lite', items: [item('Riunione pagina 2', { date: '2026-12-12' })] }), {
-      status: 200, headers: { 'Content-Type': 'application/json' },
+    return new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        const error = new Error('request aborted');
+        error.name = 'AbortError';
+        reject(error);
+      }, { once: true });
     });
   }) as typeof fetch;
 
   const renderer = await renderPdfAnalysis();
-  await act(async () => { retryButton(renderer.root).props.onClick(); });
-
-  // Richiesta in corso: risultati ancora a schermo, pulsante in caricamento.
-  const pending = retryButton(renderer.root);
-  assert.equal(pending.props.disabled, true);
-  assert.match(textOf(pending), /Rilettura in corso/);
-  assert.deepEqual(visibleTitles(renderer.root), ['Collegio pagina 1']);
-  assert.ok(checkboxes(renderer.root).length === 1, 'i risultati restano utilizzabili');
-
-  await act(async () => { release!(); await new Promise((r) => setTimeout(r, 30)); });
-  assert.deepEqual(visibleTitles(renderer.root), ['Collegio pagina 1', 'Riunione pagina 2']);
-  assert.equal(retryButton(renderer.root), undefined);
-});
-
-test('ripresa fallita: i risultati restano, l\'avviso e il pulsante non spariscono', async () => {
-  mockServer([
-    {
-      items: [item('Collegio pagina 1')],
-      unanalyzedPages: [2],
-      notice: 'Analisi parziale: pagine non analizzate: 2 (su 2). Controllale nel documento originale.',
-    },
-    { items: [], status: 503, error: 'Il documento non è stato elaborato dal servizio AI. Riprova tra poco.' },
-  ]);
-  const renderer = await renderPdfAnalysis();
-  await click(retryButton(renderer.root));
-  await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
-
-  assert.deepEqual(visibleTitles(renderer.root), ['Collegio pagina 1'], 'nessun risultato perso');
-  assert.ok(retryButton(renderer.root), 'si può riprovare ancora');
-  assert.equal(retryButton(renderer.root).props.disabled, false);
-  assert.match(textOf(renderer.root), /pagine non analizzate: 2|pagina non analizzata: 2/);
-  assert.match(textOf(renderer.root), /non è stato elaborato dal servizio AI|rileggere le pagine mancanti/);
+  try {
+    assert.equal(captured.length, 2, 'la ripresa automatica è partita');
+    assert.ok(stopAutoResumeButton(renderer.root));
+    assert.deepEqual(visibleTitles(renderer.root), ['Collegio pagina 1']);
+    await click(stopAutoResumeButton(renderer.root));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)); });
+    assert.equal(stopAutoResumeButton(renderer.root), undefined);
+    assert.ok(retryButton(renderer.root), 'dopo l\'interruzione resta il pulsante manuale');
+    assert.deepEqual(visibleTitles(renderer.root), ['Collegio pagina 1'], 'nessun risultato già arrivato viene perso');
+    assert.equal(captured.length, 2, 'non partono altri giri');
+  } finally {
+    await act(async () => renderer.unmount());
+  }
 });

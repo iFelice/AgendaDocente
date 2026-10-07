@@ -22,6 +22,8 @@ import {
   Eye,
   EyeOff,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   ChevronUp,
   Trash2,
 } from "lucide-react";
@@ -35,7 +37,10 @@ import {
 import {
   analyzeCircular,
   circularPartialNotice,
+  circularTotalPagesFromNotice,
   mergeCircularItems,
+  CIRCULAR_AUTO_RESUME_DELAY_MS,
+  CIRCULAR_AUTO_RESUME_MAX_ATTEMPTS,
   CIRCULAR_PDF_WAIT_MESSAGE,
 } from "../services/aiService";
 import {
@@ -163,6 +168,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
    */
   const [unanalyzedPages, setUnanalyzedPages] = useState<number[]>([]);
   const [isResuming, setIsResuming] = useState<boolean>(false);
+  const [autoResumeAttempt, setAutoResumeAttempt] = useState<number | null>(null);
   const [resumeError, setResumeError] = useState<string | null>(null);
   const [defaultLocation, setDefaultLocation] = useState<string>("");
   const [relevanceFilter, setRelevanceFilter] = useState<"ALL_RELEVANT" | "VERDE" | "GIALLO" | "ROSSO" | "ALL">(
@@ -183,13 +189,24 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   const [showIdentical, setShowIdentical] = useState<boolean>(false);
   /** tempId della scheda evidenziata dal "Vai al prossimo" del messaggio di blocco. */
   const [highlightedTempId, setHighlightedTempId] = useState<string | null>(null);
-  /** Overflow della riga dei mesi: alimenta la sfumatura sul bordo destro. */
-  const [monthRowMetrics, setMonthRowMetrics] = useState<{ hasOverflow: boolean; atEnd: boolean }>({
+  /** Overflow e posizione della riga mesi: mostrano la freccia solo nella direzione utile. */
+  const [monthRowMetrics, setMonthRowMetrics] = useState<{ hasOverflow: boolean; atStart: boolean; atEnd: boolean }>({
     hasOverflow: false,
+    atStart: true,
     atEnd: true,
   });
 
   const inputRevision = useRef(0);
+  const totalPagesRef = useRef<number | null>(null);
+  const automaticResumeSequenceRef = useRef(0);
+  const automaticResumeRef = useRef<{
+    id: number;
+    revision: number;
+    stopped: boolean;
+    timer: ReturnType<typeof setTimeout> | null;
+    cancelDelay: (() => void) | null;
+    controller: AbortController | null;
+  } | null>(null);
   const handledAutoTokenRef = useRef<string | null>(null);
   const [isReadingFile, setIsReadingFile] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
@@ -202,6 +219,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   /** Conflitti identici già preselezionati su "Ignora": non si ripetono dopo modifiche manuali. */
   const processedIdenticalRef = useRef<Set<string>>(new Set());
   const monthRowRef = useRef<HTMLDivElement | null>(null);
+  const monthButtonRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
 
   /**
    * Abbinamento UNO A UNO sull'INTERO documento (non riga per riga): un impegno
@@ -243,7 +261,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     setBulkOverrideMode(false);
     setShowIdentical(false);
     setHighlightedTempId(null);
-    setMonthRowMetrics({ hasOverflow: false, atEnd: true });
+    setMonthRowMetrics({ hasOverflow: false, atStart: true, atEnd: true });
     processedIdenticalRef.current = new Set();
     lastFocusedUnresolved.current = null;
     if (bulkUndoTimer.current) {
@@ -256,7 +274,120 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     }
   };
 
+  const cancelAutomaticResume = (updateState = true) => {
+    const session = automaticResumeRef.current;
+    if (session) {
+      session.stopped = true;
+      if (session.timer) clearTimeout(session.timer);
+      session.timer = null;
+      session.cancelDelay?.();
+      session.controller?.abort();
+      automaticResumeRef.current = null;
+    }
+    if (updateState) {
+      setAutoResumeAttempt(null);
+      setIsResuming(false);
+    }
+  };
+
+  const isCurrentAutomaticResume = (session: NonNullable<typeof automaticResumeRef.current>) =>
+    automaticResumeRef.current === session && !session.stopped && session.revision === inputRevision.current;
+
+  const pauseAutomaticResume = (session: NonNullable<typeof automaticResumeRef.current>) =>
+    new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        session.timer = null;
+        session.cancelDelay = null;
+        resolve(true);
+      }, CIRCULAR_AUTO_RESUME_DELAY_MS);
+      session.timer = timer;
+      session.cancelDelay = () => {
+        clearTimeout(timer);
+        session.timer = null;
+        session.cancelDelay = null;
+        resolve(false);
+      };
+    });
+
+  /** Avvia al massimo tre riprese additive automatiche delle sole pagine ancora mancanti. */
+  const startAutomaticResume = (
+    initialPages: number[], revision: number, resumeFileBase64?: string, resumeMimeType?: string
+  ) => {
+    if (initialPages.length === 0 || !resumeFileBase64 || !resumeMimeType) return;
+    cancelAutomaticResume(false);
+    const session: NonNullable<typeof automaticResumeRef.current> = {
+      id: ++automaticResumeSequenceRef.current,
+      revision,
+      stopped: false,
+      timer: null,
+      cancelDelay: null,
+      controller: null,
+    };
+    automaticResumeRef.current = session;
+
+    void (async () => {
+      let pagesToRetry = [...initialPages];
+      try {
+        for (let attempt = 1; attempt <= CIRCULAR_AUTO_RESUME_MAX_ATTEMPTS && pagesToRetry.length > 0; attempt++) {
+          if (!isCurrentAutomaticResume(session)) break;
+          setAutoResumeAttempt(attempt);
+          if (attempt > 1 && !(await pauseAutomaticResume(session))) break;
+          if (!isCurrentAutomaticResume(session)) break;
+
+          const requestedPages = [...pagesToRetry];
+          const controller = new AbortController();
+          session.controller = controller;
+          setIsResuming(true);
+          let result;
+          try {
+            result = await analyzeCircular({
+              text: "",
+              imageBase64: resumeFileBase64,
+              mimeType: resumeMimeType,
+              profile,
+              defaultLocation: defaultLocation.trim() || undefined,
+              pages: requestedPages,
+            }, { signal: controller.signal });
+          } catch (err: any) {
+            if (!isCurrentAutomaticResume(session)) break;
+            console.warn("Avviso ripresa automatica pagine circolare:", err?.message || err);
+            setResumeError("Non è stato possibile rileggere le pagine mancanti. Riprovo tra poco.");
+            session.controller = null;
+            setIsResuming(false);
+            continue;
+          }
+
+          if (!isCurrentAutomaticResume(session)) break;
+          session.controller = null;
+          setIsResuming(false);
+          if (!result.success) {
+            setResumeError(result.error || "Non è stato possibile rileggere le pagine mancanti.");
+            if (result.errorCode === "RATE_LIMITED") break;
+            continue;
+          }
+
+          // Gli elementi esistenti non vengono mai sostituiti: le modifiche,
+          // selezioni ed eliminazioni dell'utente sopravvivono alla ripresa.
+          pagesToRetry = requestedPages.filter((page) => (result.unanalyzedPages ?? []).includes(page));
+          setExtractedItems((prev) => mergeCircularItems(prev, result.items));
+          setUnanalyzedPages(pagesToRetry);
+          setAnalysisNotice(pagesToRetry.length > 0 ? circularPartialNotice(pagesToRetry, totalPagesRef.current) : null);
+          setResumeError(null);
+        }
+      } finally {
+        if (automaticResumeRef.current === session) {
+          automaticResumeRef.current = null;
+          setAutoResumeAttempt(null);
+          setIsResuming(false);
+        }
+      }
+    })();
+  };
+
+  const stopAutomaticResume = () => cancelAutomaticResume();
+
   const handleModalClose = () => {
+    cancelAutomaticResume();
     inputRevision.current++;
     onClose();
   };
@@ -272,10 +403,12 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       return;
     }
 
+    cancelAutomaticResume();
     const revision = ++inputRevision.current;
     setIsAnalyzing(true);
     setAnalysisError(null);
     setAnalysisNotice(null);
+    totalPagesRef.current = null;
     setUnanalyzedPages([]);
     setResumeError(null);
 
@@ -292,7 +425,8 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       if (!result.success && (!result.items || result.items.length === 0)) {
         throw new Error(result.error || "Impossibile analizzare il documento.");
       }
-      if (result.items.length === 0) {
+      const missingPages = result.unanalyzedPages ?? [];
+      if (result.items.length === 0 && missingPages.length === 0) {
         setExtractedItems([]);
         setAnalysisError("Nessun impegno riconosciuto nel documento. Puoi riprovare o incollare il testo.");
         return;
@@ -300,12 +434,16 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
 
       setExtractedItems(result.items);
       setAnalysisSource(result.source);
-      setAnalysisNotice(result.notice ?? null);
-      setUnanalyzedPages(result.unanalyzedPages ?? []);
+      totalPagesRef.current = circularTotalPagesFromNotice(result.notice) ?? null;
+      setAnalysisNotice(missingPages.length > 0
+        ? circularPartialNotice(missingPages, totalPagesRef.current)
+        : result.notice ?? null);
+      setUnanalyzedPages(missingPages);
       resetChoiceUiState();
       setMonthFilter("ALL");
       setIsHeaderCompact(false);
       setStep("results");
+      if (missingPages.length > 0) startAutomaticResume(missingPages, revision, base64ToAnalyze, mimeTypeToAnalyze);
     } catch (err: any) {
       console.warn("Avviso analisi circolare:", err?.message || err);
       if (revision !== inputRevision.current) return;
@@ -320,15 +458,11 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   };
 
   /**
-   * Ripresa delle sole pagine rimaste indietro. Rimanda lo STESSO file (ancora
-   * in memoria in questa finestra) chiedendo solo quelle pagine: i risultati
-   * già a schermo restano visibili e utilizzabili per tutta la richiesta, e
-   * l'esito si AGGIUNGE senza toccare modifiche, selezioni ed eliminazioni.
-   * Se la finestra è stata riaperta il file non c'è più: il pulsante non
-   * compare e resta il solo avviso.
+   * Ripresa manuale delle sole pagine rimaste indietro, dopo la fine o
+   * l'interruzione del ciclo automatico.
    */
   const handleRetryMissingPages = async () => {
-    if (isResuming || unanalyzedPages.length === 0 || !fileBase64 || !fileMimeType) return;
+    if (isResuming || automaticResumeRef.current || unanalyzedPages.length === 0 || !fileBase64 || !fileMimeType) return;
     const requestedPages = [...unanalyzedPages];
     const revision = inputRevision.current;
     setIsResuming(true);
@@ -355,10 +489,8 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       const stillMissing = requestedPages.filter((page) => (result.unanalyzedPages ?? []).includes(page));
       setExtractedItems((prev) => mergeCircularItems(prev, result.items));
       setUnanalyzedPages(stillMissing);
-      setAnalysisNotice(stillMissing.length > 0 ? circularPartialNotice(stillMissing) : null);
-      if (stillMissing.length > 0) {
-        setResumeError(null);
-      }
+      setAnalysisNotice(stillMissing.length > 0 ? circularPartialNotice(stillMissing, totalPagesRef.current) : null);
+      setResumeError(null);
     } catch (err: any) {
       console.warn("Avviso ripresa pagine circolare:", err?.message || err);
       if (revision !== inputRevision.current) return;
@@ -370,6 +502,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
 
   useEffect(() => {
     if (!isOpen) {
+      cancelAutomaticResume();
       inputRevision.current++;
       handledAutoTokenRef.current = null;
       return;
@@ -393,6 +526,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       handledAutoTokenRef.current = null;
     }
 
+    cancelAutomaticResume();
     inputRevision.current++;
     setStep("input");
     const effectiveMode = initialFile?.mode ?? initialInputMode ?? "file";
@@ -402,9 +536,11 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     setExtractedItems([]);
     setAnalysisError(null);
     setAnalysisNotice(null);
+    totalPagesRef.current = null;
     setUnanalyzedPages([]);
     setResumeError(null);
     setIsResuming(false);
+    setAutoResumeAttempt(null);
     resetChoiceUiState();
     setMonthFilter("ALL");
     setIsHeaderCompact(false);
@@ -471,6 +607,14 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     () => () => {
       if (bulkUndoTimer.current) clearTimeout(bulkUndoTimer.current);
       if (highlightTimer.current) clearTimeout(highlightTimer.current);
+      const session = automaticResumeRef.current;
+      if (session) {
+        session.stopped = true;
+        if (session.timer) clearTimeout(session.timer);
+        session.cancelDelay?.();
+        session.controller?.abort();
+        automaticResumeRef.current = null;
+      }
     },
     []
   );
@@ -849,36 +993,70 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     }
   }, [highlightedTempId, relevanceFilter, effectiveMonthFilter]);
 
-  /** Misura l'overflow orizzontale della riga dei mesi per la sfumatura sul bordo destro. */
+  // Mantiene il mese selezionato sempre raggiungibile anche dopo scorrimenti laterali.
+  useEffect(() => {
+    if (step !== "results" || effectiveMonthFilter === "ALL" || effectiveMonthFilter === "NODATE") return;
+    monthButtonRefs.current.get(effectiveMonthFilter)?.scrollIntoView?.({
+      behavior: "smooth",
+      block: "nearest",
+      inline: "nearest",
+    });
+  }, [effectiveMonthFilter, step]);
+
+  /** Misura overflow e direzione di scorrimento della riga dei mesi. */
   const measureMonthRow = () => {
     const el = monthRowRef.current;
     if (!el) return;
-    const scrollWidth = el.scrollWidth;
-    const clientWidth = el.clientWidth;
-    const scrollLeft = el.scrollLeft;
-    if (typeof scrollWidth !== "number" || typeof clientWidth !== "number" || typeof scrollLeft !== "number") return;
-    const hasOverflow = scrollWidth - clientWidth > 1;
-    const atEnd = scrollLeft + clientWidth >= scrollWidth - 1;
+    const maxScrollLeft = el.scrollWidth - el.clientWidth;
+    if (typeof maxScrollLeft !== "number" || typeof el.scrollLeft !== "number") return;
+    const hasOverflow = maxScrollLeft > 1;
+    const atStart = el.scrollLeft <= 1;
+    const atEnd = !hasOverflow || el.scrollLeft >= maxScrollLeft - 1;
     setMonthRowMetrics((prev) =>
-      prev.hasOverflow === hasOverflow && prev.atEnd === atEnd ? prev : { hasOverflow, atEnd }
+      prev.hasOverflow === hasOverflow && prev.atStart === atStart && prev.atEnd === atEnd
+        ? prev
+        : { hasOverflow, atStart, atEnd }
     );
   };
 
-  // La riga dei mesi scorre senza barra visibile (dita, trackpad e tastiera restano
-  // attivi); la sfumatura destra compare solo quando restano mesi fuori vista.
+  const handleMonthWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    const el = event.currentTarget;
+    const maxScrollLeft = el.scrollWidth - el.clientWidth;
+    if (maxScrollLeft <= 1 || event.deltaY === 0 || event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+    const deltaMultiplier = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? el.clientWidth : 1;
+    const verticalDelta = event.deltaY * deltaMultiplier;
+    const nextScrollLeft = Math.max(0, Math.min(maxScrollLeft, el.scrollLeft + verticalDelta));
+    if (nextScrollLeft === el.scrollLeft) return;
+    event.preventDefault();
+    el.scrollLeft = nextScrollLeft;
+    measureMonthRow();
+  };
+
+  const scrollMonthRowBy = (direction: -1 | 1) => {
+    const el = monthRowRef.current;
+    if (!el) return;
+    const distance = el.clientWidth * 0.8 * direction;
+    if (typeof el.scrollBy === "function") el.scrollBy({ left: distance, behavior: "smooth" });
+    else el.scrollLeft += distance;
+    measureMonthRow();
+  };
+
+  // Dita/trackpad continuano a scorrere la riga; su desktop la rotellina verticale
+  // viene convertita in orizzontale finché ci sono altri mesi in quella direzione.
   useEffect(() => {
     if (step !== "results") return;
     measureMonthRow();
-    const el = monthRowRef.current as unknown as
-      | {
-          addEventListener?: (type: string, listener: () => void, opts?: { passive?: boolean }) => void;
-          removeEventListener?: (type: string, listener: () => void) => void;
-        }
-      | null;
-    if (!el || typeof el.addEventListener !== "function" || typeof el.removeEventListener !== "function") return;
-    const onMonthRowScroll = () => measureMonthRow();
-    el.addEventListener("scroll", onMonthRowScroll, { passive: true });
-    return () => el.removeEventListener("scroll", onMonthRowScroll);
+    const el = monthRowRef.current;
+    if (!el) return;
+    const resizeObserver = typeof ResizeObserver !== "undefined"
+      ? new ResizeObserver(() => measureMonthRow())
+      : null;
+    resizeObserver?.observe(el);
+    if (typeof window !== "undefined") window.addEventListener("resize", measureMonthRow);
+    return () => {
+      resizeObserver?.disconnect();
+      if (typeof window !== "undefined") window.removeEventListener("resize", measureMonthRow);
+    };
   }, [step, extractedItems, relevanceFilter, effectiveMonthFilter]);
 
   // Compatta il riquadro del titolo durante lo scroll dell'elenco, così
@@ -1238,9 +1416,24 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                     <AlertCircle className="w-4 h-4 flex-shrink-0" />
                     <span>{analysisNotice}</span>
                   </div>
-                  {/* Il file è ancora in memoria in questa finestra: la ripresa è possibile.
-                      Riaprendo la finestra il file non c'è più e resta il solo avviso. */}
-                  {unanalyzedPages.length > 0 && !!fileBase64 && !!fileMimeType && (
+                  {autoResumeAttempt !== null && (
+                    <div className="shrink-0 self-start sm:self-auto flex items-center gap-2">
+                      <span aria-live="polite">Rileggo le pagine mancanti · tentativo {autoResumeAttempt} di {CIRCULAR_AUTO_RESUME_MAX_ATTEMPTS}</span>
+                      <button
+                        id="btn-stop-auto-resume"
+                        type="button"
+                        aria-label="Interrompi la rilettura automatica"
+                        onClick={stopAutomaticResume}
+                        className="px-3 py-1.5 rounded-lg border border-amber-400 bg-white hover:bg-amber-100 text-amber-900 font-semibold text-xs flex items-center gap-1.5 transition-colors"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                        <span>Interrompi</span>
+                      </button>
+                    </div>
+                  )}
+                  {/* Dopo il ciclo automatico resta disponibile la ripresa manuale.
+                      Se la finestra è stata riaperta il file non c'è più e resta il solo avviso. */}
+                  {unanalyzedPages.length > 0 && !!fileBase64 && !!fileMimeType && autoResumeAttempt === null && (
                     <button
                       id="btn-retry-missing-pages"
                       type="button"
@@ -1380,14 +1573,25 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                 </div>
               </div>
 
-              {/* Month filter row: scorre in orizzontale, si combina con la pertinenza.
-                  La barra di scorrimento è nascosta (dita, trackpad e tastiera continuano
-                  a funzionare); la sfumatura segnala gli altri mesi fuori vista a destra. */}
+              {/* Riga mesi: swipe nativo, rotellina verticale e frecce desktop (senza barra visibile). */}
               <div className="relative">
+                {monthRowMetrics.hasOverflow && !monthRowMetrics.atStart && (
+                  <button
+                    type="button"
+                    aria-label="Mesi precedenti"
+                    title="Mesi precedenti"
+                    onClick={() => scrollMonthRowBy(-1)}
+                    className="absolute inset-y-0 left-0 z-10 hidden w-9 items-center justify-center rounded-l-lg bg-white/95 text-stone-700 shadow-sm hover:bg-stone-100 sm:flex"
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                  </button>
+                )}
                 <div
                   ref={monthRowRef}
                   role="group"
                   aria-label="Filtra per mese"
+                  onScroll={measureMonthRow}
+                  onWheel={handleMonthWheel}
                   className="flex flex-nowrap items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar"
                 >
                   <button
@@ -1404,6 +1608,11 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                   {monthKeys.map((key) => (
                     <button
                       key={key}
+                      data-month-key={key}
+                      ref={(element) => {
+                        if (element) monthButtonRefs.current.set(key, element);
+                        else monthButtonRefs.current.delete(key);
+                      }}
                       onClick={() => setMonthFilter(key)}
                       aria-pressed={effectiveMonthFilter === key}
                       className={`min-h-11 sm:min-h-0 shrink-0 whitespace-nowrap px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
@@ -1430,10 +1639,15 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                   )}
                 </div>
                 {monthRowMetrics.hasOverflow && !monthRowMetrics.atEnd && (
-                  <div
-                    aria-hidden="true"
-                    className="pointer-events-none absolute inset-y-0 right-0 w-10 bg-gradient-to-l from-white via-white/85 to-transparent"
-                  />
+                  <button
+                    type="button"
+                    aria-label="Mesi successivi"
+                    title="Mesi successivi"
+                    onClick={() => scrollMonthRowBy(1)}
+                    className="absolute inset-y-0 right-0 z-10 hidden w-9 items-center justify-center rounded-r-lg bg-white/95 text-stone-700 shadow-sm hover:bg-stone-100 sm:flex"
+                  >
+                    <ChevronRight className="h-4 w-4" />
+                  </button>
                 )}
               </div>
 

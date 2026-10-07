@@ -74,7 +74,9 @@ const listCheckboxes = (root: any) =>
   root.findAll((n: any) => n.type === 'input' && n.props.type === 'checkbox');
 
 const scrollContainer = (root: any) =>
-  root.findAll((n: any) => n.type === 'div' && typeof n.props.onScroll === 'function')[0];
+  root.findAll((n: any) => n.type === 'div'
+    && typeof n.props.onScroll === 'function'
+    && /overflow-y-auto/.test(n.props.className ?? ''))[0];
 
 // Titoli delle schede visibili: l'input di titolo è l'unico text input senza placeholder.
 const visibleTitles = (root: any) =>

@@ -55,9 +55,25 @@ export function sanitizeUnanalyzedPages(value: unknown): number[] | undefined {
   return [...pages].sort((a, b) => a - b);
 }
 
-/** Testo dell'avviso di analisi parziale, ricalcolato a ogni ripresa. */
-export function circularPartialNotice(unanalyzedPages: number[]): string {
-  return `Analisi parziale: ${unanalyzedPages.length === 1 ? "pagina non analizzata" : "pagine non analizzate"}: ${unanalyzedPages.join(", ")}. Controllale nel documento originale.`;
+/** Totale pagine nel notice strutturato del server, per conservarlo lato client. */
+export function circularTotalPagesFromNotice(notice?: string): number | undefined {
+  if (typeof notice !== "string") return undefined;
+  const match = /\(\s*su\s+(\d+)\s*\)/i.exec(notice);
+  if (!match) return undefined;
+  const total = Number(match[1]);
+  return Number.isSafeInteger(total) && total > 0 ? total : undefined;
+}
+
+/** Testo dell'avviso parziale, ricostruito dal client a ogni ripresa. */
+export function circularPartialNotice(unanalyzedPages: number[], totalPages?: number | null): string {
+  const pages = [...new Set(unanalyzedPages)].sort((a, b) => a - b);
+  if (pages.length === 0) return "";
+  const pageList = pages.length === 1
+    ? `la ${pages[0]}`
+    : `${pages.slice(0, -1).map((page) => `la ${page}`).join(", ")} e la ${pages[pages.length - 1]}`;
+  const countLabel = pages.length === 1 ? "Manca 1 pagina" : `Mancano ${pages.length} pagine`;
+  const totalLabel = Number.isSafeInteger(totalPages) && Number(totalPages) > 0 ? ` su ${totalPages}` : "";
+  return `${countLabel}${totalLabel}: ${pageList}.`;
 }
 
 /**
@@ -152,7 +168,14 @@ export interface AnalyzeCircularOptions {
   /** Solo test: non cambia il contratto della POST. */
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  /** Annulla una richiesta di ripresa senza modificare il payload inviato al server. */
+  signal?: AbortSignal;
 }
+
+/** Riprese automatiche massime dopo una risposta parziale. */
+export const CIRCULAR_AUTO_RESUME_MAX_ATTEMPTS = 3;
+/** Pausa fra due richieste di ripresa automatiche consecutive. */
+export const CIRCULAR_AUTO_RESUME_DELAY_MS = 4_000;
 
 /**
  * Timeout portabile. `AbortSignal.timeout` manca su iOS Safari < 16: chiamarlo
@@ -246,20 +269,31 @@ export async function analyzeCircular(req: AnalyzeRequest, options: AnalyzeCircu
   // navigator.onLine non è una prova che il backend risponda: la POST parte sempre.
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   const timeout = createCircularTimeout(options.timeoutMs ?? CIRCULAR_REQUEST_TIMEOUT_MS);
+  const requestController = new AbortController();
+  const abortForTimeout = () => requestController.abort();
+  const abortForCaller = () => requestController.abort();
+  timeout.signal.addEventListener("abort", abortForTimeout, { once: true });
+  options.signal?.addEventListener("abort", abortForCaller, { once: true });
+  if (timeout.signal.aborted || options.signal?.aborted) requestController.abort();
+  const clearRequestSignals = () => {
+    timeout.signal.removeEventListener("abort", abortForTimeout);
+    options.signal?.removeEventListener("abort", abortForCaller);
+    timeout.clear();
+  };
   let response: Response;
   try {
     response = await fetchImpl("/api/analyze-circular", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(req),
-      signal: timeout.signal,
+      signal: requestController.signal,
     });
   } catch (error) {
     const expired = timeout.expired();
-    timeout.clear();
+    clearRequestSignals();
     return finishFailure(req, isCircularClientTimeout(error, expired) ? "CLIENT_TIMEOUT" : "NETWORK");
   }
-  timeout.clear();
+  clearRequestSignals();
   // Risposta arrivata, anche se non è JSON: non è un errore di rete.
   const data = await response.json().catch(() => ({})) as Record<string, unknown>;
   if (!response.ok || data.success !== true) {
