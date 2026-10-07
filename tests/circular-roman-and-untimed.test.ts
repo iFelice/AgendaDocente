@@ -53,6 +53,19 @@ test('document evidence beats a hallucinated AI className (real screenshot case)
   assert.deepEqual(evaluateItemRelevance({ title: 'Riunione', className: '2B' }, profile).detectedClasses, ['2B']);
 });
 
+test('new circular events keep user notes but do not save the relevance reason as notes', () => {
+  const item: ExtractedItem = {
+    tempId: 'notes-1', title: 'Riunione', category: 'riunione', date: '2026-11-26',
+    relevance: 'VERDE', relevanceReason: 'Destinato a tutti i docenti.', selectedForImport: true,
+  };
+  const withoutNotes = convertExtractedItemToEvent(item, 'Circolare sintetica', 'synthetic-notes');
+  assert.equal(withoutNotes.notes, undefined);
+
+  const userNotes = 'Portare il registro elettronico.';
+  const withNotes = convertExtractedItemToEvent({ ...item, notes: userNotes }, 'Circolare sintetica', 'synthetic-notes');
+  assert.equal(withNotes.notes, userNotes);
+});
+
 test('an untimed circular item is valid and becomes an all-day event', () => {
   const item: ExtractedItem = {
     tempId: 'untimed-1', title: 'Svolgimento Giochi Matematici di Prisma (divieto uscite didattiche)',

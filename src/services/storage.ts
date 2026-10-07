@@ -1293,7 +1293,7 @@ export function convertExtractedItemToEvent(
     // Nessun orario nel documento => impegno per l'intera giornata, anche se non è una scadenza.
     isAllDay: !it.startTime && !it.endTime,
     className: it.className || undefined, subject: it.subject || undefined,
-    location: it.location || undefined, notes: it.notes || it.relevanceReason,
+    location: it.location || undefined, notes: it.notes || undefined,
     sourceType: 'circolare', sourceCircularTitle, sourceCircularId, sourceItemId: it.tempId,
     completed: false,
   };
