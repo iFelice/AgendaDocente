@@ -22,6 +22,8 @@ import {
   Eye,
   EyeOff,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   ChevronUp,
   Trash2,
 } from "lucide-react";
@@ -187,9 +189,10 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   const [showIdentical, setShowIdentical] = useState<boolean>(false);
   /** tempId della scheda evidenziata dal "Vai al prossimo" del messaggio di blocco. */
   const [highlightedTempId, setHighlightedTempId] = useState<string | null>(null);
-  /** Overflow della riga dei mesi: alimenta la sfumatura sul bordo destro. */
-  const [monthRowMetrics, setMonthRowMetrics] = useState<{ hasOverflow: boolean; atEnd: boolean }>({
+  /** Overflow e posizione della riga mesi: mostrano la freccia solo nella direzione utile. */
+  const [monthRowMetrics, setMonthRowMetrics] = useState<{ hasOverflow: boolean; atStart: boolean; atEnd: boolean }>({
     hasOverflow: false,
+    atStart: true,
     atEnd: true,
   });
 
@@ -216,6 +219,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   /** Conflitti identici già preselezionati su "Ignora": non si ripetono dopo modifiche manuali. */
   const processedIdenticalRef = useRef<Set<string>>(new Set());
   const monthRowRef = useRef<HTMLDivElement | null>(null);
+  const monthButtonRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
 
   /**
    * Abbinamento UNO A UNO sull'INTERO documento (non riga per riga): un impegno
@@ -257,7 +261,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     setBulkOverrideMode(false);
     setShowIdentical(false);
     setHighlightedTempId(null);
-    setMonthRowMetrics({ hasOverflow: false, atEnd: true });
+    setMonthRowMetrics({ hasOverflow: false, atStart: true, atEnd: true });
     processedIdenticalRef.current = new Set();
     lastFocusedUnresolved.current = null;
     if (bulkUndoTimer.current) {
@@ -989,36 +993,70 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     }
   }, [highlightedTempId, relevanceFilter, effectiveMonthFilter]);
 
-  /** Misura l'overflow orizzontale della riga dei mesi per la sfumatura sul bordo destro. */
+  // Mantiene il mese selezionato sempre raggiungibile anche dopo scorrimenti laterali.
+  useEffect(() => {
+    if (step !== "results" || effectiveMonthFilter === "ALL" || effectiveMonthFilter === "NODATE") return;
+    monthButtonRefs.current.get(effectiveMonthFilter)?.scrollIntoView?.({
+      behavior: "smooth",
+      block: "nearest",
+      inline: "nearest",
+    });
+  }, [effectiveMonthFilter, step]);
+
+  /** Misura overflow e direzione di scorrimento della riga dei mesi. */
   const measureMonthRow = () => {
     const el = monthRowRef.current;
     if (!el) return;
-    const scrollWidth = el.scrollWidth;
-    const clientWidth = el.clientWidth;
-    const scrollLeft = el.scrollLeft;
-    if (typeof scrollWidth !== "number" || typeof clientWidth !== "number" || typeof scrollLeft !== "number") return;
-    const hasOverflow = scrollWidth - clientWidth > 1;
-    const atEnd = scrollLeft + clientWidth >= scrollWidth - 1;
+    const maxScrollLeft = el.scrollWidth - el.clientWidth;
+    if (typeof maxScrollLeft !== "number" || typeof el.scrollLeft !== "number") return;
+    const hasOverflow = maxScrollLeft > 1;
+    const atStart = el.scrollLeft <= 1;
+    const atEnd = !hasOverflow || el.scrollLeft >= maxScrollLeft - 1;
     setMonthRowMetrics((prev) =>
-      prev.hasOverflow === hasOverflow && prev.atEnd === atEnd ? prev : { hasOverflow, atEnd }
+      prev.hasOverflow === hasOverflow && prev.atStart === atStart && prev.atEnd === atEnd
+        ? prev
+        : { hasOverflow, atStart, atEnd }
     );
   };
 
-  // La riga dei mesi scorre senza barra visibile (dita, trackpad e tastiera restano
-  // attivi); la sfumatura destra compare solo quando restano mesi fuori vista.
+  const handleMonthWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    const el = event.currentTarget;
+    const maxScrollLeft = el.scrollWidth - el.clientWidth;
+    if (maxScrollLeft <= 1 || event.deltaY === 0 || event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+    const deltaMultiplier = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? el.clientWidth : 1;
+    const verticalDelta = event.deltaY * deltaMultiplier;
+    const nextScrollLeft = Math.max(0, Math.min(maxScrollLeft, el.scrollLeft + verticalDelta));
+    if (nextScrollLeft === el.scrollLeft) return;
+    event.preventDefault();
+    el.scrollLeft = nextScrollLeft;
+    measureMonthRow();
+  };
+
+  const scrollMonthRowBy = (direction: -1 | 1) => {
+    const el = monthRowRef.current;
+    if (!el) return;
+    const distance = el.clientWidth * 0.8 * direction;
+    if (typeof el.scrollBy === "function") el.scrollBy({ left: distance, behavior: "smooth" });
+    else el.scrollLeft += distance;
+    measureMonthRow();
+  };
+
+  // Dita/trackpad continuano a scorrere la riga; su desktop la rotellina verticale
+  // viene convertita in orizzontale finché ci sono altri mesi in quella direzione.
   useEffect(() => {
     if (step !== "results") return;
     measureMonthRow();
-    const el = monthRowRef.current as unknown as
-      | {
-          addEventListener?: (type: string, listener: () => void, opts?: { passive?: boolean }) => void;
-          removeEventListener?: (type: string, listener: () => void) => void;
-        }
-      | null;
-    if (!el || typeof el.addEventListener !== "function" || typeof el.removeEventListener !== "function") return;
-    const onMonthRowScroll = () => measureMonthRow();
-    el.addEventListener("scroll", onMonthRowScroll, { passive: true });
-    return () => el.removeEventListener("scroll", onMonthRowScroll);
+    const el = monthRowRef.current;
+    if (!el) return;
+    const resizeObserver = typeof ResizeObserver !== "undefined"
+      ? new ResizeObserver(() => measureMonthRow())
+      : null;
+    resizeObserver?.observe(el);
+    if (typeof window !== "undefined") window.addEventListener("resize", measureMonthRow);
+    return () => {
+      resizeObserver?.disconnect();
+      if (typeof window !== "undefined") window.removeEventListener("resize", measureMonthRow);
+    };
   }, [step, extractedItems, relevanceFilter, effectiveMonthFilter]);
 
   // Compatta il riquadro del titolo durante lo scroll dell'elenco, così
@@ -1535,14 +1573,25 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                 </div>
               </div>
 
-              {/* Month filter row: scorre in orizzontale, si combina con la pertinenza.
-                  La barra di scorrimento è nascosta (dita, trackpad e tastiera continuano
-                  a funzionare); la sfumatura segnala gli altri mesi fuori vista a destra. */}
+              {/* Riga mesi: swipe nativo, rotellina verticale e frecce desktop (senza barra visibile). */}
               <div className="relative">
+                {monthRowMetrics.hasOverflow && !monthRowMetrics.atStart && (
+                  <button
+                    type="button"
+                    aria-label="Mesi precedenti"
+                    title="Mesi precedenti"
+                    onClick={() => scrollMonthRowBy(-1)}
+                    className="absolute inset-y-0 left-0 z-10 hidden w-9 items-center justify-center rounded-l-lg bg-white/95 text-stone-700 shadow-sm hover:bg-stone-100 sm:flex"
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                  </button>
+                )}
                 <div
                   ref={monthRowRef}
                   role="group"
                   aria-label="Filtra per mese"
+                  onScroll={measureMonthRow}
+                  onWheel={handleMonthWheel}
                   className="flex flex-nowrap items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar"
                 >
                   <button
@@ -1559,6 +1608,11 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                   {monthKeys.map((key) => (
                     <button
                       key={key}
+                      data-month-key={key}
+                      ref={(element) => {
+                        if (element) monthButtonRefs.current.set(key, element);
+                        else monthButtonRefs.current.delete(key);
+                      }}
                       onClick={() => setMonthFilter(key)}
                       aria-pressed={effectiveMonthFilter === key}
                       className={`min-h-11 sm:min-h-0 shrink-0 whitespace-nowrap px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
@@ -1585,10 +1639,15 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                   )}
                 </div>
                 {monthRowMetrics.hasOverflow && !monthRowMetrics.atEnd && (
-                  <div
-                    aria-hidden="true"
-                    className="pointer-events-none absolute inset-y-0 right-0 w-10 bg-gradient-to-l from-white via-white/85 to-transparent"
-                  />
+                  <button
+                    type="button"
+                    aria-label="Mesi successivi"
+                    title="Mesi successivi"
+                    onClick={() => scrollMonthRowBy(1)}
+                    className="absolute inset-y-0 right-0 z-10 hidden w-9 items-center justify-center rounded-r-lg bg-white/95 text-stone-700 shadow-sm hover:bg-stone-100 sm:flex"
+                  >
+                    <ChevronRight className="h-4 w-4" />
+                  </button>
                 )}
               </div>
 

@@ -101,7 +101,9 @@ function accelerateAutomaticResumeDelays() {
 }
 
 const scrollContainer = (root: any) =>
-  root.findAll((n: any) => n.type === 'div' && typeof n.props.onScroll === 'function')[0];
+  root.findAll((n: any) => n.type === 'div'
+    && typeof n.props.onScroll === 'function'
+    && /overflow-y-auto/.test(n.props.className ?? ''))[0];
 
 const titleInputs = (root: any) =>
   scrollContainer(root).findAll((n: any) => n.type === 'input' && n.props.type === 'text' && !n.props.placeholder);

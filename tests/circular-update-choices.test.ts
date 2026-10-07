@@ -66,13 +66,18 @@ function textOf(node: any): string {
     .replace(/\(\s+/g, '(').replace(/\s+\)/g, ')').trim();
 }
 
-async function renderResults(items: any[]) {
+async function renderResults(items: any[], options: { monthRowNode?: any } = {}) {
   mockItems = items;
   let importedNew: CalendarEvent[] = [];
   let importedUpdated: CalendarEvent[] = [];
   let importCalled = false;
   let closeCalled = false;
   let renderer: any;
+  const monthRowNode = options.monthRowNode ?? {
+    scrollWidth: 1000, clientWidth: 1000, scrollLeft: 0,
+    scrollBy({ left }: { left: number }) { this.scrollLeft += left; },
+  };
+  const selectedMonthScrolls: string[] = [];
   await act(async () => {
     renderer = create(React.createElement(CircularAnalyzerModal, {
       isOpen: true,
@@ -88,11 +93,22 @@ async function renderResults(items: any[]) {
         base64: 'QUJD', mimeType: 'image/jpeg', fileName: 'circolare.jpg',
         autoStartToken: `choices-${Math.random()}`,
       },
-    }));
+    }), {
+      createNodeMock: (element: any) => {
+        if (element.props?.['aria-label'] === 'Filtra per mese') return monthRowNode;
+        if (element.props?.['data-month-key']) {
+          const key = element.props['data-month-key'];
+          return { scrollIntoView: () => selectedMonthScrolls.push(key) };
+        }
+        return {};
+      },
+    });
     await new Promise((resolve) => setTimeout(resolve, 60));
   });
   return {
     renderer,
+    monthRowNode,
+    selectedMonthScrolls,
     state: {
       get importCalled() { return importCalled; },
       get closeCalled() { return closeCalled; },
@@ -107,6 +123,9 @@ const findButton = (root: any, re: RegExp) =>
 
 const findButtonByLabel = (root: any, re: RegExp) =>
   root.findAll((n: any) => n.type === 'button' && n.props['aria-label'] && re.test(n.props['aria-label']))[0];
+
+const monthArrow = (root: any, label: string) =>
+  root.findAll((n: any) => n.type === 'button' && n.props['aria-label'] === label)[0];
 
 async function click(button: any) {
   assert.ok(button, 'pulsante non trovato');
@@ -483,7 +502,63 @@ test('blocco importazione: azioni rapide agiscono anche sugli elementi nascosti,
 // 5) + 6) Ritocco estetico e accessibilità
 // ---------------------------------------------------------------------------
 
-test('riga dei mesi senza barra di scorrimento; pulsanti con tocco >= 44px; annuncio aria-live dopo il blocco', async () => {
+test('riga dei mesi: frecce nelle direzioni utili, scorrimento 80%, rotellina e mese selezionato in vista', async () => {
+  const scrollRequests: Array<{ left: number; behavior: string }> = [];
+  const monthRowNode = {
+    scrollWidth: 1200,
+    clientWidth: 375,
+    scrollLeft: 0,
+    scrollBy({ left, behavior }: { left: number; behavior: string }) {
+      scrollRequests.push({ left, behavior });
+      this.scrollLeft = Math.max(0, Math.min(this.scrollWidth - this.clientWidth, this.scrollLeft + left));
+    },
+  };
+  const monthlyItems = [
+    { ...itemA, title: 'Evento ottobre', date: '2026-10-01' },
+    { ...itemA, title: 'Evento gennaio', date: '2027-01-02' },
+    { ...itemA, title: 'Evento maggio', date: '2027-05-03' },
+  ];
+  const { renderer, selectedMonthScrolls } = await renderResults(monthlyItems, { monthRowNode });
+  const root = renderer.root;
+  try {
+    const monthGroup = root.findByProps({ role: 'group', 'aria-label': 'Filtra per mese' });
+    const next = monthArrow(root, 'Mesi successivi');
+    assert.ok(next, 'freccia destra visibile all’inizio');
+    assert.equal(monthArrow(root, 'Mesi precedenti'), undefined, 'freccia sinistra nascosta all’inizio');
+    assert.match(next.props.className, /hidden/, 'le frecce non sottraggono spazio sui touch');
+    assert.match(next.props.className, /sm:flex/, 'frecce mostrate da schermi non touch più ampi');
+
+    await click(next);
+    assert.deepEqual(scrollRequests[0], { left: 300, behavior: 'smooth' }, 'scorrimento dell’80% della larghezza visibile');
+    assert.ok(monthArrow(root, 'Mesi precedenti'), 'freccia sinistra dopo lo scorrimento');
+    assert.ok(monthArrow(root, 'Mesi successivi'), 'freccia destra finché restano mesi');
+    await click(monthArrow(root, 'Mesi successivi'));
+    await click(monthArrow(root, 'Mesi successivi'));
+    assert.equal(monthRowNode.scrollLeft, 825, 'lo scorrimento si ferma alla fine della riga');
+    assert.ok(monthArrow(root, 'Mesi precedenti'), 'freccia sinistra ancora disponibile alla fine');
+    assert.equal(monthArrow(root, 'Mesi successivi'), undefined, 'freccia destra nascosta alla fine');
+
+    let prevented = 0;
+    await act(async () => {
+      monthGroup.props.onWheel({ currentTarget: monthRowNode, deltaY: -100, preventDefault: () => { prevented += 1; } });
+    });
+    assert.equal(monthRowNode.scrollLeft, 725, 'rotellina verticale convertita in scorrimento orizzontale');
+    assert.equal(prevented, 1, 'la pagina non scorre mentre la riga può muoversi');
+    monthRowNode.scrollLeft = 825;
+    await act(async () => {
+      monthGroup.props.onWheel({ currentTarget: monthRowNode, deltaY: 100, preventDefault: () => { prevented += 1; } });
+    });
+    assert.equal(monthRowNode.scrollLeft, 825, 'rotellina verso l’esterno non supera il bordo');
+    assert.equal(prevented, 1, 'al bordo la rotellina torna disponibile alla pagina');
+
+    await click(root.findByProps({ 'data-month-key': '2027-05' }));
+    assert.deepEqual(selectedMonthScrolls, ['2027-05'], 'il mese selezionato viene portato in vista');
+  } finally {
+    renderer.unmount();
+  }
+});
+
+test('riga dei mesi senza overflow: nessuna freccia; pulsanti con tocco >= 44px; annuncio aria-live dopo il blocco', async () => {
   const { renderer } = await renderResults([itemA, itemB, itemD]);
   const root = renderer.root;
   try {
@@ -491,6 +566,8 @@ test('riga dei mesi senza barra di scorrimento; pulsanti con tocco >= 44px; annu
     const monthGroup = root.findAll((n: any) => n.props?.['aria-label'] === 'Filtra per mese')[0];
     assert.match(monthGroup.props.className, /no-scrollbar/, 'barra di scorrimento nascosta');
     assert.match(monthGroup.props.className, /overflow-x-auto/, 'lo scorrimento orizzontale resta attivo');
+    assert.equal(monthArrow(root, 'Mesi precedenti'), undefined, 'nessuna freccia senza overflow');
+    assert.equal(monthArrow(root, 'Mesi successivi'), undefined, 'nessuna freccia senza overflow');
 
     // Pulsanti di azione in blocco con area di tocco >= 44px su mobile.
     const bulkUpdate = findButtonByLabel(root, /^Aggiorna tutti: conflitti visibili non risolti \(2\)/);
