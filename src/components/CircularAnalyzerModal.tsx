@@ -35,6 +35,7 @@ import {
 import {
   analyzeCircular,
   circularPartialNotice,
+  circularTotalPagesFromNotice,
   mergeCircularItems,
   CIRCULAR_AUTO_RESUME_DELAY_MS,
   CIRCULAR_AUTO_RESUME_MAX_ATTEMPTS,
@@ -193,6 +194,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   });
 
   const inputRevision = useRef(0);
+  const totalPagesRef = useRef<number | null>(null);
   const automaticResumeSequenceRef = useRef(0);
   const automaticResumeRef = useRef<{
     id: number;
@@ -365,7 +367,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
           pagesToRetry = requestedPages.filter((page) => (result.unanalyzedPages ?? []).includes(page));
           setExtractedItems((prev) => mergeCircularItems(prev, result.items));
           setUnanalyzedPages(pagesToRetry);
-          setAnalysisNotice(pagesToRetry.length > 0 ? circularPartialNotice(pagesToRetry) : null);
+          setAnalysisNotice(pagesToRetry.length > 0 ? circularPartialNotice(pagesToRetry, totalPagesRef.current) : null);
           setResumeError(null);
         }
       } finally {
@@ -402,6 +404,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     setIsAnalyzing(true);
     setAnalysisError(null);
     setAnalysisNotice(null);
+    totalPagesRef.current = null;
     setUnanalyzedPages([]);
     setResumeError(null);
 
@@ -427,7 +430,10 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
 
       setExtractedItems(result.items);
       setAnalysisSource(result.source);
-      setAnalysisNotice(result.notice ?? null);
+      totalPagesRef.current = circularTotalPagesFromNotice(result.notice) ?? null;
+      setAnalysisNotice(missingPages.length > 0
+        ? circularPartialNotice(missingPages, totalPagesRef.current)
+        : result.notice ?? null);
       setUnanalyzedPages(missingPages);
       resetChoiceUiState();
       setMonthFilter("ALL");
@@ -479,7 +485,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       const stillMissing = requestedPages.filter((page) => (result.unanalyzedPages ?? []).includes(page));
       setExtractedItems((prev) => mergeCircularItems(prev, result.items));
       setUnanalyzedPages(stillMissing);
-      setAnalysisNotice(stillMissing.length > 0 ? circularPartialNotice(stillMissing) : null);
+      setAnalysisNotice(stillMissing.length > 0 ? circularPartialNotice(stillMissing, totalPagesRef.current) : null);
       setResumeError(null);
     } catch (err: any) {
       console.warn("Avviso ripresa pagine circolare:", err?.message || err);
@@ -526,6 +532,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     setExtractedItems([]);
     setAnalysisError(null);
     setAnalysisNotice(null);
+    totalPagesRef.current = null;
     setUnanalyzedPages([]);
     setResumeError(null);
     setIsResuming(false);

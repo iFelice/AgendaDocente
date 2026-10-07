@@ -55,9 +55,25 @@ export function sanitizeUnanalyzedPages(value: unknown): number[] | undefined {
   return [...pages].sort((a, b) => a - b);
 }
 
-/** Testo dell'avviso di analisi parziale, ricalcolato a ogni ripresa. */
-export function circularPartialNotice(unanalyzedPages: number[]): string {
-  return `Analisi parziale: ${unanalyzedPages.length === 1 ? "pagina non analizzata" : "pagine non analizzate"}: ${unanalyzedPages.join(", ")}. Controllale nel documento originale.`;
+/** Totale pagine nel notice strutturato del server, per conservarlo lato client. */
+export function circularTotalPagesFromNotice(notice?: string): number | undefined {
+  if (typeof notice !== "string") return undefined;
+  const match = /\(\s*su\s+(\d+)\s*\)/i.exec(notice);
+  if (!match) return undefined;
+  const total = Number(match[1]);
+  return Number.isSafeInteger(total) && total > 0 ? total : undefined;
+}
+
+/** Testo dell'avviso parziale, ricostruito dal client a ogni ripresa. */
+export function circularPartialNotice(unanalyzedPages: number[], totalPages?: number | null): string {
+  const pages = [...new Set(unanalyzedPages)].sort((a, b) => a - b);
+  if (pages.length === 0) return "";
+  const pageList = pages.length === 1
+    ? `la ${pages[0]}`
+    : `${pages.slice(0, -1).map((page) => `la ${page}`).join(", ")} e la ${pages[pages.length - 1]}`;
+  const countLabel = pages.length === 1 ? "Manca 1 pagina" : `Mancano ${pages.length} pagine`;
+  const totalLabel = Number.isSafeInteger(totalPages) && Number(totalPages) > 0 ? ` su ${totalPages}` : "";
+  return `${countLabel}${totalLabel}: ${pageList}.`;
 }
 
 /**

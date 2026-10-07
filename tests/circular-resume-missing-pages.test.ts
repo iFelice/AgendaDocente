@@ -19,6 +19,7 @@ import { CircularAnalyzerModal } from '../src/components/CircularAnalyzerModal';
 import {
   circularItemKey,
   circularPartialNotice,
+  circularTotalPagesFromNotice,
   mergeCircularItems,
   sanitizeUnanalyzedPages,
   CIRCULAR_AUTO_RESUME_DELAY_MS,
@@ -191,9 +192,12 @@ test('unanalyzedPages malformato non produce mai una ripresa che il server rifiu
   assert.deepEqual(sanitizeUnanalyzedPages([5, 2, 2, 0]), [2, 5]);
 });
 
-test('l\'avviso parziale è ricalcolato dalle pagine ancora mancanti', () => {
-  assert.match(circularPartialNotice([4, 5]), /pagine non analizzate: 4, 5/);
-  assert.match(circularPartialNotice([4]), /pagina non analizzata: 4/);
+test('notice server: il totale si ricava una volta e l\'avviso client ha singolare e plurale', () => {
+  assert.equal(circularTotalPagesFromNotice('Analisi parziale: pagine non analizzate: 3, 5 (su 7).'), 7);
+  assert.equal(circularTotalPagesFromNotice('Avviso privo del totale'), undefined);
+  assert.equal(circularPartialNotice([7], 7), 'Manca 1 pagina su 7: la 7.');
+  assert.equal(circularPartialNotice([5, 3], 7), 'Mancano 2 pagine su 7: la 3 e la 5.');
+  assert.equal(circularPartialNotice([1, 3, 5], 7), 'Mancano 3 pagine su 7: la 1, la 3 e la 5.');
 });
 
 // ---------------------------------------------------------------------------
@@ -256,7 +260,7 @@ test('finestra senza file: resta l\'avviso ma non parte né compare una ripresa'
     const run = renderer.root.findAll((n: any) => n.type === 'button' && n.props?.id === 'btn-run-analysis')[0];
     await act(async () => { run.props.onClick(); await new Promise((r) => setTimeout(r, 60)); });
 
-    assert.match(textOf(renderer.root), /pagine non analizzate: 3/);
+    assert.match(textOf(renderer.root), /Manca 1 pagina su 3: la 3\./);
     assert.equal(retryButton(renderer.root), undefined, 'senza file in memoria non compare il pulsante');
     assert.equal(stopAutoResumeButton(renderer.root), undefined);
   } finally {
@@ -264,12 +268,14 @@ test('finestra senza file: resta l\'avviso ma non parte né compare una ripresa'
   }
 });
 
-test('tentativo automatico 2 di 3: risultati sempre utilizzabili e modifiche utente conservate', async () => {
+test('tentativi automatici: notice aggiornato, risultati utilizzabili e modifiche utente conservate', async () => {
   const accelerated = accelerateAutomaticResumeDelays();
   const captured: Capture[] = [];
   let call = 0;
-  let release: (() => void) | null = null;
-  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let releaseFirst: (() => void) | null = null;
+  let releaseSecond: (() => void) | null = null;
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
   const jsonResponse = (body: any) => new Response(JSON.stringify(body), {
     status: 200, headers: { 'Content-Type': 'application/json' },
   });
@@ -284,12 +290,13 @@ test('tentativo automatico 2 di 3: risultati sempre utilizzabili e modifiche ute
       });
     }
     if (current === 1) {
+      await firstGate;
       return jsonResponse({
         success: true, source: 'server', items: [item('Riunione pagina 4', { date: '2026-12-14' })],
-        unanalyzedPages: [5],
+        unanalyzedPages: [5], notice: 'Analisi parziale: pagine non analizzate: 5 (su 2).',
       });
     }
-    await gate;
+    await secondGate;
     return jsonResponse({
       success: true, source: 'server', items: [item('Riunione pagina 5', { date: '2026-12-15' })],
     });
@@ -299,20 +306,28 @@ test('tentativo automatico 2 di 3: risultati sempre utilizzabili e modifiche ute
   try {
     renderer = await renderPdfAnalysis();
     const root = renderer.root;
-    assert.equal(captured.length, 3, 'la seconda ripresa automatica è già partita');
+    assert.equal(captured.length, 2, 'il primo tentativo automatico è partito senza clic');
     assert.deepEqual(captured[1].body.pages, [4, 5]);
-    assert.deepEqual(captured[2].body.pages, [5]);
-    assert.match(textOf(root), /Rileggo le pagine mancanti · tentativo 2 di 3/);
-    assert.ok(stopAutoResumeButton(root), 'Interrompi è disponibile durante i tentativi');
+    assert.match(textOf(root), /Mancano 2 pagine su 5: la 4 e la 5\./, 'avviso plurale iniziale');
+    assert.match(textOf(root), /Rileggo le pagine mancanti · tentativo 1 di 3/);
+    assert.ok(stopAutoResumeButton(root), 'Interrompi è disponibile durante la richiesta');
     assert.equal(retryButton(root), undefined, 'il pulsante manuale non compete con il ciclo automatico');
 
     // Durante la richiesta, i risultati già arrivati restano modificabili.
     await act(async () => { titleInputs(root)[0].props.onChange({ target: { value: 'Collegio CORRETTO a mano' } }); });
     await act(async () => { checkboxes(root)[1].props.onChange(); });
     await click(deleteButtons(root)[2]);
-    assert.deepEqual(checkboxes(root).map((checkbox: any) => checkbox.props.checked), [false, true, false]);
+    assert.deepEqual(checkboxes(root).map((checkbox: any) => checkbox.props.checked), [false, true]);
 
-    await act(async () => { release!(); await new Promise((resolve) => setTimeout(resolve, 30)); });
+    // La prima ripresa lascia la pagina 5 mancante: dopo 4 secondi parte il secondo giro.
+    await act(async () => { releaseFirst!(); await new Promise((resolve) => setTimeout(resolve, 30)); });
+    assert.equal(captured.length, 3);
+    assert.deepEqual(captured[2].body.pages, [5]);
+    assert.match(textOf(root), /Manca 1 pagina su 5: la 5\./, 'avviso aggiornato mantenendo il totale della prima risposta');
+    assert.match(textOf(root), /Rileggo le pagine mancanti · tentativo 2 di 3/);
+    assert.ok(stopAutoResumeButton(root));
+
+    await act(async () => { releaseSecond!(); await new Promise((resolve) => setTimeout(resolve, 30)); });
     assert.deepEqual(visibleTitles(root), [
       'Collegio CORRETTO a mano', 'Dipartimento pagina 2', 'Riunione pagina 4', 'Riunione pagina 5',
     ]);
@@ -320,7 +335,8 @@ test('tentativo automatico 2 di 3: risultati sempre utilizzabili e modifiche ute
     assert.ok(!textOf(root).includes('Da eliminare'), 'una riga eliminata non viene ripristinata');
     assert.deepEqual(accelerated.scheduledDelays, [CIRCULAR_AUTO_RESUME_DELAY_MS], 'pausa di 4 secondi fra i giri');
   } finally {
-    if (release) release();
+    if (releaseFirst) releaseFirst();
+    if (releaseSecond) releaseSecond();
     if (renderer) await act(async () => renderer.unmount());
     accelerated.restore();
   }
@@ -342,6 +358,7 @@ test('il ciclo automatico si ferma dopo al massimo tre riprese e lascia il pulsa
     assert.equal(stopAutoResumeButton(renderer.root), undefined, 'il ciclo automatico è terminato');
     assert.ok(retryButton(renderer.root), 'resta disponibile la ripresa manuale');
     assert.equal(retryButton(renderer.root).props.disabled, false);
+    assert.match(textOf(renderer.root), /Manca 1 pagina su 6: la 6\./, 'il totale della prima risposta è conservato fino all\'ultimo giro');
     assert.deepEqual(accelerated.scheduledDelays, [CIRCULAR_AUTO_RESUME_DELAY_MS, CIRCULAR_AUTO_RESUME_DELAY_MS]);
   } finally {
     if (renderer) await act(async () => renderer.unmount());
