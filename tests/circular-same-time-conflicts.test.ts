@@ -401,3 +401,60 @@ test('"Vai al prossimo" raggiunge ed evidenzia anche un conflitto di orario', as
     renderer.unmount();
   }
 });
+
+const overlapItem = { title: 'GLO alunno', category: 'glo', className: '1A', date: '2026-10-12', startTime: '15:00', endTime: '16:00' };
+const overlapExisting: CalendarEvent = { ...existingIncontro, id: 'cdc', title: 'Consiglio di Classe 1A', category: 'consiglio_classe', className: '1A' };
+
+test('sovrapposizione: due sole scelte, intervallo comune, blocco e Vai al prossimo', async () => {
+  const { renderer, state } = await renderResults([overlapItem], [overlapExisting]);
+  const root = renderer.root;
+  try {
+    const scope = scopeOfTitle(root, overlapItem.title);
+    assert.ok(textOf(scope).includes('Sovrapposizione con un impegno già in agenda'));
+    assert.ok(textOf(scope).includes('Si sovrappongono dalle 15:00 alle 15:45'));
+    assert.deepEqual(scope.findAll((n: any) => n.type === 'button' && n.props['aria-pressed'] !== undefined).map(textOf), ['Aggiungi comunque', 'Ignora']);
+    await click(findButton(root, /all'Agenda/));
+    assert.equal(state.importCalled, false);
+    await click(root.findAll((n: any) => n.props?.id === 'btn-go-to-next-unresolved')[0]);
+    assert.equal(root.findAll((n: any) => n.type === 'div' && n.props['data-conflict-highlight'] === 'true').length, 1);
+    await click(cardChoiceButton(root, overlapItem.title, 'Ignora'));
+    assert.equal(cardCheckbox(root, overlapItem.title).props.checked, false);
+    await click(cardChoiceButton(root, overlapItem.title, 'Aggiungi comunque'));
+    assert.equal(cardCheckbox(root, overlapItem.title).props.checked, true);
+    await click(findButton(root, /all'Agenda/));
+    assert.equal(state.importCalled, true);
+    assert.equal(state.importedNew.length, 1);
+    assert.equal(state.importedUpdated.length, 0);
+    assert.equal(overlapExisting.title, 'Consiglio di Classe 1A');
+  } finally { renderer.unmount(); }
+});
+
+test('tre tipi in blocco: aggiorna esclude sovrapposizioni; Annulla, aggiungi e ignora', async () => {
+  const titleExisting: CalendarEvent = { ...existingIncontro, id: 'title', title: 'Collegio Docenti', category: 'collegio_docenti', date: '2026-10-15' };
+  const titleItem = { ...titleExisting, startTime: '17:00', endTime: '18:00' };
+  const timeItem = { ...itemColloquio, date: '2026-10-16' };
+  const { renderer, state } = await renderResults([overlapItem, titleItem, timeItem], [overlapExisting, titleExisting, { ...existingIncontro, date: '2026-10-16' }]);
+  const root = renderer.root;
+  try {
+    assert.ok(textOf(root).includes('1 possibili aggiornamenti · 1 stesso orario · 1 sovrapposizioni'));
+    await click(findButtonByLabel(root, /^Aggiorna esistenti: conflitti visibili non risolti/));
+    assert.ok(textOf(root).includes('1 sovrapposizioni escluse: nessuna scelta modificata; 1 restano da risolvere.'));
+    assert.equal(isPressed(cardChoiceButton(root, titleItem.title, 'Aggiorna esistente')), true);
+    assert.equal(isPressed(cardChoiceButton(root, timeItem.title, 'Aggiorna esistente')), true);
+    assert.equal(isPressed(cardChoiceButton(root, overlapItem.title, 'Aggiungi comunque')), false);
+    assert.equal(isPressed(cardChoiceButton(root, overlapItem.title, 'Ignora')), false);
+    await click(findButton(root, /all'Agenda/));
+    assert.equal(state.importCalled, false);
+    await click(findButton(root, /^Annulla$/));
+    assert.equal(isPressed(cardChoiceButton(root, titleItem.title, 'Aggiorna esistente')), false);
+    await click(findButtonByLabel(root, /^Ignora: conflitti visibili non risolti/));
+    assert.equal(cardCheckbox(root, overlapItem.title).props.checked, false);
+    await click(findButton(root, /^Annulla$/));
+    assert.equal(cardCheckbox(root, overlapItem.title).props.checked, true);
+    await click(findButtonByLabel(root, /^Aggiungi come nuovi: conflitti visibili non risolti/));
+    assert.equal(isPressed(cardChoiceButton(root, overlapItem.title, 'Aggiungi comunque')), true);
+    await click(findButton(root, /all'Agenda/));
+    assert.equal(state.importedNew.length, 3);
+    assert.equal(state.importedUpdated.length, 0);
+  } finally { renderer.unmount(); }
+});

@@ -41,9 +41,20 @@ import {
 import {
   findEventMatch,
   getEventFieldDiff,
+  timeToMinutes,
   isIdenticalEventUpdate,
   type EventMatchResult,
 } from "../utils/eventMatching";
+
+/** Intersezione effettiva; con il solo inizio non inventa un orario di fine. */
+function overlapLabel(a: ExtractedItem, b: CalendarEvent): string {
+  const start = Math.max(timeToMinutes(a.startTime)!, timeToMinutes(b.startTime)!);
+  const ends = [timeToMinutes(a.endTime), timeToMinutes(b.endTime)];
+  const format = (minutes: number) => `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+  if (ends.some((end) => end === null)) return `Si sovrappongono alle ${format(start)} (orario di fine non disponibile).`;
+  return `Si sovrappongono dalle ${format(start)} alle ${format(Math.min(...ends as number[]))}`;
+}
+
 
 export type UpdateChoice = "update" | "create" | "ignore";
 
@@ -583,8 +594,8 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
 
   // Conflitti: abbinamento deterministico con un impegno già in agenda, calcolato
   // una sola volta per render e riusato da conteggi, blocco importazione e schede.
-  // Due criteri, in ordine di precedenza: "titolo" (possibile aggiornamento) e
-  // "orario" (stesso orario, possibile doppione con un nome diverso).
+  // Tre criteri, in ordine di precedenza: "titolo" (possibile aggiornamento) e
+  // "orario" (possibile doppione), poi "sovrapposizione" (impegni distinti).
   const matchByTempId = new Map<string, EventMatchResult>();
   const identicalConflictIds = new Set<string>();
   for (const it of extractedItems) {
@@ -605,6 +616,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
    */
   const choiceOf = (item: ExtractedItem): UpdateChoice | undefined => {
     if (!matchByTempId.has(item.tempId)) return undefined;
+    if (matchByTempId.get(item.tempId)?.kind === "sovrapposizione" && updateChoices[item.tempId] === "update") return undefined;
     return updateChoices[item.tempId] ?? (identicalConflictIds.has(item.tempId) ? "ignore" : undefined);
   };
 
@@ -682,8 +694,8 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   // Conflitti visibili con una scelta esplicita dell'utente: sono i soli che
   // "Cambia per tutti" può sovrascrivere (gli identici invariati restano fuori).
   const overridableVisibleConflicts = visibleConflicts.filter((it) => updateChoices[it.tempId] !== undefined);
-  // Il conteggio distingue i due criteri di riconoscimento: il titolo
-  // ("possibili aggiornamenti") e il solo orario ("stesso orario").
+  // Il conteggio distingue i tre criteri di riconoscimento: il titolo
+  // ("possibili aggiornamenti"), il solo orario e le sovrapposizioni.
   const unresolvedTitleConflicts = unresolvedVisibleConflicts.filter(
     (it) => matchByTempId.get(it.tempId)?.kind === "titolo"
   );
@@ -691,10 +703,15 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
     (it) => matchByTempId.get(it.tempId)?.kind === "orario"
   );
 
+  const unresolvedOverlapConflicts = unresolvedVisibleConflicts.filter(
+    (it) => matchByTempId.get(it.tempId)?.kind === "sovrapposizione"
+  );
+
   // Scelta singola su un conflitto: la scelta implica la selezione (punto 1).
   // Una modifica manuale successiva della casella non viene ri-allineata finché
   // l'utente non cambia di nuovo la scelta sul conflitto.
   const handleUpdateChoice = (tempId: string, choice: UpdateChoice) => {
+    if (choice === "update" && matchByTempId.get(tempId)?.kind === "sovrapposizione") return;
     setUpdateChoices((prev) => ({ ...prev, [tempId]: choice }));
     setExtractedItems((prev) =>
       prev.map((it) => (it.tempId === tempId ? { ...it, selectedForImport: choice !== "ignore" } : it))
@@ -704,6 +721,14 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
   /** Applica una scelta a un insieme di conflitti e prepara l'"Annulla". */
   const applyBulkChoice = (targetIds: string[], choice: UpdateChoice) => {
     if (targetIds.length === 0) return;
+    const skipped = choice === "update"
+      ? targetIds.filter((id) => matchByTempId.get(id)?.kind === "sovrapposizione")
+      : [];
+    targetIds = targetIds.filter((id) => !skipped.includes(id));
+    const unresolvedSkipped = skipped.filter((id) => {
+      const item = extractedItems.find((it) => it.tempId === id);
+      return item && choiceOf(item) === undefined;
+    }).length;
     const idSet = new Set(targetIds);
     const entries = extractedItems
       .filter((it) => idSet.has(it.tempId))
@@ -721,7 +746,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
       entries,
       announcement: `${CHOICE_BULK_LABELS[choice]} applicato a ${targetIds.length} ${
         targetIds.length === 1 ? "impegno" : "impegni"
-      }.`,
+      }.${skipped.length > 0 ? ` ${skipped.length} sovrapposizioni escluse: nessuna scelta modificata; ${unresolvedSkipped} restano da risolvere.` : ""}`,
       restoreBlock: importBlockActive,
     });
     if (bulkUndoTimer.current) clearTimeout(bulkUndoTimer.current);
@@ -1431,17 +1456,11 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                       {/* I due criteri di riconoscimento si contano separati
                           (es. "5 possibili aggiornamenti · 3 stesso orario"). */}
                       <span className="font-bold whitespace-nowrap">
-                        {unresolvedTitleConflicts.length > 0 && unresolvedTimeConflicts.length > 0 ? (
-                          <>
-                            {unresolvedTitleConflicts.length} possibili aggiornamenti
-                            <span aria-hidden="true"> · </span>
-                            {unresolvedTimeConflicts.length} stesso orario
-                          </>
-                        ) : unresolvedTitleConflicts.length > 0 ? (
-                          <>{unresolvedTitleConflicts.length} possibili aggiornamenti</>
-                        ) : (
-                          <>{unresolvedTimeConflicts.length} impegni allo stesso orario</>
-                        )}
+                        {[
+                          unresolvedTitleConflicts.length > 0 ? `${unresolvedTitleConflicts.length} possibili aggiornamenti` : null,
+                          unresolvedTimeConflicts.length > 0 ? `${unresolvedTimeConflicts.length} ${unresolvedTitleConflicts.length || unresolvedOverlapConflicts.length ? "stesso orario" : "impegni allo stesso orario"}` : null,
+                          unresolvedOverlapConflicts.length > 0 ? `${unresolvedOverlapConflicts.length} sovrapposizioni` : null,
+                        ].filter(Boolean).join(" · ")}
                       </span>
                       <span aria-hidden="true">·</span>
                       <span className="font-medium">Applica a tutti:</span>
@@ -1544,7 +1563,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                     // Criterio che ha riconosciuto l'impegno: il titolo
                     // ("possibile aggiornamento") o il solo orario.
                     const matchKind = matchResult?.kind ?? null;
-                    const otherSameTimeCount = matchResult?.kind === "orario" ? matchResult.others : 0;
+                    const otherSameTimeCount = matchResult && matchResult.kind !== "titolo" ? matchResult.others : 0;
                     const diff = match ? getEventFieldDiff(match, item) : null;
                     const choice = choiceOf(item);
                     const isIdenticalConflict = identicalConflictIds.has(item.tempId);
@@ -1687,7 +1706,9 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                                   <div className="flex flex-wrap items-center gap-1.5 text-xs font-bold text-amber-900">
                                     <RefreshCw className="w-3.5 h-3.5 text-amber-600 shrink-0" />
                                     <span>
-                                      {matchKind === "orario"
+                                      {matchKind === "sovrapposizione"
+                                        ? "Sovrapposizione con un impegno già in agenda"
+                                        : matchKind === "orario"
                                         ? "Stesso orario di un impegno già in agenda"
                                         : "Possibile aggiornamento di un impegno esistente"}
                                     </span>
@@ -1703,10 +1724,11 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
 
                                   {/* Riconosciuto per orario: può essere lo stesso
                                       impegno della circolare con un nome diverso. */}
-                                  {matchKind === "orario" && (
+                                  {(matchKind === "orario" || matchKind === "sovrapposizione") && (
                                     <p className="text-[11px] leading-snug text-amber-900">
-                                      In agenda c'è già un impegno a quest'ora: potrebbe essere lo
-                                      stesso della circolare, con un nome diverso.
+                                      {matchKind === "sovrapposizione"
+                                        ? overlapLabel(item, match)
+                                        : "In agenda c'è già un impegno a quest'ora: potrebbe essere lo stesso della circolare, con un nome diverso."}
                                       {otherSameTimeCount > 0 && (
                                         <span className="font-semibold">
                                           {" "}
@@ -1784,7 +1806,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                                   <div className="pt-1">
                                     <span className="text-[11px] font-semibold text-stone-700 block mb-1.5">Scegli come procedere:</span>
                                     <div className="flex flex-wrap gap-2" role="group" aria-label={`Scelta per l'impegno "${item.title}"`}>
-                                      <button
+                                      {matchKind !== "sovrapposizione" && <button
                                         type="button"
                                         onClick={() => handleUpdateChoice(item.tempId, "update")}
                                         aria-pressed={choice === "update"}
@@ -1795,7 +1817,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                                         }`}
                                       >
                                         Aggiorna esistente
-                                      </button>
+                                      </button>}
                                       <button
                                         type="button"
                                         onClick={() => handleUpdateChoice(item.tempId, "create")}
@@ -1806,7 +1828,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
                                             : "bg-white border-stone-300 text-stone-700 hover:bg-stone-50"
                                         }`}
                                       >
-                                        Aggiungi come nuovo
+                                        {matchKind === "sovrapposizione" ? "Aggiungi comunque" : "Aggiungi come nuovo"}
                                       </button>
                                       <button
                                         type="button"

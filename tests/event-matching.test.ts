@@ -1038,7 +1038,7 @@ test('18. Caso riprodotto: "Consigli di Classe" riconosce "Consiglio di Classe 3
   assert.equal(findPossibleEventUpdate(candidate, [existingEvent])?.id, 'ev-consiglio-3d');
 });
 
-test('19. Classi diverse (3D in agenda, 1C dalla circolare): nessun riconoscimento', () => {
+test('19. Classi diverse (3D in agenda, 1C dalla circolare): solo sovrapposizione', () => {
   const existingEvent: CalendarEvent = {
     id: 'ev-consiglio-3d',
     title: 'Consiglio di Classe 3D',
@@ -1062,7 +1062,7 @@ test('19. Classi diverse (3D in agenda, 1C dalla circolare): nessun riconoscimen
   });
 
   assert.equal(findPossibleEventUpdate(candidate, [existingEvent]), null, 'Nessun aggiornamento per titolo');
-  assert.equal(findEventMatch(candidate, [existingEvent]), null, 'La stessa ora non basta: la classe è diversa');
+  assert.deepEqual(findEventMatch(candidate, [existingEvent]), { event: existingEvent, kind: 'sovrapposizione', others: 0 }, 'Classe diversa: avviso, non possibile aggiornamento');
 });
 
 test('20. "Consiglio di Classe" vs "Consiglio di Istituto": nessuna corrispondenza per titolo', () => {
@@ -1304,4 +1304,38 @@ test('27. Il criterio del titolo ha la precedenza su quello dell\'orario', () =>
   assert.ok(match);
   assert.equal(match.kind, 'titolo');
   assert.equal(match.event.id, 'ev-titolo', 'anche se l\'altro si sovrappone di più');
+});
+
+test('sovrapposizione: tre casi riprodotti e classi diverse', () => {
+  const events = [
+    makeExisting({ id: 'cdc', title: 'Consiglio di Classe 3D', category: 'consiglio_classe', className: '3D', startTime: '15:00', endTime: '15:45' }),
+    makeExisting({ id: 'pei', title: 'meet pei', category: 'pei', className: '3E', startTime: '17:30', endTime: '18:30' }),
+  ];
+  for (const [title, category, className, startTime, endTime, id] of [
+    ['GLO alunno', 'glo', '3D', '15:00', '16:00', 'cdc'],
+    ['Consigli di Classe', 'consiglio_classe', '3E', '17:30', '18:15', 'pei'],
+    ['Collegio Docenti', 'collegio_docenti', undefined, '15:00', '17:00', 'cdc'],
+    ['Consiglio di Classe 1C', 'consiglio_classe', '1C', '15:00', '16:00', 'cdc'],
+  ] as const) {
+    const match = findEventMatch({ title, category, className, date: '2026-10-12', startTime, endTime }, events);
+    assert.equal(match?.kind, 'sovrapposizione');
+    assert.equal(match?.event.id, id);
+    assert.equal(match?.others, 0);
+  }
+});
+
+test('precedenza titolo > orario > sovrapposizione e spareggio', () => {
+  const candidate = { title: 'GLO alunno', category: 'glo' as const, date: '2026-10-12', startTime: '15:00', endTime: '16:00' };
+  const overlap = makeExisting({ id: 'overlap', title: 'Altro', category: 'pei', startTime: '15:00', endTime: '16:00' });
+  const time = makeExisting({ id: 'time', title: 'Riunione diversa', category: 'glo', startTime: '15:30', endTime: '16:30' });
+  const title = makeExisting({ id: 'title', ...candidate, startTime: '18:00', endTime: '19:00' });
+  assert.equal(findEventMatch(candidate, [overlap, time, title])?.kind, 'titolo');
+  assert.equal(findEventMatch(candidate, [overlap, time])?.kind, 'orario');
+  const partial = { ...overlap, id: 'partial', startTime: '15:30' };
+  assert.deepEqual(findEventMatch(candidate, [partial, overlap]), { event: overlap, kind: 'sovrapposizione', others: 1 });
+  assert.equal(findEventMatch({ ...candidate, startTime: '16:00', endTime: '17:00' }, [overlap]), null);
+  for (const excluded of [ { category: 'lezione' as const }, { category: 'scadenza' as const }, { isAllDay: true }, { startTime: undefined, endTime: undefined } ]) {
+    assert.equal(findEventMatch({ ...candidate, ...excluded }, [overlap]), null);
+    assert.equal(findEventMatch(candidate, [{ ...overlap, ...excluded }]), null);
+  }
 });

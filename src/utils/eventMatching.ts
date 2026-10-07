@@ -332,20 +332,20 @@ export function isIdenticalEventUpdate(
 }
 
 /** Tipo di riconoscimento: per titolo (possibile aggiornamento) o per orario. */
-export type EventMatchKind = "titolo" | "orario";
+export type EventMatchKind = "titolo" | "orario" | "sovrapposizione";
 
 export interface EventMatchResult {
   /** Impegno già in agenda riconosciuto. */
   event: CalendarEvent;
   /** Criterio che lo ha riconosciuto: il titolo ha la precedenza sull'orario. */
   kind: EventMatchKind;
-  /** Altri impegni trovati dallo stesso criterio (solo "orario"): quanti ne restano fuori. */
+  /** Altri impegni trovati dallo stesso criterio ("orario" e "sovrapposizione"): quanti ne restano fuori. */
   others: number;
 }
 
 /** Elemento estratto nella parte che serve al riconoscimento. */
 export type EventMatchCandidate = Pick<ExtractedItem, "title" | "date" | "category" | "className"> &
-  Partial<Pick<ExtractedItem, "startTime" | "endTime" | "isDeadline">>;
+  Partial<Pick<ExtractedItem, "startTime" | "endTime" | "isDeadline">> & { isAllDay?: boolean };
 
 /**
  * Fra più candidati per TITOLO sceglie quello con lo stesso inizio+fine del
@@ -383,9 +383,12 @@ function disambiguateTitleMatches(
  *
  * 1. TITOLO (stessa data obbligatoria, categorie e classi compatibili, titolo
  *    corrispondente parola per parola): è un possibile aggiornamento.
- * 2. ORARIO (stessa data, intervalli che si sovrappongono): è lo stesso
+ * 2. ORARIO (stessa data, intervalli sovrapposti, categorie e classi compatibili): possibile stesso
  *    impegno con un nome diverso. Fuori dal confronto: lezioni, scadenze,
  *    impegni tutto il giorno o senza orario (su entrambi i lati).
+ *
+ * 3. SOVRAPPOSIZIONE: stessi vincoli temporali ed esclusioni del criterio orario,
+ *    ma qualsiasi categoria e classe. Impegni distinti, mai da aggiornare.
  *
  * In caso di più candidati lo spareggio è sugli orari (stesso inizio+fine,
  * poi stesso inizio, poi sovrapposizione più lunga); se resta ambiguità il
@@ -399,7 +402,7 @@ export function findEventMatch(
   if (!existingEvents || existingEvents.length === 0) return null;
   if (!candidate.date || !candidate.title) return null;
 
-  // La data è obbligatoria per entrambi i criteri.
+  // La data è obbligatoria per tutti i criteri.
   const sameDay = existingEvents.filter((existing) => existing.date === candidate.date);
   if (sameDay.length === 0) return null;
 
@@ -420,18 +423,19 @@ export function findEventMatch(
   const candidateWindow = timeWindowOf(candidate);
   if (!candidateWindow) return null;
 
-  const overlapping = sameDay
-    // Categorie e classi restano un discrimine anche qui: a parità di orario,
-    // un consiglio di classe 3D non è lo stesso impegno di un consiglio 1C.
-    .filter((existing) => areCategoriesCompatible(candidate.category, existing.category))
-    .filter((existing) =>
-      areClassesCompatible(candidate.className, existing.className, candidate.title, existing.title)
-    )
+  const allOverlapping = sameDay
     .filter((existing) => !isDeadlineLike(existing) && !isLessonLike(existing))
     .map((existing) => ({ existing, window: timeWindowOf(existing) }))
     .filter((entry): entry is { existing: CalendarEvent; window: TimeWindow } => entry.window !== null)
     .filter((entry) => windowsOverlap(candidateWindow, entry.window));
 
+  const compatible = allOverlapping.filter(({ existing }) =>
+    areCategoriesCompatible(candidate.category, existing.category) &&
+    areClassesCompatible(candidate.className, existing.className, candidate.title, existing.title)
+  );
+  // 3. Se non è un possibile doppione, segnala comunque il conflitto del docente.
+  const kind: EventMatchKind = compatible.length > 0 ? "orario" : "sovrapposizione";
+  const overlapping = compatible.length > 0 ? compatible : allOverlapping;
   if (overlapping.length === 0) return null;
 
   // Spareggio: stesso inizio+fine, poi stesso inizio, poi sovrapposizione più lunga.
@@ -453,7 +457,7 @@ export function findEventMatch(
     }
   }
 
-  return { event: best.existing, kind: "orario", others: overlapping.length - 1 };
+  return { event: best.existing, kind, others: overlapping.length - 1 };
 }
 
 /**
