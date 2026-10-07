@@ -70,7 +70,7 @@ async function renderResults(items: any[], events: CalendarEvent[]) {
     await new Promise((resolve) => setTimeout(resolve, 60));
   });
   // La pertinenza dipende dalla valutazione del documento: qui interessa il
-  // conflitto, quindi si parte da tutti gli impegni selezionati.
+  // conflitto, quindi si parte da tutti gli impegni visibili selezionati.
   const selectAll = renderer.root.findAll((n: any) => n.type === 'button' && textOf(n) === 'Tutti')[0];
   await act(async () => { selectAll.props.onClick(); });
   return {
@@ -125,33 +125,35 @@ const cardChoiceButton = (root: any, title: string, label: string, occurrence = 
   scopeFromTitleInput(titleInputs(root, title)[occurrence])!
     .findAll((n: any) => n.type === 'button' && textOf(n) === label && n.props['aria-pressed'] !== undefined)[0];
 
+/** Righe di differenza della scheda compatta: "Orario: 15:00–15:45 → 15:15–15:40", … */
+const differenceLines = (scope: any) => scope.findAll((n: any) => n.type === 'li').map((n: any) => textOf(n));
+
 const isPressed = (button: any) =>
   /\bbg-(emerald-700|amber-600|stone-700)\b/.test(button?.props?.className || '');
 
 // ---------------------------------------------------------------------------
-// 1) Riquadro "Stesso orario di un impegno già in agenda"
+// 1) Riconoscimento per ORARIO: scheda compatta "Forse è lo stesso impegno"
 // ---------------------------------------------------------------------------
 
-test('stesso orario: riquadro con le tre scelte, nessuna preselezionata, riga di spiegazione', async () => {
+test('stesso orario: scheda compatta con le sole differenze e tre scelte, nessuna preselezionata', async () => {
   const { renderer } = await renderResults([itemColloquio], [existingIncontro]);
   const root = renderer.root;
   try {
-    const text = textOf(root);
-    assert.ok(text.includes('Stesso orario di un impegno già in agenda'), 'titolo del riquadro');
-    assert.ok(
-      text.includes('potrebbe essere lo stesso della circolare'),
-      'riga che spiega il possibile doppione con un nome diverso'
-    );
-    assert.ok(text.includes('Esistente in agenda'), 'confronto con l\'esistente');
-    assert.ok(text.includes('Dalla nuova circolare'), 'confronto con il nuovo');
-    assert.ok(text.includes('15:00 - 15:45'), 'orario dell\'impegno esistente');
-    assert.ok(text.includes('15:15 - 15:40'), 'orario estratto dalla circolare');
+    const scope = scopeOfTitle(root, 'Colloquio col Dirigente');
+    const text = textOf(scope);
+    assert.ok(text.includes('Forse è lo stesso impegno'), 'riga di titolo della scheda');
+    // Niente più riquadro a due colonne: solo le differenze, una per riga.
+    assert.equal(text.includes('Esistente in agenda'), false, 'niente colonna "Esistente in agenda"');
+    assert.equal(text.includes('Dalla nuova circolare'), false, 'niente colonna "Dalla nuova circolare"');
+    assert.deepEqual(differenceLines(scope), [
+      'Orario: 15:00–15:45 → 15:15–15:40',
+      'Titolo: Incontro con il Dirigente → Colloquio col Dirigente',
+    ]);
 
     // Le tre scelte ci sono tutte, nessuna preselezionata.
-    const scope = scopeOfTitle(root, 'Colloquio col Dirigente');
     const choices = scope.findAll((n: any) => n.type === 'button' && n.props['aria-pressed'] !== undefined);
     const labels = choices.map((n: any) => textOf(n));
-    assert.deepEqual(labels, ['Aggiorna esistente', 'Aggiungi come nuovo', 'Ignora']);
+    assert.deepEqual(labels, ['Aggiorna', 'Tieni entrambi', 'Salta']);
     for (const choice of choices) {
       assert.equal(isPressed(choice), false, `nessuna scelta preselezionata: ${textOf(choice)}`);
     }
@@ -164,21 +166,21 @@ test('stesso orario: riquadro con le tre scelte, nessuna preselezionata, riga di
 // 2) L'importazione resta bloccata finché manca la scelta
 // ---------------------------------------------------------------------------
 
-test('stesso orario: importazione bloccata senza scelta, poi "Aggiorna esistente" aggiorna (nessun doppione)', async () => {
+test('stesso orario: importazione bloccata senza scelta, poi "Aggiorna" aggiorna (nessun doppione)', async () => {
   const { renderer, state } = await renderResults([itemColloquio], [existingIncontro]);
   const root = renderer.root;
   try {
-    // 1. Conferma senza scelta: non importa e avvisa.
+    // 1. Conferma senza scelta: non importa e avvisa con una riga sola.
     await click(findButton(root, /all'Agenda/));
     assert.equal(state.importCalled, false, 'senza scelta l\'importazione resta bloccata');
     assert.ok(
-      textOf(root).includes('Restano 1 impegni selezionati da risolvere prima di importare.'),
-      'messaggio di blocco con il conteggio'
+      textOf(root).includes('Restano 1 impegni da decidere'),
+      'messaggio di blocco in una riga con il conteggio'
     );
 
-    // 2. Scelta "Aggiorna esistente": aggiorna l'impegno in agenda, non ne crea uno nuovo.
-    await click(cardChoiceButton(root, 'Colloquio col Dirigente', 'Aggiorna esistente'));
-    assert.equal(isPressed(cardChoiceButton(root, 'Colloquio col Dirigente', 'Aggiorna esistente')), true);
+    // 2. Scelta "Aggiorna": aggiorna l'impegno in agenda, non ne crea uno nuovo.
+    await click(cardChoiceButton(root, 'Colloquio col Dirigente', 'Aggiorna'));
+    assert.equal(isPressed(cardChoiceButton(root, 'Colloquio col Dirigente', 'Aggiorna')), true);
     assert.equal(cardCheckbox(root, 'Colloquio col Dirigente').props.checked, true, 'la scelta seleziona');
 
     await click(findButton(root, /all'Agenda/));
@@ -194,13 +196,13 @@ test('stesso orario: importazione bloccata senza scelta, poi "Aggiorna esistente
   }
 });
 
-test('stesso orario: "Ignora" deseleziona (la scelta comanda sulla selezione)', async () => {
+test('stesso orario: "Salta" deseleziona (la scelta comanda sulla selezione)', async () => {
   const { renderer, state } = await renderResults([itemColloquio], [existingIncontro]);
   const root = renderer.root;
   try {
-    await click(cardChoiceButton(root, 'Colloquio col Dirigente', 'Ignora'));
-    assert.equal(cardCheckbox(root, 'Colloquio col Dirigente').props.checked, false, '"Ignora" deseleziona');
-    assert.equal(isPressed(cardChoiceButton(root, 'Colloquio col Dirigente', 'Ignora')), true);
+    await click(cardChoiceButton(root, 'Colloquio col Dirigente', 'Salta'));
+    assert.equal(cardCheckbox(root, 'Colloquio col Dirigente').props.checked, false, '"Salta" deseleziona');
+    assert.equal(isPressed(cardChoiceButton(root, 'Colloquio col Dirigente', 'Salta')), true);
 
     await click(findButton(root, /all'Agenda/));
     assert.equal(state.importCalled, false, 'nessun impegno selezionato: nessuna importazione');
@@ -210,10 +212,10 @@ test('stesso orario: "Ignora" deseleziona (la scelta comanda sulla selezione)', 
 });
 
 // ---------------------------------------------------------------------------
-// 3) "Identico ⇒ Ignora preimpostato" vale solo per il criterio del titolo
+// 3) "Identico ⇒ saltato in automatico" vale solo per il criterio del titolo
 // ---------------------------------------------------------------------------
 
-test('identico ⇒ Ignora preimpostato: solo per il titolo, non per il solo orario', async () => {
+test('identico ⇒ saltato in automatico: solo per il titolo, non per il solo orario', async () => {
   // Due impegni identici in agenda: il titolo resta ambiguo (nessuno spareggio
   // possibile), subentra il criterio dell'orario. Pur essendo i dati identici a
   // quelli estratti, la scelta NON è preimpostata: va chiesta.
@@ -232,28 +234,29 @@ test('identico ⇒ Ignora preimpostato: solo per il titolo, non per il solo orar
   const root = renderer.root;
   try {
     const text = textOf(root);
-    assert.ok(text.includes('Stesso orario di un impegno già in agenda'));
+    assert.ok(text.includes('Forse è lo stesso impegno'));
     assert.equal(text.includes('Già in agenda, identico'), false, 'etichetta riservata al criterio del titolo');
+    assert.equal(text.includes('già in agenda, saltati'), false, 'nessun saltato in automatico per il solo orario');
     assert.equal(cardCheckbox(root, 'Colloquio col Dirigente').props.checked, true, 'resta selezionato');
 
-    // Senza scelta l'importazione è bloccata: il preimpostato "Ignora" non scatta.
+    // Senza scelta l'importazione è bloccata: il preimpostato "Salta" non scatta.
     await click(findButton(root, /all'Agenda/));
     assert.equal(state.importCalled, false, 'la scelta resta obbligatoria');
 
     // Con la scelta esplicita si procede.
-    await click(cardChoiceButton(root, 'Colloquio col Dirigente', 'Ignora'));
+    await click(cardChoiceButton(root, 'Colloquio col Dirigente', 'Salta'));
     await click(findButton(root, /all'Agenda/));
-    assert.equal(state.importCalled, false, 'ignorato: nessuna modifica da salvare');
+    assert.equal(state.importCalled, false, 'saltato: nessuna modifica da salvare');
   } finally {
     renderer.unmount();
   }
 });
 
 // ---------------------------------------------------------------------------
-// 4) Riga in blocco: conteggi distinti per tipo, azione valida su entrambi
+// 4) Riga in blocco: un solo conteggio, azione valida su entrambi i criteri
 // ---------------------------------------------------------------------------
 
-test('riga in blocco: il conteggio distingue "possibili aggiornamenti" e "stesso orario"', async () => {
+test('riga in blocco: un solo conteggio "N da decidere", senza conteggi per tipo', async () => {
   const existingCollegio: CalendarEvent = {
     id: 'ev-collegio', title: 'Collegio Docenti', category: 'collegio_docenti',
     date: '2026-10-15', startTime: '17:00', endTime: '18:00', isAllDay: false, sourceType: 'circolare',
@@ -261,9 +264,9 @@ test('riga in blocco: il conteggio distingue "possibili aggiornamenti" e "stesso
 
   const { renderer } = await renderResults(
     [
-      // Possibile aggiornamento (criterio del titolo).
+      // Riconosciuta per titolo (possibile aggiornamento).
       { title: 'Collegio Docenti', category: 'collegio_docenti', date: '2026-10-15', startTime: '15:00', endTime: '16:30' },
-      // Solo stesso orario (titolo diverso).
+      // Riconosciuta per il solo orario (titolo diverso).
       itemColloquio,
     ],
     [existingCollegio, existingIncontro]
@@ -271,18 +274,17 @@ test('riga in blocco: il conteggio distingue "possibili aggiornamenti" e "stesso
   const root = renderer.root;
   try {
     const text = textOf(root);
-    assert.ok(
-      text.includes('1 possibili aggiornamenti · 1 stesso orario'),
-      'conteggio distinto per tipo nella riga in blocco'
-    );
-    assert.ok(text.includes('Possibile aggiornamento di un impegno esistente'), 'riquadro per titolo');
-    assert.ok(text.includes('Stesso orario di un impegno già in agenda'), 'riquadro per orario');
+    assert.ok(text.includes('2 da decidere'), 'un solo conteggio nella riga in blocco');
+    assert.equal(text.includes('possibili aggiornamenti'), false, 'niente conteggi per tipo');
+    assert.equal(text.includes('sovrapposizioni'), false, 'niente conteggi per tipo');
+    assert.ok(text.includes('Già in agenda con dati diversi'), 'scheda per il titolo');
+    assert.ok(text.includes('Forse è lo stesso impegno'), 'scheda per l\'orario');
   } finally {
     renderer.unmount();
   }
 });
 
-test('riga in blocco: l\'azione vale su entrambi i tipi di conflitto', async () => {
+test('riga in blocco: le tre azioni rapide valgono su entrambi i criteri di conflitto', async () => {
   const existingCollegio: CalendarEvent = {
     id: 'ev-collegio', title: 'Collegio Docenti', category: 'collegio_docenti',
     date: '2026-10-15', startTime: '17:00', endTime: '18:00', isAllDay: false, sourceType: 'circolare',
@@ -298,10 +300,10 @@ test('riga in blocco: l\'azione vale su entrambi i tipi di conflitto', async () 
   const root = renderer.root;
   try {
     // Azione in blocco sui 2 conflitti visibili non risolti (titolo + orario).
-    await click(findButtonByLabel(root, /^Aggiorna esistenti: conflitti visibili non risolti \(2\)/));
+    await click(findButtonByLabel(root, /^Aggiorna tutti: conflitti visibili non risolti \(2\)/));
 
-    assert.equal(isPressed(cardChoiceButton(root, 'Collegio Docenti', 'Aggiorna esistente')), true);
-    assert.equal(isPressed(cardChoiceButton(root, 'Colloquio col Dirigente', 'Aggiorna esistente')), true);
+    assert.equal(isPressed(cardChoiceButton(root, 'Collegio Docenti', 'Aggiorna')), true);
+    assert.equal(isPressed(cardChoiceButton(root, 'Colloquio col Dirigente', 'Aggiorna')), true);
 
     await click(findButton(root, /all'Agenda/));
     assert.equal(state.importCalled, true);
@@ -314,29 +316,22 @@ test('riga in blocco: l\'azione vale su entrambi i tipi di conflitto', async () 
   }
 });
 
-test('riga in blocco: con i soli conflitti di orario il conteggio li nomina per quello che sono', async () => {
+test('riga in blocco: con la sola riconoscizione per orario resta un solo "da decidere"', async () => {
   const { renderer } = await renderResults([itemColloquio], [existingIncontro]);
   const root = renderer.root;
   try {
-    assert.ok(
-      textOf(root).includes('1 impegni allo stesso orario'),
-      'conteggio del solo criterio dell\'orario'
-    );
-    assert.equal(
-      textOf(root).includes('possibili aggiornamenti'),
-      false,
-      'nessun conflitto per titolo: il conteggio non li cita'
-    );
+    assert.ok(textOf(root).includes('1 da decidere'), 'conteggio del solo criterio dell\'orario');
+    assert.equal(textOf(root).includes('possibili aggiornamenti'), false, 'il conteggio non nomina i criteri');
   } finally {
     renderer.unmount();
   }
 });
 
 // ---------------------------------------------------------------------------
-// 5) Più impegni sovrapposti: l'avviso dice quanti altri ce ne sono
+// 5) Più impegni alla stessa ora: la riga si abbina al migliore
 // ---------------------------------------------------------------------------
 
-test('più impegni sovrapposti: la scheda segnala gli altri alla stessa ora', async () => {
+test('più impegni alla stessa ora: la riga si abbina a quello con stesso inizio+fine', async () => {
   const events: CalendarEvent[] = [
     {
       id: 'ev-uguale', title: 'Incontro uguale', category: 'riunione',
@@ -352,14 +347,23 @@ test('più impegni sovrapposti: la scheda segnala gli altri alla stessa ora', as
     },
   ];
 
-  const { renderer } = await renderResults([itemColloquio], events);
+  const { renderer, state } = await renderResults([itemColloquio], events);
   const root = renderer.root;
   try {
     const scope = scopeOfTitle(root, 'Colloquio col Dirigente');
-    const text = textOf(scope);
-    assert.ok(text.includes('Stesso orario di un impegno già in agenda'));
-    assert.ok(text.includes('E altri 2 alla stessa ora.'), 'avviso con il conteggio degli altri');
-    assert.ok(text.includes('Incontro uguale'), 'viene mostrato il migliore: stesso inizio+fine');
+    assert.ok(textOf(scope).includes('Forse è lo stesso impegno'));
+    assert.deepEqual(differenceLines(scope), [
+      'Titolo: Incontro uguale → Colloquio col Dirigente',
+    ], 'lo spareggio sceglie l\'impegno con stesso inizio+fine (l\'orario non differisce)');
+
+    // Un livello per riga: la scheda del conflitto non lascia anche l'etichetta
+    // di sovrapposizione, che è riservata agli impegni diversi senza conflitto.
+    assert.equal(textOf(scope).includes('Si sovrappone a:'), false);
+
+    await click(cardChoiceButton(root, 'Colloquio col Dirigente', 'Aggiorna'));
+    await click(findButton(root, /all'Agenda/));
+    assert.equal(state.importedUpdated.length, 1);
+    assert.equal(state.importedUpdated[0].id, 'ev-uguale', 'aggiornato l\'impegno giusto');
   } finally {
     renderer.unmount();
   }
@@ -375,7 +379,7 @@ test('"Vai al prossimo" raggiunge ed evidenzia anche un conflitto di orario', as
   try {
     // Blocco attivo: fra i selezionati resta un conflitto senza scelta.
     await click(findButton(root, /all'Agenda/));
-    assert.ok(textOf(root).includes('Restano 1 impegni selezionati da risolvere prima di importare.'));
+    assert.ok(textOf(root).includes('Restano 1 impegni da decidere'));
 
     const goNext = root.findAll((n: any) => n.props?.id === 'btn-go-to-next-unresolved')[0];
     assert.ok(goNext, 'pulsante "Vai al prossimo" presente');
@@ -391,9 +395,9 @@ test('"Vai al prossimo" raggiunge ed evidenzia anche un conflitto di orario', as
     );
 
     // Risolto il conflitto, il messaggio di blocco sparisce.
-    await click(cardChoiceButton(root, 'Colloquio col Dirigente', 'Aggiungi come nuovo'));
+    await click(cardChoiceButton(root, 'Colloquio col Dirigente', 'Tieni entrambi'));
     assert.equal(
-      textOf(root).includes('Restano 1 impegni selezionati da risolvere'),
+      textOf(root).includes('Restano 1 impegni da decidere'),
       false,
       'dopo la scelta il messaggio di blocco non serve più'
     );
@@ -402,59 +406,74 @@ test('"Vai al prossimo" raggiunge ed evidenzia anche un conflitto di orario', as
   }
 });
 
+// ---------------------------------------------------------------------------
+// 7) Sovrapposizione: etichetta compatta, nessuna scelta, nessun blocco
+// ---------------------------------------------------------------------------
+
 const overlapItem = { title: 'GLO alunno', category: 'glo', className: '1A', date: '2026-10-12', startTime: '15:00', endTime: '16:00' };
 const overlapExisting: CalendarEvent = { ...existingIncontro, id: 'cdc', title: 'Consiglio di Classe 1A', category: 'consiglio_classe', className: '1A' };
 
-test('sovrapposizione: due sole scelte, intervallo comune, blocco e Vai al prossimo', async () => {
+test('sovrapposizione: etichetta compatta, nessuna scelta e nessun blocco all\'importazione', async () => {
   const { renderer, state } = await renderResults([overlapItem], [overlapExisting]);
   const root = renderer.root;
   try {
     const scope = scopeOfTitle(root, overlapItem.title);
-    assert.ok(textOf(scope).includes('Sovrapposizione con un impegno già in agenda'));
-    assert.ok(textOf(scope).includes('Si sovrappongono dalle 15:00 alle 15:45'));
-    assert.deepEqual(scope.findAll((n: any) => n.type === 'button' && n.props['aria-pressed'] !== undefined).map(textOf), ['Aggiungi comunque', 'Ignora']);
-    await click(findButton(root, /all'Agenda/));
-    assert.equal(state.importCalled, false);
-    await click(root.findAll((n: any) => n.props?.id === 'btn-go-to-next-unresolved')[0]);
-    assert.equal(root.findAll((n: any) => n.type === 'div' && n.props['data-conflict-highlight'] === 'true').length, 1);
-    await click(cardChoiceButton(root, overlapItem.title, 'Ignora'));
-    assert.equal(cardCheckbox(root, overlapItem.title).props.checked, false);
-    await click(cardChoiceButton(root, overlapItem.title, 'Aggiungi comunque'));
+    assert.ok(
+      textOf(scope).includes('Si sovrappone a: Consiglio di Classe 1A 15:00–15:45'),
+      'etichetta compatta con titolo e orario dell\'impegno in agenda'
+    );
+    assert.equal(
+      scope.findAll((n: any) => n.type === 'button' && n.props['aria-pressed'] !== undefined).length,
+      0,
+      'la sovrapposizione non chiede alcuna scelta'
+    );
+    assert.ok(!textOf(root).includes('da decidere'), 'fuori dal conteggio dei conflitti');
+
+    // L'impegno segue la normale selezione e viene aggiunto senza fermarsi.
     assert.equal(cardCheckbox(root, overlapItem.title).props.checked, true);
     await click(findButton(root, /all'Agenda/));
-    assert.equal(state.importCalled, true);
+    assert.equal(state.importCalled, true, 'importazione non bloccata');
+    assert.ok(!textOf(root).includes('Restano'), 'nessun messaggio di blocco');
     assert.equal(state.importedNew.length, 1);
     assert.equal(state.importedUpdated.length, 0);
-    assert.equal(overlapExisting.title, 'Consiglio di Classe 1A');
+    assert.equal(overlapExisting.title, 'Consiglio di Classe 1A', 'l\'impegno in agenda non viene toccato');
   } finally { renderer.unmount(); }
 });
 
-test('tre tipi in blocco: aggiorna esclude sovrapposizioni; Annulla, aggiungi e ignora', async () => {
+test('riga in blocco: "Aggiorna tutti" non tocca le sovrapposizioni; Annulla, "Tieni tutti" e "Salta tutti"', async () => {
   const titleExisting: CalendarEvent = { ...existingIncontro, id: 'title', title: 'Collegio Docenti', category: 'collegio_docenti', date: '2026-10-15' };
   const titleItem = { ...titleExisting, startTime: '17:00', endTime: '18:00' };
   const timeItem = { ...itemColloquio, date: '2026-10-16' };
   const { renderer, state } = await renderResults([overlapItem, titleItem, timeItem], [overlapExisting, titleExisting, { ...existingIncontro, date: '2026-10-16' }]);
   const root = renderer.root;
   try {
-    assert.ok(textOf(root).includes('1 possibili aggiornamenti · 1 stesso orario · 1 sovrapposizioni'));
-    await click(findButtonByLabel(root, /^Aggiorna esistenti: conflitti visibili non risolti/));
-    assert.ok(textOf(root).includes('1 sovrapposizioni escluse: nessuna scelta modificata; 1 restano da risolvere.'));
-    assert.equal(isPressed(cardChoiceButton(root, titleItem.title, 'Aggiorna esistente')), true);
-    assert.equal(isPressed(cardChoiceButton(root, timeItem.title, 'Aggiorna esistente')), true);
-    assert.equal(isPressed(cardChoiceButton(root, overlapItem.title, 'Aggiungi comunque')), false);
-    assert.equal(isPressed(cardChoiceButton(root, overlapItem.title, 'Ignora')), false);
+    // La sovrapposizione non entra nel conteggio: restano i due conflitti veri.
+    assert.ok(textOf(root).includes('2 da decidere'));
+    await click(findButtonByLabel(root, /^Aggiorna tutti: conflitti visibili non risolti \(2\)/));
+    assert.equal(isPressed(cardChoiceButton(root, titleItem.title, 'Aggiorna')), true);
+    assert.equal(isPressed(cardChoiceButton(root, timeItem.title, 'Aggiorna')), true);
+    assert.equal(
+      scopeOfTitle(root, overlapItem.title).findAll((n: any) => n.type === 'button' && n.props['aria-pressed'] !== undefined).length,
+      0,
+      'la sovrapposizione non ha scelte da sovrascrivere'
+    );
+
     await click(findButton(root, /all'Agenda/));
-    assert.equal(state.importCalled, false);
-    await click(findButton(root, /^Annulla$/));
-    assert.equal(isPressed(cardChoiceButton(root, titleItem.title, 'Aggiorna esistente')), false);
-    await click(findButtonByLabel(root, /^Ignora: conflitti visibili non risolti/));
-    assert.equal(cardCheckbox(root, overlapItem.title).props.checked, false);
-    await click(findButton(root, /^Annulla$/));
+    assert.equal(state.importCalled, true, 'importazione completata');
+    assert.equal(state.importedUpdated.length, 2);
+    assert.equal(state.importedNew.length, 1, 'solo la sovrapposizione nasce come nuovo impegno');
+    assert.equal(state.importedNew[0].title, overlapItem.title);
+    assert.equal(state.importedUpdated.map((e) => e.id).sort().join(','), 'ev-dirigente,title');
+
+    // "Annulla" riporta le scelte allo stato precedente.
+    await click(findButtonByLabel(root, /^Annulla l'ultima azione in blocco/));
+    assert.equal(isPressed(cardChoiceButton(root, titleItem.title, 'Aggiorna')), false);
+    assert.ok(textOf(root).includes('2 da decidere'));
+
+    // "Salta tutti": restano solo le sovrapposizioni da importare.
+    await click(findButtonByLabel(root, /^Salta tutti: conflitti visibili non risolti \(2\)/));
+    assert.equal(cardCheckbox(root, titleItem.title).props.checked, false);
     assert.equal(cardCheckbox(root, overlapItem.title).props.checked, true);
-    await click(findButtonByLabel(root, /^Aggiungi come nuovi: conflitti visibili non risolti/));
-    assert.equal(isPressed(cardChoiceButton(root, overlapItem.title, 'Aggiungi comunque')), true);
-    await click(findButton(root, /all'Agenda/));
-    assert.equal(state.importedNew.length, 3);
-    assert.equal(state.importedUpdated.length, 0);
+    assert.ok(textOf(root).includes("Aggiungi 1 selezionati all'Agenda"), 'resta selezionata la sola sovrapposizione');
   } finally { renderer.unmount(); }
 });
