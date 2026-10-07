@@ -364,3 +364,40 @@ test('più impegni sovrapposti: la scheda segnala gli altri alla stessa ora', as
     renderer.unmount();
   }
 });
+
+// ---------------------------------------------------------------------------
+// 6) "Vai al prossimo" vale anche per i conflitti di orario
+// ---------------------------------------------------------------------------
+
+test('"Vai al prossimo" raggiunge ed evidenzia anche un conflitto di orario', async () => {
+  const { renderer } = await renderResults([itemColloquio], [existingIncontro]);
+  const root = renderer.root;
+  try {
+    // Blocco attivo: fra i selezionati resta un conflitto senza scelta.
+    await click(findButton(root, /all'Agenda/));
+    assert.ok(textOf(root).includes('Restano 1 impegni selezionati da risolvere prima di importare.'));
+
+    const goNext = root.findAll((n: any) => n.props?.id === 'btn-go-to-next-unresolved')[0];
+    assert.ok(goNext, 'pulsante "Vai al prossimo" presente');
+    await click(goNext);
+
+    const highlighted = root.findAll(
+      (n: any) => n.type === 'div' && n.props['data-conflict-highlight'] === 'true'
+    );
+    assert.equal(highlighted.length, 1, 'una sola scheda evidenziata');
+    assert.ok(
+      textOf(highlighted[0]).includes('Colloquio col Dirigente'),
+      'la scheda evidenziata è quella del conflitto di orario'
+    );
+
+    // Risolto il conflitto, il messaggio di blocco sparisce.
+    await click(cardChoiceButton(root, 'Colloquio col Dirigente', 'Aggiungi come nuovo'));
+    assert.equal(
+      textOf(root).includes('Restano 1 impegni selezionati da risolvere'),
+      false,
+      'dopo la scelta il messaggio di blocco non serve più'
+    );
+  } finally {
+    renderer.unmount();
+  }
+});
