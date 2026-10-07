@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import React from 'react';
 import { act, create } from 'react-test-renderer';
 import { CircularAnalyzerModal } from '../src/components/CircularAnalyzerModal';
-import { isIdenticalEventUpdate } from '../src/utils/eventMatching';
+import { describeEventDifferences, isIdenticalEventUpdate } from '../src/utils/eventMatching';
 import type { CalendarEvent, TeacherProfile } from '../src/types';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -157,7 +157,7 @@ const isPressed = (button: any) =>
 // UNIT: definizione esatta di "identico"
 // ---------------------------------------------------------------------------
 
-test('identico: titolo senza maiuscole/spazi, data, orari e categoria; campo vuoto e testo spostato non contano', () => {
+test('identico: campo nuovo vuoto conserva il vecchio; testo spostato è una differenza effettiva', () => {
   const existing: CalendarEvent = {
     id: 'ev-1', title: 'Collegio  Docenti', category: 'collegio_docenti',
     date: '2026-10-15', startTime: '17:00', endTime: '18:00', location: 'Modalità Telematica',
@@ -170,11 +170,14 @@ test('identico: titolo senza maiuscole/spazi, data, orari e categoria; campo vuo
     startTime: '17:00', endTime: '18:00',
   }), true, 'stesso titolo senza distinzione di maiuscole e spazi; campo vuoto non è differenza');
 
-  // "Modalità Telematica" come luogo nell'esistente e come nota nel nuovo: identico.
-  assert.equal(isIdenticalEventUpdate(existing, {
-    title: 'Collegio Docenti', category: 'collegio_docenti', date: '2026-10-15',
+  // Il nuovo valore note sarebbe scritto davvero nell'evento; il fatto che il testo
+  // esista già nel luogo non evita la modifica del campo Note.
+  const movedTextCandidate = {
+    title: 'Collegio Docenti', category: 'collegio_docenti' as const, date: '2026-10-15',
     startTime: '17:00', endTime: '18:00', notes: 'Modalità Telematica',
-  }), true, 'lo stesso testo in un campo diverso non è differenza');
+  };
+  assert.deepEqual(describeEventDifferences(existing, movedTextCandidate).map((difference) => difference.label), ['Note']);
+  assert.equal(isIdenticalEventUpdate(existing, movedTextCandidate), false, 'la differenza mostrata e il salto automatico condividono la stessa regola');
 
   // Un valore davvero diverso (luogo nuovo) non è identico.
   assert.equal(isIdenticalEventUpdate(existing, {

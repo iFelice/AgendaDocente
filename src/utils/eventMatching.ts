@@ -258,34 +258,58 @@ export interface EventFieldDiff {
   deadlineDate: boolean;
   startTime: boolean;
   endTime: boolean;
+  isAllDay: boolean;
   location: boolean;
   notes: boolean;
   category: boolean;
   className: boolean;
+  subject: boolean;
+  completed: boolean;
+}
+
+type EventDifferenceCandidate = Pick<
+  ExtractedItem,
+  | "title" | "date" | "deadlineDate" | "isDeadline" | "startTime" | "endTime"
+  | "location" | "notes" | "category" | "className" | "subject"
+>;
+
+const cleanEventField = (value?: string) => (value ?? "").trim();
+/** Confronto insensibile a maiuscole/minuscole e spazi ripetuti. */
+const foldEventField = (value?: string) => cleanEventField(value).toLowerCase().replace(/\s+/g, " ");
+
+/** Un campo testuale usato con `candidate || existing` cambia solo se il nuovo è valorizzato. */
+function providedTextDiffers(existing?: string, candidate?: string): boolean {
+  const next = cleanEventField(candidate);
+  return next.length > 0 && foldEventField(existing) !== foldEventField(next);
 }
 
 /**
- * Calcola quali campi differiscono tra un evento esistente e un elemento da circolare.
+ * Calcola le differenze che `handleConfirmImport` produrrebbe davvero con
+ * "Aggiorna": orario/data/titolo/categoria e scadenza vengono assegnati; luogo,
+ * note, classe e materia conservano il valore esistente se il nuovo è vuoto,
+ * mentre un evento completato viene riattivato.
  */
-export function getEventFieldDiff(
-  existing: CalendarEvent,
-  candidate: Pick<ExtractedItem, "title" | "date" | "deadlineDate" | "isDeadline" | "startTime" | "endTime" | "location" | "notes" | "category" | "className">
-): EventFieldDiff {
-  const cleanStr = (s?: string) => (s ?? "").trim();
-  /** Confronto insensibile a maiuscole/minuscole e spazi ripetuti. */
-  const foldStr = (s?: string) => (s ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+export function getEventFieldDiff(existing: CalendarEvent, candidate: EventDifferenceCandidate): EventFieldDiff {
   const candidateDeadline = candidate.deadlineDate || (candidate.isDeadline === true ? candidate.date : undefined);
+  const candidateAllDay = !candidate.startTime && !candidate.endTime;
 
   return {
-    title: cleanStr(existing.title) !== cleanStr(candidate.title) && !isTitleMatch(existing.title ?? "", candidate.title ?? ""),
-    date: cleanStr(existing.date) !== cleanStr(candidate.date),
-    deadlineDate: cleanStr(existing.deadlineDate) !== cleanStr(candidateDeadline),
-    startTime: cleanStr(existing.startTime) !== cleanStr(candidate.startTime),
-    endTime: cleanStr(existing.endTime) !== cleanStr(candidate.endTime),
-    location: foldStr(existing.location) !== foldStr(candidate.location),
-    notes: foldStr(existing.notes) !== foldStr(candidate.notes),
-    category: existing.category !== candidate.category,
-    className: foldStr(existing.className) !== foldStr(candidate.className),
+    title: cleanEventField(existing.title) !== cleanEventField(candidate.title)
+      && !isTitleMatch(existing.title ?? "", candidate.title ?? ""),
+    date: cleanEventField(existing.date) !== cleanEventField(candidate.date),
+    deadlineDate: cleanEventField(existing.deadlineDate) !== cleanEventField(candidateDeadline),
+    startTime: cleanEventField(existing.startTime) !== cleanEventField(candidate.startTime),
+    endTime: cleanEventField(existing.endTime) !== cleanEventField(candidate.endTime),
+    isAllDay: !!existing.isAllDay !== candidateAllDay,
+    location: providedTextDiffers(existing.location, candidate.location),
+    notes: providedTextDiffers(existing.notes, candidate.notes),
+    category: existing.category !== candidate.category
+      && SPECIFIC_CATEGORIES.has(existing.category)
+      && SPECIFIC_CATEGORIES.has(candidate.category),
+    className: providedTextDiffers(existing.className, candidate.className),
+    subject: providedTextDiffers(existing.subject, candidate.subject),
+    // L'azione "Aggiorna" riattiva sempre un evento completato.
+    completed: existing.completed === true,
   };
 }
 
@@ -294,8 +318,8 @@ const EMPTY_FIELD = "—";
 
 /** Etichetta breve di un campo che differisce fra agenda e circolare. */
 export interface EventFieldDifference {
-  /** Chiave tecnica del campo confrontato ("time" accorpa inizio e fine). */
-  field: "title" | "date" | "deadlineDate" | "time" | "location" | "notes" | "category" | "className";
+  /** Chiave tecnica del campo confrontato ("time" accorpa inizio/fine e tutto-il-giorno). */
+  field: "title" | "date" | "deadlineDate" | "time" | "location" | "notes" | "category" | "className" | "subject" | "completed";
   /** Etichetta mostrata a schermo ("Orario", "Luogo", …). */
   label: string;
   /** Valore già in agenda, oppure "—" se assente. */
@@ -304,8 +328,9 @@ export interface EventFieldDifference {
   to: string;
 }
 
-/** Intervallo orario leggibile: "16:00–18:30", un solo estremo, oppure "—". */
-function timeRangeLabel(start?: string | null, end?: string | null): string {
+/** Intervallo orario leggibile, un solo estremo, assenza o "Tutto il giorno". */
+function timeRangeLabel(start?: string | null, end?: string | null, isAllDay = false): string {
+  if (isAllDay) return "Tutto il giorno";
   const from = (start ?? "").trim();
   const to = (end ?? "").trim();
   if (!from && !to) return EMPTY_FIELD;
@@ -326,31 +351,24 @@ function categoryLabel(category?: EventCategory): string {
 }
 
 /**
- * Solo le differenze fra l'impegno già in agenda e la riga della circolare,
- * nell'ordine in cui vanno mostrate nella scheda compatta:
- * "Orario: 16:00–18:30 → 17:00–18:30", "Luogo: — → Telematica", …
- *
- * I campi uguali non compaiono: il confronto è quello simmetrico di
- * `getEventFieldDiff`, quindi un campo vuoto da un lato e valorizzato
- * dall'altro è una differenza. Inizio e fine orario sono una riga sola.
+ * Solo le differenze effettive dell'azione "Aggiorna".
+ * I campi testuali aggiornati con fallback (`nuovo || esistente`) non mostrano
+ * una rimozione quando il nuovo valore è vuoto; le categorie sono confrontate
+ * solo se entrambe specifiche; un completato riattivato è mostrato come Stato.
+ * Inizio/fine e stato tutto-il-giorno hanno una sola riga Orario.
  */
-export function describeEventDifferences(
-  existing: CalendarEvent,
-  candidate: Pick<
-    ExtractedItem,
-    "title" | "date" | "deadlineDate" | "isDeadline" | "startTime" | "endTime" | "location" | "notes" | "category" | "className"
-  >
-): EventFieldDifference[] {
+export function describeEventDifferences(existing: CalendarEvent, candidate: EventDifferenceCandidate): EventFieldDifference[] {
   const diff = getEventFieldDiff(existing, candidate);
   const candidateDeadline = candidate.deadlineDate || (candidate.isDeadline === true ? candidate.date : undefined);
+  const candidateAllDay = !candidate.startTime && !candidate.endTime;
   const differences: EventFieldDifference[] = [];
 
-  if (diff.startTime || diff.endTime) {
+  if (diff.startTime || diff.endTime || diff.isAllDay) {
     differences.push({
       field: "time",
       label: "Orario",
-      from: timeRangeLabel(existing.startTime, existing.endTime),
-      to: timeRangeLabel(candidate.startTime, candidate.endTime),
+      from: timeRangeLabel(existing.startTime, existing.endTime, existing.isAllDay),
+      to: timeRangeLabel(candidate.startTime, candidate.endTime, candidateAllDay),
     });
   }
   if (diff.date) {
@@ -360,24 +378,32 @@ export function describeEventDifferences(
     differences.push({
       field: "location",
       label: "Luogo",
-      from: (existing.location ?? "").trim() || EMPTY_FIELD,
-      to: (candidate.location ?? "").trim() || EMPTY_FIELD,
+      from: cleanEventField(existing.location) || EMPTY_FIELD,
+      to: cleanEventField(candidate.location) || EMPTY_FIELD,
     });
   }
   if (diff.title) {
     differences.push({
       field: "title",
       label: "Titolo",
-      from: (existing.title ?? "").trim() || EMPTY_FIELD,
-      to: (candidate.title ?? "").trim() || EMPTY_FIELD,
+      from: cleanEventField(existing.title) || EMPTY_FIELD,
+      to: cleanEventField(candidate.title) || EMPTY_FIELD,
     });
   }
   if (diff.className) {
     differences.push({
       field: "className",
       label: "Classe",
-      from: (existing.className ?? "").trim() || EMPTY_FIELD,
-      to: (candidate.className ?? "").trim() || EMPTY_FIELD,
+      from: cleanEventField(existing.className) || EMPTY_FIELD,
+      to: cleanEventField(candidate.className) || EMPTY_FIELD,
+    });
+  }
+  if (diff.subject) {
+    differences.push({
+      field: "subject",
+      label: "Materia",
+      from: cleanEventField(existing.subject) || EMPTY_FIELD,
+      to: cleanEventField(candidate.subject) || EMPTY_FIELD,
     });
   }
   if (diff.category) {
@@ -387,6 +413,9 @@ export function describeEventDifferences(
       from: categoryLabel(existing.category),
       to: categoryLabel(candidate.category),
     });
+  }
+  if (diff.completed) {
+    differences.push({ field: "completed", label: "Stato", from: "Completato", to: "Da fare" });
   }
   if (diff.deadlineDate) {
     differences.push({
@@ -400,8 +429,8 @@ export function describeEventDifferences(
     differences.push({
       field: "notes",
       label: "Note",
-      from: (existing.notes ?? "").trim() || EMPTY_FIELD,
-      to: (candidate.notes ?? "").trim() || EMPTY_FIELD,
+      from: cleanEventField(existing.notes) || EMPTY_FIELD,
+      to: cleanEventField(candidate.notes) || EMPTY_FIELD,
     });
   }
 
@@ -409,53 +438,12 @@ export function describeEventDifferences(
 }
 
 /**
- * Un conflitto è "identico" quando l'impegno estratto non porta alcuna
- * differenza rispetto all'impegno già in agenda:
- * - stesso titolo, senza distinzione di maiuscole e spazi;
- * - stessa data, stessi orari di inizio e fine, stessa categoria;
- * - nessun campo non vuoto del nuovo (luogo, classe, note) diverso dal
- *   corrispondente esistente. Un campo vuoto nel nuovo non è una differenza
- *   e lo stesso testo spostato in un campo diverso (es. la sede finita nelle
- *   note) non è una differenza.
- *
- * È la definizione usata per preselezionare "Ignora" sui doppioni già in
- * agenda; non va confusa con `getEventFieldDiff`, che evidenzia le differenze
- * simmetriche (inclusi i campi vuoti) nel confronto mostrato a schermo.
+ * Un conflitto per titolo è identico esattamente quando la stessa lista delle
+ * differenze mostrata all'utente è vuota: UI, preselezione "Salta" e blocco
+ * import condividono quindi un'unica definizione.
  */
-export function isIdenticalEventUpdate(
-  existing: CalendarEvent,
-  candidate: Pick<
-    ExtractedItem,
-    "title" | "date" | "startTime" | "endTime" | "category" | "className" | "location" | "notes"
-  >
-): boolean {
-  // Confronto titolo tramite isTitleMatch (parole significative, radici, sigle di classe ignorate).
-  if (!isTitleMatch(existing.title ?? "", candidate.title ?? "")) return false;
-  const clean = (raw?: string) => (raw ?? "").trim();
-  /** Confronto insensibile a maiuscole/minuscole e spazi ripetuti. */
-  const fold = (raw?: string) => (raw ?? "").trim().toLowerCase().replace(/\s+/g, " ");
-
-  if (clean(existing.date) !== clean(candidate.date)) return false;
-  if (clean(existing.startTime) !== clean(candidate.startTime)) return false;
-  if (clean(existing.endTime) !== clean(candidate.endTime)) return false;
-  if ((existing.category ?? "") !== (candidate.category ?? "")) return false;
-
-  // Testi già presenti nell'impegno esistente (luogo, classe, note): un valore
-  // del nuovo che li riproduce, anche in un campo diverso, non è una differenza.
-  // Il confronto è insensibile a maiuscole/minuscole e spazi ripetuti.
-  const existingTexts = new Set(
-    [fold(existing.location), fold(existing.className), fold(existing.notes)].filter((t) => t.length > 0)
-  );
-  const carriesDifference = (value: string, corresponding?: string) => {
-    const folded = fold(value);
-    return folded.length > 0 && folded !== fold(corresponding) && !existingTexts.has(folded);
-  };
-
-  return (
-    !carriesDifference(candidate.location ?? "", existing.location) &&
-    !carriesDifference(candidate.className ?? "", existing.className) &&
-    !carriesDifference(candidate.notes ?? "", existing.notes)
-  );
+export function isIdenticalEventUpdate(existing: CalendarEvent, candidate: EventDifferenceCandidate): boolean {
+  return describeEventDifferences(existing, candidate).length === 0;
 }
 
 /** Tipo di riconoscimento: per titolo (possibile aggiornamento) o per orario. */

@@ -963,11 +963,11 @@ test('17. Regressione Prisma: evento circolare con completed:true viene riattiva
       await new Promise(r => setTimeout(r, 100));
     });
 
-    // L'impegno è identico a quello in agenda: per riattivarlo lo si rivela con
-    // "Mostra" e poi si sceglie "Aggiorna".
-    assert.ok(flatText(renderer.root).includes('1 già in agenda, saltati'), 'saltato in automatico');
-    const revealBtn = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Mostra')[0];
-    await act(async () => { revealBtn.props.onClick(); });
+    // La materia nuova verrebbe scritta sul CalendarEvent: la differenza è
+    // mostrata e la riga non viene saltata come identica.
+    assert.doesNotMatch(flatText(renderer.root), /già in agenda, saltati/);
+    assert.match(flatText(renderer.root), /Materia: — → Matematica/);
+    assert.match(flatText(renderer.root), /Stato: Completato → Da fare/, 'Aggiorna riattiva un evento completato');
 
     // Scegli "Aggiorna"
     const updateBtn = renderer.root.findAll((el: any) => el.type === 'button' && flatText(el) === 'Aggiorna')[0];
@@ -1487,6 +1487,34 @@ test('32. describeEventDifferences: solo le differenze, una riga per campo e "�
       startTime: '17:00', endTime: '18:00', isDeadline: true,
     }).map((difference) => difference.label),
     ['Data', 'Classe', 'Categoria', 'Scadenza', 'Note']
+  );
+});
+
+test('32a. differenze allineate ad Aggiorna: vuoti preservati, categorie generiche ignorate, specifiche mostrate', () => {
+  const existing = makeExisting({
+    title: 'Impegno organizzativo', category: 'personale',
+    location: 'Sede Centrale', className: '1A', subject: 'Matematica', notes: 'Nota esistente',
+  });
+  const emptyNewFields = {
+    title: 'Impegno organizzativo', category: 'promemoria' as const, date: existing.date,
+    startTime: existing.startTime, endTime: existing.endTime,
+  };
+
+  assert.deepEqual(describeEventDifferences(existing, emptyNewFields), [], 'i campi testuali vuoti non cancellano quelli esistenti; due categorie generiche non differiscono');
+  assert.equal(isIdenticalEventUpdate(existing, emptyNewFields), true, 'elenco vuoto significa identico e saltato');
+
+  assert.deepEqual(
+    describeEventDifferences({ ...existing, category: 'glo' }, { ...emptyNewFields, category: 'pei' })
+      .map((difference) => difference.label),
+    ['Categoria'],
+    'due categorie specifiche diverse sono una differenza',
+  );
+
+  assert.deepEqual(
+    describeEventDifferences(existing, { ...emptyNewFields, subject: 'Inglese' })
+      .map((difference) => difference.label),
+    ['Materia'],
+    'una materia non vuota verrebbe aggiornata ed è mostrata',
   );
 });
 

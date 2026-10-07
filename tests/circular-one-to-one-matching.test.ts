@@ -420,6 +420,28 @@ test('scheda compatta: solo i campi diversi, tre pulsanti brevi, significato est
   }
 });
 
+test('caso reale Aggiorna: con campi nuovi vuoti e categorie generiche diverse mostra solo il Luogo', async () => {
+  const existing: CalendarEvent = {
+    id: 'ev-agenda', title: 'Incontro organizzativo', category: 'personale',
+    date: '2027-05-25', startTime: '15:00', endTime: '15:45', notes: 'Docenti SSIG',
+    isAllDay: false, sourceType: 'manuale',
+  };
+  const { renderer } = await renderResults([
+    {
+      title: 'Incontro organizzativo', category: 'promemoria', date: '2027-05-25',
+      startTime: '15:00', endTime: '15:45', location: 'Propria sede', relevance: 'VERDE',
+    },
+  ], [existing]);
+  const root = renderer.root;
+  try {
+    const scope = scopeOfTitle(root, 'Incontro organizzativo');
+    assert.deepEqual(differenceLines(scope), ['Luogo: — → Propria sede']);
+    assert.doesNotMatch(textOf(scope), /Categoria:|Note:/, 'categoria generica e nota vuota in circolare non sono falsi cambiamenti');
+  } finally {
+    renderer.unmount();
+  }
+});
+
 test('scheda compatta: per il criterio dell\'orario la riga di titolo è "Forse è lo stesso impegno"', async () => {
   const existingIncontro: CalendarEvent = {
     id: 'ev-dirigente', title: 'Incontro con il Dirigente', category: 'riunione',
