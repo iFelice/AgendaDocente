@@ -14,6 +14,7 @@ import {
   findEventMatch,
   assignDocumentMatches,
   describeEventDifferences,
+  isIdenticalEventUpdate,
 } from '../src/utils/eventMatching';
 import { CircularAnalyzerModal } from '../src/components/CircularAnalyzerModal';
 import { deriveFutureCommitments } from '../src/utils/futureCommitments';
@@ -1478,13 +1479,132 @@ test('32. describeEventDifferences: solo le differenze, una riga per campo e "�
     []
   );
 
-  // Titolo, classe, categoria, scadenza e note diversi: una riga per campo.
+  // Titoli equivalenti per isTitleMatch non compaiono; gli altri campi diversi restano elencati.
   assert.deepEqual(
     describeEventDifferences(existing, {
       title: 'Collegio dei Docenti Straordinario', category: 'formazione', date: '2026-10-13',
       deadlineDate: '2026-10-20', className: '1A', notes: 'Ordine del giorno nuovo',
       startTime: '17:00', endTime: '18:00', isDeadline: true,
     }).map((difference) => difference.label),
-    ['Data', 'Titolo', 'Classe', 'Categoria', 'Scadenza', 'Note']
+    ['Data', 'Classe', 'Categoria', 'Scadenza', 'Note']
   );
+});
+
+// ---------------------------------------------------------------------------
+// isIdenticalEventUpdate: equivalenza titoli e confronto case-insensitive
+// ---------------------------------------------------------------------------
+
+test('33. isIdenticalEventUpdate: caso riprodotto "Consiglio di Classe 3D" ≈ "Consigli di Classe" → identico', () => {
+  const existing: CalendarEvent = {
+    id: 'ev-consiglio-3d',
+    title: 'Consiglio di Classe 3D',
+    category: 'consiglio_classe',
+    className: '3D',
+    date: '2026-10-12',
+    startTime: '15:00',
+    endTime: '15:45',
+    isAllDay: false,
+    sourceType: 'circolare',
+  };
+
+  assert.equal(isIdenticalEventUpdate(existing, {
+    title: 'Consigli di Classe',
+    category: 'consiglio_classe',
+    className: '3D',
+    date: '2026-10-12',
+    startTime: '15:00',
+    endTime: '15:45',
+  }), true, 'titoli equivalenti per isTitleMatch → identico');
+});
+
+test('34. isIdenticalEventUpdate: "Mod TELEMATICA" vs "Telematica" → NON identico (testi diversi)', () => {
+  const existing: CalendarEvent = {
+    id: 'ev-telematica',
+    title: 'Collegio Docenti',
+    category: 'collegio_docenti',
+    date: '2026-10-12',
+    startTime: '15:00',
+    endTime: '16:00',
+    location: 'Mod TELEMATICA',
+    isAllDay: false,
+    sourceType: 'circolare',
+  };
+
+  assert.equal(isIdenticalEventUpdate(existing, {
+    title: 'Collegio Docenti',
+    category: 'collegio_docenti',
+    date: '2026-10-12',
+    startTime: '15:00',
+    endTime: '16:00',
+    location: 'Telematica',
+  }), false, 'Mod TELEMATICA e Telematica sono testi diversi');
+});
+
+test('35. isIdenticalEventUpdate: luogo uguale salvo maiuscole → identico', () => {
+  const existing: CalendarEvent = {
+    id: 'ev-luogo',
+    title: 'Collegio Docenti',
+    category: 'collegio_docenti',
+    date: '2026-10-12',
+    startTime: '15:00',
+    endTime: '16:00',
+    location: 'Aula Magna',
+    isAllDay: false,
+    sourceType: 'circolare',
+  };
+
+  assert.equal(isIdenticalEventUpdate(existing, {
+    title: 'Collegio Docenti',
+    category: 'collegio_docenti',
+    date: '2026-10-12',
+    startTime: '15:00',
+    endTime: '16:00',
+    location: 'AULA MAGNA',
+  }), true, 'luogo uguale salvo maiuscole è identico');
+});
+
+test('36. isIdenticalEventUpdate: orario diverso → non identico', () => {
+  const existing: CalendarEvent = {
+    id: 'ev-consiglio-3d',
+    title: 'Consiglio di Classe 3D',
+    category: 'consiglio_classe',
+    className: '3D',
+    date: '2026-10-12',
+    startTime: '15:00',
+    endTime: '15:45',
+    isAllDay: false,
+    sourceType: 'circolare',
+  };
+
+  assert.equal(isIdenticalEventUpdate(existing, {
+    title: 'Consigli di Classe',
+    category: 'consiglio_classe',
+    className: '3D',
+    date: '2026-10-12',
+    startTime: '16:00',
+    endTime: '16:45',
+  }), false, 'orario diverso non è identico');
+});
+
+test('37. isIdenticalEventUpdate: titoli non equivalenti → non identico', () => {
+  const existing: CalendarEvent = {
+    id: 'ev-consiglio-3d',
+    title: 'Consiglio di Classe 3D',
+    category: 'consiglio_classe',
+    className: '3D',
+    date: '2026-10-12',
+    startTime: '15:00',
+    endTime: '15:45',
+    isAllDay: false,
+    sourceType: 'circolare',
+  };
+
+  assert.equal(isIdenticalEventUpdate(existing, {
+    title: 'Consiglio di Istituto',
+    category: 'consiglio_classe',
+    className: '3D',
+    date: '2026-10-12',
+    startTime: '15:00',
+    endTime: '15:45',
+  }), false, 'titoli non equivalenti non è identico');
 });
