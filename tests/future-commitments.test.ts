@@ -39,6 +39,12 @@ function event(partial: Partial<CalendarEvent> & { id: string; date: string }): 
   } as CalendarEvent;
 }
 
+function renderedText(node: any): string {
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(renderedText).join('');
+  return renderedText(node?.children ?? []);
+}
+
 const students: Student[] = [
   { id: 'stu-1', fullName: 'Mario Rossi', className: '3E', notes: [] } as unknown as Student,
 ];
@@ -241,6 +247,72 @@ test('render: gruppi e badge visibili, titolo Note e impegni', async () => {
   assert.ok(!json.includes('Vecchio'));
   const groups = renderer.root.findAll((el: any) => typeof el.props?.['data-commitment-group'] === 'string');
   assert.deepEqual(groups.map((g: any) => g.props['data-commitment-group']), ['oggi', 'domani']);
+  await act(async () => renderer.unmount());
+});
+
+test('render: data a sinistra, intervalli completi senza troncamento e dettagli in ordine', async () => {
+  const range = event({
+    id: 'range', date: TODAY, startTime: '15:00', endTime: '15:45', title: 'Consiglio di classe straordinario e aggiornamento',
+    className: '3E', subject: 'Matematica', location: 'Aula 2',
+  });
+  const startOnly = event({ id: 'start-only', date: '2026-04-16', startTime: '09:10', endTime: undefined });
+  const allDay = event({ id: 'all-day', date: '2027-04-15', isAllDay: true });
+  let renderer: any;
+  await act(async () => {
+    renderer = create(React.createElement(FutureCommitmentsView, {
+      events: [range, startOnly, allDay], scheduledAssessments: [], students, todayIso: TODAY,
+    }));
+  });
+
+  const rangeRow = renderer.root.findByProps({ 'data-commitment-id': 'event:range' });
+  const rowContent = rangeRow.findByProps({ 'data-commitment-row-content': true });
+  assert.equal(rowContent.children[0].props['data-commitment-date'], true, 'la colonna data è a sinistra');
+  assert.equal(renderedText(rowContent.findByProps({ 'data-commitment-date': true })), 'mer15/04');
+
+  const rangeTime = rangeRow.findByProps({ 'data-commitment-time': true });
+  assert.equal(renderedText(rangeTime), '15:00–15:45');
+  assert.match(rangeTime.props.className, /shrink-0/);
+  assert.match(rangeTime.props.className, /whitespace-nowrap/);
+  const detailsText = renderedText(rangeRow.findByProps({ 'data-commitment-details-row': true }));
+  const orderedFields = ['15:00–15:45', '3E', 'Matematica', 'Aula 2'].map(value => detailsText.indexOf(value));
+  assert.ok(orderedFields.every(index => index >= 0));
+  assert.ok(orderedFields.every((index, position) => position === 0 || orderedFields[position - 1] < index));
+  assert.ok(!detailsText.includes('15/04'), 'la data non viene ripetuta nella riga dei dettagli');
+  assert.match(rangeRow.findByProps({ 'data-commitment-title': true }).props.className, /truncate/);
+  assert.match(rangeRow.findByProps({ 'data-commitment-details-row': true }).props.className, /flex-wrap/);
+
+  assert.equal(renderedText(renderer.root.findByProps({ 'data-commitment-id': 'event:start-only' }).findByProps({ 'data-commitment-time': true })), '09:10');
+  const allDayRow = renderer.root.findByProps({ 'data-commitment-id': 'event:all-day' });
+  assert.equal(renderedText(allDayRow.findByProps({ 'data-commitment-time': true })), 'Tutto il giorno');
+  assert.equal(renderedText(allDayRow.findByProps({ 'data-commitment-date': true })), 'gio15/04/2027');
+  await act(async () => renderer.unmount());
+});
+
+test('render: nasconde solo il motivo esatto sulle circolari, non note o testi di altre fonti', async () => {
+  const relevanceReason = 'Destinato a tutti i docenti.';
+  const userNote = 'Portare il registro di classe.';
+  let renderer: any;
+  await act(async () => {
+    renderer = create(React.createElement(FutureCommitmentsView, {
+      events: [
+        event({ id: 'circular-reason', date: TODAY, sourceType: 'circolare', notes: relevanceReason }),
+        event({ id: 'manual-reason', date: TODAY, sourceType: 'manuale', notes: relevanceReason }),
+        event({ id: 'google-reason', date: TODAY, sourceType: 'google_calendar', notes: relevanceReason }),
+        event({ id: 'circular-note', date: TODAY, sourceType: 'circolare', notes: userNote }),
+      ],
+      scheduledAssessments: [], students, todayIso: TODAY,
+    }));
+  });
+
+  const circularReasonRow = renderer.root.findByProps({ 'data-commitment-id': 'event:circular-reason' });
+  assert.equal(circularReasonRow.findAllByProps({ 'data-commitment-notes': true }).length, 0);
+  assert.ok(!renderedText(circularReasonRow).includes(relevanceReason));
+  for (const id of ['manual-reason', 'google-reason']) {
+    const row = renderer.root.findByProps({ 'data-commitment-id': `event:${id}` });
+    assert.equal(renderedText(row.findByProps({ 'data-commitment-notes': true })), relevanceReason);
+  }
+  const circularNoteRow = renderer.root.findByProps({ 'data-commitment-id': 'event:circular-note' });
+  assert.equal(renderedText(circularNoteRow.findByProps({ 'data-commitment-notes': true })), userNote);
   await act(async () => renderer.unmount());
 });
 

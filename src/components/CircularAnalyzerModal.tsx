@@ -1124,6 +1124,7 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
           className: it.className || match.className,
           subject: it.subject || match.subject,
           location: it.location || match.location,
+          // Preserve only extracted/existing notes; never copy the relevance reason into event notes.
           notes: it.notes || match.notes,
           completed: false,
           sourceCircularId: match.sourceCircularId || circularId,

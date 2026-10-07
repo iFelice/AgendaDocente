@@ -1,7 +1,8 @@
 import React from "react";
 import { CalendarClock, CheckCircle2, ChevronDown, ChevronRight, Circle, ListTodo, MapPin, Plus, Users } from "lucide-react";
 import type { CalendarEvent, Student, StudentScheduledAssessment } from "../types";
-import { formatCivilDateIt, localDateISO } from "../utils/dates";
+import { civilDayOfWeek, localDateISO } from "../utils/dates";
+import { isRelevanceReasonText } from "../utils/circularRelevance";
 import {
   deriveArchiveCommitments,
   deriveFutureCommitments,
@@ -41,46 +42,65 @@ const SOURCE_BADGE_CLASS: Record<FutureCommitmentSource, string> = {
   nota: "bg-indigo-100 text-indigo-800 border-indigo-300",
 };
 
+const WEEKDAY_ABBREVIATIONS_IT = ["dom", "lun", "mar", "mer", "gio", "ven", "sab"] as const;
+
 const CommitmentRow: React.FC<{
   item: FutureCommitmentItem;
+  todayIso: string;
   onEditEvent?: (event: CalendarEvent) => void;
   onEditNote?: (event: CalendarEvent) => void;
   onToggleComplete?: (id: string) => void | Promise<void | false> | false;
-}> = ({ item, onEditEvent, onEditNote, onToggleComplete }) => {
+}> = ({ item, todayIso, onEditEvent, onEditNote, onToggleComplete }) => {
   const editCallback = item.source === "nota" ? onEditNote : onEditEvent;
   const clickable = item.kind === "calendar-event" && !!editCallback && !!item.originalEvent;
   // Il completamento è offerto sulle note personali: restano CalendarEvent con `completed`.
   const completable = item.kind === "calendar-event" && item.source === "nota" && !!onToggleComplete && !!item.originalEvent;
+  const event = item.originalEvent;
+  const startTime = event?.startTime || item.startTime;
+  const timeLabel = event?.isAllDay || !startTime
+    ? "Tutto il giorno"
+    : event?.endTime ? `${startTime}–${event.endTime}` : startTime;
+  const [year, month, day] = item.date.split("-");
+  const dateLabel = year === todayIso.slice(0, 4) ? `${day}/${month}` : `${day}/${month}/${year}`;
+  const weekdayLabel = WEEKDAY_ABBREVIATIONS_IT[civilDayOfWeek(item.date)];
+  const hideRelevanceReason = event?.sourceType === "circolare"
+    && !!item.details
+    && isRelevanceReasonText(item.details);
   const content = (
-    <div className="flex items-start gap-3 w-full">
-      <div className="w-20 shrink-0 text-sm font-semibold text-stone-700 tabular-nums">
-        {item.startTime || formatCivilDateIt(item.date).slice(0, 5)}
+    <div data-commitment-row-content className="flex w-full min-w-0 items-start gap-2">
+      <div data-commitment-date className="w-[4.5rem] shrink-0 pt-0.5 text-[11px] font-semibold leading-4 text-stone-700 tabular-nums">
+        <span className="block">{weekdayLabel}</span>
+        <span className="block whitespace-nowrap">{dateLabel}</span>
       </div>
       <div className="min-w-0 flex-1">
-        <div className="font-medium text-stone-900 truncate">{item.title}</div>
-        <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-stone-600">
-          <span>{formatCivilDateIt(item.date)}</span>
+        <div className="flex min-w-0 items-start gap-2">
+          <div data-commitment-title className="min-w-0 flex-1 truncate font-medium text-stone-900">{item.title}</div>
+          <span
+            className={`shrink-0 inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold border ${SOURCE_BADGE_CLASS[item.source]}`}
+          >
+            {FUTURE_COMMITMENT_SOURCE_LABELS[item.source]}
+          </span>
+        </div>
+        <div data-commitment-details-row className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-stone-600">
+          <span data-commitment-time className="shrink-0 whitespace-nowrap font-medium tabular-nums">{timeLabel}</span>
           {item.className && (
-            <span className="inline-flex items-center gap-1">
-              <Users className="w-3 h-3" />
+            <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap">
+              <Users className="h-3 w-3 shrink-0" />
               {item.className}
             </span>
           )}
           {item.subject && <span>{item.subject}</span>}
           {item.location && (
-            <span className="inline-flex items-center gap-1">
-              <MapPin className="w-3 h-3" />
-              {item.location}
+            <span className="inline-flex min-w-0 max-w-full items-start gap-1 break-words">
+              <MapPin className="mt-0.5 h-3 w-3 shrink-0" />
+              <span className="min-w-0 [overflow-wrap:anywhere]">{item.location}</span>
             </span>
           )}
         </div>
-        {item.details && <div className="mt-1 text-xs text-stone-500 line-clamp-2">{item.details}</div>}
+        {item.details && !hideRelevanceReason && (
+          <div data-commitment-notes className="mt-1 text-xs text-stone-500 line-clamp-2">{item.details}</div>
+        )}
       </div>
-      <span
-        className={`shrink-0 inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold border ${SOURCE_BADGE_CLASS[item.source]}`}
-      >
-        {FUTURE_COMMITMENT_SOURCE_LABELS[item.source]}
-      </span>
     </div>
   );
 
@@ -173,7 +193,7 @@ export const FutureCommitmentsView: React.FC<FutureCommitmentsViewProps> = ({
             </h3>
             <div className="space-y-2">
               {group.items.map(item => (
-                <CommitmentRow key={item.id} item={item} onEditEvent={onEditEvent} onEditNote={onEditNote} onToggleComplete={onToggleComplete} />
+                <CommitmentRow key={item.id} item={item} todayIso={todayIso} onEditEvent={onEditEvent} onEditNote={onEditNote} onToggleComplete={onToggleComplete} />
               ))}
             </div>
           </section>
@@ -201,7 +221,7 @@ export const FutureCommitmentsView: React.FC<FutureCommitmentsViewProps> = ({
           {showArchive && (
             <div id="archive-commitments-list" data-archive-commitments-list data-past-commitments-list className="mt-2 space-y-2">
               {archiveItems.map(item => (
-                <CommitmentRow key={item.id} item={item} onEditEvent={onEditEvent} onEditNote={onEditNote} />
+                <CommitmentRow key={item.id} item={item} todayIso={todayIso} onEditEvent={onEditEvent} onEditNote={onEditNote} />
               ))}
             </div>
           )}
