@@ -272,18 +272,20 @@ export function getEventFieldDiff(
   candidate: Pick<ExtractedItem, "title" | "date" | "deadlineDate" | "isDeadline" | "startTime" | "endTime" | "location" | "notes" | "category" | "className">
 ): EventFieldDiff {
   const cleanStr = (s?: string) => (s ?? "").trim();
+  /** Confronto insensibile a maiuscole/minuscole e spazi ripetuti. */
+  const foldStr = (s?: string) => (s ?? "").trim().toLowerCase().replace(/\s+/g, " ");
   const candidateDeadline = candidate.deadlineDate || (candidate.isDeadline === true ? candidate.date : undefined);
 
   return {
-    title: cleanStr(existing.title) !== cleanStr(candidate.title),
+    title: cleanStr(existing.title) !== cleanStr(candidate.title) && !isTitleMatch(existing.title ?? "", candidate.title ?? ""),
     date: cleanStr(existing.date) !== cleanStr(candidate.date),
     deadlineDate: cleanStr(existing.deadlineDate) !== cleanStr(candidateDeadline),
     startTime: cleanStr(existing.startTime) !== cleanStr(candidate.startTime),
     endTime: cleanStr(existing.endTime) !== cleanStr(candidate.endTime),
-    location: cleanStr(existing.location) !== cleanStr(candidate.location),
-    notes: cleanStr(existing.notes) !== cleanStr(candidate.notes),
+    location: foldStr(existing.location) !== foldStr(candidate.location),
+    notes: foldStr(existing.notes) !== foldStr(candidate.notes),
     category: existing.category !== candidate.category,
-    className: cleanStr(existing.className) !== cleanStr(candidate.className),
+    className: foldStr(existing.className) !== foldStr(candidate.className),
   };
 }
 
@@ -427,10 +429,12 @@ export function isIdenticalEventUpdate(
     "title" | "date" | "startTime" | "endTime" | "category" | "className" | "location" | "notes"
   >
 ): boolean {
-  const foldTitle = (raw?: string) => (raw ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+  // Confronto titolo tramite isTitleMatch (parole significative, radici, sigle di classe ignorate).
+  if (!isTitleMatch(existing.title ?? "", candidate.title ?? "")) return false;
   const clean = (raw?: string) => (raw ?? "").trim();
+  /** Confronto insensibile a maiuscole/minuscole e spazi ripetuti. */
+  const fold = (raw?: string) => (raw ?? "").trim().toLowerCase().replace(/\s+/g, " ");
 
-  if (foldTitle(existing.title) !== foldTitle(candidate.title)) return false;
   if (clean(existing.date) !== clean(candidate.date)) return false;
   if (clean(existing.startTime) !== clean(candidate.startTime)) return false;
   if (clean(existing.endTime) !== clean(candidate.endTime)) return false;
@@ -438,16 +442,19 @@ export function isIdenticalEventUpdate(
 
   // Testi già presenti nell'impegno esistente (luogo, classe, note): un valore
   // del nuovo che li riproduce, anche in un campo diverso, non è una differenza.
+  // Il confronto è insensibile a maiuscole/minuscole e spazi ripetuti.
   const existingTexts = new Set(
-    [clean(existing.location), clean(existing.className), clean(existing.notes)].filter((t) => t.length > 0)
+    [fold(existing.location), fold(existing.className), fold(existing.notes)].filter((t) => t.length > 0)
   );
-  const carriesDifference = (value: string, corresponding?: string) =>
-    value.length > 0 && value !== clean(corresponding) && !existingTexts.has(value);
+  const carriesDifference = (value: string, corresponding?: string) => {
+    const folded = fold(value);
+    return folded.length > 0 && folded !== fold(corresponding) && !existingTexts.has(folded);
+  };
 
   return (
-    !carriesDifference(clean(candidate.location), existing.location) &&
-    !carriesDifference(clean(candidate.className), existing.className) &&
-    !carriesDifference(clean(candidate.notes), existing.notes)
+    !carriesDifference(candidate.location ?? "", existing.location) &&
+    !carriesDifference(candidate.className ?? "", existing.className) &&
+    !carriesDifference(candidate.notes ?? "", existing.notes)
   );
 }
 
