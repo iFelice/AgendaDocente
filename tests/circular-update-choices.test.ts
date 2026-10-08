@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import React from 'react';
 import { act, create } from 'react-test-renderer';
 import { CircularAnalyzerModal } from '../src/components/CircularAnalyzerModal';
-import { describeEventDifferences, isIdenticalEventUpdate } from '../src/utils/eventMatching';
+import { describeEventDifferences, isIdenticalEventUpdate, resolveUpdatedField } from '../src/utils/eventMatching';
 import type { CalendarEvent, TeacherProfile } from '../src/types';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -66,7 +66,7 @@ function textOf(node: any): string {
     .replace(/\(\s+/g, '(').replace(/\s+\)/g, ')').trim();
 }
 
-async function renderResults(items: any[], options: { monthRowNode?: any } = {}) {
+async function renderResults(items: any[], options: { monthRowNode?: any; events?: CalendarEvent[] } = {}) {
   mockItems = items;
   let importedNew: CalendarEvent[] = [];
   let importedUpdated: CalendarEvent[] = [];
@@ -83,7 +83,7 @@ async function renderResults(items: any[], options: { monthRowNode?: any } = {})
       isOpen: true,
       onClose: () => { closeCalled = true; },
       profile,
-      existingEvents,
+      existingEvents: options.events ?? existingEvents,
       onImportEvents: (newEvents: CalendarEvent[], _docMeta: any, updatedEvents?: CalendarEvent[]) => {
         importCalled = true;
         importedNew = newEvents;
@@ -176,7 +176,7 @@ const isPressed = (button: any) =>
 // UNIT: definizione esatta di "identico"
 // ---------------------------------------------------------------------------
 
-test('identico: campo nuovo vuoto conserva il vecchio; testo spostato è una differenza effettiva', () => {
+test('identico: campo nuovo vuoto conserva il vecchio; testo già presente in un altro campo non è una differenza', () => {
   const existing: CalendarEvent = {
     id: 'ev-1', title: 'Collegio  Docenti', category: 'collegio_docenti',
     date: '2026-10-15', startTime: '17:00', endTime: '18:00', location: 'Modalità Telematica',
@@ -189,14 +189,25 @@ test('identico: campo nuovo vuoto conserva il vecchio; testo spostato è una dif
     startTime: '17:00', endTime: '18:00',
   }), true, 'stesso titolo senza distinzione di maiuscole e spazi; campo vuoto non è differenza');
 
-  // Il nuovo valore note sarebbe scritto davvero nell'evento; il fatto che il testo
-  // esista già nel luogo non evita la modifica del campo Note.
+  // CASO RIPRODOTTO 1: lo stesso testo del luogo esistente finisce nelle note
+  // nuove. "Aggiorna" non lo riscriverebbe in un campo che lo contiene già
+  // (regola A): nessuna differenza, abbinamento identico.
   const movedTextCandidate = {
     title: 'Collegio Docenti', category: 'collegio_docenti' as const, date: '2026-10-15',
     startTime: '17:00', endTime: '18:00', notes: 'Modalità Telematica',
   };
-  assert.deepEqual(describeEventDifferences(existing, movedTextCandidate).map((difference) => difference.label), ['Note']);
-  assert.equal(isIdenticalEventUpdate(existing, movedTextCandidate), false, 'la differenza mostrata e il salto automatico condividono la stessa regola');
+  assert.deepEqual(describeEventDifferences(existing, movedTextCandidate), []);
+  assert.equal(isIdenticalEventUpdate(existing, movedTextCandidate), true, 'la differenza mostrata e il salto automatico condividono la stessa regola');
+
+  // La regola A vale senza distinzione di maiuscole e spazi ripetuti, in entrambe
+  // le direzioni (luogo -> note e note -> luogo).
+  assert.equal(isIdenticalEventUpdate(existing, {
+    ...movedTextCandidate, notes: 'modalità   TELEMATICA',
+  }), true, 'confronto senza maiuscole e spazi ripetuti');
+  assert.equal(isIdenticalEventUpdate({ ...existing, location: '', notes: 'Modalità Telematica' }, {
+    title: 'Collegio Docenti', category: 'collegio_docenti', date: '2026-10-15',
+    startTime: '17:00', endTime: '18:00', location: 'Modalità Telematica',
+  }), true, 'testo già presente nelle note esistenti non riscrive il luogo');
 
   // Un valore davvero diverso (luogo nuovo) non è identico.
   assert.equal(isIdenticalEventUpdate(existing, {
@@ -216,6 +227,49 @@ test('identico: campo nuovo vuoto conserva il vecchio; testo spostato è una dif
     title: 'Collegio Docenti', category: 'formazione', date: '2026-10-15',
     startTime: '17:00', endTime: '18:00',
   }), false, 'categoria diversa');
+});
+
+test('motivo di pertinenza nelle note da circolare: vale come vuoto nelle differenze, sostituito solo con note nuove', () => {
+  // CASO RIPRODOTTO 2: impegno importato da una vecchia circolare con il motivo
+  // di pertinenza salvato nelle note; la nuova circolare riporta note "TUTTI".
+  const fromCircular: CalendarEvent = {
+    id: 'ev-collegio', title: 'Collegio Docenti', category: 'collegio_docenti',
+    date: '2026-12-03', startTime: '17:00', endTime: '18:00', isAllDay: false,
+    notes: 'Destinato a tutti i docenti.', sourceType: 'circolare',
+  };
+  const tuttiCandidate = {
+    title: 'Collegio Docenti', category: 'collegio_docenti' as const, date: '2026-12-03',
+    startTime: '17:00', endTime: '18:00', notes: 'TUTTI',
+  };
+  assert.deepEqual(describeEventDifferences(fromCircular, tuttiCandidate), [], 'note-motivo come vuote: nessuna differenza');
+  assert.equal(isIdenticalEventUpdate(fromCircular, tuttiCandidate), true, 'caso riprodotto 2 identico e saltato');
+
+  // Con un orario diverso l'unica differenza è l'orario: le note non compaiono.
+  assert.deepEqual(
+    describeEventDifferences(fromCircular, { ...tuttiCandidate, startTime: '16:00', endTime: '17:00' })
+      .map((difference) => difference.label),
+    ['Orario'],
+  );
+
+  // Applicazione di "Aggiorna" (stessa regola unica): le note nuove sostituiscono
+  // il motivo di pertinenza; note nuove vuote lo lasciano dov'è.
+  assert.equal(resolveUpdatedField(fromCircular, 'notes', 'TUTTI'), 'TUTTI');
+  assert.equal(resolveUpdatedField(fromCircular, 'notes', ''), 'Destinato a tutti i docenti.');
+
+  // Note esistenti scritte dall'utente (non riconosciute come motivo): la differenza resta.
+  const userNotes: CalendarEvent = { ...fromCircular, notes: 'Portare il registro elettronico' };
+  assert.deepEqual(describeEventDifferences(userNotes, tuttiCandidate), [
+    { field: 'notes', label: 'Note', from: 'Portare il registro elettronico', to: 'TUTTI' },
+  ], 'note utente confrontate normalmente');
+
+  // Impegno MANUALE con note uguali a un motivo di pertinenza: note normali.
+  const manual: CalendarEvent = { ...fromCircular, sourceType: 'manuale' };
+  assert.deepEqual(
+    describeEventDifferences(manual, tuttiCandidate).map((difference) => difference.label),
+    ['Note'],
+    'il motivo di pertinenza conta solo per gli impegni provenienti da circolare',
+  );
+  assert.equal(resolveUpdatedField(manual, 'notes', 'TUTTI'), 'TUTTI');
 });
 
 // ---------------------------------------------------------------------------
@@ -583,6 +637,104 @@ test('riga dei mesi senza overflow: nessuna freccia; pulsanti con tocco >= 44px;
     assert.ok(live.some((n: any) => /applicato a 2 impegni/.test(textOf(n))), 'stato annunciato in aria-live');
     // Fuori dal blocco non esiste alcun "Vai al prossimo".
     assert.equal(findButton(root, /^Vai al prossimo$/), undefined);
+  } finally {
+    renderer.unmount();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 7) Casi riprodotti: A (testo già in un altro campo) e B (motivo di pertinenza)
+//    nel flusso completo del modale, fino all'applicazione di "Aggiorna"
+// ---------------------------------------------------------------------------
+
+/** Righe di differenza della scheda compatta: "Orario: 15:00–16:00 → 16:00–17:00", … */
+const differenceLines = (scope: any) => scope.findAll((n: any) => n.type === 'li').map((n: any) => textOf(n));
+
+// CASO 1: "Dipartimenti" con luogo "Modalità Telematica" e note vuote.
+const dipartimentiExisting: CalendarEvent[] = [{
+  id: 'ev-dipartimenti', title: 'Dipartimenti', category: 'dipartimento',
+  date: '2026-11-10', startTime: '15:00', endTime: '16:00', isAllDay: false,
+  location: 'Modalità Telematica', sourceType: 'circolare',
+}];
+
+// CASO 2: "Collegio Docenti" da circolare con il motivo di pertinenza nelle note.
+const collegioReasonExisting: CalendarEvent[] = [{
+  id: 'ev-collegio-reason', title: 'Collegio Docenti', category: 'collegio_docenti',
+  date: '2026-12-03', startTime: '17:00', endTime: '18:00', isAllDay: false,
+  notes: 'Destinato a tutti i docenti.', sourceType: 'circolare',
+}];
+
+test('caso 1: note nuove uguali al luogo esistente → identico, saltato in automatico', async () => {
+  const { renderer, state } = await renderResults([
+    { title: 'Dipartimenti', category: 'dipartimento', date: '2026-11-10', startTime: '15:00', endTime: '16:00', notes: 'Modalità Telematica' },
+  ], { events: dipartimentiExisting });
+  const root = renderer.root;
+  try {
+    assert.equal(titleInputs(root, 'Dipartimenti').length, 0, 'identico fuori dall\'elenco');
+    assert.ok(textOf(root).includes('1 già in agenda, saltati'), 'contato nella riga riassuntiva');
+    assert.equal(state.importCalled, false);
+  } finally {
+    renderer.unmount();
+  }
+});
+
+test('caso 1 con orario diverso: unica differenza "Orario"; dopo "Aggiorna" luogo intatto e note vuote', async () => {
+  const { renderer, state } = await renderResults([
+    { title: 'Dipartimenti', category: 'dipartimento', date: '2026-11-10', startTime: '16:00', endTime: '17:00', notes: 'Modalità Telematica' },
+  ], { events: dipartimentiExisting });
+  const root = renderer.root;
+  try {
+    const scope = scopeOfTitle(root, 'Dipartimenti');
+    assert.deepEqual(differenceLines(scope), ['Orario: 15:00–16:00 → 16:00–17:00'], 'il testo già nel luogo non è una differenza Note');
+
+    // "Aggiorna" implica la selezione anche per un impegno GIALLO non preselezionato.
+    await click(cardChoiceButton(root, 'Dipartimenti', 'Aggiorna'));
+    assert.equal(cardCheckbox(root, 'Dipartimenti').props.checked, true);
+    await click(root.findByProps({ id: 'btn-confirm-circular-import' }));
+    assert.equal(state.importCalled, true);
+    assert.equal(state.importedUpdated.length, 1);
+    const updated = state.importedUpdated[0];
+    assert.equal(updated.id, 'ev-dipartimenti');
+    assert.equal(updated.startTime, '16:00', 'orario aggiornato');
+    assert.equal(updated.location, 'Modalità Telematica', 'luogo esistente intatto');
+    assert.ok(!updated.notes, 'note restano vuote: il testo già presente nel luogo non viene riscritto');
+  } finally {
+    renderer.unmount();
+  }
+});
+
+test('caso 2: note esistenti = motivo di pertinenza, note nuove "TUTTI" → identico, saltato in automatico', async () => {
+  const { renderer, state } = await renderResults([
+    { title: 'Collegio Docenti', category: 'collegio_docenti', date: '2026-12-03', startTime: '17:00', endTime: '18:00', notes: 'TUTTI' },
+  ], { events: collegioReasonExisting });
+  const root = renderer.root;
+  try {
+    assert.equal(titleInputs(root, 'Collegio Docenti').length, 0, 'identico fuori dall\'elenco');
+    assert.ok(textOf(root).includes('1 già in agenda, saltati'), 'contato nella riga riassuntiva');
+    assert.equal(state.importCalled, false);
+  } finally {
+    renderer.unmount();
+  }
+});
+
+test('caso 2 con orario diverso: unica differenza "Orario"; dopo "Aggiorna" le note diventano "TUTTI"', async () => {
+  const { renderer, state } = await renderResults([
+    { title: 'Collegio Docenti', category: 'collegio_docenti', date: '2026-12-03', startTime: '16:00', endTime: '17:00', notes: 'TUTTI' },
+  ], { events: collegioReasonExisting });
+  const root = renderer.root;
+  try {
+    const scope = scopeOfTitle(root, 'Collegio Docenti');
+    assert.deepEqual(differenceLines(scope), ['Orario: 17:00–18:00 → 16:00–17:00'], 'note-motivo come vuote: nessuna differenza Note');
+    assert.equal(cardCheckbox(root, 'Collegio Docenti').props.checked, true, 'VERDE auto-selezionato');
+
+    await click(cardChoiceButton(root, 'Collegio Docenti', 'Aggiorna'));
+    await click(root.findByProps({ id: 'btn-confirm-circular-import' }));
+    assert.equal(state.importCalled, true);
+    assert.equal(state.importedUpdated.length, 1);
+    const updated = state.importedUpdated[0];
+    assert.equal(updated.id, 'ev-collegio-reason');
+    assert.equal(updated.startTime, '16:00', 'orario aggiornato');
+    assert.equal(updated.notes, 'TUTTI', 'scelto "Aggiorna" per un altro motivo: le note nuove sostituiscono il motivo di pertinenza');
   } finally {
     renderer.unmount();
   }

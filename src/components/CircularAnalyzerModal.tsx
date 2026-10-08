@@ -47,6 +47,7 @@ import {
   assignDocumentMatches,
   describeEventDifferences,
   isIdenticalEventUpdate,
+  resolveUpdatedField,
   type OccupiedEventMatch,
 } from "../utils/eventMatching";
 
@@ -1111,7 +1112,12 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
         const updatedDeadlineDate =
           it.deadlineDate ||
           (it.isDeadline === true ? it.date : undefined);
-        // Aggiorna l'evento esistente preservando ID e metadati tecnici
+        // Aggiorna l'evento esistente preservando ID e metadati tecnici.
+        // Luogo, note e classe passano dalla stessa regola unica usata
+        // dall'elenco delle differenze (`resolveUpdatedField`): un testo già
+        // presente in un altro di quei campi non viene riscritto (A) e le note
+        // da circolare che sono un motivo di pertinenza vengono sostituite solo
+        // da note nuove non vuote (B).
         const updatedEvent: CalendarEvent = {
           ...match,
           title: it.title,
@@ -1121,11 +1127,11 @@ export const CircularAnalyzerModal: React.FC<CircularAnalyzerModalProps> = ({
           startTime: it.startTime || undefined,
           endTime: it.endTime || undefined,
           isAllDay: !it.startTime && !it.endTime,
-          className: it.className || match.className,
+          className: resolveUpdatedField(match, "className", it.className),
           subject: it.subject || match.subject,
-          location: it.location || match.location,
+          location: resolveUpdatedField(match, "location", it.location),
           // Preserve only extracted/existing notes; never copy the relevance reason into event notes.
-          notes: it.notes || match.notes,
+          notes: resolveUpdatedField(match, "notes", it.notes),
           completed: false,
           sourceCircularId: match.sourceCircularId || circularId,
           sourceCircularTitle: match.sourceCircularTitle || fileName || "Circolare importata",

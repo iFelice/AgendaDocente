@@ -15,6 +15,7 @@ import {
   assignDocumentMatches,
   describeEventDifferences,
   isIdenticalEventUpdate,
+  resolveUpdatedField,
 } from '../src/utils/eventMatching';
 import { CircularAnalyzerModal } from '../src/components/CircularAnalyzerModal';
 import { deriveFutureCommitments } from '../src/utils/futureCommitments';
@@ -1635,4 +1636,87 @@ test('37. isIdenticalEventUpdate: titoli non equivalenti → non identico', () =
     startTime: '15:00',
     endTime: '15:45',
   }), false, 'titoli non equivalenti non è identico');
+});
+
+// ---------------------------------------------------------------------------
+// Regola A: testo già presente in un altro campo (luogo/note/classe)
+// ---------------------------------------------------------------------------
+
+test('38. Regola A: testo già presente in un altro campo non viene scritto né mostrato', () => {
+  const existing = makeExisting({
+    id: 'ev-dipartimenti', title: 'Dipartimenti', category: 'dipartimento',
+    startTime: '15:00', endTime: '16:00', location: 'Modalità Telematica', sourceType: 'circolare',
+  });
+
+  // CASO RIPRODOTTO 1: le note nuove ripetono il luogo esistente → identico.
+  assert.deepEqual(
+    describeEventDifferences(existing, {
+      title: 'Dipartimenti', category: 'dipartimento', date: '2026-10-12',
+      startTime: '15:00', endTime: '16:00', notes: 'Modalità Telematica',
+    }),
+    [],
+  );
+
+  // Confronto senza maiuscole e spazi ripetuti, per tutti e tre i campi.
+  const base = { title: 'Dipartimenti', category: 'dipartimento' as const, date: '2026-10-12', startTime: '15:00', endTime: '16:00' };
+  assert.equal(getEventFieldDiff(existing, { ...base, notes: 'modalità   TELEMATICA' }).notes, false);
+  assert.equal(getEventFieldDiff(existing, { ...base, className: 'Modalità Telematica' }).className, false, 'anche la classe partecipa alla regola');
+  assert.equal(getEventFieldDiff({ ...existing, location: '', className: '3D' }, { ...base, location: '3d' }).location, false, 'testo già nella classe non riscrive il luogo');
+
+  // Un testo davvero nuovo resta una differenza e viene scritto.
+  assert.equal(getEventFieldDiff(existing, { ...base, notes: 'Portare il registro' }).notes, true);
+  assert.equal(resolveUpdatedField(existing, 'notes', 'Portare il registro'), 'Portare il registro');
+
+  // Applicazione: stessa regola delle differenze, una sola definizione.
+  assert.equal(resolveUpdatedField(existing, 'notes', 'Modalità Telematica'), existing.notes, 'valore già nel luogo: non scritto');
+  assert.equal(resolveUpdatedField(existing, 'location', ''), 'Modalità Telematica', 'campo nuovo vuoto: il valore esistente resta');
+  assert.equal(resolveUpdatedField(existing, 'location', 'Aula Magna'), 'Aula Magna', 'valore nuovo scritto');
+
+  // La materia non fa parte dei tre campi della regola A: lo stesso testo nel
+  // luogo esistente non trattiene una materia nuova.
+  const conMateria = makeExisting({ location: 'Matematica' });
+  assert.equal(getEventFieldDiff(conMateria, { ...base, subject: 'Matematica' }).subject, true, 'la materia resta fuori dalla regola A');
+  assert.equal(getEventFieldDiff(conMateria, { ...base, subject: 'Matematica' }).location, false, 'luogo nuovo vuoto: nessuna differenza');
+});
+
+// ---------------------------------------------------------------------------
+// Regola B: motivo di pertinenza nelle note di un impegno da circolare
+// ---------------------------------------------------------------------------
+
+test('39. Regola B: note da circolare riconosciute come motivo di pertinenza valgono come vuote', () => {
+  const motivo = 'Destinato a tutti i docenti.';
+  const base = { title: 'Collegio Docenti', category: 'collegio_docenti' as const, date: '2026-10-12', startTime: '15:00', endTime: '15:45' };
+  const daCircolare = makeExisting({ id: 'ev-collegio', title: 'Collegio Docenti', category: 'collegio_docenti', notes: motivo, sourceType: 'circolare' });
+
+  // CASO RIPRODOTTO 2: note nuove "TUTTI" sul motivo di pertinenza → identico.
+  assert.deepEqual(describeEventDifferences(daCircolare, { ...base, notes: 'TUTTI' }), []);
+  assert.equal(isIdenticalEventUpdate(daCircolare, { ...base, notes: 'TUTTI' }), true);
+
+  // Con un orario diverso l'unica differenza è l'orario.
+  assert.deepEqual(
+    describeEventDifferences(daCircolare, { ...base, startTime: '16:00', notes: 'TUTTI' }).map((d) => d.label),
+    ['Orario'],
+  );
+
+  // Applicazione: note nuove sostituiscono il motivo; note vuote lo conservano.
+  assert.equal(resolveUpdatedField(daCircolare, 'notes', 'TUTTI'), 'TUTTI');
+  assert.equal(resolveUpdatedField(daCircolare, 'notes', undefined), motivo);
+
+  // Il motivo vale come vuoto anche per la regola A: non blocca un luogo nuovo uguale.
+  assert.equal(getEventFieldDiff(daCircolare, { ...base, location: motivo }).location, true);
+
+  // Note utente (non un motivo) su impegno da circolare: differenza normale.
+  const noteUtente = makeExisting({ id: 'ev-collegio', title: 'Collegio Docenti', category: 'collegio_docenti', notes: 'Portare il registro', sourceType: 'circolare' });
+  assert.deepEqual(
+    describeEventDifferences(noteUtente, { ...base, notes: 'TUTTI' }),
+    [{ field: 'notes', label: 'Note', from: 'Portare il registro', to: 'TUTTI' }],
+  );
+
+  // Impegno MANUALE con note uguali a un motivo: trattate come note normali.
+  const manuale = makeExisting({ id: 'ev-collegio', title: 'Collegio Docenti', category: 'collegio_docenti', notes: motivo, sourceType: 'manuale' });
+  assert.deepEqual(
+    describeEventDifferences(manuale, { ...base, notes: 'TUTTI' }).map((d) => d.label),
+    ['Note'],
+  );
+  assert.equal(isIdenticalEventUpdate(manuale, { ...base, notes: motivo }), true, 'note identiche restano identiche');
 });

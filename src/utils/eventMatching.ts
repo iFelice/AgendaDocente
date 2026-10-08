@@ -1,5 +1,6 @@
 import type { CalendarEvent, EventCategory, ExtractedItem } from "../types";
 import { formatCivilDateIt, isValidDate } from "./dates";
+import { isRelevanceReasonText } from "./circularRelevance";
 
 /** Categorie specifiche per le quali un disallineamento indica attività distinte. */
 const SPECIFIC_CATEGORIES = new Set<EventCategory>([
@@ -284,10 +285,96 @@ function providedTextDiffers(existing?: string, candidate?: string): boolean {
 }
 
 /**
+ * Campi testuali che "Aggiorna" assegna con fallback (`nuovo || esistente`) e che
+ * condividono la regola "non riscrivere un testo già presente in un altro campo":
+ * luogo, note e classe.
+ */
+const FALLBACK_TEXT_FIELDS = ["location", "notes", "className"] as const;
+
+/** Uno dei campi testuali con fallback soggetti alle regole A e B (luogo, note, classe). */
+export type FallbackTextField = (typeof FALLBACK_TEXT_FIELDS)[number];
+
+/**
+ * B: le note di un impegno PROVENIENTE DA CIRCOLARE riconosciute come motivo di
+ * pertinenza (salvate dalle vecchie importazioni) valgono come vuote: non
+ * producono una differenza "Note" e non contano come testo già presente per gli
+ * altri campi. Le note scritte dall'utente (non riconosciute da
+ * `isRelevanceReasonText`) e gli impegni non da circolare restano note normali.
+ */
+function hasRelevanceReasonNotes(existing: CalendarEvent): boolean {
+  if (existing.sourceType !== "circolare") return false;
+  const notes = cleanEventField(existing.notes);
+  return notes.length > 0 && isRelevanceReasonText(notes);
+}
+
+/** Valore esistente di un campo con fallback usato nei confronti (B: note-motivo come vuote). */
+function comparableExistingField(existing: CalendarEvent, field: FallbackTextField): string {
+  if (field === "notes" && hasRelevanceReasonNotes(existing)) return "";
+  return cleanEventField(existing[field]);
+}
+
+/**
+ * A: il testo che "Aggiorna" scriverebbe in un campo è già contenuto in un ALTRO
+ * campo fra luogo, note e classe dell'impegno esistente (confronto senza
+ * maiuscole/minuscole e spazi ripetuti).
+ */
+function isTextAlreadyInOtherField(
+  existing: CalendarEvent,
+  field: FallbackTextField,
+  candidateValue?: string
+): boolean {
+  const folded = foldEventField(candidateValue);
+  if (!folded) return false;
+  return FALLBACK_TEXT_FIELDS.some(
+    (other) => other !== field && foldEventField(comparableExistingField(existing, other)) === folded
+  );
+}
+
+/**
+ * Regola UNICA con cui "Aggiorna" tratta luogo, note e classe, condivisa
+ * dall'elenco delle differenze e dall'applicazione dell'importazione:
+ * - nuovo valore vuoto -> il campo esistente non cambia;
+ * - A: nuovo valore già presente in un altro di questi campi -> non viene scritto;
+ * - B: note esistenti riconosciute come motivo di pertinenza -> mai una
+ *   differenza "Note" (valgono come vuote);
+ * - altrimenti il campo cambia se il nuovo valore differisce dall'esistente.
+ */
+function fallbackFieldDiffers(existing: CalendarEvent, field: FallbackTextField, candidateValue?: string): boolean {
+  const next = cleanEventField(candidateValue);
+  if (!next) return false;
+  if (field === "notes" && hasRelevanceReasonNotes(existing)) return false;
+  if (isTextAlreadyInOtherField(existing, field, next)) return false;
+  return foldEventField(comparableExistingField(existing, field)) !== foldEventField(next);
+}
+
+/**
+ * Valore che "Aggiorna" scrive DAVVERO in luogo, note o classe: la stessa regola
+ * dell'elenco delle differenze, definita una volta sola. Il nuovo valore viene
+ * scritto solo se non vuoto e non già presente in un altro di questi campi (A);
+ * altrimenti resta il valore esistente. Per le note che valgono come vuote (B)
+ * il nuovo valore sostituisce il motivo di pertinenza quando c'è, e il motivo
+ * resta dov'è quando il nuovo valore è vuoto.
+ */
+export function resolveUpdatedField(
+  existing: CalendarEvent,
+  field: FallbackTextField,
+  candidateValue?: string
+): string | undefined {
+  const next = cleanEventField(candidateValue);
+  if (next && !isTextAlreadyInOtherField(existing, field, next)) return candidateValue;
+  return existing[field];
+}
+
+/**
  * Calcola le differenze che `handleConfirmImport` produrrebbe davvero con
  * "Aggiorna": orario/data/titolo/categoria e scadenza vengono assegnati; luogo,
  * note, classe e materia conservano il valore esistente se il nuovo è vuoto,
  * mentre un evento completato viene riattivato.
+ *
+ * Luogo, note e classe seguono la regola unica di `resolveUpdatedField`:
+ * un testo già presente in un altro di questi campi non viene scritto (A) e le
+ * note da circolare riconosciute come motivo di pertinenza valgono come vuote
+ * (B), quindi nessuna differenza "Note" per quei campi.
  */
 export function getEventFieldDiff(existing: CalendarEvent, candidate: EventDifferenceCandidate): EventFieldDiff {
   const candidateDeadline = candidate.deadlineDate || (candidate.isDeadline === true ? candidate.date : undefined);
@@ -301,12 +388,12 @@ export function getEventFieldDiff(existing: CalendarEvent, candidate: EventDiffe
     startTime: cleanEventField(existing.startTime) !== cleanEventField(candidate.startTime),
     endTime: cleanEventField(existing.endTime) !== cleanEventField(candidate.endTime),
     isAllDay: !!existing.isAllDay !== candidateAllDay,
-    location: providedTextDiffers(existing.location, candidate.location),
-    notes: providedTextDiffers(existing.notes, candidate.notes),
+    location: fallbackFieldDiffers(existing, "location", candidate.location),
+    notes: fallbackFieldDiffers(existing, "notes", candidate.notes),
     category: existing.category !== candidate.category
       && SPECIFIC_CATEGORIES.has(existing.category)
       && SPECIFIC_CATEGORIES.has(candidate.category),
-    className: providedTextDiffers(existing.className, candidate.className),
+    className: fallbackFieldDiffers(existing, "className", candidate.className),
     subject: providedTextDiffers(existing.subject, candidate.subject),
     // L'azione "Aggiorna" riattiva sempre un evento completato.
     completed: existing.completed === true,
@@ -353,8 +440,11 @@ function categoryLabel(category?: EventCategory): string {
 /**
  * Solo le differenze effettive dell'azione "Aggiorna".
  * I campi testuali aggiornati con fallback (`nuovo || esistente`) non mostrano
- * una rimozione quando il nuovo valore è vuoto; le categorie sono confrontate
- * solo se entrambe specifiche; un completato riattivato è mostrato come Stato.
+ * una rimozione quando il nuovo valore è vuoto; luogo, note e classe seguono la
+ * regola unica di `resolveUpdatedField` (A: testo già presente in un altro di
+ * quei campi non scritto; B: note da circolare che sono un motivo di pertinenza
+ * valgono come vuote); le categorie sono confrontate solo se entrambe
+ * specifiche; un completato riattivato è mostrato come Stato.
  * Inizio/fine e stato tutto-il-giorno hanno una sola riga Orario.
  */
 export function describeEventDifferences(existing: CalendarEvent, candidate: EventDifferenceCandidate): EventFieldDifference[] {
