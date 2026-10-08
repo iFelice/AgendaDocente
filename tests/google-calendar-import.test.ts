@@ -136,9 +136,10 @@ test("workflow scarica prima e poi salva una sola volta dentro atomic; errore GE
   assert.equal(writes, 2);
 });
 
-test("finestra G1 è 30 giorni indietro e 12 mesi avanti; token mancante è esplicito", async () => {
-  assert.deepEqual(googleCalendarImportWindow(new Date(2026, 9, 1, 12)), {
-    timeMin: "2026-09-01T00:00:00Z", timeMax: "2027-10-01T23:59:59Z",
+test("finestra G1 è limitata all'anno scolastico del profilo; token mancante è esplicito", async () => {
+  // 1 ottobre 2026, anno scolastico 2026/2027: 30 giorni indietro … 31 agosto 2027.
+  assert.deepEqual(googleCalendarImportWindow(new Date(2026, 9, 1, 12), "2026/2027"), {
+    timeMin: "2026-09-01T00:00:00Z", timeMax: "2027-08-31T23:59:59Z",
   });
   await assert.rejects(importGoogleCalendarEvents(""), /Riconnetti/);
 });

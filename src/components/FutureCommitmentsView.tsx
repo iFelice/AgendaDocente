@@ -1,16 +1,18 @@
 import React from "react";
 import { CalendarClock, CheckCircle2, ChevronDown, ChevronRight, Circle, ListTodo, MapPin, Plus, Users } from "lucide-react";
 import type { CalendarEvent, Student, StudentScheduledAssessment } from "../types";
-import { civilDayOfWeek, localDateISO } from "../utils/dates";
+import { civilDayOfWeek, formatCivilDateIt, isValidDate, localDateISO, parseCivilDate } from "../utils/dates";
 import { isRelevanceReasonText } from "../utils/circularRelevance";
 import {
   deriveArchiveCommitments,
   deriveFutureCommitments,
   groupFutureCommitments,
+  splitFutureCommitmentsBySchoolYearEnd,
   FUTURE_COMMITMENT_SOURCE_LABELS,
   type FutureCommitmentItem,
   type FutureCommitmentSource,
 } from "../utils/futureCommitments";
+import { getSchoolYearBoundaries } from "../utils/schoolYear";
 
 /**
  * "Note e impegni": proiezione read-only degli impegni operativi, con Archivio
@@ -31,6 +33,12 @@ export interface FutureCommitmentsViewProps {
   /** Riusa il flusso esistente `storage.toggleEventCompleted`. */
   onToggleComplete?: (id: string) => void | Promise<void | false> | false;
   todayIso?: string;
+  /**
+   * Anno scolastico del profilo ("AAAA/AAAA"). L'elenco mostra solo gli impegni fino al
+   * 31 agosto di quell'anno: quelli oltre restano salvati (viste calendario) e qui sono
+   * riassunti in fondo da un solo conteggio. Mancante o non valido ⇒ anno corrente.
+   */
+  schoolYear?: string;
 }
 
 const SOURCE_BADGE_CLASS: Record<FutureCommitmentSource, string> = {
@@ -149,10 +157,19 @@ export const FutureCommitmentsView: React.FC<FutureCommitmentsViewProps> = ({
   onCreateNote,
   onToggleComplete,
   todayIso = localDateISO(),
+  schoolYear,
 }) => {
   const [showArchive, setShowArchive] = React.useState(false);
+  // Confini dell'anno scolastico del profilo (unica fonte: `getSchoolYearBoundaries`).
+  // Il riferimento temporale è il "oggi" della vista, così il fallback sull'anno corrente
+  // resta deterministico rispetto a `todayIso`.
+  const schoolYearEnd = getSchoolYearBoundaries(
+    schoolYear,
+    isValidDate(todayIso) ? parseCivilDate(todayIso) : new Date(),
+  ).end;
   const items = deriveFutureCommitments({ events, scheduledAssessments, students, todayIso });
-  const groups = groupFutureCommitments(items, todayIso);
+  const { withinSchoolYear, beyondSchoolYear } = splitFutureCommitmentsBySchoolYearEnd(items, schoolYearEnd);
+  const groups = groupFutureCommitments(withinSchoolYear, todayIso);
   const archiveItems = deriveArchiveCommitments({ events, scheduledAssessments, students, todayIso });
 
   return (
@@ -198,6 +215,20 @@ export const FutureCommitmentsView: React.FC<FutureCommitmentsViewProps> = ({
             </div>
           </section>
         ))
+      )}
+
+      {beyondSchoolYear.length > 0 && (
+        /* Riga discreta, senza elencarli: gli impegni oltre il 31 agosto restano salvati
+           e visibili nelle viste calendario, qui non sporcano l'elenco operativo. */
+        <p
+          data-commitments-beyond-school-year={schoolYearEnd}
+          data-commitments-beyond-count={beyondSchoolYear.length}
+          className="px-3 text-xs text-stone-500"
+        >
+          {beyondSchoolYear.length === 1
+            ? `1 impegno oltre il ${formatCivilDateIt(schoolYearEnd)}`
+            : `${beyondSchoolYear.length} impegni oltre il ${formatCivilDateIt(schoolYearEnd)}`}
+        </p>
       )}
 
       {archiveItems.length > 0 && (

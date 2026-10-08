@@ -261,6 +261,26 @@ export function deriveArchiveCommitments({
 /** Nome legacy mantenuto per i consumer N1.1: ora rappresenta l'Archivio. */
 export const derivePastCommitments = deriveArchiveCommitments;
 
+/**
+ * Limite superiore dell'elenco "prossimi impegni": il 31 agosto dell'anno scolastico
+ * del profilo. Gli impegni che lo superano — qualunque sia l'origine (agenda, Google,
+ * circolare, verifica, nota) — restano salvati e visibili nelle viste calendario: qui
+ * vengono solo esclusi dall'elenco, per essere riassunti in fondo da un solo conteggio.
+ *
+ * Derivazione pura: nessun elemento viene modificato o eliminato.
+ */
+export function splitFutureCommitmentsBySchoolYearEnd(
+  items: FutureCommitmentItem[],
+  schoolYearEnd: string,
+): { withinSchoolYear: FutureCommitmentItem[]; beyondSchoolYear: FutureCommitmentItem[] } {
+  const withinSchoolYear: FutureCommitmentItem[] = [];
+  const beyondSchoolYear: FutureCommitmentItem[] = [];
+  for (const item of items) {
+    (item.date <= schoolYearEnd ? withinSchoolYear : beyondSchoolYear).push(item);
+  }
+  return { withinSchoolYear, beyondSchoolYear };
+}
+
 /** Gruppi non vuoti, nell'ordine di lettura della schermata. */
 export function groupFutureCommitments(
   items: FutureCommitmentItem[],

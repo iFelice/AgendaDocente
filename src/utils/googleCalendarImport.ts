@@ -1,5 +1,6 @@
 import type { CalendarEvent } from "../types";
 import type { GoogleCalendarApiEvent } from "../services/googleCalendarService";
+import { isValidDate } from "./dates";
 
 const ROME_TIME_ZONE = "Europe/Rome";
 
@@ -89,6 +90,29 @@ export function removeImportedGoogleEventsForCalendars(
     // Older imports had no calendar id and can only belong to primary.
     if (!event.googleCalendarId && removed.has("primary") && event.googleEventId != null) return false;
     return true;
+  });
+}
+
+/**
+ * Confine superiore dell'importazione: un evento Google già salvato con data civile
+ * OLTRE l'ultimo giorno dell'anno scolastico (31 agosto) non appartiene più alla
+ * finestra gestita e viene rimosso alla sincronizzazione successiva.
+ *
+ * Regole rigorose:
+ * - solo `sourceType === "google_calendar"`: un impegno creato dall'utente o importato
+ *   da circolare non viene MAI rimosso, nemmeno se collegato a Google (`googleEventId`);
+ * - solo il lato futuro: gli eventi Google passati restano lo storico locale già
+ *   scaricato (l'Archivio li mostra) e la finestra inferiore è solo un limite di lettura;
+ * - una data non valida non è motivo di rimozione.
+ */
+export function removeImportedGoogleEventsBeyondDate(
+  events: CalendarEvent[],
+  lastDayIso: string,
+): CalendarEvent[] {
+  return events.filter(event => {
+    if (event.sourceType !== "google_calendar") return true;
+    if (!isValidDate(event.date)) return true;
+    return event.date <= lastDayIso;
   });
 }
 
