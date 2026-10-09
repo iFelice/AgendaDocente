@@ -306,6 +306,8 @@ export async function decryptLocalStudents(students: Student[], key: CryptoKey):
   for (const row of students) {
     const blob = row?.sensitiveEnc;
     if (!blob || !isSensitiveEncryptedBlob(blob)) { out.push(row); continue; }
+    // La riga ha già valori in chiaro: sono la verità locale, il blob è vecchio.
+    if (SENSITIVE_STUDENT_FIELDS.some(field => row[field] !== undefined)) { out.push(row); continue; }
     try {
       const fields = sanitizeDecryptedStudentFields(await decryptJson(key, blob));
       const { sensitiveEnc: _dropped, ...rest } = row;
@@ -417,26 +419,32 @@ export function createSensitiveSyncAdapter(keystore: EncryptionKeystore): Sensit
           const fields = pickSensitiveStudentFields(local);
           const hasLocal = Object.keys(fields).length > 0;
           const remoteRow = remoteById.get(row.id);
-          const hadBlob =
-            (isRecord(remoteRow) && isSensitiveEncryptedBlob(remoteRow.sensitiveEnc)) ||
-            Boolean(local && isSensitiveEncryptedBlob(local.sensitiveEnc));
           const clean = stripSensitiveTransportStudent(row);
-          // Nessuna informazione riservata (né ora, né prima): niente blob.
-          if (!hasLocal && !hadBlob) { out.push(clean); continue; }
-          out.push({ ...(clean as Record<string, unknown>), sensitiveEnc: await encryptJson(key, fields) });
+          // Questo dispositivo ha i valori in chiaro: cifra quelli (IV fresco).
+          if (hasLocal) {
+            out.push({ ...(clean as Record<string, unknown>), sensitiveEnc: await encryptJson(key, fields) });
+            continue;
+          }
+          // Senza valori locali non si cifra MAI il vuoto (cancellerebbe i dati
+          // scritti da altri): il blob esistente — del cloud o già noto in
+          // locale — viene riportato invariato, come facesse un dispositivo
+          // senza chiave.
+          const kept = (isRecord(remoteRow) && isSensitiveEncryptedBlob(remoteRow.sensitiveEnc) ? remoteRow.sensitiveEnc : undefined)
+            ?? (local && isSensitiveEncryptedBlob(local.sensitiveEnc) ? local.sensitiveEnc : undefined);
+          if (kept) out.push({ ...(clean as Record<string, unknown>), sensitiveEnc: kept });
+          else out.push(clean);
         }
         return out;
       }
       if (!isRecord(base)) return base;
       const localProfile = snapshot.profile;
       const assigned = localProfile?.assignedStudents;
-      const hasLocal = assigned !== undefined;
-      const hadBlob =
-        (isRecord(remotePayload) && isSensitiveEncryptedBlob(remotePayload.sensitiveEnc)) ||
-        Boolean(localProfile && isSensitiveEncryptedBlob(localProfile.sensitiveEnc));
       const clean = stripSensitiveTransportProfile(base) as Record<string, unknown>;
-      if (!hasLocal && !hadBlob) return clean;
-      return { ...clean, sensitiveEnc: await encryptJson(key, { assignedStudents: assigned ?? [] }) };
+      if (assigned !== undefined) return { ...clean, sensitiveEnc: await encryptJson(key, { assignedStudents: assigned }) };
+      const kept = (isRecord(remotePayload) && isSensitiveEncryptedBlob(remotePayload.sensitiveEnc) ? remotePayload.sensitiveEnc : undefined)
+        ?? (localProfile && isSensitiveEncryptedBlob(localProfile.sensitiveEnc) ? localProfile.sensitiveEnc : undefined);
+      if (kept) clean.sensitiveEnc = kept;
+      return clean;
     },
   };
 }

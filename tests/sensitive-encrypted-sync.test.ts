@@ -484,6 +484,38 @@ test('B6. cambio frase: gli alunni cifrati nel cloud non vengono toccati', async
 // Copie "fuori dispositivo": blob mai presenti
 // ---------------------------------------------------------------------------
 
+test('B6b. dispositivo sbloccato senza valori locali: mai cifrare il vuoto, il blob esistente si riporta invariato', async () => {
+  const clock = { now: '2026-10-01T10:00:00.000Z' };
+  const cloud = makeFakeCloud(clock);
+  const deviceA = makeDevice({ students: [student('s1', { ...SENSITIVE })] });
+  const keystoreA = makeKeystore(cloud, clock, deviceA);
+  await keystoreA.activate('uid-1', 'frase segreta dispositivo A');
+  await makeEngine(deviceA, cloud, clock, keystoreA).syncNow();
+
+  // Dispositivo C: sbloccato, ma senza valori riservati in locale.
+  const deviceC = makeDevice({ students: [student('s1')] });
+  const keystoreC = makeKeystore(cloud, clock, deviceC);
+  await keystoreC.unlock('uid-1', 'frase segreta dispositivo A', 'phrase');
+  const engineC = makeEngine(deviceC, cloud, clock, keystoreC);
+  deviceC.meta['sync:state'] = alignedState(deviceC, cloud, true, docUpdatedAt(cloud, 'students'));
+  const blobPrima = clone((statePayloadOf(cloud, 'students') as Array<{ sensitiveEnc: unknown }>)[0].sensitiveEnc);
+
+  deviceC.db.students[0].className = '4H';
+  clock.now = '2026-10-01T12:00:00.000Z';
+  await engineC.syncNow();
+
+  const rows = statePayloadOf(cloud, 'students') as Array<Record<string, unknown>>;
+  assert.equal(rows[0].className, '4H');
+  assert.deepEqual(rows[0].sensitiveEnc, blobPrima, 'nessuna cifratura del vuoto: il blob di A è riportato invariato');
+  assertNoPlaintextSensitive(cloud.state.students, 'nessun chiaro');
+
+  // Secondo ciclo: nessun'altra scrittura.
+  const writes = cloud.writes.total;
+  clock.now = '2026-10-01T12:30:00.000Z';
+  await engineC.syncNow();
+  assert.equal(cloud.writes.total, writes, 'nessun loop');
+});
+
 test('B7. endpoint di analisi e copie locali: niente blob cifrati in giro', () => {
   const withBlob = student('s1', { ...SENSITIVE, sensitiveEnc: { v: 1, iv: 'AAAA', ct: 'BBBB' } });
   const clean = withoutSensitiveStudent(withBlob) as unknown as Record<string, unknown>;
