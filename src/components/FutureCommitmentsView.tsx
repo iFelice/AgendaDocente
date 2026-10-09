@@ -114,9 +114,9 @@ const CommitmentRow: React.FC<{
     </div>
   );
 
-  // Il link della videochiamata si ricava qui e solo per la visualizzazione, con
-  // l'unica funzione usata da tutte le viste (campo meetingUrl, poi luogo, poi note).
-  // L'archivio le note le mostra già: un impegno con Meet in nota ha il suo pulsante.
+  // Il link si ricava qui e solo per la visualizzazione, con l'unica funzione usata da
+  // tutte le viste (campo meetingUrl, poi luogo, poi note): nessun dato viene riscritto.
+  // Vale anche per l'Archivio, che mostra gli stessi impegni già passati.
   const meetingUrl = getEventMeetingUrl(event);
 
   const rowClass = `${completable || meetingUrl ? "flex-1 min-w-0" : "w-full"} px-3 py-3 rounded-xl border border-stone-200 bg-white`;

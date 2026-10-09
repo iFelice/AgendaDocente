@@ -1,7 +1,7 @@
 import { usePersistenceAction } from "../hooks/usePersistenceAction";
 import type { GoogleCalendarListEntry } from "../services/googleCalendarService";
 import { eventDateError, isValidDate, localDateISO } from "../utils/dates";
-import { getEventMeetingUrl, isHttpsMeetingUrl, normalizeMeetingUrl } from "../utils/meetingLinks";
+import { isHttpsMeetingUrl, normalizeMeetingUrl } from "../utils/meetingLinks";
 import { EventMeetingLink } from "./EventMeetingLink";
 import React, { useState, useEffect } from "react";
 import { Clock, MapPin, X, Calendar, BookOpen, AlertCircle, Trash2, ChevronRight } from "lucide-react";
@@ -522,7 +522,7 @@ export const EventModal: React.FC<EventModalProps> = ({
               dell'app, con il suo messaggio in italiano — un input nativo type="url"
               bloccherebbe il submit con un tooltip del browser. autoCapitalize/autoCorrect/
               spellCheck spenti perché un URL mai corretto automaticamente. */}
-          <div data-meeting-url-field>
+          <div>
             <label htmlFor="event-meeting-url" className="block font-semibold text-stone-700 mb-1">Link videochiamata</label>
             <input
               id="event-meeting-url"
