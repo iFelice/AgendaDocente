@@ -11,6 +11,7 @@ import type {
 import { ITEMS_COLLECTIONS, STATE_DOC_NAMES } from "./types";
 import { isPlaceholderFullName } from "../../utils/names";
 import { isValidStudentAssessment, isValidStudentScheduledAssessment } from "../backup";
+import { sanitizeRemoteCalendarEvent } from "./remoteSchema";
 
 /** Deterministic key-order-insensitive serialization + FNV-1a hash: content identity only. */
 export function canonicalStringify(value: unknown): string {
@@ -124,7 +125,7 @@ export function snapshotFromRemote(remote: RemoteSnapshot): Partial<Record<State
       if (doc.payload && typeof doc.payload === "object") Object.assign(out, doc.payload);
     } else out[name] = doc.payload;
   }
-  if (remote.items.events.length) out.events = remote.items.events.map(i => i.payload);
+  if (remote.items.events.length) out.events = remote.items.events.map(i => sanitizeRemoteCalendarEvent(i.payload));
   if (remote.items.circulars.length) out.circulars = remote.items.circulars.map(i => i.payload);
   if (remote.items.assessments?.length) out.assessments = remote.items.assessments.map(i => i.payload);
   if (remote.items.scheduledAssessments?.length) out.scheduledAssessments = remote.items.scheduledAssessments.map(i => i.payload);
@@ -184,6 +185,11 @@ export function planSync(ctx: PlanContext): SyncPlan {
     }
   }
   remote.items.scheduledAssessments = validScheduledAssessments;
+
+  // Eventi: mai rifiutati (sarebbe perdita di dati), solo ripuliti. Un meetingUrl non
+  // https committato in IndexedDB farebbe fallire la validazione di `validateBackup`
+  // sull'intera scrittura atomica, congelando la sync di questo dispositivo.
+  remote.items.events = (remote.items.events ?? []).map(item => ({ ...item, payload: sanitizeRemoteCalendarEvent(item.payload) }));
 
   const remoteKnown = remoteHasData(remote);
   if (!syncState && !resolution && isPristineLocal(snapshot) && remoteKnown) {

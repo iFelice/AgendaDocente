@@ -1,6 +1,7 @@
 import type { CalendarEvent } from "../types";
 import type { GoogleCalendarApiEvent } from "../services/googleCalendarService";
 import { isValidDate } from "./dates";
+import { normalizeMeetingUrl } from "./meetingLinks";
 
 const ROME_TIME_ZONE = "Europe/Rome";
 
@@ -35,6 +36,28 @@ export function googleEventLocalId(calendarId: string | undefined, eventId: stri
     : `gcal-${encodeURIComponent(eventId)}`;
 }
 
+/**
+ * Link della videoconferenza pubblicata da Google per un evento.
+ *
+ * `hangoutLink` vince sempre: è il campo che Google usa per il proprio pulsante
+ * "Partecipa". In sua assenza si prende il PRIMO `conferenceData.entryPoints` di tipo
+ * "video" (phone/sip/more non fanno partecipare a una videochiamata). Un `uri` non https
+ * viene scartato con lo stesso contratto del campo salvato (`normalizeMeetingUrl`):
+ * dall'import Google non entra mai un link che l'editor o il backup rifiuterebbero.
+ */
+export function googleEventMeetingUrl(remote: GoogleCalendarApiEvent): string | undefined {
+  const hangoutLink = normalizeMeetingUrl(remote.hangoutLink);
+  if (hangoutLink) return hangoutLink;
+  const entryPoints = remote.conferenceData?.entryPoints;
+  if (!Array.isArray(entryPoints)) return undefined;
+  for (const entryPoint of entryPoints) {
+    if (!entryPoint || entryPoint.entryPointType !== "video") continue;
+    const uri = normalizeMeetingUrl(entryPoint.uri);
+    if (uri) return uri;
+  }
+  return undefined;
+}
+
 export function googleEventToCalendarEvent(remote: GoogleCalendarApiEvent, calendarId?: string): CalendarEvent {
   if (!remote.id) throw new Error("Evento Google Calendar senza identificativo");
 
@@ -56,6 +79,8 @@ export function googleEventToCalendarEvent(remote: GoogleCalendarApiEvent, calen
     endTime = end.time;
   }
 
+  const meetingUrl = googleEventMeetingUrl(remote);
+
   return {
     id: googleEventLocalId(calendarId, remote.id),
     title: remote.summary?.trim() || "Evento Google",
@@ -66,6 +91,9 @@ export function googleEventToCalendarEvent(remote: GoogleCalendarApiEvent, calen
     isAllDay: allDay,
     location: remote.location,
     notes: remote.description,
+    // Chiave assente quando Google non pubblica alcun link: un evento importato senza
+    // videoconferenza resta identico a prima (nessun campo vuoto, nessuna chiave undefined).
+    ...(meetingUrl ? { meetingUrl } : {}),
     googleEventId: remote.id,
     ...(calendarId ? { googleCalendarId: calendarId } : {}),
     sourceType: "google_calendar",
@@ -152,6 +180,12 @@ export function mergeGoogleCalendarEvents(
       linked++;
       continue;
     }
+    // La riga importata viene SEMPRE ricostruita, non solo quando i campi visibili
+    // cambiano: `mapped` porta meetingUrl quando Google pubblica la videoconferenza,
+    // quindi il link arriva anche su un impegno già importato in passato. Se il link
+    // scompare lato Google il valore locale NON viene cancellato: l'impegno importato
+    // resta modificabile nell'app e un link digitato dal docente non può essere perso
+    // da una sincronizzazione.
     events[index] = {
       ...existing,
       ...mapped,
@@ -225,6 +259,9 @@ export function mergeGoogleCalendarGroups(
         linked++;
         continue;
       }
+      // Stesso contratto del merge G1: la riga è ricostruita a ogni ciclo, così meetingUrl
+      // (presente in `mapped` solo se Google pubblica un link) si aggiunge anche su un
+      // impegno già importato e un link rimosso lato Google non cancella quello locale.
       events[index] = {
         ...existing,
         ...mapped,

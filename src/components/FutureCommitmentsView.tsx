@@ -3,6 +3,8 @@ import { CalendarClock, CheckCircle2, ChevronDown, ChevronRight, Circle, ListTod
 import type { CalendarEvent, Student, StudentScheduledAssessment } from "../types";
 import { civilDayOfWeek, formatCivilDateIt, isValidDate, localDateISO, parseCivilDate } from "../utils/dates";
 import { isRelevanceReasonText } from "../utils/circularRelevance";
+import { getEventMeetingUrl } from "../utils/meetingLinks";
+import { EventMeetingLink } from "./EventMeetingLink";
 import {
   deriveArchiveCommitments,
   deriveFutureCommitments,
@@ -112,7 +114,12 @@ const CommitmentRow: React.FC<{
     </div>
   );
 
-  const rowClass = `${completable ? "flex-1 min-w-0" : "w-full"} px-3 py-3 rounded-xl border border-stone-200 bg-white`;
+  // Il link si ricava qui e solo per la visualizzazione, con l'unica funzione usata da
+  // tutte le viste (campo meetingUrl, poi luogo, poi note): nessun dato viene riscritto.
+  // Vale anche per l'Archivio, che mostra gli stessi impegni già passati.
+  const meetingUrl = getEventMeetingUrl(event);
+
+  const rowClass = `${completable || meetingUrl ? "flex-1 min-w-0" : "w-full"} px-3 py-3 rounded-xl border border-stone-200 bg-white`;
   const row = clickable ? (
     <button
       type="button"
@@ -128,22 +135,28 @@ const CommitmentRow: React.FC<{
     </div>
   );
 
-  if (!completable) return row;
+  // Il link è un FRATELLO della riga, non un discendente: la riga tappabile è un
+  // <button>, e un <a> dentro un <button> non è HTML valido (il tap sul link
+  // finirebbe per aprire anche l'editor).
+  if (!completable && !meetingUrl) return row;
 
   return (
     <div className="flex items-start gap-2">
-      <button
-        type="button"
-        data-commitment-toggle={item.id}
-        aria-pressed={!!item.completed}
-        aria-label={item.completed ? `Segna come da fare: ${item.title}` : `Segna come completata: ${item.title}`}
-        title={item.completed ? "Segna come da fare" : "Segna come completata"}
-        onClick={() => onToggleComplete!(item.originalEvent!.id)}
-        className="mt-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-stone-400 hover:text-emerald-700 hover:bg-emerald-50 transition-colors"
-      >
-        {item.completed ? <CheckCircle2 className="h-5 w-5 text-emerald-700" /> : <Circle className="h-5 w-5" />}
-      </button>
+      {completable && (
+        <button
+          type="button"
+          data-commitment-toggle={item.id}
+          aria-pressed={!!item.completed}
+          aria-label={item.completed ? `Segna come da fare: ${item.title}` : `Segna come completata: ${item.title}`}
+          title={item.completed ? "Segna come da fare" : "Segna come completata"}
+          onClick={() => onToggleComplete!(item.originalEvent!.id)}
+          className="mt-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-stone-400 hover:text-emerald-700 hover:bg-emerald-50 transition-colors"
+        >
+          {item.completed ? <CheckCircle2 className="h-5 w-5 text-emerald-700" /> : <Circle className="h-5 w-5" />}
+        </button>
+      )}
       {row}
+      {meetingUrl && <EventMeetingLink event={event} label={item.title} className="mt-0.5" />}
     </div>
   );
 };

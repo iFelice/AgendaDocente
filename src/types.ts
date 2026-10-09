@@ -222,6 +222,17 @@ export interface CalendarEvent {
   subject?: string;
   location?: string;
   notes?: string;
+  /**
+   * Link della videochiamata (Meet, Zoom, Teams…) per partecipare da casa.
+   *
+   * Opzionale e additivo: un evento salvato prima di questo campo resta valido.
+   * SOLO URL https — è il contratto verificato dalla validazione runtime
+   * (`src/services/backup.ts` per backup e commit locale,
+   * `src/services/sync/remoteSchema.ts` per le righe arrivate dal cloud) e
+   * dall'editor. Non va confuso con un link qualunque nel luogo o nelle note:
+   * quello viene solo mostrato, mai copiato qui (vedi `src/utils/meetingLinks.ts`).
+   */
+  meetingUrl?: string;
   sourceType: "manuale" | "circolare" | "orario" | "google_calendar" | "registro";
   sourceCircularTitle?: string;
   sourceCircularId?: string;

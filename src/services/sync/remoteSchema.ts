@@ -1,4 +1,5 @@
 import { isValidTime } from "../../utils/dates";
+import { isHttpsMeetingUrl } from "../../utils/meetingLinks";
 import { TEACHER_ROLE_KINDS } from "../../types";
 import { isValidStudentAssessment } from "../backup";
 import type { RemoteStateDoc, StateDocName } from "./types";
@@ -54,6 +55,38 @@ const boundedText = (max: number) => (v: unknown): boolean => text(v) && (v as s
 
 /** Shared runtime validator for item-level assessment documents. */
 export { isValidStudentAssessment };
+
+// ---------------------------------------------------------------------------
+// CalendarEvent link di videochiamata (collezione items `events`)
+// ---------------------------------------------------------------------------
+
+/**
+ * `CalendarEvent.meetingUrl` deve essere un URL https o non esserci. Stesso contratto
+ * del validatore di backup (`src/services/backup.ts`): le due porte di ingresso dei dati
+ * — file di backup e righe del cloud — accettano e rifiutano le stesse cose, così un
+ * evento scritto da questo dispositivo è sempre ri-sincronizzabile e ripristinabile.
+ */
+export function isValidCalendarEventMeetingUrl(value: unknown): boolean {
+  return value === undefined || isHttpsMeetingUrl(value);
+}
+
+/**
+ * Una riga evento remota è input non fidato, ma qui NON si rifiuta nulla: un evento con
+ * un solo campo malformato verrebbe perso dall'utente. Il link non https viene ripulito
+ * (campo rimosso) e tutto il resto passa invariato. La pulizia è richiesta anche per un
+ * motivo tecnico: gli eventi applicati dal cloud vengono committati in IndexedDB, dove
+ * `validateBackup` rifiuterebbe l'intero commit — un solo campo velenoso bloccerebbe la
+ * sincronizzazione di tutta la collezione.
+ *
+ * Ritorna la stessa reference quando non c'è nulla da pulire, così gli hash di
+ * contenuto del merge restano identici e non si genera nessun write inutile.
+ */
+export function sanitizeRemoteCalendarEvent<T>(payload: T): T {
+  if (!isRecord(payload)) return payload;
+  if (isValidCalendarEventMeetingUrl(payload.meetingUrl)) return payload;
+  const { meetingUrl: _dropped, ...clean } = payload;
+  return clean as T;
+}
 
 // ---------------------------------------------------------------------------
 // Semantic payload validators (per state document type)
