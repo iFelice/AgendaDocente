@@ -1,4 +1,5 @@
 import type { ExtractedItem, TeacherProfile } from "../types";
+import { withoutSensitiveProfile } from "./sensitiveData";
 import { parseCircularText, normalizeExtractedItems } from "../utils/circularParser";
 export { parseCircularText as clientSideLocalParser } from "../utils/circularParser";
 
@@ -285,7 +286,9 @@ export async function analyzeCircular(req: AnalyzeRequest, options: AnalyzeCircu
     response = await fetchImpl("/api/analyze-circular", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(req),
+      // Il profilo parte senza `assignedStudents`: è testo libero che può
+      // contenere sigle di alunni, ore e tipo di PEI (dati riservati).
+      body: JSON.stringify({ ...req, profile: withoutSensitiveProfile(req.profile) }),
       signal: requestController.signal,
     });
   } catch (error) {

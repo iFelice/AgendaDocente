@@ -10,7 +10,8 @@ import {
 } from "firebase/firestore";
 import type { FirebaseApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
-import type { ItemsCollection, RemoteItem, StateDocName, SyncGateway } from "./types";
+import type { ItemsCollection, RemoteConflictArchive, RemoteItem, StateDocName, SyncGateway } from "./types";
+import { stripSensitiveConflictArchive, stripSensitiveStatePayload } from "../sensitiveData";
 
 /** Firestore single-document hard limit is 1 MiB; keep a safety margin for metadata. */
 export const CLOUD_DOC_BYTE_LIMIT = 900_000;
@@ -51,7 +52,10 @@ export function createFirestoreGateway(app: FirebaseApp | null, getUid: () => st
     },
     async writeState(name: StateDocName, payload: unknown): Promise<{ updatedAt: string }> {
       const updatedAt = new Date().toISOString();
-      const sanitized = sanitizeFirestorePayload(payload);
+      // Dati sensibili: nessun campo riservato di un alunno e nessun
+      // `assignedStudents` del profilo raggiunge mai il cloud, qualunque sia
+      // l'origine della scrittura (documento di stato, riparazione, pulizia).
+      const sanitized = sanitizeFirestorePayload(stripSensitiveStatePayload(name, payload));
       if (estimateBytes(sanitized) > CLOUD_DOC_BYTE_LIMIT) throw new Error(`"${name}" supera lo spazio cloud disponibile: resta salvato in locale.`);
       await setDoc(doc(database(), `users/${uid()}/state`, name), { payload: sanitized, updatedAt, schemaVersion: 1 });
       return { updatedAt };
@@ -81,9 +85,20 @@ export function createFirestoreGateway(app: FirebaseApp | null, getUid: () => st
         await batch.commit();
       }
     },
+    async listConflicts(): Promise<RemoteConflictArchive[]> {
+      // Lettura consentita dalle regole (solo il proprietario). Serve unicamente a
+      // CONTARE gli archivi che custodiscono ancora dati riservati: il contenuto
+      // non viene mai loggato né riscritto (le regole li rendono immutabili).
+      const querySnapshot = await getDocs(collection(database(), `users/${uid()}/conflicts`));
+      return querySnapshot.docs.map(entry => {
+        const data = entry.data() as { kind?: unknown; payload?: unknown };
+        return { id: entry.id, kind: typeof data.kind === "string" ? data.kind : "", payload: data.payload };
+      });
+    },
     async archiveConflict(kind: string, loser: unknown): Promise<void> {
       const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const sanitized = sanitizeFirestorePayload(loser);
+      // Anche la copia archiviata di un conflitto è una scrittura verso il cloud.
+      const sanitized = sanitizeFirestorePayload(stripSensitiveConflictArchive(kind, loser));
       await setDoc(doc(database(), `users/${uid()}/conflicts`, id), {
         kind,
         createdAt: new Date().toISOString(),
