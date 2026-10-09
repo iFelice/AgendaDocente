@@ -32,7 +32,7 @@ import {
 } from "lucide-react";
 import { compareStudentNames, isStudentActive } from "../utils/studentMatcher";
 import { isSupportTeacherOf } from "../utils/teacherType";
-import { LOCAL_ONLY_SENSITIVE_NOTICE, hasSensitiveStudentData } from "../services/sensitiveData";
+import { LOCAL_ONLY_SENSITIVE_NOTICE, LOCKED_SENSITIVE_NOTICE, hasEncryptedSensitiveBlob, hasSensitiveStudentData } from "../services/sensitiveData";
 import {
   Student,
   StudentNote,
@@ -794,6 +794,11 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
                   {/* I dati riservati (sostegno, PEI, BES/DSA, équipe, GLO) restano qui */}
                   {hasSensitiveStudentData(student) && (
                     <p className="mt-2 text-[11px] text-stone-500">{LOCAL_ONLY_SENSITIVE_NOTICE}</p>
+                  )}
+
+                  {/* Dati riservati cifrati nel cloud, ma dispositivo non sbloccato */}
+                  {!hasSensitiveStudentData(student) && hasEncryptedSensitiveBlob(student) && (
+                    <p className="mt-2 text-[11px] text-stone-500">{LOCKED_SENSITIVE_NOTICE}</p>
                   )}
 
                   {/* Parent Contact Info Preview */}

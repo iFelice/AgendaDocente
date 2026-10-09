@@ -256,6 +256,21 @@ export class EncryptionKeystore {
     await this.storeDeviceKey(uid, raw);
   }
 
+  /** Come `changePassphrase`, ma accetta nello stesso campo la frase o il codice di recupero. */
+  async changePassphraseAuto(uid: string, currentSecret: string, newPassphrase: string): Promise<void> {
+    const normalized = normalizeRecoveryCode(currentSecret);
+    if (normalized) {
+      try {
+        await this.changePassphrase(uid, { secret: normalized, kind: "recovery" }, newPassphrase);
+        return;
+      } catch (error) {
+        if (!(error instanceof WrongSecretError)) throw error;
+        // Ha la forma di un codice ma non apre: si prova comunque come frase.
+      }
+    }
+    await this.changePassphrase(uid, { secret: currentSecret.trim(), kind: "phrase" }, newPassphrase);
+  }
+
   /** Apre l'involucro giusto con il secret giusto; altrimenti WrongSecretError. */
   private async unwrapWithSecret(payload: EncryptionKeysPayload, secret: string, kind: SecretKind): Promise<Uint8Array> {
     const normalized = kind === "recovery" ? normalizeRecoveryCode(secret) : secret;

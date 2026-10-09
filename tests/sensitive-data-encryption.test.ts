@@ -294,3 +294,20 @@ test('costanti e utilità: lunghezza frase minima e chiave AES-GCM', async () =>
   const { key } = await generateDataKey();
   assert.equal((key.algorithm as { name: string }).name, 'AES-GCM');
 });
+
+test('cambio frase automatico: stesso campo per frase attuale o codice di recupero', async () => {
+  const cloud: FakeKeysCloud = { doc: null, writes: 0 };
+  const keystore = makeKeystore(cloud, makeMeta().store);
+  const { recoveryCode } = await keystore.activate('uid-1', 'prima frase segreta lunga');
+
+  await keystore.changePassphraseAuto('uid-1', 'prima frase segreta lunga', 'seconda frase segreta lunga');
+  const b = makeMeta();
+  const keystoreB = makeKeystore(cloud, b.store);
+  await keystoreB.unlock('uid-1', 'seconda frase segreta lunga', 'phrase');
+
+  await keystoreB.changePassphraseAuto('uid-1', recoveryCode, 'terza frase segreta valida');
+  const c = makeMeta();
+  const keystoreC = makeKeystore(cloud, c.store);
+  await keystoreC.unlock('uid-1', 'terza frase segreta valida', 'phrase');
+  await assert.rejects(() => keystoreC.unlock('uid-1', 'seconda frase segreta lunga', 'phrase'), WrongSecretError);
+});

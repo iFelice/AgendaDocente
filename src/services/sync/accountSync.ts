@@ -3,7 +3,7 @@ import { createFirestoreGateway } from "./firestoreGateway";
 import { createStoreAdapter, observeLocalCommits } from "./localStore";
 import { SyncEngine } from "./engine";
 import { database } from "../db";
-import { EncryptionKeystore, createSensitiveSyncAdapter } from "../encryptionKeys";
+import { EncryptionKeystore, createSensitiveSyncAdapter, decryptLocalProfile, decryptLocalStudents } from "../encryptionKeys";
 
 /**
  * Multi-device account sync singleton.
@@ -43,3 +43,23 @@ export const accountSync = new SyncEngine({
   observeLocalCommits,
   sensitiveEncryption: createSensitiveSyncAdapter(encryptionKeystore),
 });
+
+/**
+ * Subito dopo lo sblocco: i blob cifrati già presenti nelle righe locali
+ * (arrivati col ripristino quando il dispositivo era ancora bloccato) vengono
+ * decifrati in locale, senza attendere il prossimo ingresso dal cloud.
+ * Restituisce true se qualcosa è stato applicato.
+ */
+export async function applyLocalDecryption(uid: string): Promise<boolean> {
+  const key = await encryptionKeystore.deviceKey(uid);
+  if (!key) return false;
+  const [students, profile] = await Promise.all([database.read("students"), database.read("profile")]);
+  const decryptedStudents = await decryptLocalStudents(students, key);
+  const decryptedProfile = await decryptLocalProfile(profile, key);
+  if (!decryptedStudents.changed && !decryptedProfile.changed) return false;
+  await database.atomic(async () => {
+    if (decryptedStudents.changed) await database.write("students", decryptedStudents.students);
+    if (decryptedProfile.changed) await database.write("profile", decryptedProfile.profile);
+  });
+  return true;
+}
