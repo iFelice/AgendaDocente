@@ -35,6 +35,16 @@ import {
   type WrappedKey,
 } from "./sensitiveCrypto";
 import { classifyRemoteStateDoc } from "./sync/remoteSchema";
+import {
+  SENSITIVE_STUDENT_FIELDS,
+  pickSensitiveStudentFields,
+  stripSensitiveTransportProfile,
+  stripSensitiveTransportStudent,
+  type DecryptedSensitive,
+  type DecryptedStudentFields,
+} from "./sensitiveData";
+import type { SyncableSnapshot } from "./sync/types";
+import type { Student, TeacherProfile } from "../types";
 
 /** Lunghezza minima della frase segreta: abbastanza lunga da non indovinarsi. */
 export const MIN_PHRASE_LENGTH = 12;
@@ -263,4 +273,166 @@ export class EncryptionKeystore {
       throw new WrongSecretError();
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Sblocco dei dati già presenti in locale (blob arrivati da un ripristino)
+// ---------------------------------------------------------------------------
+
+/**
+ * Dopo lo sblocco, i blob eventualmente conservati nelle righe locali (arrivati
+ * col ripristino quando il dispositivo era ancora bloccato) vengono decifrati
+ * subito, in locale: i valori prendono il posto del blob. Righe senza blob o
+ * con un blob illeggibile restano invariate.
+ */
+export async function decryptLocalStudents(students: Student[], key: CryptoKey): Promise<{ students: Student[]; changed: boolean }> {
+  let changed = false;
+  const out: Student[] = [];
+  for (const row of students) {
+    const blob = row?.sensitiveEnc;
+    if (!blob || !isSensitiveEncryptedBlob(blob)) { out.push(row); continue; }
+    try {
+      const fields = sanitizeDecryptedStudentFields(await decryptJson(key, blob));
+      const { sensitiveEnc: _dropped, ...rest } = row;
+      out.push({ ...rest, ...fields } as Student);
+      changed = true;
+    } catch {
+      out.push(row); // blob illeggibile: si conserva, riproverà al prossimo ingresso
+    }
+  }
+  return { students: out, changed };
+}
+
+/** Come sopra per `assignedStudents` del profilo. */
+export async function decryptLocalProfile(profile: TeacherProfile, key: CryptoKey): Promise<{ profile: TeacherProfile; changed: boolean }> {
+  const blob = profile?.sensitiveEnc;
+  if (!blob || !isSensitiveEncryptedBlob(blob)) return { profile, changed: false };
+  try {
+    const value = await decryptJson(key, blob);
+    const assigned = isRecord(value) && Array.isArray(value.assignedStudents)
+      ? value.assignedStudents.filter(item => typeof item === "string")
+      : null;
+    if (assigned === null) return { profile, changed: false };
+    const { sensitiveEnc: _dropped, ...rest } = profile;
+    return { profile: { ...rest, assignedStudents: assigned }, changed: true };
+  } catch {
+    return { profile, changed: false };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Adattatore per il motore di sincronizzazione
+// ---------------------------------------------------------------------------
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  !!value && typeof value === "object" && !Array.isArray(value);
+
+/**
+ * Il motore di sync non conosce la cifratura: parla con questo adattatore.
+ * Senza documento chiavi (cifratura mai attivata) `cycleState` restituisce
+ * null e tutto si comporta esattamente come prima (campi riservati solo locali).
+ */
+export interface SensitiveSyncAdapter {
+  /** Stato chiavi dell'account per il ciclo: null = cifratura mai attivata. */
+  cycleState(uid: string): Promise<{ dataKey: CryptoKey | null } | null>;
+  /** INGRESSO: decifra i blob di un payload remoto (miglior sforzo). */
+  decryptRemote(name: "students" | "profile", payload: unknown, key: CryptoKey): Promise<DecryptedSensitive>;
+  /** USCITA: aggancia i blob cifrati (con la chiave) al payload in partenza. */
+  attachOutgoing(
+    name: "students" | "profile",
+    base: unknown,
+    ctx: { snapshot: SyncableSnapshot; remotePayload: unknown; key: CryptoKey },
+  ): Promise<unknown>;
+}
+
+export function createSensitiveSyncAdapter(keystore: EncryptionKeystore): SensitiveSyncAdapter {
+  return {
+    async cycleState(uid) {
+      const payload = await keystore.loadKeys(uid);
+      if (!payload) return null;
+      const dataKey = await keystore.deviceKey(uid);
+      return { dataKey };
+    },
+
+    async decryptRemote(name, payload, key) {
+      const out: DecryptedSensitive = {};
+      if (name === "students") {
+        const map = new Map<string, DecryptedStudentFields>();
+        if (Array.isArray(payload)) {
+          for (const row of payload) {
+            if (!isRecord(row) || typeof row.id !== "string") continue;
+            const blob = row.sensitiveEnc;
+            if (!isSensitiveEncryptedBlob(blob)) continue;
+            try {
+              map.set(row.id, sanitizeDecryptedStudentFields(await decryptJson(key, blob)));
+            } catch {
+              // Blob illeggibile: per questo alunno si tiene il valore locale.
+            }
+          }
+        }
+        if (map.size) out.students = map;
+      } else if (isRecord(payload) && isSensitiveEncryptedBlob(payload.sensitiveEnc)) {
+        try {
+          const value = await decryptJson(key, payload.sensitiveEnc);
+          const assigned = isRecord(value) && Array.isArray(value.assignedStudents)
+            ? value.assignedStudents.filter(item => typeof item === "string")
+            : null;
+          out.profile = assigned !== null ? { assignedStudents: assigned } : null;
+        } catch {
+          out.profile = null;
+        }
+      }
+      return out;
+    },
+
+    async attachOutgoing(name, base, { snapshot, remotePayload, key }) {
+      if (name === "students") {
+        if (!Array.isArray(base)) return base;
+        const localById = new Map(snapshot.students.map(student => [student.id, student]));
+        const remoteById = new Map<string, unknown>();
+        if (Array.isArray(remotePayload)) {
+          for (const row of remotePayload) {
+            if (isRecord(row) && typeof row.id === "string") remoteById.set(row.id, row);
+          }
+        }
+        const out: unknown[] = [];
+        for (const row of base) {
+          if (!isRecord(row) || typeof row.id !== "string") { out.push(row); continue; }
+          const local = localById.get(row.id);
+          const fields = pickSensitiveStudentFields(local);
+          const hasLocal = Object.keys(fields).length > 0;
+          const remoteRow = remoteById.get(row.id);
+          const hadBlob =
+            (isRecord(remoteRow) && isSensitiveEncryptedBlob(remoteRow.sensitiveEnc)) ||
+            Boolean(local && isSensitiveEncryptedBlob(local.sensitiveEnc));
+          const clean = stripSensitiveTransportStudent(row);
+          // Nessuna informazione riservata (né ora, né prima): niente blob.
+          if (!hasLocal && !hadBlob) { out.push(clean); continue; }
+          out.push({ ...(clean as Record<string, unknown>), sensitiveEnc: await encryptJson(key, fields) });
+        }
+        return out;
+      }
+      if (!isRecord(base)) return base;
+      const localProfile = snapshot.profile;
+      const assigned = localProfile?.assignedStudents;
+      const hasLocal = assigned !== undefined;
+      const hadBlob =
+        (isRecord(remotePayload) && isSensitiveEncryptedBlob(remotePayload.sensitiveEnc)) ||
+        Boolean(localProfile && isSensitiveEncryptedBlob(localProfile.sensitiveEnc));
+      const clean = stripSensitiveTransportProfile(base) as Record<string, unknown>;
+      if (!hasLocal && !hadBlob) return clean;
+      return { ...clean, sensitiveEnc: await encryptJson(key, { assignedStudents: assigned ?? [] }) };
+    },
+  };
+}
+
+/** Input non fidato: dal blob decifrato si tengono SOLO i campi dell'elenco unico. */
+function sanitizeDecryptedStudentFields(value: unknown): DecryptedStudentFields {
+  const out: DecryptedStudentFields = {};
+  if (!isRecord(value)) return out;
+  for (const field of SENSITIVE_STUDENT_FIELDS) {
+    const entry = value[field];
+    if (entry !== undefined) out[field] = entry;
+  }
+  return out;
 }

@@ -21,6 +21,7 @@
 
 import type { Student, TeacherProfile } from "../types";
 import type { RemoteConflictArchive, StateDocName, SyncedStateDocName } from "./sync/types";
+import { isSensitiveEncryptedBlob } from "./sensitiveCrypto";
 
 export type { RemoteConflictArchive };
 
@@ -53,8 +54,32 @@ export const SENSITIVE_STATE_DOCS: readonly StateDocName[] = ["students", "profi
 export const LOCAL_ONLY_SENSITIVE_NOTICE =
   "Dati riservati: salvati solo su questo dispositivo, non sincronizzati.";
 
+/** Riga mostrata quando esistono dati riservati cifrati ma il dispositivo non è sbloccato. */
+export const LOCKED_SENSITIVE_NOTICE = "Dati riservati cifrati: sblocca per vederli.";
+
 const STUDENT_KEYS: ReadonlySet<string> = new Set<string>(SENSITIVE_STUDENT_FIELDS);
 const PROFILE_KEYS: ReadonlySet<string> = new Set<string>(SENSITIVE_PROFILE_FIELDS);
+
+/**
+ * Campi "di trasporto" della cifratura: i campi riservati in chiaro PIÙ il
+ * blob cifrato `sensitiveEnc`. È la forma usata per il payload base e per gli
+ * hash di contenuto: il blob viaggia solo agganciato all'ultimo passo
+ * (in uscita), così il suo IV sempre nuovo non fa mai sembrare "modificato"
+ * un contenuto che non lo è.
+ */
+const STUDENT_TRANSPORT_KEYS: ReadonlySet<string> = new Set<string>([...SENSITIVE_STUDENT_FIELDS, "sensitiveEnc"]);
+const PROFILE_TRANSPORT_KEYS: ReadonlySet<string> = new Set<string>([...SENSITIVE_PROFILE_FIELDS, "sensitiveEnc"]);
+
+/** Valori decifrati dei campi riservati di un alunno (input non fidato: solo campi dell'elenco unico). */
+export type DecryptedStudentFields = Partial<Record<SensitiveStudentField, unknown>>;
+
+/** Esito della decifratura dei blob di un documento remoto, per il merge in ingresso. */
+export interface DecryptedSensitive {
+  /** id alunno -> campi riservati decifrati (assente = blob mancante o non decifrabile). */
+  students?: Map<string, DecryptedStudentFields>;
+  /** `assignedStudents` del profilo decifrata (null = assente o non decifrabile; [] = svuotata altrove). */
+  profile?: { assignedStudents: string[] } | null;
+}
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === "object" && !Array.isArray(value);
@@ -69,16 +94,19 @@ function omitKeys(value: Record<string, unknown>, keys: ReadonlySet<string>): Re
 // USCITA — rimozione prima di ogni scrittura remota / richiesta di analisi
 // ---------------------------------------------------------------------------
 
-/** Copia di un alunno senza i campi sensibili. Non muta l'originale. */
+/**
+ * Copia di un alunno senza i campi sensibili E senza il blob cifrato (che non
+ * serve a nulla fuori dalla sincronizzazione). Non muta l'originale.
+ */
 export function withoutSensitiveStudent<T extends Student>(student: T): T {
   if (!isRecord(student)) return student;
-  return omitKeys(student as Record<string, unknown>, STUDENT_KEYS) as T;
+  return omitKeys(student as Record<string, unknown>, STUDENT_TRANSPORT_KEYS) as T;
 }
 
-/** Copia del profilo docente senza `assignedStudents`. Non muta l'originale. */
+/** Copia del profilo docente senza `assignedStudents` e senza blob. Non muta l'originale. */
 export function withoutSensitiveProfile<T extends TeacherProfile>(profile: T): T {
   if (!isRecord(profile)) return profile;
-  return omitKeys(profile as Record<string, unknown>, PROFILE_KEYS) as T;
+  return omitKeys(profile as Record<string, unknown>, PROFILE_TRANSPORT_KEYS) as T;
 }
 
 /** Versione "input non fidato": stesso elenco, ma accetta e restituisce `unknown`. */
@@ -91,6 +119,48 @@ export function stripSensitiveStudentFields(student: unknown): unknown {
 export function stripSensitiveProfileFields(profile: unknown): unknown {
   if (!isRecord(profile)) return profile;
   return omitKeys(profile, PROFILE_KEYS);
+}
+
+/**
+ * Payload BASE di un alunno: senza campi riservati E senza il blob cifrato.
+ * È la forma usata per gli hash di contenuto: il blob (IV sempre nuovo) viene
+ * agganciato solo all'ultimo passo dell'uscita.
+ */
+export function stripSensitiveTransportStudent(student: unknown): unknown {
+  if (!isRecord(student)) return student;
+  return omitKeys(student, STUDENT_TRANSPORT_KEYS);
+}
+
+/** Payload base del profilo: senza `assignedStudents` e senza blob. */
+export function stripSensitiveTransportProfile(profile: unknown): unknown {
+  if (!isRecord(profile)) return profile;
+  return omitKeys(profile, PROFILE_TRANSPORT_KEYS);
+}
+
+/** Payload base di un documento di stato (solo `students` e `profile` hanno dati riservati). */
+export function stripSensitiveTransportPayload(name: SyncedStateDocName, payload: unknown): unknown {
+  if (name === "students") {
+    if (!Array.isArray(payload)) return payload;
+    return payload.map(stripSensitiveTransportStudent);
+  }
+  if (name === "profile") return stripSensitiveTransportProfile(payload);
+  return payload;
+}
+
+/** I soli campi riservati compilati di un alunno: è ciò che finisce nel blob cifrato. */
+export function pickSensitiveStudentFields(student: unknown): DecryptedStudentFields {
+  if (!isRecord(student)) return {};
+  const picked: DecryptedStudentFields = {};
+  for (const field of SENSITIVE_STUDENT_FIELDS) {
+    const value = student[field];
+    if (value !== undefined) picked[field] = value;
+  }
+  return picked;
+}
+
+/** Vero se l'alunno porta un blob cifrato (dati riservati protetti nel cloud). */
+export function hasEncryptedSensitiveBlob(row: unknown): boolean {
+  return isRecord(row) && isSensitiveEncryptedBlob(row.sensitiveEnc);
 }
 
 /**
@@ -134,50 +204,143 @@ export function stripSensitiveLegacyDoc(name: SyncedStateDocName, raw: unknown):
 // ---------------------------------------------------------------------------
 
 /**
- * Ricompone un alunno ricevuto dal cloud: i campi sensibili remoti sono SEMPRE
- * scartati, quelli locali (se l'alunno esiste già qui) sono SEMPRE conservati.
- * Un alunno che esiste solo nel cloud arriva senza campi sensibili.
+ * Ricompone un alunno ricevuto dal cloud, con tre comportamenti:
+ *  1. dispositivo SBLOCCATO e blob decifrato (`decrypted`): i valori del cloud
+ *     si applicano con la stessa regola di precedenza del resto della scheda
+ *     (qui il remoto ha vinto) e il blob non viene conservato in locale;
+ *  2. senza chiave o decifratura fallita: i campi sensibili locali restano
+ *     come oggi e il blob cifrato NON viene scartato (segnala i dati protetti
+ *     e sopravvive a una riscrittura);
+ *  3. i campi sensibili in chiaro eventualmente ancora nel cloud (documenti
+ *     precedenti alla cifratura) sono sempre ignorati.
  */
-export function mergeLocalSensitiveStudent(remoteStudent: unknown, localStudent: Student | undefined): unknown {
+export function mergeLocalSensitiveStudent(
+  remoteStudent: unknown,
+  localStudent: Student | undefined,
+  decrypted?: DecryptedStudentFields | null,
+): unknown {
   if (!isRecord(remoteStudent)) return remoteStudent;
-  const clean = stripSensitiveStudentFields(remoteStudent) as Record<string, unknown>;
-  if (!localStudent) return clean;
-  for (const field of SENSITIVE_STUDENT_FIELDS) {
-    const value = localStudent[field];
-    if (value !== undefined) clean[field] = value;
+  const clean = omitKeys(remoteStudent, STUDENT_TRANSPORT_KEYS) as Record<string, unknown>;
+  const blob = isSensitiveEncryptedBlob(remoteStudent.sensitiveEnc) ? remoteStudent.sensitiveEnc : undefined;
+  if (decrypted) {
+    for (const field of SENSITIVE_STUDENT_FIELDS) {
+      const value = decrypted[field];
+      if (value !== undefined) clean[field] = value;
+    }
+    return clean;
   }
+  if (localStudent) {
+    for (const field of SENSITIVE_STUDENT_FIELDS) {
+      const value = localStudent[field];
+      if (value !== undefined) clean[field] = value;
+    }
+  }
+  if (blob) clean.sensitiveEnc = blob;
   return clean;
 }
 
 /** Come sopra, per l'intero elenco alunni: l'aggancio è l'`id`. */
-export function mergeLocalSensitiveStudents(remoteStudents: unknown, localStudents: Student[]): unknown {
+export function mergeLocalSensitiveStudents(
+  remoteStudents: unknown,
+  localStudents: Student[],
+  decrypted?: Map<string, DecryptedStudentFields>,
+): unknown {
   if (!Array.isArray(remoteStudents)) return remoteStudents;
   const byId = new Map(localStudents.map(student => [student.id, student]));
-  return remoteStudents.map(row =>
-    isRecord(row) ? mergeLocalSensitiveStudent(row, byId.get(typeof row.id === "string" ? row.id : "")) : row);
+  return remoteStudents.map(row => {
+    if (!isRecord(row)) return row;
+    const id = typeof row.id === "string" ? row.id : "";
+    return mergeLocalSensitiveStudent(row, byId.get(id), decrypted?.get(id) ?? null);
+  });
 }
 
-/** Profilo: `assignedStudents` resta quella locale; quella remota è ignorata. */
-export function mergeLocalSensitiveProfile(remoteProfile: unknown, localProfile?: TeacherProfile): unknown {
+/**
+ * Profilo: con i valori decifrati si applica la precedenza del remoto; senza
+ * chiave `assignedStudents` resta quella locale e il blob non viene scartato.
+ */
+export function mergeLocalSensitiveProfile(
+  remoteProfile: unknown,
+  localProfile?: TeacherProfile,
+  decrypted?: { assignedStudents: string[] } | null,
+): unknown {
   if (!isRecord(remoteProfile)) return remoteProfile;
-  const clean = stripSensitiveProfileFields(remoteProfile) as Record<string, unknown>;
+  const clean = omitKeys(remoteProfile, PROFILE_TRANSPORT_KEYS) as Record<string, unknown>;
+  const blob = isSensitiveEncryptedBlob(remoteProfile.sensitiveEnc) ? remoteProfile.sensitiveEnc : undefined;
+  if (decrypted) {
+    clean.assignedStudents = decrypted.assignedStudents ?? [];
+    return clean;
+  }
   if (localProfile?.assignedStudents !== undefined) clean.assignedStudents = localProfile.assignedStudents;
+  if (blob) clean.sensitiveEnc = blob;
   return clean;
 }
 
 /**
  * L'UNICA funzione di ingresso: applicata a ogni payload remoto che va a
  * sostituire o unirsi ai dati locali (ripristino completo o aggiornamento di un
- * singolo documento di stato).
+ * singolo documento di stato). `decrypted` porta i blob già decifrati dal
+ * motore (dispositivo sbloccato); senza chiave è omesso.
  */
 export function mergeRemoteStateWithLocalSensitive(
   name: SyncedStateDocName,
   remotePayload: unknown,
   local: { students: Student[]; profile?: TeacherProfile },
+  decrypted?: DecryptedSensitive,
 ): unknown {
-  if (name === "students") return mergeLocalSensitiveStudents(remotePayload, local.students ?? []);
-  if (name === "profile") return mergeLocalSensitiveProfile(remotePayload, local.profile);
+  if (name === "students") return mergeLocalSensitiveStudents(remotePayload, local.students ?? [], decrypted?.students);
+  if (name === "profile") return mergeLocalSensitiveProfile(remotePayload, local.profile, decrypted?.profile);
   return remotePayload;
+}
+
+// ---------------------------------------------------------------------------
+// USCITA da dispositivo SENZA chiave: i blob del cloud tornano invariati
+// ---------------------------------------------------------------------------
+
+/**
+ * Un dispositivo senza chiave non cifra, ma non deve mai cancellare i dati
+ * cifrati scritti da un altro dispositivo: per ogni alunno il blob presente
+ * nel cloud (o, in subordine, quello già noto in locale) viene riportato
+ * invariato nella scrittura.
+ */
+export function preserveSensitiveEncStudents(baseRows: unknown, remotePayload: unknown, localStudents: Student[]): unknown {
+  if (!Array.isArray(baseRows)) return baseRows;
+  const remoteById = new Map<string, unknown>();
+  if (Array.isArray(remotePayload)) {
+    for (const row of remotePayload) {
+      if (isRecord(row) && typeof row.id === "string") remoteById.set(row.id, row);
+    }
+  }
+  const localById = new Map(localStudents.map(student => [student.id, student]));
+  return baseRows.map(row => {
+    if (!isRecord(row) || typeof row.id !== "string") return row;
+    const remoteRow = remoteById.get(row.id);
+    const blob = (isRecord(remoteRow) && isSensitiveEncryptedBlob(remoteRow.sensitiveEnc) ? remoteRow.sensitiveEnc : undefined)
+      ?? (localById.get(row.id)?.sensitiveEnc && isSensitiveEncryptedBlob(localById.get(row.id)!.sensitiveEnc) ? localById.get(row.id)!.sensitiveEnc : undefined);
+    if (!blob) return stripSensitiveTransportStudent(row);
+    return { ...(stripSensitiveTransportStudent(row) as Record<string, unknown>), sensitiveEnc: blob };
+  });
+}
+
+/** Profilo senza chiave: il blob del cloud (o locale) torna invariato. */
+export function preserveSensitiveEncProfile(baseProfile: unknown, remotePayload: unknown, localProfile?: TeacherProfile): unknown {
+  if (!isRecord(baseProfile)) return baseProfile;
+  const blob = (isRecord(remotePayload) && isSensitiveEncryptedBlob(remotePayload.sensitiveEnc) ? remotePayload.sensitiveEnc : undefined)
+    ?? (localProfile?.sensitiveEnc && isSensitiveEncryptedBlob(localProfile.sensitiveEnc) ? localProfile.sensitiveEnc : undefined);
+  const clean = stripSensitiveTransportProfile(baseProfile) as Record<string, unknown>;
+  if (blob) clean.sensitiveEnc = blob;
+  return clean;
+}
+
+/** Variante per documento di stato (solo `students` e `profile`). */
+export function preserveSensitiveEncPayload(
+  name: SyncedStateDocName,
+  base: unknown,
+  remotePayload: unknown,
+  local: { students: Student[]; profile?: TeacherProfile },
+): unknown {
+  if (name === "students") return preserveSensitiveEncStudents(base, remotePayload, local.students ?? []);
+  if (name === "profile") return preserveSensitiveEncProfile(base, remotePayload, local.profile);
+  return base;
 }
 
 // ---------------------------------------------------------------------------

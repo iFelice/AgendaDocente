@@ -10,7 +10,7 @@ import {
 } from "firebase/firestore";
 import type { FirebaseApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
-import type { ItemsCollection, RemoteConflictArchive, RemoteItem, StateDocName, SyncGateway } from "./types";
+import type { ItemsCollection, RemoteConflictArchive, RemoteItem, StateDocName, SyncedStateDocName, SyncGateway } from "./types";
 import { stripSensitiveConflictArchive, stripSensitiveStatePayload } from "../sensitiveData";
 
 /** Firestore single-document hard limit is 1 MiB; keep a safety margin for metadata. */
@@ -42,7 +42,7 @@ export function createFirestoreGateway(app: FirebaseApp | null, getUid: () => st
   };
 
   return {
-    async readState(name: StateDocName): Promise<unknown> {
+    async readState(name: SyncedStateDocName): Promise<unknown> {
       const snapshot = await getDoc(doc(database(), `users/${uid()}/state`, name));
       if (!snapshot.exists()) return null;
       // RAW document, no cast: a legacy/malformed cloud document must never be
@@ -50,7 +50,7 @@ export function createFirestoreGateway(app: FirebaseApp | null, getUid: () => st
       // via classifyRemoteStateDoc (src/services/sync/remoteSchema.ts).
       return snapshot.data();
     },
-    async writeState(name: StateDocName, payload: unknown): Promise<{ updatedAt: string }> {
+    async writeState(name: SyncedStateDocName, payload: unknown): Promise<{ updatedAt: string }> {
       const updatedAt = new Date().toISOString();
       // Dati sensibili: nessun campo riservato di un alunno e nessun
       // `assignedStudents` del profilo raggiunge mai il cloud, qualunque sia

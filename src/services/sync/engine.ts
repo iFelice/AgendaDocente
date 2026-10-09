@@ -16,9 +16,10 @@ import type {
   SyncableSnapshot,
 } from "./types";
 import { ITEMS_COLLECTIONS, STATE_DOC_NAMES, type ItemsCollection } from "./types";
-import { contentHash, isPristineLocal, itemsDigest, planSync, statePayload, type SyncPlan } from "./merge";
+import { contentHash, isPristineLocal, itemsDigest, localStateHash, planSync, sensitiveStateFingerprint, statePayload, type SyncPlan } from "./merge";
 import { classifyRemoteStateDoc } from "./remoteSchema";
-import { SENSITIVE_STATE_DOCS, countSensitiveArchives } from "../sensitiveData";
+import { SENSITIVE_STATE_DOCS, countSensitiveArchives, preserveSensitiveEncPayload, type DecryptedSensitive } from "../sensitiveData";
+import type { SensitiveSyncAdapter } from "../encryptionKeys";
 
 const META_STATE_KEY = "sync:state";
 const META_ENABLED_KEY = "sync:enabled";
@@ -67,6 +68,13 @@ export interface SyncEngineDeps {
   /** Scheduler override for tests; defaults to setTimeout. */
   schedule?: (fn: () => void, ms: number) => () => void;
   now?: () => string;
+  /**
+   * Optional: cifratura dei dati riservati dell'account (keystore). Quando la
+   * cifratura è attiva, l'uscita aggancia i blob cifrati e l'ingresso decifra;
+   * senza adapter il comportamento è esattamente quello precedente (campi
+   * riservati solo locali).
+   */
+  sensitiveEncryption?: SensitiveSyncAdapter;
 }
 
 type Listener = (status: SyncStatus) => void;
@@ -243,13 +251,20 @@ export class SyncEngine {
     const nowIso = this.now();
     // C. Documenti che il cloud non ha ancora riscritto in forma pulita per QUESTO account.
     const sensitiveCleanup = await this.pendingSensitiveCleanup(uid);
+    // Cifratura dati riservati: stato delle chiavi dell'account per questo ciclo
+    // (null = mai attivata). Un errore qui interrompe il ciclo PRIMA di ogni
+    // scrittura: nessun blob cifrato può essere cancellato per sbaglio.
+    const enc = this.deps.sensitiveEncryption ? await this.deps.sensitiveEncryption.cycleState(uid) : null;
+    const sensitiveActive = enc !== null;
 
     // 1. Detect *new* local edits (hash moved since the last detection) and stamp their time.
     const detection: SyncStateV1 = previous ? structuredClone(previous) : { uid, state: {}, items: { events: { docs: {} }, circulars: { docs: {} }, assessments: { docs: {} }, scheduledAssessments: { docs: {} } } };
     detection.uid = uid;
     for (const name of STATE_DOC_NAMES) {
       const track = detection.state[name];
-      const hash = contentHash(statePayload(snapshot, name));
+      // Con la cifratura attiva anche una modifica ai soli dati riservati è una
+      // modifica (l'impronta in chiaro è locale: nel cloud va solo il blob).
+      const hash = localStateHash(name, statePayload(snapshot, name), sensitiveActive, sensitiveStateFingerprint(name, name === "students" ? snapshot.students : snapshot.profile));
       if (track) {
         if (track.lastSyncedLocalHash !== hash) {
           if (track.lastDetectedHash !== hash || !track.localChangedAt) {
@@ -313,6 +328,25 @@ export class SyncEngine {
       items: { events, circulars, assessments, scheduledAssessments },
     };
 
+    // Cifratura dati riservati, INGRESSO: con la chiave i blob del cloud vengono
+    // decifrati prima del merge (i valori si applicano con la stessa precedenza
+    // del resto della scheda). Senza chiave — o per un blob illeggibile — il
+    // merge procede come sempre: dati locali conservati, blob non scartato.
+    const sensitiveDecrypted: DecryptedSensitive = {};
+    if (enc?.dataKey && this.deps.sensitiveEncryption) {
+      for (const name of ["students", "profile"] as const) {
+        const doc = remoteState[name];
+        if (!doc) continue;
+        try {
+          const part = await this.deps.sensitiveEncryption.decryptRemote(name, doc.payload, enc.dataKey);
+          if (name === "students" && part.students) sensitiveDecrypted.students = part.students;
+          if (name === "profile" && part.profile) sensitiveDecrypted.profile = part.profile;
+        } catch {
+          // Decifratura non riuscita per questo documento: come senza chiave.
+        }
+      }
+    }
+
     // 3. Plan locally (pure), then execute both sides.
     const plan = planSync({
       uid,
@@ -325,12 +359,15 @@ export class SyncEngine {
       remoteLegacy,
       remoteInvalid,
       sensitiveCleanup,
+      sensitiveActive,
+      sensitiveDecrypted,
     });
 
     if (plan.fullRestore) {
       await this.deps.store.applyLocal({ fullRestore: plan.fullRestore });
       // Even a wholesale restore must repair the cloud side: preserve legacy copies and
       // rewrite malformed/recoverable documents in the current format.
+      await this.prepareSensitiveOutgoing(plan, snapshot, remote, enc);
       const written = await this.executeCloudSide(plan, gateway, remote, nowIso);
       await this.finishSensitiveCleanup(gateway, sensitiveCleanup, written);
       await this.persistState(detectionJson, plan.nextState);
@@ -347,6 +384,7 @@ export class SyncEngine {
       await this.deps.store.applyLocal({ localApplyState, localEvents: plan.localEvents, localCirculars: plan.localCirculars, localAssessments: plan.localAssessments, localScheduledAssessments: plan.localScheduledAssessments });
     }
 
+    await this.prepareSensitiveOutgoing(plan, snapshot, remote, enc);
     const written = await this.executeCloudSide(plan, gateway, remote, nowIso);
     await this.finishSensitiveCleanup(gateway, sensitiveCleanup, written);
 
@@ -358,6 +396,31 @@ export class SyncEngine {
       this.publish({ phase: "awaiting-resolution", conflicts: plan.needsResolution, message: "Questo dispositivo e il cloud contengono modifiche indipendenti. Scegli quali dati conservare." });
     } else {
       this.publish({ phase: "idle", conflicts: undefined, message: undefined });
+    }
+  }
+
+  /**
+   * CIFRATURA DATI RISERVATI, USCITA: aggancia i blob ai documenti in partenza.
+   * Con la chiave: cifra i dati riservati di questo dispositivo (IV fresco a
+   * ogni scrittura). Senza chiave: riporta invariati i blob già presenti nel
+   * cloud (o noti in locale) — un dispositivo senza chiave non cancella mai i
+   * dati cifrati scritti da un altro dispositivo. In entrambi i casi nessun
+   * campo riservato in chiaro lascia il dispositivo.
+   */
+  private async prepareSensitiveOutgoing(
+    plan: SyncPlan,
+    snapshot: SyncableSnapshot,
+    remote: RemoteSnapshot,
+    enc: { dataKey: CryptoKey | null } | null,
+  ): Promise<void> {
+    if (!enc || !this.deps.sensitiveEncryption) return;
+    for (const name of ["students", "profile"] as const) {
+      const payload = plan.stateWrites[name];
+      if (payload === undefined) continue;
+      const remotePayload = remote.state[name]?.payload;
+      plan.stateWrites[name] = enc.dataKey
+        ? await this.deps.sensitiveEncryption.attachOutgoing(name, payload, { snapshot, remotePayload, key: enc.dataKey })
+        : preserveSensitiveEncPayload(name, payload, remotePayload, snapshot);
     }
   }
 

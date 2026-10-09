@@ -18,8 +18,11 @@ import {
   mergeLocalSensitiveProfile,
   mergeLocalSensitiveStudents,
   mergeRemoteStateWithLocalSensitive,
+  pickSensitiveStudentFields,
   stripSensitiveLegacyDoc,
   stripSensitiveStatePayload,
+  stripSensitiveTransportPayload,
+  type DecryptedSensitive,
 } from "../sensitiveData";
 
 /** Deterministic key-order-insensitive serialization + FNV-1a hash: content identity only. */
@@ -42,15 +45,16 @@ export function contentHash(value: unknown): string {
 }
 
 /**
- * Payload locale di un documento di stato, PRIVO dei dati sensibili.
+ * Payload BASE locale di un documento di stato: privo dei dati sensibili E del
+ * blob cifrato `sensitiveEnc` (trasporto, agganciato solo all'ultimo passo).
  *
- * È l'unica forma che può diventare una scrittura remota (o un hash di
- * confronto): i campi riservati degli alunni e `assignedStudents` del profilo
- * restano in IndexedDB e non entrano mai nel cloud. Ne consegue che una
- * modifica ai soli dati sensibili NON produce alcuna sincronizzazione.
+ * È la forma usata per gli hash di confronto e come base delle scritture remote.
+ * Senza cifratura attiva una modifica ai soli dati sensibili NON produce alcuna
+ * sincronizzazione; con la cifratura attiva ci pensa l'impronta dei campi in
+ * chiaro (vedi `localStateHash`) a segnalare la modifica.
  */
 export const statePayload = (snapshot: SyncableSnapshot, name: StateDocName): unknown =>
-  stripSensitiveStatePayload(
+  stripSensitiveTransportPayload(
     name,
     name === "settings"
       ? {
@@ -62,12 +66,56 @@ export const statePayload = (snapshot: SyncableSnapshot, name: StateDocName): un
   );
 
 /**
- * INGRESSO: un payload remoto che sta per sostituire o unirsi ai dati locali.
- * I campi sensibili presenti nel cloud (documenti vecchi) sono sempre ignorati;
- * per ogni alunno con lo stesso `id` valgono quelli già salvati qui.
+ * Impronta (solo locale, mai inviata) dei campi riservati IN CHIARO: alunni
+ * per `id`, poi `assignedStudents` del profilo. Con la cifratura attiva entra
+ * nell'hash di rilevazione, così una modifica ai dati riservati produce una
+ * sincronizzazione (che li porterà nel cloud cifrati).
  */
-const incomingStatePayload = (name: StateDocName, remotePayload: unknown, snapshot: SyncableSnapshot): unknown =>
-  mergeRemoteStateWithLocalSensitive(name, remotePayload, snapshot);
+export function sensitiveStudentsFingerprint(students: unknown): string {
+  if (!Array.isArray(students)) return contentHash(null);
+  const rows = students
+    .filter(row => row && typeof row === "object" && !Array.isArray(row))
+    .map(row => [typeof (row as { id?: unknown }).id === "string" ? (row as { id: string }).id : "", pickSensitiveStudentFields(row)] as [string, unknown])
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  return contentHash(rows);
+}
+
+export function sensitiveProfileFingerprint(profile: unknown): string {
+  const assigned = profile && typeof profile === "object" && !Array.isArray(profile)
+    ? (profile as { assignedStudents?: unknown }).assignedStudents
+    : undefined;
+  return contentHash(Array.isArray(assigned) ? assigned : null);
+}
+
+export function sensitiveStateFingerprint(name: StateDocName, value: unknown): string {
+  if (name === "students") return sensitiveStudentsFingerprint(value);
+  if (name === "profile") return sensitiveProfileFingerprint(value);
+  return "";
+}
+
+const fingerprintSource = (name: StateDocName, source: SyncableSnapshot): unknown =>
+  name === "students" ? source.students : name === "profile" ? source.profile : undefined;
+
+/**
+ * Hash di rilevazione delle modifiche locali. Con la cifratura INATTIVA è
+ * esattamente l'hash del payload base (compatibilità con gli stati di sync già
+ * salvati). Con la cifratura ATTIVA include anche l'impronta dei campi
+ * riservati in chiaro: l'impronta resta sul dispositivo, nel cloud va solo il
+ * blob cifrato.
+ */
+export function localStateHash(name: StateDocName, basePayload: unknown, sensitiveActive: boolean, fingerprint: string): string {
+  if (!sensitiveActive || (name !== "students" && name !== "profile")) return contentHash(basePayload);
+  return contentHash({ payload: basePayload, sensitive: fingerprint });
+}
+
+/**
+ * INGRESSO: un payload remoto che sta per sostituire o unirsi ai dati locali.
+ * I campi sensibili in chiaro presenti nel cloud (documenti vecchi) sono sempre
+ * ignorati; con il dispositivo sbloccato si applicano invece i valori decifrati
+ * dai blob (`decrypted`), con la stessa precedenza del resto della scheda.
+ */
+const incomingStatePayload = (name: StateDocName, remotePayload: unknown, snapshot: SyncableSnapshot, decrypted?: DecryptedSensitive): unknown =>
+  mergeRemoteStateWithLocalSensitive(name, remotePayload, snapshot, decrypted);
 
 export interface PlanContext {
   uid: string;
@@ -90,6 +138,17 @@ export interface PlanContext {
    * locale in `sync:sensitive-cleanup`). Vale solo per "students" e "profile".
    */
   sensitiveCleanup?: StateDocName[];
+  /**
+   * Cifratura dei dati riservati attiva per l'account: gli hash di rilevazione
+   * includono l'impronta (locale) dei campi riservati in chiaro.
+   */
+  sensitiveActive?: boolean;
+  /**
+   * Blob cifrati già decifrati dal motore (dispositivo sbloccato): in ingresso
+   * i valori del cloud si applicano con la stessa precedenza del resto della
+   * scheda. Omesso quando il dispositivo non ha la chiave.
+   */
+  sensitiveDecrypted?: DecryptedSensitive;
 }
 
 export interface SyncPlan {
@@ -228,19 +287,25 @@ export function planSync(ctx: PlanContext): SyncPlan {
   // sull'intera scrittura atomica, congelando la sync di questo dispositivo.
   remote.items.events = (remote.items.events ?? []).map(item => ({ ...item, payload: sanitizeRemoteCalendarEvent(item.payload) }));
 
+  const sensitiveActive = Boolean(ctx.sensitiveActive);
+  const sensitiveDecrypted = ctx.sensitiveDecrypted;
+  /** Hash di rilevazione del contenuto locale (con impronta dei dati riservati se la cifratura è attiva). */
+  const hashOf = (name: StateDocName, base: unknown, source: unknown): string =>
+    localStateHash(name, base, sensitiveActive, sensitiveStateFingerprint(name, source));
+
   const remoteKnown = remoteHasData(remote);
   if (!syncState && !resolution && isPristineLocal(snapshot) && remoteKnown) {
     // New device (or cleared local data): adopt the cloud snapshot wholesale.
-    plan.fullRestore = buildFullRestore(snapshot, remote);
-    syncAllTracks(nextState, snapshot, remote, nowIso);
+    plan.fullRestore = buildFullRestore(snapshot, remote, sensitiveDecrypted);
+    syncAllTracks(nextState, snapshot, remote, nowIso, plan.fullRestore, sensitiveActive);
     repairLegacyStateDocs(plan, ctx, nextState, snapshot);
     planSensitiveCleanup(plan, ctx, nextState, snapshot, remote, true);
     plan.changedSomething = true;
     return plan;
   }
   if (!syncState && resolution === "remote" && remoteKnown) {
-    plan.fullRestore = buildFullRestore(snapshot, remote);
-    syncAllTracks(nextState, snapshot, remote, nowIso);
+    plan.fullRestore = buildFullRestore(snapshot, remote, sensitiveDecrypted);
+    syncAllTracks(nextState, snapshot, remote, nowIso, plan.fullRestore, sensitiveActive);
     repairLegacyStateDocs(plan, ctx, nextState, snapshot);
     planSensitiveCleanup(plan, ctx, nextState, snapshot, remote, true);
     plan.changedSomething = true;
@@ -251,14 +316,17 @@ export function planSync(ctx: PlanContext): SyncPlan {
 
   /**
    * INGRESSO di un documento di stato: il payload remoto viene applicato in
-   * locale conservando i dati sensibili già salvati su questo dispositivo e
-   * ignorando quelli (vecchi) eventualmente presenti nel cloud.
+   * locale. Senza chiave: i dati sensibili locali si conservano e il blob
+   * cifrato non viene scartato. Con la chiave: si applicano i valori decifrati
+   * dal cloud con la stessa precedenza del resto della scheda.
    */
   const pullState = (name: StateDocName, doc: RemoteStateDoc) => {
-    plan.localApplyState[name] = incomingStatePayload(name, doc.payload, snapshot);
-    // Il track segue il contenuto che finirà nel cloud: quello locale, ripulito.
+    const merged = incomingStatePayload(name, doc.payload, snapshot, sensitiveDecrypted);
+    plan.localApplyState[name] = merged;
+    // Il track segue il contenuto che finirà in locale (base senza trasporto +
+    // impronta di ciò che ora è salvato qui).
     nextState.state[name] = {
-      lastSyncedLocalHash: contentHash(stripSensitiveStatePayload(name, doc.payload)),
+      lastSyncedLocalHash: hashOf(name, stripSensitiveTransportPayload(name, doc.payload), merged),
       remoteUpdatedAt: doc.updatedAt,
     };
     plan.changedSomething = true;
@@ -267,7 +335,7 @@ export function planSync(ctx: PlanContext): SyncPlan {
   // --- state documents ---
   for (const name of STATE_DOC_NAMES) {
     const localPayload = statePayload(snapshot, name);
-    const hL = contentHash(localPayload);
+    const hL = hashOf(name, localPayload, fingerprintSource(name, snapshot));
     const remoteDoc = remote.state[name] ?? null;
     const track: StateTrack | undefined = nextState.state[name];
     const localChanged = !track || track.lastSyncedLocalHash !== hL;
@@ -511,6 +579,7 @@ function planSensitiveCleanup(
   remote: RemoteSnapshot,
   localAdoptsRemote = false,
 ): void {
+  const sensitiveActive = Boolean(ctx.sensitiveActive);
   for (const name of ctx.sensitiveCleanup ?? []) {
     if (name !== "students" && name !== "profile") continue;
     // Questo ciclo riscrive già il documento (push, riparazione, forzatura):
@@ -529,12 +598,15 @@ function planSensitiveCleanup(
     const cleaned = stripSensitiveStatePayload(name, localHasContent ? localPayload : remoteDoc.payload);
     plan.stateWrites[name] = cleaned;
     if (!plan.sensitiveCleanupWritten.includes(name)) plan.sensitiveCleanupWritten.push(name);
+    // Con dati locali (o con un ripristino in corso) il contenuto scritto è
+    // quello che il dispositivo considera sincronizzato; senza dati locali il
+    // cloud resta il solo contenuto valido e NON deve essere scambiato per una
+    // cancellazione locale. L'hash segue lo stesso contenuto, con l'impronta
+    // dei dati riservati quando la cifratura è attiva.
+    const hashBase = localHasContent || localAdoptsRemote ? cleaned : localPayload;
+    const fingerprintSourceValue = localAdoptsRemote ? hashBase : fingerprintSource(name, snapshot);
     nextState.state[name] = {
-      // Con dati locali (o con un ripristino in corso) il contenuto scritto è
-      // quello che il dispositivo considera sincronizzato; senza dati locali il
-      // cloud resta il solo contenuto valido e NON deve essere scambiato per
-      // una cancellazione locale.
-      lastSyncedLocalHash: contentHash(localHasContent || localAdoptsRemote ? cleaned : localPayload),
+      lastSyncedLocalHash: localStateHash(name, stripSensitiveTransportPayload(name, hashBase), sensitiveActive, sensitiveStateFingerprint(name, fingerprintSourceValue)),
       remoteUpdatedAt: remoteDoc?.updatedAt ?? nextState.state[name]?.remoteUpdatedAt ?? null,
     };
     delete nextState.state[name]!.localChangedAt;
@@ -573,7 +645,7 @@ function repairLegacyStateDocs(plan: SyncPlan, ctx: PlanContext, nextState: Sync
     const raw = ctx.remoteRaw?.[name];
     if (raw === undefined || raw === null) continue;
     const track = (nextState.state[name] ??= {
-      lastSyncedLocalHash: contentHash(statePayload(snapshot, name)),
+      lastSyncedLocalHash: localStateHash(name, statePayload(snapshot, name), Boolean(ctx.sensitiveActive), sensitiveStateFingerprint(name, fingerprintSource(name, snapshot))),
       remoteUpdatedAt: null,
     });
     const rawHash = contentHash(raw);
@@ -627,18 +699,19 @@ function removeLocalRow(plan: SyncPlan, coll: ItemsCollection, id: string) {
   else plan.localCirculars = plan.localCirculars!.filter(c => c.id !== id);
 }
 
-function buildFullRestore(snapshot: SyncableSnapshot, remote: RemoteSnapshot): SyncableSnapshot {
+function buildFullRestore(snapshot: SyncableSnapshot, remote: RemoteSnapshot, decrypted?: DecryptedSensitive): SyncableSnapshot {
   const fromRemote = snapshotFromRemote(remote);
   /**
-   * L'elenco alunni e il profilo arrivano dal cloud come sempre: con i dati
-   * sensibili LOCALI conservati per ogni alunno con lo stesso id e con quelli
-   * (eventuali, vecchi) del cloud ignorati.
+   * L'elenco alunni e il profilo arrivano dal cloud come sempre: senza chiave,
+   * con i dati sensibili LOCALI conservati per ogni alunno con lo stesso id e
+   * con quelli (eventuali, vecchi) del cloud ignorati; con la chiave, con i
+   * valori decifrati dai blob applicati al posto di quelli locali.
    */
   const students = Array.isArray(fromRemote.students)
-    ? (mergeLocalSensitiveStudents(fromRemote.students, snapshot.students) as SyncableSnapshot["students"])
+    ? (mergeLocalSensitiveStudents(fromRemote.students, snapshot.students, decrypted?.students) as SyncableSnapshot["students"])
     : snapshot.students;
   const profile = fromRemote.profile
-    ? (mergeLocalSensitiveProfile(fromRemote.profile, snapshot.profile) as TeacherProfile)
+    ? (mergeLocalSensitiveProfile(fromRemote.profile, snapshot.profile, decrypted?.profile) as TeacherProfile)
     : snapshot.profile;
   const merged = {
     ...snapshot,
@@ -655,13 +728,28 @@ function buildFullRestore(snapshot: SyncableSnapshot, remote: RemoteSnapshot): S
   return merged;
 }
 
-function syncAllTracks(nextState: SyncStateV1, snapshot: SyncableSnapshot, remote: RemoteSnapshot, nowIso: string) {
+function syncAllTracks(
+  nextState: SyncStateV1,
+  snapshot: SyncableSnapshot,
+  remote: RemoteSnapshot,
+  nowIso: string,
+  restored?: SyncableSnapshot | null,
+  sensitiveActive = false,
+) {
   for (const name of STATE_DOC_NAMES) {
     const remoteDoc = remote.state[name];
     if (remoteDoc) {
-      nextState.state[name] = { lastSyncedLocalHash: contentHash(stripSensitiveStatePayload(name, remoteDoc.payload)), remoteUpdatedAt: remoteDoc.updatedAt };
+      // Il contenuto locale dopo il ripristino è quello restaurato (se avvenuto).
+      const source = restored ? fingerprintSource(name, restored) : fingerprintSource(name, snapshot);
+      nextState.state[name] = {
+        lastSyncedLocalHash: localStateHash(name, stripSensitiveTransportPayload(name, remoteDoc.payload), sensitiveActive, sensitiveStateFingerprint(name, source)),
+        remoteUpdatedAt: remoteDoc.updatedAt,
+      };
     } else {
-      nextState.state[name] = { lastSyncedLocalHash: contentHash(statePayload(snapshot, name)), remoteUpdatedAt: null };
+      nextState.state[name] = {
+        lastSyncedLocalHash: localStateHash(name, statePayload(snapshot, name), sensitiveActive, sensitiveStateFingerprint(name, fingerprintSource(name, snapshot))),
+        remoteUpdatedAt: null,
+      };
     }
   }
   for (const coll of ITEMS_COLLECTIONS) {

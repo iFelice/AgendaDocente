@@ -2,6 +2,8 @@ import { auth, firebaseApp } from "../googleAuth";
 import { createFirestoreGateway } from "./firestoreGateway";
 import { createStoreAdapter, observeLocalCommits } from "./localStore";
 import { SyncEngine } from "./engine";
+import { database } from "../db";
+import { EncryptionKeystore, createSensitiveSyncAdapter } from "../encryptionKeys";
 
 /**
  * Multi-device account sync singleton.
@@ -15,10 +17,29 @@ import { SyncEngine } from "./engine";
  * Without the public Firebase configuration (no firebaseApp) everything degrades to a
  * no-op: the app keeps working fully local-first.
  */
-const gateway = createFirestoreGateway(firebaseApp, () => auth?.currentUser?.uid ?? null);
+export const syncGateway = createFirestoreGateway(firebaseApp, () => auth?.currentUser?.uid ?? null);
+
+/**
+ * Keystore della cifratura dei dati riservati: documento chiavi nel cloud e
+ * chiave dati sbloccata conservata in IndexedDB come CryptoKey non estraibile.
+ */
+export const encryptionKeystore = new EncryptionKeystore({
+  gateway: () => syncGateway,
+  meta: {
+    async read(key: string) {
+      const row = await database.table("metadata").get(key);
+      return row?.value;
+    },
+    async write(key: string, value: unknown) {
+      await database.table("metadata").put({ key, value });
+    },
+  },
+});
+
 export const accountSync = new SyncEngine({
-  gateway: () => gateway,
+  gateway: () => syncGateway,
   uid: () => auth?.currentUser?.uid ?? null,
   store: createStoreAdapter(),
   observeLocalCommits,
+  sensitiveEncryption: createSensitiveSyncAdapter(encryptionKeystore),
 });
