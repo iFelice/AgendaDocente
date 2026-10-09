@@ -159,6 +159,8 @@ export interface TeacherProfile {
   weeklyDeclaredHours?: number;
   /** Additive multi-institute model; legacy scalar fields remain supported. */
   schools?: SchoolProfile[];
+  /** Dati riservati cifrati (`assignedStudents` protetta): testo illeggibile senza la chiave. */
+  sensitiveEnc?: SensitiveEncryptedBlob;
 }
 
 export type TimetableType = "definitivo" | "provvisorio";
@@ -356,10 +358,25 @@ export interface StudentAssessment {
   updatedAt: string;
 }
 
+/**
+ * Blobo cifrato dei dati riservati (cifratura a busta, solo Web Crypto API).
+ * Il cloud conserva esclusivamente questo testo illeggibile: `iv` (12 byte, mai
+ * riutilizzato) e `ct` (cifrato AES-GCM) sono stringhe base64. Viaggia con la
+ * scheda alunno e con il profilo; in locale segnala che esistono dati riservati
+ * cifrati da sbloccare.
+ */
+export interface SensitiveEncryptedBlob {
+  v: 1;
+  iv: string;
+  ct: string;
+}
+
 export interface Student {
   id: string;
   fullName: string;
   className: string;
+  /** Dati riservati cifrati (sincronizzazione protetta): testo illeggibile senza la chiave. */
+  sensitiveEnc?: SensitiveEncryptedBlob;
   /** Optional school identity metadata; legacy students may omit it. */
   schoolId?: string;
   /** Optional school year metadata; legacy students may omit it. */
