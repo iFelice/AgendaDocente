@@ -136,3 +136,161 @@ test('chiave dati sul dispositivo: importabile come CryptoKey non estraibile', a
   const blob = await encryptJson(key, { hasBesDsa: true });
   assert.deepEqual(await decryptJson(key, blob), { hasBesDsa: true });
 });
+
+// ---------------------------------------------------------------------------
+// Keystore: documento chiavi, attivazione, sblocco, cambio frase
+// ---------------------------------------------------------------------------
+
+import {
+  AlreadyActiveError,
+  EncryptionKeystore,
+  MIN_PHRASE_LENGTH,
+  WrongSecretError,
+  type KeysGateway,
+  type KeysMetaStore,
+} from '../src/services/encryptionKeys';
+import { classifyRemoteStateDoc } from '../src/services/sync/remoteSchema';
+import { isValidEncryptionKeysPayload } from '../src/services/sync/remoteSchema';
+import { toBase64 } from '../src/services/sensitiveCrypto';
+
+interface FakeKeysCloud { doc: { payload: unknown; updatedAt: string; schemaVersion: 1 } | null; writes: number }
+
+function makeKeysCloud(cloud: FakeKeysCloud): KeysGateway {
+  return {
+    async readState() { return cloud.doc ? structuredClone(cloud.doc) : null; },
+    async writeState(_name, payload) {
+      cloud.writes++;
+      cloud.doc = { payload: structuredClone(payload), updatedAt: new Date(Date.UTC(2026, 9, 9, 10, cloud.writes)).toISOString(), schemaVersion: 1 };
+      return { updatedAt: cloud.doc.updatedAt };
+    },
+  };
+}
+
+function makeMeta(): { store: KeysMetaStore; rows: Map<string, unknown> } {
+  const rows = new Map<string, unknown>();
+  return { rows, store: { read: async key => rows.get(key), write: async (key, value) => { rows.set(key, value); } } };
+}
+
+const makeKeystore = (cloud: FakeKeysCloud, meta: KeysMetaStore) =>
+  new EncryptionKeystore({ gateway: () => makeKeysCloud(cloud), meta });
+
+test('attivazione: documento chiavi nel cloud senza nulla in chiaro, dispositivo sbloccato', async () => {
+  const cloud: FakeKeysCloud = { doc: null, writes: 0 };
+  const { store, rows } = makeMeta();
+  const keystore = makeKeystore(cloud, store);
+
+  assert.equal(await keystore.status('uid-1'), 'inactive');
+  await assert.rejects(() => keystore.activate('uid-1', 'corta'), /almeno/, 'frase troppo corta rifiutata');
+
+  const { recoveryCode } = await keystore.activate('uid-1', 'la mia frase segreta lunga');
+  assert.match(recoveryCode, /^[A-Z0-9]{4}(-[A-Z0-9]{4}){5}$/, 'codice di recupero generato');
+
+  // Il documento chiavi ha la forma prevista dallo schema remoto.
+  const verdict = classifyRemoteStateDoc('encryptionKeys', cloud.doc);
+  assert.equal(verdict.status, 'valid');
+  assert.equal(isValidEncryptionKeysPayload(cloud.doc!.payload), true);
+
+  // Nessun segreto in chiaro nel cloud: né frase, né codice, né chiave dati.
+  const serialized = JSON.stringify(cloud.doc);
+  assert.ok(!serialized.includes('la mia frase segreta lunga'), 'la frase non finisce nel cloud');
+  assert.ok(!serialized.includes(recoveryCode.replace(/-/g, '')), 'il codice non finisce nel cloud');
+
+  // La chiave dati è sul dispositivo come CryptoKey non estraibile.
+  const deviceKey = await keystore.deviceKey('uid-1');
+  assert.ok(deviceKey instanceof CryptoKey, 'CryptoKey conservata nelle righe metadata');
+  assert.equal(deviceKey!.extractable, false);
+  assert.equal([...rows.keys()].length, 1, 'una sola riga locale: la chiave');
+
+  assert.equal(await keystore.status('uid-1'), 'unlocked');
+  await assert.rejects(() => keystore.activate('uid-1', 'un altra frase valida qui'), AlreadyActiveError, 'una sola attivazione per account');
+});
+
+test('sblocco su un altro dispositivo: con la frase, col codice; frase errata rifiutata dalla verifica', async () => {
+  const cloud: FakeKeysCloud = { doc: null, writes: 0 };
+  const deviceA = makeMeta();
+  const keystoreA = makeKeystore(cloud, deviceA.store);
+  const { recoveryCode } = await keystoreA.activate('uid-1', 'prima frase segreta scelta');
+
+  const deviceB = makeMeta();
+  const keystoreB = makeKeystore(cloud, deviceB.store);
+  assert.equal(await keystoreB.status('uid-1'), 'locked', 'chiavi nel cloud ma dispositivo da sbloccare');
+
+  await assert.rejects(() => keystoreB.unlock('uid-1', 'frase completamente sbagliata', 'phrase'), WrongSecretError);
+
+  await keystoreB.unlock('uid-1', 'prima frase segreta scelta', 'phrase');
+  assert.equal(await keystoreB.status('uid-1'), 'unlocked');
+
+  // Il codice di recupero sblocca un terzo dispositivo.
+  const deviceC = makeMeta();
+  const keystoreC = makeKeystore(cloud, deviceC.store);
+  await keystoreC.unlock('uid-1', recoveryCode.toLowerCase().replace(/-/g, ' '), 'recovery');
+  assert.equal(await keystoreC.status('uid-1'), 'unlocked');
+
+  // Tutti e tre i dispositivi aprono lo stesso cifrato.
+  const dati = { diagnosticSummary: 'Profilo di funzionamento' };
+  const blob = await encryptJson((await keystoreA.deviceKey('uid-1'))!, dati);
+  assert.deepEqual(await decryptJson((await keystoreB.deviceKey('uid-1'))!, blob), dati);
+  assert.deepEqual(await decryptJson((await keystoreC.deviceKey('uid-1'))!, blob), dati);
+});
+
+test('cambio frase: riprotegge solo la chiave dati, senza ricifrare gli alunni', async () => {
+  const cloud: FakeKeysCloud = { doc: null, writes: 0 };
+  const { store } = makeMeta();
+  const keystore = makeKeystore(cloud, store);
+  const { recoveryCode } = await keystore.activate('uid-1', 'vecchia frase segreta lunga');
+
+  // Cifrato di un alunno scritto PRIMA del cambio frase.
+  const chiave = (await keystore.deviceKey('uid-1'))!;
+  const blobAlunno = await encryptJson(chiave, { peiType: 'differenziato', supportHoursPerWeek: 9 });
+  const prima = JSON.stringify(cloud.doc!.payload);
+
+  await keystore.changePassphrase('uid-1', { secret: 'vecchia frase segreta lunga', kind: 'phrase' }, 'nuova frase segreta lunga');
+  const dopo = cloud.doc!.payload as { wrappedPhrase: unknown; wrappedRecovery: unknown; verify: unknown; salt: string };
+  const primaPayload = JSON.parse(prima) as { wrappedPhrase: unknown; wrappedRecovery: unknown; verify: unknown; salt: string };
+
+  assert.notDeepEqual(dopo.wrappedPhrase, primaPayload.wrappedPhrase, 'involucro frase aggiornato');
+  assert.deepEqual(dopo.wrappedRecovery, primaPayload.wrappedRecovery, 'codice di recupero invariato');
+  assert.deepEqual(dopo.verify, primaPayload.verify, 'verifica invariata');
+  assert.equal(dopo.salt, primaPayload.salt, 'sale invariato');
+
+  // La chiave dati è la stessa: il blob dell'alunno si apre ancora, senza ricifrature.
+  const deviceB = makeMeta();
+  const keystoreB = makeKeystore(cloud, deviceB.store);
+  await keystoreB.unlock('uid-1', 'nuova frase segreta lunga', 'phrase');
+  assert.deepEqual(await decryptJson((await keystoreB.deviceKey('uid-1'))!, blobAlunno), { peiType: 'differenziato', supportHoursPerWeek: 9 });
+  await assert.rejects(() => keystoreB.unlock('uid-1', 'vecchia frase segreta lunga', 'phrase'), WrongSecretError, 'la vecchia frase non apre più');
+
+  // Il cambio frase funziona anche presentando il codice di recupero.
+  await keystore.changePassphrase('uid-1', { secret: recoveryCode, kind: 'recovery' }, 'terza frase segreta valida');
+  const deviceC = makeMeta();
+  const keystoreC = makeKeystore(cloud, deviceC.store);
+  await keystoreC.unlock('uid-1', 'terza frase segreta valida', 'phrase');
+  assert.deepEqual(await decryptJson((await keystoreC.deviceKey('uid-1'))!, blobAlunno), { peiType: 'differenziato', supportHoursPerWeek: 9 });
+});
+
+test('sblocco automatico: stesso campo per frase o codice di recupero', async () => {
+  const cloud: FakeKeysCloud = { doc: null, writes: 0 };
+  const keystoreA = makeKeystore(cloud, makeMeta().store);
+  const { recoveryCode } = await keystoreA.activate('uid-1', 'frase segreta numero uno');
+
+  const b = makeMeta();
+  const keystoreB = makeKeystore(cloud, b.store);
+  await keystoreB.unlockAuto('uid-1', '  frase segreta numero uno  ');
+  assert.equal(await keystoreB.status('uid-1'), 'unlocked');
+
+  const c = makeMeta();
+  const keystoreC = makeKeystore(cloud, c.store);
+  await keystoreC.unlockAuto('uid-1', recoveryCode);
+  assert.equal(await keystoreC.status('uid-1'), 'unlocked');
+
+  const d = makeMeta();
+  const keystoreD = makeKeystore(cloud, d.store);
+  await assert.rejects(() => keystoreD.unlockAuto('uid-1', 'qualcosa che non c entra'), WrongSecretError);
+});
+
+test('costanti e utilità: lunghezza frase minima e chiave AES-GCM', async () => {
+  assert.equal(MIN_PHRASE_LENGTH, 12, 'frase segreta di almeno 12 caratteri');
+  assert.equal(typeof toBase64(new Uint8Array([1, 2, 3])), 'string');
+  const { key } = await generateDataKey();
+  assert.equal((key.algorithm as { name: string }).name, 'AES-GCM');
+});

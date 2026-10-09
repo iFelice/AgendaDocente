@@ -15,6 +15,15 @@ export type StateDocName = "profile" | "settings" | "definitiveTimetable" | "pro
 /** Collections synced as one Firestore document per entity under users/{uid}/{events|circulars}/{id}. */
 export type ItemsCollection = "events" | "circulars" | "assessments" | "scheduledAssessments";
 
+/**
+ * Documento di stato dedicato alle chiavi di cifratura dei dati riservati
+ * ({payload, updatedAt, schemaVersion} come gli altri). NON entra nel merge di
+ * sincronizzazione (non è in STATE_DOC_NAMES): lo legge e scrive solo il
+ * keystore (src/services/encryptionKeys.ts). Nel cloud contiene esclusivamente
+ * sale, involucri della chiave dati e valore di verifica: mai dati in chiaro.
+ */
+export type SyncedStateDocName = StateDocName | "encryptionKeys";
+
 export const STATE_DOC_NAMES: StateDocName[] = ["profile", "settings", "definitiveTimetable", "provisionalTimetable", "students"];
 export const ITEMS_COLLECTIONS: ItemsCollection[] = ["events", "circulars", "assessments", "scheduledAssessments"];
 
@@ -126,8 +135,8 @@ export interface SyncGateway {
    * about its shape: runtime schema validation lives in the engine (see remoteSchema.ts),
    * so a legacy or malformed cloud document can never be mistaken for valid remote state.
    */
-  readState(name: StateDocName): Promise<unknown>;
-  writeState(name: StateDocName, payload: unknown): Promise<{ updatedAt: string }>;
+  readState(name: SyncedStateDocName): Promise<unknown>;
+  writeState(name: SyncedStateDocName, payload: unknown): Promise<{ updatedAt: string }>;
   listItems(collectionName: ItemsCollection): Promise<RemoteItem[]>;
   writeItems(collectionName: ItemsCollection, entries: { id: string; payload: unknown }[]): Promise<void>;
   deleteItems(collectionName: ItemsCollection, ids: string[]): Promise<void>;

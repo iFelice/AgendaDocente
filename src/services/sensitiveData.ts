@@ -20,7 +20,7 @@
  */
 
 import type { Student, TeacherProfile } from "../types";
-import type { RemoteConflictArchive, StateDocName } from "./sync/types";
+import type { RemoteConflictArchive, StateDocName, SyncedStateDocName } from "./sync/types";
 
 export type { RemoteConflictArchive };
 
@@ -99,7 +99,7 @@ export function stripSensitiveProfileFields(profile: unknown): unknown {
  * remota (documento di stato, riscrittura di riparazione, archivio conflitti).
  * Gli altri documenti (orari, impostazioni) non ne contengono e passano invariati.
  */
-export function stripSensitiveStatePayload(name: StateDocName, payload: unknown): unknown {
+export function stripSensitiveStatePayload(name: SyncedStateDocName, payload: unknown): unknown {
   if (name === "students") {
     if (!Array.isArray(payload)) return payload;
     return payload.map(stripSensitiveStudentFields);
@@ -114,7 +114,7 @@ export function stripSensitiveStatePayload(name: StateDocName, payload: unknown)
  * caso di doppio wrapper il payload è a sua volta un documento: si scende finché
  * non si trova il contenuto reale, così nessun livello sfugge alla ripulitura.
  */
-export function stripSensitiveLegacyDoc(name: StateDocName, raw: unknown): unknown {
+export function stripSensitiveLegacyDoc(name: SyncedStateDocName, raw: unknown): unknown {
   if (!isRecord(raw)) return raw;
   const clean: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(raw)) {
@@ -171,7 +171,7 @@ export function mergeLocalSensitiveProfile(remoteProfile: unknown, localProfile?
  * singolo documento di stato).
  */
 export function mergeRemoteStateWithLocalSensitive(
-  name: StateDocName,
+  name: SyncedStateDocName,
   remotePayload: unknown,
   local: { students: Student[]; profile?: TeacherProfile },
 ): unknown {
@@ -196,7 +196,7 @@ export function hasSensitiveProfileData(profile: unknown): boolean {
 }
 
 /** Vero se il payload remoto di un documento contiene ancora dati sensibili. */
-export function hasSensitiveStatePayload(name: StateDocName, payload: unknown): boolean {
+export function hasSensitiveStatePayload(name: SyncedStateDocName, payload: unknown): boolean {
   if (name === "students") return Array.isArray(payload) && payload.some(hasSensitiveStudentData);
   if (name === "profile") return hasSensitiveProfileData(payload);
   return false;

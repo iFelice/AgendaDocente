@@ -2,7 +2,7 @@ import { isValidTime } from "../../utils/dates";
 import { isHttpsMeetingUrl } from "../../utils/meetingLinks";
 import { TEACHER_ROLE_KINDS } from "../../types";
 import { isValidStudentAssessment } from "../backup";
-import type { RemoteStateDoc, StateDocName } from "./types";
+import type { RemoteStateDoc, StateDocName, SyncedStateDocName } from "./types";
 
 /**
  * RUNTIME schema validation for remote state documents (users/{uid}/state/{name}).
@@ -35,10 +35,10 @@ import type { RemoteStateDoc, StateDocName } from "./types";
 export const REMOTE_EPOCH = "1970-01-01T00:00:00.000Z";
 
 export type RemoteStateVerdict =
-  | { status: "absent"; name: StateDocName }
-  | { status: "valid"; name: StateDocName; doc: RemoteStateDoc }
-  | { status: "legacy"; name: StateDocName; doc: RemoteStateDoc; raw: unknown; reason: string }
-  | { status: "invalid"; name: StateDocName; raw: unknown; reason: string };
+  | { status: "absent"; name: SyncedStateDocName }
+  | { status: "valid"; name: SyncedStateDocName; doc: RemoteStateDoc }
+  | { status: "legacy"; name: SyncedStateDocName; doc: RemoteStateDoc; raw: unknown; reason: string }
+  | { status: "invalid"; name: SyncedStateDocName; raw: unknown; reason: string };
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   !!v && typeof v === "object" && !Array.isArray(v);
@@ -52,6 +52,50 @@ const optional = (v: unknown, fn: (v: unknown) => boolean): boolean => v === und
 const isIsoTimestamp = (v: unknown): boolean =>
   typeof v === "string" && v.length >= 10 && !Number.isNaN(Date.parse(v));
 const boundedText = (max: number) => (v: unknown): boolean => text(v) && (v as string).length <= max;
+
+// ---------------------------------------------------------------------------
+// Dati riservati cifrati (cifratura a busta): forme accettate nel cloud
+// ---------------------------------------------------------------------------
+
+/**
+ * Blob cifrato di un alunno o del profilo: { v: 1, iv, ct } in base64.
+ * Nel cloud NON esiste altra forma per i dati riservati: o questo testo
+ * illeggibile, o niente.
+ */
+export function isValidSensitiveEncBlob(v: unknown): boolean {
+  return (
+    isRecord(v) &&
+    v.v === 1 &&
+    text(v.iv) && (v.iv as string).length > 0 && (v.iv as string).length <= 64 &&
+    text(v.ct) && (v.ct as string).length > 0 && (v.ct as string).length <= 262_144
+  );
+}
+
+/** Involucro AES-GCM della chiave dati dentro il documento `encryptionKeys`. */
+function isValidWrappedKey(v: unknown): boolean {
+  return (
+    isRecord(v) &&
+    text(v.iv) && (v.iv as string).length > 0 && (v.iv as string).length <= 64 &&
+    text(v.ct) && (v.ct as string).length > 0 && (v.ct as string).length <= 512
+  );
+}
+
+/**
+ * Documento di stato `encryptionKeys` (stessa forma {payload, updatedAt,
+ * schemaVersion} degli altri): sale dell'account, due involucri della chiave
+ * dati (frase segreta e codice di recupero) e valore di verifica cifrato.
+ * Nessuna informazione in chiaro: il sale non è un segreto.
+ */
+export function isValidEncryptionKeysPayload(v: unknown): boolean {
+  return (
+    isRecord(v) &&
+    v.v === 1 &&
+    text(v.salt) && (v.salt as string).length >= 16 && (v.salt as string).length <= 64 &&
+    isValidWrappedKey(v.wrappedPhrase) &&
+    isValidWrappedKey(v.wrappedRecovery) &&
+    isValidSensitiveEncBlob(v.verify)
+  );
+}
 
 /** Shared runtime validator for item-level assessment documents. */
 export { isValidStudentAssessment };
@@ -202,7 +246,10 @@ export function isValidProfilePayload(v: unknown): boolean {
     optional(v.googleCalendarImportIds, strings) &&
     optional(v.googleCalendarListCache, isValidGoogleCalendarListCache) &&
     optional(v.schoolLevel, l => ["infanzia", "primaria", "ssig", "ssiig"].includes(l as string)) &&
-    optional(v.schools, schools => Array.isArray(schools) && schools.every(s => isRecord(s) && requiredText(s.id) && text(s.name) && optional(s.institutionalEmail, text) && optional(s.campuses, strings) && optional(s.schoolLevel, l => ["infanzia", "primaria", "ssig", "ssiig"].includes(l as string)) && optional(s.weeklyHours, n => typeof n === "number" && Number.isFinite(n)) && optional(s.isPrimary, bool) && optional(s.active, bool) && optional(s.dayPeriods, isValidSchoolDayPeriods) && optional(s.timeSlotConfig, isValidTimeSlotConfig)))
+    optional(v.schools, schools => Array.isArray(schools) && schools.every(s => isRecord(s) && requiredText(s.id) && text(s.name) && optional(s.institutionalEmail, text) && optional(s.campuses, strings) && optional(s.schoolLevel, l => ["infanzia", "primaria", "ssig", "ssiig"].includes(l as string)) && optional(s.weeklyHours, n => typeof n === "number" && Number.isFinite(n)) && optional(s.isPrimary, bool) && optional(s.active, bool) && optional(s.dayPeriods, isValidSchoolDayPeriods) && optional(s.timeSlotConfig, isValidTimeSlotConfig))) &&
+    // Dati riservati cifrati: `assignedStudents` in chiaro non viaggia più; al suo
+    // posto (o accanto, nei documenti precedenti all'attivazione) può esserci il blob.
+    optional(v.sensitiveEnc, isValidSensitiveEncBlob)
   );
 }
 
@@ -227,7 +274,10 @@ export function isValidStudentPayload(v: unknown): boolean {
     optional(v.schoolYear, requiredText) &&
     optional(v.status, status => status === "active" || status === "archived") &&
     optional(v.archivedAt, isIsoTimestamp) &&
-    optional(v.archivedReason, boundedText(500))
+    optional(v.archivedReason, boundedText(500)) &&
+    // Dati riservati cifrati (sostegno, PEI, BES/DSA, équipe…): solo il blob può
+    // comparire nel cloud, mai i campi in chiaro.
+    optional(v.sensitiveEnc, isValidSensitiveEncBlob)
   );
 }
 
@@ -235,12 +285,14 @@ export function isValidStudentsPayload(v: unknown): boolean {
   return Array.isArray(v) && v.every(isValidStudentPayload);
 }
 
-const payloadValidators: Record<StateDocName, (v: unknown) => boolean> = {
+const payloadValidators: Record<SyncedStateDocName, (v: unknown) => boolean> = {
   profile: isValidProfilePayload,
   settings: isValidSettingsPayload,
   definitiveTimetable: isValidTimetablePayload,
   provisionalTimetable: isValidTimetablePayload,
   students: isValidStudentsPayload,
+  // Documento chiavi della cifratura dei dati riservati: solo metadati protetti.
+  encryptionKeys: isValidEncryptionKeysPayload,
 };
 
 /**
@@ -261,7 +313,7 @@ export function isLegacyMetadataOnlyPayload(v: unknown): boolean {
 // Document classification
 // ---------------------------------------------------------------------------
 
-export function classifyRemoteStateDoc(name: StateDocName, raw: unknown): RemoteStateVerdict {
+export function classifyRemoteStateDoc(name: SyncedStateDocName, raw: unknown): RemoteStateVerdict {
   if (raw === null || raw === undefined) return { status: "absent", name };
   const validate = payloadValidators[name];
 
