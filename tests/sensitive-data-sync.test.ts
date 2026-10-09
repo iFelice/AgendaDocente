@@ -515,7 +515,7 @@ test('C. conteggio archivi: il contenuto non viene mai incluso, solo il numero',
 // D. ENDPOINT DI ANALISI
 // ---------------------------------------------------------------------------
 
-async function captureAnalysisBody(run: () => Promise<void>): Promise<string> {
+async function captureAnalysisBody(run: () => Promise<unknown>): Promise<string> {
   const original = globalThis.fetch;
   let body = '';
   globalThis.fetch = (async (_url: unknown, init?: { body?: unknown }) => {
