@@ -43,6 +43,13 @@ export interface RemoteStateDoc {
   updatedAt: string;
 }
 
+/** Un archivio conflitti `users/{uid}/conflicts/{id}`, letto senza mai esporne il contenuto. */
+export interface RemoteConflictArchive {
+  id: string;
+  kind: string;
+  payload: unknown;
+}
+
 export interface RemoteSnapshot {
   state: Partial<Record<StateDocName, RemoteStateDoc | null>>;
   items: {
@@ -126,4 +133,10 @@ export interface SyncGateway {
   deleteItems(collectionName: ItemsCollection, ids: string[]): Promise<void>;
   /** Preserves the losing copy of any conflict before it is replaced. Never silently destructive. */
   archiveConflict(kind: string, loser: unknown): Promise<void>;
+  /**
+   * Optional: reads the conflict archives (`users/{uid}/conflicts`) so the engine can COUNT
+   * how many still hold reserved student/profile data. Read-only and best-effort: the rules
+   * make those archives immutable, so they are never rewritten or deleted here.
+   */
+  listConflicts?: () => Promise<RemoteConflictArchive[]>;
 }

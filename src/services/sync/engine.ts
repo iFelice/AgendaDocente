@@ -16,12 +16,15 @@ import type {
   SyncableSnapshot,
 } from "./types";
 import { ITEMS_COLLECTIONS, STATE_DOC_NAMES, type ItemsCollection } from "./types";
-import { contentHash, isPristineLocal, itemsDigest, planSync, type SyncPlan } from "./merge";
+import { contentHash, isPristineLocal, itemsDigest, planSync, statePayload, type SyncPlan } from "./merge";
 import { classifyRemoteStateDoc } from "./remoteSchema";
+import { SENSITIVE_STATE_DOCS, countSensitiveArchives } from "../sensitiveData";
 
 const META_STATE_KEY = "sync:state";
 const META_ENABLED_KEY = "sync:enabled";
 const META_DIAGNOSTICS_KEY = "sync:diagnostics";
+/** Indicatore locale: documenti di stato già riscritti puliti nel cloud per questo account. */
+const META_SENSITIVE_CLEANUP_KEY = "sync:sensitive-cleanup";
 const DEBOUNCE_MS = 1500;
 const RETRY_BASE_MS = 30_000;
 const RETRY_MAX_MS = 15 * 60_000;
@@ -34,6 +37,16 @@ export interface LocalApply {
   localCirculars?: CircularDocument[];
   localAssessments?: StudentAssessment[];
   localScheduledAssessments?: StudentScheduledAssessment[];
+}
+
+/**
+ * Indicatore locale della pulizia dei dati sensibili già caricati nel cloud:
+ * quali documenti sono stati riscritti puliti, per quale account e quando.
+ */
+export interface SensitiveCleanupMarker {
+  uid: string;
+  done: StateDocName[];
+  at?: string;
 }
 
 /** Storage adapter so the engine can be tested against a fake IndexedDB + fake cloud. */
@@ -228,13 +241,15 @@ export class SyncEngine {
     const previous: SyncStateV1 | null = rawState && rawState.uid === uid ? rawState : null;
     const snapshot = await this.deps.store.readSnapshot();
     const nowIso = this.now();
+    // C. Documenti che il cloud non ha ancora riscritto in forma pulita per QUESTO account.
+    const sensitiveCleanup = await this.pendingSensitiveCleanup(uid);
 
     // 1. Detect *new* local edits (hash moved since the last detection) and stamp their time.
     const detection: SyncStateV1 = previous ? structuredClone(previous) : { uid, state: {}, items: { events: { docs: {} }, circulars: { docs: {} }, assessments: { docs: {} }, scheduledAssessments: { docs: {} } } };
     detection.uid = uid;
     for (const name of STATE_DOC_NAMES) {
       const track = detection.state[name];
-      const hash = contentHash(localPayload(snapshot, name));
+      const hash = contentHash(statePayload(snapshot, name));
       if (track) {
         if (track.lastSyncedLocalHash !== hash) {
           if (track.lastDetectedHash !== hash || !track.localChangedAt) {
@@ -309,6 +324,7 @@ export class SyncEngine {
       remoteRaw,
       remoteLegacy,
       remoteInvalid,
+      sensitiveCleanup,
     });
 
     if (plan.fullRestore) {
@@ -316,6 +332,7 @@ export class SyncEngine {
       // Even a wholesale restore must repair the cloud side: preserve legacy copies and
       // rewrite malformed/recoverable documents in the current format.
       const written = await this.executeCloudSide(plan, gateway, remote, nowIso);
+      await this.finishSensitiveCleanup(gateway, sensitiveCleanup, written);
       await this.persistState(detectionJson, plan.nextState);
       this.resolution = null;
       this.finishCycleDiagnostics(plan, remote, written, nowIso);
@@ -331,6 +348,7 @@ export class SyncEngine {
     }
 
     const written = await this.executeCloudSide(plan, gateway, remote, nowIso);
+    await this.finishSensitiveCleanup(gateway, sensitiveCleanup, written);
 
     await this.persistState(detectionJson, plan.nextState);
     const hadResolution = this.resolution;
@@ -364,6 +382,67 @@ export class SyncEngine {
       written.push(name as StateDocName);
     }
     return written;
+  }
+
+  /**
+   * C. Documenti che possono contenere dati sensibili e che QUESTO account non ha
+   * ancora riscritto in forma pulita nel cloud: l'indicatore è locale
+   * (`sync:sensitive-cleanup`) e vale per l'uid corrente, così la riscrittura
+   * avviene una sola volta per account e non a ogni ciclo.
+   */
+  private async pendingSensitiveCleanup(uid: string): Promise<StateDocName[]> {
+    const raw = (await this.deps.store.readMeta(META_SENSITIVE_CLEANUP_KEY)) as SensitiveCleanupMarker | null;
+    const done = raw && raw.uid === uid ? raw.done : [];
+    return SENSITIVE_STATE_DOCS.filter(name => !done.includes(name));
+  }
+
+  /**
+   * C. Chiusura della pulizia: conta (senza contenuti) gli archivi conflitti che
+   * custodiscono ancora dati riservati e registra i documenti riscritti, così la
+   * riscrittura non si ripete. Se un documento non è stato scritto (perché
+   * l'utente deve ancora scegliere) resta in sospeso per il prossimo ciclo.
+   */
+  private async finishSensitiveCleanup(gateway: SyncGateway, pending: StateDocName[], written: StateDocName[]): Promise<void> {
+    if (pending.length === 0) return;
+    const done = pending.filter(name => written.includes(name));
+    if (done.length === 0) return;
+    await this.logSensitiveConflictArchives(gateway);
+    await this.markSensitiveCleanupDone(done);
+  }
+
+  private async markSensitiveCleanupDone(done: StateDocName[]): Promise<void> {
+    const uid = this.deps.uid();
+    if (!uid) return;
+    const raw = (await this.deps.store.readMeta(META_SENSITIVE_CLEANUP_KEY)) as SensitiveCleanupMarker | null;
+    const marker: SensitiveCleanupMarker = {
+      uid,
+      done: [...new Set([...(raw && raw.uid === uid ? raw.done : []), ...done])],
+      at: this.now(),
+    };
+    try {
+      await this.deps.store.writeMeta(META_SENSITIVE_CLEANUP_KEY, marker);
+    } catch {
+      // Indicatore best-effort: la riscrittura pulita è idempotente, al più si ripete.
+    }
+  }
+
+  /**
+   * C. Gli archivi conflitti (`users/{uid}/conflicts`) sono IMMUTABILI per le regole
+   * Firestore: non si cancellano e non si riscrivono. Se ne conta soltanto, SENZA
+   * contenuti, quanti custodiscono ancora dati riservati di alunni o profilo.
+   */
+  private async logSensitiveConflictArchives(gateway: SyncGateway): Promise<void> {
+    if (!gateway.listConflicts) return;
+    try {
+      const count = countSensitiveArchives(await gateway.listConflicts());
+      console.info(
+        count.total > 0
+          ? `[Sync] Archivi conflitti con dati riservati: ${count.total} (alunni: ${count.students}, profilo: ${count.profile}). Le regole li rendono immutabili: restano nel cloud, qui solo il conteggio.`
+          : "[Sync] Archivi conflitti: nessun dato riservato presente.",
+      );
+    } catch {
+      console.info("[Sync] Archivi conflitti non leggibili: conteggio dei dati riservati non disponibile.");
+    }
   }
 
   /** Records beta diagnostics (sections touched, repair notices) for the UI. No document contents. */
@@ -451,17 +530,6 @@ export class SyncEngine {
     const nextJson = JSON.stringify(next);
     if (nextJson !== detectionJson) await this.deps.store.writeMeta(META_STATE_KEY, next);
   }
-}
-
-function localPayload(snapshot: SyncableSnapshot, name: StateDocName): unknown {
-  if (name === "settings") {
-    return {
-      timetableMode: snapshot.timetableMode,
-      onboardingCompleted: snapshot.onboardingCompleted,
-      ...(snapshot.timeSlotConfig ? { timeSlotConfig: snapshot.timeSlotConfig } : {}),
-    };
-  }
-  return (snapshot as unknown as Record<string, unknown>)[name];
 }
 
 /** Never leak document contents, tokens or raw SDK errors into user-visible messages. */

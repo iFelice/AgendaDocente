@@ -23,11 +23,11 @@ Tutto è radicato nell'uid Firebase — le regole (`firestore.rules`) autorizzan
 `request.auth.uid == uid`.
 
 ```
-users/{uid}/state/profile               { payload: TeacherProfile, updatedAt, schemaVersion }
+users/{uid}/state/profile               { payload: TeacherProfile (senza assignedStudents), updatedAt, schemaVersion }
 users/{uid}/state/settings              { timetableMode, onboardingCompleted }
 users/{uid}/state/definitiveTimetable   { payload: TimetableSlot[] }
 users/{uid}/state/provisionalTimetable
-users/{uid}/state/students              { payload: Student[] }
+users/{uid}/state/students              { payload: Student[] (senza i dati riservati, vedi sotto) }
 users/{uid}/events/{eventId}            { payload: CalendarEvent, updatedAt }
 users/{uid}/circulars/{circularId}      { payload: CircularDocument, updatedAt }
 users/{uid}/conflicts/{ts-random}       copia archiviata del perdente di un conflitto (mai persa)
@@ -54,6 +54,79 @@ modifica locale rilevata). Per ogni collezione:
 
 Anti-loop: ogni piano è hash-guardato (contenuto identico = nessun write) e un solo tab alla
 volta sincronizza (`navigator.locks`, chiave `agenda-docente-cloud-sync`).
+
+## Dati sensibili: NON escono mai dal dispositivo
+
+Elenco unico, definito in `src/services/sensitiveData.ts` e usato da sync, servizi di
+analisi e interfaccia. Sono **sempre locali** (IndexedDB) e restano modificabili qui:
+
+- `Student`: `isSupportStudent`, `peiType`, `supportHoursPerWeek`, `hasBesDsa`,
+  `pdpApproved`, `diagnosticSummary`, `specialists`, `gloDate`;
+- `TeacherProfile`: `assignedStudents` (testo libero: può contenere sigle di alunni, ore
+  e tipo di PEI).
+
+Restano sincronizzati: nome, classe, scuola, anno, stato, contatti dei genitori, diario
+note dell'alunno e tutto il resto del profilo docente.
+
+### Uscita (una sola funzione: `stripSensitiveStatePayload` / `stripSensitiveConflictArchive`)
+
+Il punto di passaggio obbligato per i payload locali è `statePayload()` in
+`src/services/sync/merge.ts` (usato anche per gli hash di confronto, quindi una modifica
+ai SOLI dati sensibili non genera alcuna sincronizzazione). La stessa ripulitura è
+riapplicata nel gateway Firestore, così nessun percorso di scrittura può aggirarla:
+
+1. **documenti di stato** — `gateway.writeState(name, payload)` su
+   `users/{uid}/state/{profile|students}`: caricamento iniziale, push per modifica
+   locale, push forzato dopo la scelta «mantieni i dati di questo dispositivo»,
+   riscrittura di riparazione di un documento legacy/invalido, riscrittura di pulizia;
+2. **scritture in blocco** — `gateway.writeItems(coll, entries)` su `events`,
+   `circulars`, `assessments`, `scheduledAssessments` (per id; nessuna di queste
+   collezioni contiene campi riservati: la verifica è nel test dedicato);
+3. **archivi dei conflitti** — `gateway.archiveConflict(kind, loser)` su
+   `users/{uid}/conflicts`, per i kind `state:<name>`, `legacy-state:<name>` (documento
+   grezzo, doppio wrapper compreso), `item:<coll>:<id>` e `invalid-item:<coll>:<id>`;
+4. **endpoint di analisi** — `analyzeCircular` (`/api/analyze-circular`),
+   `analyzeTimetableDocument` (`/api/analyze-timetable`) e `analyzeStudentDocument`
+   (`/api/analyze-student-document`): il profilo parte senza `assignedStudents`
+   (`withoutSensitiveProfile`). Il server continua ad accettare il campo come opzionale:
+   nessuna modifica lato server.
+
+`deleteItems` non scrive dati (solo id) e `listConflicts` è una lettura.
+
+### Ingresso (`mergeRemoteStateWithLocalSensitive`)
+
+Ogni payload remoto che sostituisce o si unisce ai dati locali — ripristino completo
+(`buildFullRestore`), aggiornamento del singolo documento (`localApplyState`) — passa
+dalla stessa funzione:
+
+- per ogni alunno con lo stesso `id` valgono i campi riservati **locali**;
+- i campi riservati presenti nel cloud (documenti scritti da versioni precedenti) sono
+  **ignorati**, mai applicati;
+- un alunno che esiste solo nel cloud arriva **senza** campi riservati.
+
+### Pulizia dei dati già caricati (una sola volta per account)
+
+Al primo ciclo utile dopo l'aggiornamento, `students` e `profile` nel cloud vengono
+riscritti puliti **anche se null'altro è cambiato**: la scrittura usa `setDoc` senza
+merge, quindi sostituisce l'intero documento (non è un merge parziale). L'indicatore
+locale `sync:sensitive-cleanup` (tabella `metadata`, per uid) evita di ripeterla a ogni
+ciclo; se il documento è in attesa di una scelta dell'utente la riscrittura resta in
+sospeso invece di decidere al suo posto.
+
+Gli archivi `users/{uid}/conflicts` NON si toccano: le regole Firestore li rendono
+immutabili. Se ne conta soltanto, senza contenuti, quanti custodiscono ancora dati
+riservati (`countSensitiveArchives`): una riga di log con il solo numero
+(es. `Archivi conflitti con dati riservati: 3 (alunni: 2, profilo: 1)`), una volta per
+account, se le regole ne consentono la lettura.
+
+### Interfaccia e backup
+
+La scheda alunno (`ClassesView`) mostra, accanto ai campi riservati, la riga
+«Dati riservati: salvati solo su questo dispositivo, non sincronizzati.» Nessun
+interruttore: la regola non è opzionale.
+
+Il **backup locale resta completo**, dati riservati inclusi: serve al ripristino e non
+esce dal dispositivo.
 
 ## Validazione runtime e riparazione dei documenti legacy (`src/services/sync/remoteSchema.ts`)
 

@@ -8,6 +8,7 @@
  */
 
 import type { TeacherProfile } from "../types";
+import { withoutSensitiveProfile } from "./sensitiveData";
 import { OFFLINE_ANALYSIS_MESSAGE, isOnline } from "../utils/documentScanner";
 import type { CurricularScopeCoordinate, PersonalTimetablePeriodsByDay } from "../utils/timetableAnalysis";
 
@@ -114,6 +115,15 @@ export function scanAnalysisErrorMessage(status: number, serverMessage: string):
   }
 }
 
+/**
+ * Il profilo non porta con sé `assignedStudents`: testo libero con sigle di
+ * alunni, ore e tipo di PEI. Il server continua ad accettarlo come opzionale,
+ * qui semplicemente non parte.
+ */
+function withCleanProfile<T extends { profile: TeacherProfile }>(req: T): T {
+  return { ...req, profile: withoutSensitiveProfile(req.profile) };
+}
+
 async function postScan(endpoint: string, body: unknown): Promise<Record<string, unknown>> {
   if (!isOnline()) throw new OfflineAnalysisError();
   const timeout = createScanTimeout(SCAN_REQUEST_TIMEOUT_MS);
@@ -145,7 +155,7 @@ async function postScan(endpoint: string, body: unknown): Promise<Record<string,
 
 /** Analizza una foto/PDF di un orario (personale o curricolare). */
 export async function analyzeTimetableDocument(req: ScanTimetableRequest): Promise<ScanTimetableResult> {
-  const data = await postScan("/api/analyze-timetable", req);
+  const data = await postScan("/api/analyze-timetable", withCleanProfile(req));
   const result: ScanTimetableResult = {
     success: true,
     source: typeof data.source === "string" ? data.source : undefined,
@@ -158,7 +168,7 @@ export async function analyzeTimetableDocument(req: ScanTimetableRequest): Promi
 
 /** Analizza una foto/appunti di registro per estrarre impegni alunni. */
 export async function analyzeStudentDocument(req: ScanStudentDocumentRequest): Promise<ScanStudentDocumentResult> {
-  const data = await postScan("/api/analyze-student-document", req);
+  const data = await postScan("/api/analyze-student-document", withCleanProfile(req));
   return {
     success: true,
     source: typeof data.source === "string" ? data.source : undefined,

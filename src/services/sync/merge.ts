@@ -3,6 +3,7 @@ import type {
   ItemsCollection,
   RemoteItem,
   RemoteSnapshot,
+  RemoteStateDoc,
   StateDocName,
   StateTrack,
   SyncStateV1,
@@ -12,6 +13,14 @@ import { ITEMS_COLLECTIONS, STATE_DOC_NAMES } from "./types";
 import { isPlaceholderFullName } from "../../utils/names";
 import { isValidStudentAssessment, isValidStudentScheduledAssessment } from "../backup";
 import { sanitizeRemoteCalendarEvent } from "./remoteSchema";
+import {
+  hasSensitiveStatePayload,
+  mergeLocalSensitiveProfile,
+  mergeLocalSensitiveStudents,
+  mergeRemoteStateWithLocalSensitive,
+  stripSensitiveLegacyDoc,
+  stripSensitiveStatePayload,
+} from "../sensitiveData";
 
 /** Deterministic key-order-insensitive serialization + FNV-1a hash: content identity only. */
 export function canonicalStringify(value: unknown): string {
@@ -32,14 +41,33 @@ export function contentHash(value: unknown): string {
   return `${h.toString(16).padStart(8, "0")}-${s.length.toString(36)}`;
 }
 
+/**
+ * Payload locale di un documento di stato, PRIVO dei dati sensibili.
+ *
+ * È l'unica forma che può diventare una scrittura remota (o un hash di
+ * confronto): i campi riservati degli alunni e `assignedStudents` del profilo
+ * restano in IndexedDB e non entrano mai nel cloud. Ne consegue che una
+ * modifica ai soli dati sensibili NON produce alcuna sincronizzazione.
+ */
 export const statePayload = (snapshot: SyncableSnapshot, name: StateDocName): unknown =>
-  name === "settings"
-    ? {
-        timetableMode: snapshot.timetableMode,
-        onboardingCompleted: snapshot.onboardingCompleted,
-        ...(snapshot.timeSlotConfig ? { timeSlotConfig: snapshot.timeSlotConfig } : {}),
-      }
-    : snapshot[name];
+  stripSensitiveStatePayload(
+    name,
+    name === "settings"
+      ? {
+          timetableMode: snapshot.timetableMode,
+          onboardingCompleted: snapshot.onboardingCompleted,
+          ...(snapshot.timeSlotConfig ? { timeSlotConfig: snapshot.timeSlotConfig } : {}),
+        }
+      : snapshot[name],
+  );
+
+/**
+ * INGRESSO: un payload remoto che sta per sostituire o unirsi ai dati locali.
+ * I campi sensibili presenti nel cloud (documenti vecchi) sono sempre ignorati;
+ * per ogni alunno con lo stesso `id` valgono quelli già salvati qui.
+ */
+const incomingStatePayload = (name: StateDocName, remotePayload: unknown, snapshot: SyncableSnapshot): unknown =>
+  mergeRemoteStateWithLocalSensitive(name, remotePayload, snapshot);
 
 export interface PlanContext {
   uid: string;
@@ -56,6 +84,12 @@ export interface PlanContext {
   remoteLegacy?: StateDocName[];
   /** State docs whose remote copy is malformed/unrecoverable: they cannot win conflicts. */
   remoteInvalid?: StateDocName[];
+  /**
+   * Documenti che possono contenere dati sensibili e che il cloud non ha ancora
+   * riscritto in forma pulita per QUESTO account (una sola volta, indicatore
+   * locale in `sync:sensitive-cleanup`). Vale solo per "students" e "profile".
+   */
+  sensitiveCleanup?: StateDocName[];
 }
 
 export interface SyncPlan {
@@ -74,6 +108,8 @@ export interface SyncPlan {
   needsResolution: StateDocName[];
   /** Remote copies preserved before a local-wins overwrite. Nothing is ever silently destroyed. */
   archivedOnOverwrite: { kind: string; loser: unknown }[];
+  /** Documenti riscritti dal cloud dalla pulizia dei dati sensibili (una volta per account). */
+  sensitiveCleanupWritten: StateDocName[];
   /** Remote docs that are malformed AND have no valid local replacement: reported, never fabricated. */
   unrecoverableRemote: StateDocName[];
   nextState: SyncStateV1;
@@ -158,6 +194,7 @@ export function planSync(ctx: PlanContext): SyncPlan {
     stateWrites: {},
     needsResolution: [],
     archivedOnOverwrite: [],
+    sensitiveCleanupWritten: [],
     unrecoverableRemote: [],
     nextState,
     changedSomething: false,
@@ -197,6 +234,7 @@ export function planSync(ctx: PlanContext): SyncPlan {
     plan.fullRestore = buildFullRestore(snapshot, remote);
     syncAllTracks(nextState, snapshot, remote, nowIso);
     repairLegacyStateDocs(plan, ctx, nextState, snapshot);
+    planSensitiveCleanup(plan, ctx, nextState, snapshot, remote, true);
     plan.changedSomething = true;
     return plan;
   }
@@ -204,11 +242,27 @@ export function planSync(ctx: PlanContext): SyncPlan {
     plan.fullRestore = buildFullRestore(snapshot, remote);
     syncAllTracks(nextState, snapshot, remote, nowIso);
     repairLegacyStateDocs(plan, ctx, nextState, snapshot);
+    planSensitiveCleanup(plan, ctx, nextState, snapshot, remote, true);
     plan.changedSomething = true;
     return plan;
   }
 
   const forcePush = resolution === "local";
+
+  /**
+   * INGRESSO di un documento di stato: il payload remoto viene applicato in
+   * locale conservando i dati sensibili già salvati su questo dispositivo e
+   * ignorando quelli (vecchi) eventualmente presenti nel cloud.
+   */
+  const pullState = (name: StateDocName, doc: RemoteStateDoc) => {
+    plan.localApplyState[name] = incomingStatePayload(name, doc.payload, snapshot);
+    // Il track segue il contenuto che finirà nel cloud: quello locale, ripulito.
+    nextState.state[name] = {
+      lastSyncedLocalHash: contentHash(stripSensitiveStatePayload(name, doc.payload)),
+      remoteUpdatedAt: doc.updatedAt,
+    };
+    plan.changedSomething = true;
+  };
 
   // --- state documents ---
   for (const name of STATE_DOC_NAMES) {
@@ -220,7 +274,7 @@ export function planSync(ctx: PlanContext): SyncPlan {
     const remoteChanged = remoteDoc ? !track || remoteDoc.updatedAt !== track.remoteUpdatedAt : Boolean(track?.remoteUpdatedAt);
 
     if (forcePush) {
-      if (remoteDoc) plan.archivedOnOverwrite.push({ kind: `state:${name}`, loser: remoteDoc.payload });
+      if (remoteDoc) plan.archivedOnOverwrite.push({ kind: `state:${name}`, loser: stripSensitiveStatePayload(name, remoteDoc.payload) });
       plan.stateWrites[name] = localPayload;
       nextState.state[name] = { lastSyncedLocalHash: hL, remoteUpdatedAt: nowIso };
       plan.changedSomething = true;
@@ -237,9 +291,7 @@ export function planSync(ctx: PlanContext): SyncPlan {
     if (remoteDoc && !track) {
       // Remote exists but this device has no history: only a pristine local may silently adopt it.
       if (isPristineLocal(snapshot) || localCollectionEmpty(snapshot, name)) {
-        plan.localApplyState[name] = remoteDoc.payload;
-        nextState.state[name] = { lastSyncedLocalHash: contentHash(remoteDoc.payload), remoteUpdatedAt: remoteDoc.updatedAt };
-        plan.changedSomething = true;
+        pullState(name, remoteDoc);
       } else {
         plan.needsResolution.push(name);
       }
@@ -262,28 +314,28 @@ export function planSync(ctx: PlanContext): SyncPlan {
       continue;
     }
     if (!localChanged && remoteChanged) {
-      plan.localApplyState[name] = remoteDoc.payload;
-      nextState.state[name] = { lastSyncedLocalHash: contentHash(remoteDoc.payload), remoteUpdatedAt: remoteDoc.updatedAt };
-      plan.changedSomething = true;
+      pullState(name, remoteDoc);
       continue;
     }
     // Both changed -> explicit comparison; unknown local time asks the user instead of guessing.
     const localAt = track.localChangedAt;
     if (!localAt) { plan.needsResolution.push(name); continue; }
     if (localAt > remoteDoc.updatedAt) {
-      plan.archivedOnOverwrite.push({ kind: `state:${name}`, loser: remoteDoc.payload });
+      plan.archivedOnOverwrite.push({ kind: `state:${name}`, loser: stripSensitiveStatePayload(name, remoteDoc.payload) });
       plan.stateWrites[name] = localPayload;
       nextState.state[name] = { ...track, lastSyncedLocalHash: hL, remoteUpdatedAt: nowIso };
       delete nextState.state[name]!.localChangedAt;
     } else {
-      plan.localApplyState[name] = remoteDoc.payload;
-      nextState.state[name] = { lastSyncedLocalHash: contentHash(remoteDoc.payload), remoteUpdatedAt: remoteDoc.updatedAt };
+      pullState(name, remoteDoc);
     }
     plan.changedSomething = true;
   }
 
   // --- legacy / malformed remote state documents (classified by remoteSchema.ts) ---
   repairLegacyStateDocs(plan, ctx, nextState, snapshot);
+
+  // --- pulizia una volta per account dei dati sensibili già finiti nel cloud ---
+  planSensitiveCleanup(plan, ctx, nextState, snapshot, remote);
 
   // --- item collections: id-level three-way merge (union + conflict archive + assessment tombstones) ---
   for (const coll of ITEMS_COLLECTIONS) {
@@ -436,6 +488,61 @@ export function planSync(ctx: PlanContext): SyncPlan {
   return plan;
 }
 
+/**
+ * C. PULIZIA DEI DATI GIÀ CARICATI NEL CLOUD.
+ *
+ * Il documento `state/students` e il profilo possono contenere dati sensibili
+ * scritti da una versione precedente dell'app. Al primo ciclo utile dopo
+ * l'aggiornamento vengono riscritti puliti ANCHE SE null'altro è cambiato: una
+ * sola volta per account (indicatore locale `sync:sensitive-cleanup`, gestito
+ * dall'engine). La scrittura sostituisce l'intero documento — `setDoc` senza
+ * merge, vedi `firestoreGateway.writeState` — quindi nel cloud resta solo la
+ * copia ripulita e completa, non un merge parziale.
+ *
+ * Gli archivi `users/{uid}/conflicts` NON si toccano: le regole Firestore li
+ * rendono immutabili. Di quelli l'engine conta, senza contenuti, quanti
+ * custodiscono ancora dati riservati.
+ */
+function planSensitiveCleanup(
+  plan: SyncPlan,
+  ctx: PlanContext,
+  nextState: SyncStateV1,
+  snapshot: SyncableSnapshot,
+  remote: RemoteSnapshot,
+  localAdoptsRemote = false,
+): void {
+  for (const name of ctx.sensitiveCleanup ?? []) {
+    if (name !== "students" && name !== "profile") continue;
+    // Questo ciclo riscrive già il documento (push, riparazione, forzatura):
+    // ciò che arriva nel cloud è comunque già privo di dati sensibili.
+    if (plan.stateWrites[name] !== undefined) continue;
+    // Una divergenza non si decide qui: la scelta resta all'utente.
+    if (plan.needsResolution.includes(name)) continue;
+    const remoteDoc = remote.state[name] ?? null;
+    // Nulla da pulire: il documento nel cloud non custodisce dati riservati
+    // (già pulito, assente o irrecuperabile). Nessuna scrittura inutile.
+    if (!remoteDoc || !hasSensitiveStatePayload(name, remoteDoc.payload)) continue;
+    const localPayload = statePayload(snapshot, name);
+    const localHasContent = name === "students"
+      ? snapshot.students.length > 0
+      : Boolean(snapshot.profile?.fullName?.trim());
+    const cleaned = stripSensitiveStatePayload(name, localHasContent ? localPayload : remoteDoc.payload);
+    plan.stateWrites[name] = cleaned;
+    if (!plan.sensitiveCleanupWritten.includes(name)) plan.sensitiveCleanupWritten.push(name);
+    nextState.state[name] = {
+      // Con dati locali (o con un ripristino in corso) il contenuto scritto è
+      // quello che il dispositivo considera sincronizzato; senza dati locali il
+      // cloud resta il solo contenuto valido e NON deve essere scambiato per
+      // una cancellazione locale.
+      lastSyncedLocalHash: contentHash(localHasContent || localAdoptsRemote ? cleaned : localPayload),
+      remoteUpdatedAt: remoteDoc?.updatedAt ?? nextState.state[name]?.remoteUpdatedAt ?? null,
+    };
+    delete nextState.state[name]!.localChangedAt;
+    delete nextState.state[name]!.lastDetectedHash;
+    plan.changedSomething = true;
+  }
+}
+
 function localCollectionEmpty(snapshot: SyncableSnapshot, name: StateDocName): boolean {
   switch (name) {
     case "students": return snapshot.students.length === 0;
@@ -471,7 +578,10 @@ function repairLegacyStateDocs(plan: SyncPlan, ctx: PlanContext, nextState: Sync
     });
     const rawHash = contentHash(raw);
     if (track.archivedLegacyHash !== rawHash) {
-      plan.archivedOnOverwrite.push({ kind: `legacy-state:${name}`, loser: raw });
+      // Anche l'archivio viene ripulito: la copia originale nel cloud non deve
+      // contenere dati sensibili (le regole lo rendono immutabile, quindi gli
+      // archivi già scritti restano: per quelli si conta, non si riscrive).
+      plan.archivedOnOverwrite.push({ kind: `legacy-state:${name}`, loser: stripSensitiveLegacyDoc(name, raw) });
       track.archivedLegacyHash = rawHash;
       plan.changedSomething = true;
     }
@@ -488,7 +598,9 @@ function repairLegacyStateDocs(plan: SyncPlan, ctx: PlanContext, nextState: Sync
     } else if (legacy.has(name) && plan.stateWrites[name] === undefined && !plan.needsResolution.includes(name)) {
       const recovered = ctx.remote.state[name]?.payload;
       if (recovered !== undefined) {
-        plan.stateWrites[name] = recovered;
+        // Il contenuto recuperato torna nel cloud: mai con i dati sensibili di
+        // un documento scritto da una versione precedente dell'app.
+        plan.stateWrites[name] = stripSensitiveStatePayload(name, recovered);
         plan.changedSomething = true;
       }
     }
@@ -517,13 +629,24 @@ function removeLocalRow(plan: SyncPlan, coll: ItemsCollection, id: string) {
 
 function buildFullRestore(snapshot: SyncableSnapshot, remote: RemoteSnapshot): SyncableSnapshot {
   const fromRemote = snapshotFromRemote(remote);
+  /**
+   * L'elenco alunni e il profilo arrivano dal cloud come sempre: con i dati
+   * sensibili LOCALI conservati per ogni alunno con lo stesso id e con quelli
+   * (eventuali, vecchi) del cloud ignorati.
+   */
+  const students = Array.isArray(fromRemote.students)
+    ? (mergeLocalSensitiveStudents(fromRemote.students, snapshot.students) as SyncableSnapshot["students"])
+    : snapshot.students;
+  const profile = fromRemote.profile
+    ? (mergeLocalSensitiveProfile(fromRemote.profile, snapshot.profile) as TeacherProfile)
+    : snapshot.profile;
   const merged = {
     ...snapshot,
     ...fromRemote,
     definitiveTimetable: Array.isArray(fromRemote.definitiveTimetable) ? fromRemote.definitiveTimetable : snapshot.definitiveTimetable,
     provisionalTimetable: Array.isArray(fromRemote.provisionalTimetable) ? fromRemote.provisionalTimetable : snapshot.provisionalTimetable,
-    students: Array.isArray(fromRemote.students) ? fromRemote.students : snapshot.students,
-    profile: fromRemote.profile ? (fromRemote.profile as TeacherProfile) : snapshot.profile,
+    students,
+    profile,
     timetableMode: fromRemote.timetableMode ?? snapshot.timetableMode ?? "auto",
     onboardingCompleted: typeof fromRemote.onboardingCompleted === "boolean" ? fromRemote.onboardingCompleted : snapshot.onboardingCompleted,
     timeSlotConfig: fromRemote.timeSlotConfig ?? snapshot.timeSlotConfig,
@@ -536,7 +659,7 @@ function syncAllTracks(nextState: SyncStateV1, snapshot: SyncableSnapshot, remot
   for (const name of STATE_DOC_NAMES) {
     const remoteDoc = remote.state[name];
     if (remoteDoc) {
-      nextState.state[name] = { lastSyncedLocalHash: contentHash(remoteDoc.payload), remoteUpdatedAt: remoteDoc.updatedAt };
+      nextState.state[name] = { lastSyncedLocalHash: contentHash(stripSensitiveStatePayload(name, remoteDoc.payload)), remoteUpdatedAt: remoteDoc.updatedAt };
     } else {
       nextState.state[name] = { lastSyncedLocalHash: contentHash(statePayload(snapshot, name)), remoteUpdatedAt: null };
     }
