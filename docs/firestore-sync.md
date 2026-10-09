@@ -226,3 +226,81 @@ Indici Firestore: non necessari (solo letture puntuali per path sotto l'uid).
   gateway.writeState` è coperto da test end-to-end senza chiamate artificiali a `syncNow`.
   Le scritture bookkeeping del sync stesso (righe `metadata`) non passano da `atomic()` e non
   generano notifiche esplicite; i piani hash-guardati impediscono i ping-pong.
+## Dati riservati CIFRATI: sincronizzazione a busta (opt-in)
+
+La sezione qui sopra resta vera: nessun campo riservato **in chiaro** esce mai dal
+dispositivo. In più, quando l'utente attiva la protezione («Cifratura dati riservati»
+nelle impostazioni), i dati riservati **viaggiano e vengono sincronizzati cifrati**:
+nel cloud resta solo testo illeggibile. Nessuna dipendenza nuova: solo Web Crypto API
+(`crypto.subtle`).
+
+### Modello delle chiavi (`src/services/sensitiveCrypto.ts`, `src/services/encryptionKeys.ts`)
+
+- una **chiave dati** casuale AES-GCM 256 bit, generata una volta per account, cifra i dati;
+- la chiave dati è protetta due volte e salvata nel cloud solo protetta: con una chiave
+  derivata dalla **frase segreta** e con una derivata da un **codice di recupero**
+  (mostrato una sola volta all'attivazione);
+- derivazione: **PBKDF2-HMAC-SHA256, 600.000 iterazioni**, sale casuale di 16 byte per
+  account (salvato nel cloud, non è un segreto); domini di derivazione separati per frase
+  e codice;
+- ogni cifratura usa un **IV casuale di 12 byte, mai riutilizzato**;
+- un **valore di verifica** cifrato consente di dire «frase errata» senza decifrare i dati;
+- cambiare la frase riprotegge **solo la chiave dati**: gli alunni non vengono ricifrati;
+- sul dispositivo la chiave dati sbloccata vive come **CryptoKey non estraibile** in
+  IndexedDB (riga `encryption:device-key:<uid>` della tabella `metadata`). Frase e codice
+  non vengono mai salvati né inviati.
+
+Le chiavi stanno in un documento di stato dedicato, stessa forma degli altri:
+
+```
+users/{uid}/state/encryptionKeys        { payload: { v: 1, salt, wrappedPhrase, wrappedRecovery, verify }, updatedAt, schemaVersion }
+```
+
+### Regole Firestore: modifica necessaria (non ancora applicata)
+
+Le regole attuali permettono la scrittura solo dei documenti di stato nella allow-list
+`['profile', 'settings', 'definitiveTimetable', 'provisionalTimetable', 'students']`.
+Perché il documento `encryptionKeys` possa essere scritto va aggiunto alla lista
+(modifica proposta, da applicare con `firebase deploy --only firestore:rules`):
+
+```diff
+       match /state/{stateDoc} {
+         allow read: if isOwner();
+         allow create, update: if isOwner() && syncedDocShape()
+-          && stateDoc in ['profile', 'settings', 'definitiveTimetable', 'provisionalTimetable', 'students'];
++          && stateDoc in ['profile', 'settings', 'definitiveTimetable', 'provisionalTimetable', 'students', 'encryptionKeys'];
+         allow delete: if isOwner();
+       }
+```
+
+Fino al deploy delle regole, l'attivazione della protezione fallirà lato cloud con un
+errore di permessi (nessun danno: i dati restano locali come prima).
+
+### Sincronizzazione
+
+- **Uscita con la chiave**: per ogni alunno (e per il profilo) i campi riservati vengono
+  sostituiti da un unico campo cifrato `sensitiveEnc = { v, iv, ct }`;
+- **uscita senza chiave**: per ogni alunno che nel cloud ha già un `sensitiveEnc`, quel
+  valore viene riportato **invariato** nella scrittura: un dispositivo senza chiave non
+  cancella mai i dati cifrati scritti da un altro;
+- **ingresso con la chiave**: i valori decifrati si applicano con la stessa precedenza che
+  vale per il resto della scheda alunno;
+- **ingresso senza chiave o decifratura fallita**: valori locali conservati (come prima) e
+  blob cifrato non scartato;
+- **rilevazione**: con la cifratura attiva l'hash di rilevazione include un'impronta
+  LOCALE dei campi riservati in chiaro, così una modifica ai soli dati riservati produce
+  una sincronizzazione (l'impronta non lascia il dispositivo). Senza cifratura gli hash
+  restano esattamente quelli di prima;
+- gli endpoint `/api/analyze-*` continuano a non ricevere né i campi riservati né i blob
+  (`withoutSensitive*`).
+
+### Interfaccia
+
+Nelle impostazioni, accanto all'account Google: «Cifratura dati riservati» con stato
+(non attiva / attiva su questo dispositivo / attiva ma da sbloccare su questo
+dispositivo), attivazione (frase ≥12 caratteri + conferma, poi codice di recupero una
+volta con copia e stampa), sblocco (frase oppure codice), cambio frase. La scheda alunno
+mostra «Dati riservati cifrati: sblocca per vederli» quando esistono dati cifrati ma il
+dispositivo non è sbloccato.
+
+Il **backup locale resta invariato**: contiene i dati in chiaro, è un file dell'utente.

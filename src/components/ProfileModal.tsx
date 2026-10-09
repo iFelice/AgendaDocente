@@ -34,6 +34,7 @@ import { downloadIcsCalendar, getImportableGoogleCalendars, isInsufficientScopeE
 import type { SyncStatus } from "../services/sync/types";
 import type { GoogleCalendarImportResult } from "../services/googleCalendarImportService";
 import { CloudSync } from "./CloudSyncCard";
+import { EncryptionCard } from "./EncryptionCard";
 import { useManualSync } from "../hooks/useManualSync";
 import { hasActiveSecondarySchool, normalizeTeacherProfile } from "../utils/multiSchool";
 import { DEFAULT_SCHOOL_DAYS, SchoolDayPeriodsEditor } from "./SchoolDayPeriodsEditor";
@@ -1682,6 +1683,9 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                     online={online}
                     controller={manualSync}
                   />
+
+                  {/* Dati riservati: attivazione, sblocco e cambio frase segreta. */}
+                  <EncryptionCard uid={googleUser?.uid ?? null} />
 
                   <div className="p-5 rounded-2xl border border-stone-200 bg-white space-y-4" data-google-outbound-info>
                     <div className="flex items-center space-x-2">
