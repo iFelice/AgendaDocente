@@ -1,4 +1,5 @@
 import { isValidDate, isValidTime, eventDateError } from '../utils/dates';
+import { isHttpsMeetingUrl } from '../utils/meetingLinks';
 import { TEACHER_ROLE_KINDS, type StudentAssessment, type StudentScheduledAssessment } from '../types';
 import { normalizeTeacherProfile } from '../utils/multiSchool';
 
@@ -115,6 +116,10 @@ export function validateBackup(data: unknown): asserts data is Record<string, an
   if (!list(data.events, e => required(e.title) && isValidDate(e.date) && bool(e.isAllDay) && eventDateError({ date: e.date, isAllDay: e.isAllDay, startTime: e.startTime, endTime: e.endTime }) === null && categories.includes(e.category)
     && ['manuale','circolare','orario','google_calendar','registro'].includes(e.sourceType)
     && ['startTime','endTime','className','subject','location','notes','sourceCircularTitle','sourceCircularId','sourceItemId','googleEventId','updatedAt','schoolId','deadlineDate'].every(k => optional(e[k],text))
+    // Link videochiamata: https obbligatorio, come nell'editor e nell'import Google. Un
+    // valore diverso rende l'intero backup non valido (stessa sorte degli altri campi
+    // malformati): meglio rifiutare il ripristino che importare un link non apribile.
+    && optional(e.meetingUrl, isHttpsMeetingUrl)
     && optional(e.completed,bool) && optional(e.syncedWithGoogle,bool) && optional(e.reminderMinutesBefore,number))) throw new Error('Eventi nel backup non validi.');
   if (!list(data.circulars, c => text(c.title) && isValidDate(c.uploadDate) && ['pdf','image','text'].includes(c.fileType) && text(c.fileName)
     && number(c.extractedCount) && number(c.relevantCount) && optional(c.rawText,text) && optional(c.updatedAt,text) && optional(c.schoolId,required)
