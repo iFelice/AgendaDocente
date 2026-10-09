@@ -1,5 +1,14 @@
 import { nextDateISO, eventDateError } from "../utils/dates";
+import { normalizeMeetingUrl } from "../utils/meetingLinks";
 import { CalendarEvent } from "../types";
+
+/** Un punto di ingresso della conferenza (Meet, Zoom, Teams…) come pubblicato da Google. */
+export interface GoogleCalendarApiEntryPoint {
+  /** "video" è l'unico tipo che fa partecipare: "phone", "sip", "more" restano testo. */
+  entryPointType?: string;
+  uri?: string;
+  label?: string;
+}
 
 export interface GoogleCalendarApiEvent {
   id?: string;
@@ -7,6 +16,17 @@ export interface GoogleCalendarApiEvent {
   status?: string;
   description?: string;
   location?: string;
+  /**
+   * Link della videoconferenza Google (Meet/Teams/Zoom creati da Google). Non è nel
+   * wrapper `conferenceData`: le API Calendar lo pubblicano anche su eventi importati
+   * da altre fonti, ed è il campo che l'app usa per il pulsante "Partecipa".
+   */
+  hangoutLink?: string;
+  /** Dettaglio della conferenza: qui interessa solo il punto di ingresso video. */
+  conferenceData?: {
+    conferenceId?: string;
+    entryPoints?: GoogleCalendarApiEntryPoint[];
+  };
   start: {
     dateTime?: string;
     date?: string;
@@ -121,6 +141,20 @@ function validateExportEvent(event: CalendarEvent): void {
 }
 
 /**
+ * Riga "Videoconferenza: <link>" delle descrizioni inviate a Google.
+ *
+ * SOLO TESTO: nessuna `conferenceData.createRequest` viene mai costruita, quindi l'app
+ * non crea e non collega alcuna videoconferenza lato Google — si limita a riportare il
+ * link che il docente ha salvato sull'impegno. Un `meetingUrl` non https (dato vecchio
+ * o importato a mano) non viene inviato: `normalizeMeetingUrl` è lo stesso contratto della
+ * validazione, così ciò che l'app accetta è anche ciò che Google riceve.
+ */
+export const googleMeetingDescriptionLine = (event: Pick<CalendarEvent, "meetingUrl">): string => {
+  const url = normalizeMeetingUrl(event.meetingUrl);
+  return url ? `Videoconferenza: ${url}` : "";
+};
+
+/**
  * Transforms an Agenda Docente CalendarEvent into a Google Calendar API format
  */
 export const toGoogleCalendarPayload = (event: CalendarEvent): GoogleCalendarApiEvent => {
@@ -130,6 +164,7 @@ export const toGoogleCalendarPayload = (event: CalendarEvent): GoogleCalendarApi
 
   const descriptionParts = [
     `Agenda Docente - ${categoryLabel}`,
+    googleMeetingDescriptionLine(event),
     event.className ? `Classe: ${event.className}` : "",
     event.subject ? `Materia: ${event.subject}` : "",
     event.notes ? `Note: ${event.notes}` : "",
@@ -248,7 +283,15 @@ export type GoogleCalendarEventList = GoogleCalendarApiEvent[] & {
   pagesRead: number;
 };
 
-/** Fetches every page of one calendar in the requested range, up to G1's explicit safety cap. */
+/**
+ * Fetches every page of one calendar in the requested range, up to G1's explicit safety cap.
+ *
+ * NESSUN parametro `fields`: la richiesta lascia che Google restituisca la risorsa Event
+ * completa, quindi `hangoutLink` e `conferenceData.entryPoints` arrivano e l'importazione
+ * può costruire il link "Partecipa". Un `fields=` restrittivo qui (tipica micro-ottimizzazione)
+ * renderebbe gli impegni video di nuovo privi di link, in silenzio: `tests/meeting-link-google.test.ts`
+ * lo impedisce.
+ */
 export const listCalendarEvents = async (
   accessToken: string,
   calendarId: string = PRIMARY_CALENDAR_ID,
@@ -317,6 +360,7 @@ export const getGoogleCalendarWebUrl = (event: CalendarEvent): string => {
   const location = event.location ? encodeURIComponent(event.location) : "";
   const details = encodeURIComponent(
     [
+      googleMeetingDescriptionLine(event),
       event.notes || "",
       event.className ? `Classe: ${event.className}` : "",
       event.subject ? `Materia: ${event.subject}` : "",
@@ -391,6 +435,7 @@ export const downloadIcsCalendar = (events: CalendarEvent[], filename = "agenda_
 
     const descParts = [
       `Categoria: ${ev.category}`,
+      googleMeetingDescriptionLine(ev),
       ev.className ? `Classe: ${ev.className}` : "",
       ev.subject ? `Materia: ${ev.subject}` : "",
       ev.notes ? `Note: ${ev.notes}` : "",
