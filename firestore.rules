@@ -29,7 +29,7 @@ service cloud.firestore {
       match /state/{stateDoc} {
         allow read: if isOwner();
         allow create, update: if isOwner() && syncedDocShape()
-          && stateDoc in ['profile', 'settings', 'definitiveTimetable', 'provisionalTimetable', 'students'];
+          && stateDoc in ['profile', 'settings', 'definitiveTimetable', 'provisionalTimetable', 'students', 'encryptionKeys'];
         allow delete: if isOwner();
       }
 
