@@ -1,6 +1,8 @@
 import { usePersistenceAction } from "../hooks/usePersistenceAction";
 import type { GoogleCalendarListEntry } from "../services/googleCalendarService";
 import { eventDateError, isValidDate, localDateISO } from "../utils/dates";
+import { getEventMeetingUrl, isHttpsMeetingUrl, normalizeMeetingUrl } from "../utils/meetingLinks";
+import { EventMeetingLink } from "./EventMeetingLink";
 import React, { useState, useEffect } from "react";
 import { Clock, MapPin, X, Calendar, BookOpen, AlertCircle, Trash2, ChevronRight } from "lucide-react";
 import { CalendarEvent, EventCategory, TeacherProfile } from "../types";
@@ -89,6 +91,9 @@ export const EventModal: React.FC<EventModalProps> = ({
   const [className, setClassName] = useState("");
   const [subject, setSubject] = useState("");
   const [location, setLocation] = useState(initialTimeFields.location);
+  // Link della videochiamata: separato dal luogo perché il luogo resta testo libero
+  // ("Aula Magna", "Google Meet") mentre qui vive solo un URL https.
+  const [meetingUrl, setMeetingUrl] = useState(eventToEdit?.meetingUrl ?? initialEventData?.meetingUrl ?? "");
   const [notes, setNotes] = useState("");
   const [selectedGoogleCalendarId, setSelectedGoogleCalendarId] = useState("");
   const [isSendingToGoogle, setIsSendingToGoogle] = useState(false);
@@ -110,6 +115,7 @@ export const EventModal: React.FC<EventModalProps> = ({
     setStartTime(timeFields.startTime);
     setEndTime(timeFields.endTime);
     setLocation(timeFields.location);
+    setMeetingUrl((eventToEdit ?? initialEventData)?.meetingUrl ?? "");
     setValidationError(null);
     setIsConfirmingDelete(false);
     if (eventToEdit) {
@@ -215,6 +221,10 @@ export const EventModal: React.FC<EventModalProps> = ({
       className: className.trim() || undefined,
       subject: subject.trim() || undefined,
       location: location.trim() || undefined,
+      // Normalizzazione e non semplice trim: un link non https non deve potersi salvare
+      // nemmeno passando da un'altra via d'accesso al form (validateCurrentEvent lo
+      // mostra già come errore, qui è la seconda linea di difesa).
+      meetingUrl: normalizeMeetingUrl(meetingUrl),
       notes: notes.trim() || undefined,
       sourceType: eventToEdit?.sourceType || "manuale",
       completed: eventToEdit?.completed || false,
@@ -224,6 +234,11 @@ export const EventModal: React.FC<EventModalProps> = ({
 
   const validateCurrentEvent = () => {
     if (!title.trim()) { setValidationError("Inserisci un titolo."); return false; }
+    // Stesso contratto del dato salvato (src/utils/meetingLinks.ts): https o vuoto.
+    if (meetingUrl.trim() && !isHttpsMeetingUrl(meetingUrl)) {
+      setValidationError("Il link videochiamata deve iniziare con https:// (Meet, Zoom, Teams o un'altra piattaforma).");
+      return false;
+    }
     const error = eventDateError({ date, startTime, endTime, isAllDay });
     if (error) { setValidationError(error); return false; }
     const isDeadlined = category === "scadenza" || hasDeadline;
@@ -501,6 +516,33 @@ export const EventModal: React.FC<EventModalProps> = ({
               placeholder="es. Aula Magna, Google Meet, Sede Centrale..."
               className="w-full p-2 border border-stone-300 rounded-lg text-xs"
             />
+          </div>
+
+          {/* Link videochiamata. type="text" (non type="url"): la validazione è quella
+              dell'app, con il suo messaggio in italiano — un input nativo type="url"
+              bloccherebbe il submit con un tooltip del browser. autoCapitalize/autoCorrect/
+              spellCheck spenti perché un URL mai corretto automaticamente. */}
+          <div data-meeting-url-field>
+            <label htmlFor="event-meeting-url" className="block font-semibold text-stone-700 mb-1">Link videochiamata</label>
+            <input
+              id="event-meeting-url"
+              type="text"
+              inputMode="url"
+              autoComplete="off"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              value={meetingUrl}
+              onChange={(e) => setMeetingUrl(e.target.value)}
+              placeholder="https://meet.google.com/abc-def-ghi"
+              className="w-full p-2 min-h-[44px] border border-stone-300 rounded-lg text-xs"
+            />
+            <div className="mt-1 flex flex-wrap items-end justify-between gap-2">
+              <p className="min-w-0 flex-1 text-[11px] leading-4 text-stone-500">
+                Solo https. In assenza, un link Meet/Zoom/Teams scritto nel luogo o nelle note viene comunque mostrato come “Partecipa”.
+              </p>
+              <EventMeetingLink event={{ meetingUrl, location, notes }} label={title.trim() || undefined} className="shrink-0" />
+            </div>
           </div>
 
           {/* Notes */}

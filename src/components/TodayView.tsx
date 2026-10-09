@@ -17,6 +17,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { CalendarEvent, TeacherProfile, TimeSlotConfig, TimetableSlot, TimetableType } from "../types";
+import { EventMeetingLink } from "./EventMeetingLink";
 import type { ScheduledAssessmentCalendarItem } from "../utils/scheduledAssessmentCalendar";
 import { scheduledAssessmentTypeLabel } from "../utils/scheduledAssessmentCalendar";
 import { readDailyCollapse, writeDailyCollapse, type CollapseGroup } from "../utils/collapsePreferences";
@@ -772,6 +773,9 @@ export const TodayView: React.FC<TodayViewProps> = ({
                             <span>{ev.location}</span>
                           </div>
                         )}
+                        {/* "Partecipa"compare solo quando esiste un link: il componente
+                            rende null e la riga resta esattamente com'era. */}
+                        <EventMeetingLink event={ev} label={ev.title} className="-my-1.5" />
                       </div>
 
                       {ev.notes && <p className="text-xs text-stone-500 bg-stone-50 p-2 rounded-md">{ev.notes}</p>}
