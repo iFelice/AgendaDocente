@@ -188,7 +188,8 @@ test('Note e impegni: Google Calendar su importato, Circolare + Google su unito,
 test('Anteprima: scelte solo per campi pieni e diversi; uguali e vuoti non compaiono', async () => {
   const base = event({ id: 'b', title: 'Consiglio classe 3D', sourceType: 'circolare', sourceCircularTitle: 'C3', sourceCircularId: 'circ-3',
     category: 'consiglio_classe', className: '3D', location: 'Aula 2', startTime: '15:00', endTime: '16:00', notes: 'Portare il verbale' });
-  const other = importedEvent({ id: 'gcal-z', title: 'Consiglio straordinario', category: 'personale',
+  // categoria "glo" reale: il default "personale" dell'import Google non genera scelta
+  const other = importedEvent({ id: 'gcal-z', title: 'Consiglio straordinario', category: 'glo',
     startTime: '15:00', endTime: '16:00', location: 'Aula 2', notes: 'Portare il registro', meetingUrl: MEET });
   let confirmed: CalendarEvent | null = null;
   let renderer: any;
@@ -219,6 +220,27 @@ test('Anteprima: scelte solo per campi pieni e diversi; uguali e vuoti non compa
   assert.equal(merged.className, '3D');
   assert.equal(merged.googleEventId, 'g1');
   assert.equal(merged.category, 'consiglio_classe');
+});
+
+test('Anteprima: categoria Google "personale" non genera scelta e il risultato prende quella della circolare', async () => {
+  const base = event({ id: 'b', title: 'Consiglio classe 3D', sourceType: 'circolare', sourceCircularTitle: 'C4', sourceCircularId: 'circ-4',
+    category: 'consiglio_classe', className: '3D', startTime: '15:00', endTime: '16:00' });
+  const other = importedEvent({ id: 'gcal-p', title: 'Consiglio classe 3D', category: 'personale', startTime: '15:00', endTime: '16:00' });
+  let confirmed: CalendarEvent | null = null;
+  let renderer: any;
+  await act(async () => {
+    renderer = create(React.createElement(EventMergeModal, {
+      base, other, categoryLabel: (c: string) => c,
+      onCancel: () => {}, onConfirm: (merged: CalendarEvent) => { confirmed = merged; },
+    }));
+  });
+  assert.equal(findAll(renderer, node => node.props['data-merge-field'] === 'category').length, 0, 'nessuna scelta di categoria');
+  assert.equal(findAll(renderer, node => node.props['data-merge-field'] !== undefined).length, 0, 'nessuna scelta in tutto: restano solo i campi uguali o da un solo lato');
+  const confirm = findAll(renderer, node => node.type === 'button' && node.props.children === 'Conferma unione')[0];
+  await act(async () => { confirm.props.onClick(); });
+  assert.ok(confirmed);
+  assert.equal((confirmed as CalendarEvent).category, 'consiglio_classe', 'categoria della circolare');
+  assert.equal((confirmed as CalendarEvent).sourceType, 'circolare');
 });
 
 test('Modifica: "Unisci con un altro impegno dello stesso giorno" elenca il giorno e passa la scelta', async () => {
