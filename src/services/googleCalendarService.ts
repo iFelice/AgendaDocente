@@ -56,6 +56,38 @@ export const getWritableGoogleCalendars = (calendars: GoogleCalendarListEntry[])
   calendars.filter(calendar => ["owner", "writer", "organizer"].includes(calendar.accessRole || ""));
 
 /**
+ * Unica regola di riconoscimento del calendario principale: l'alias "primary",
+ * oppure l'id reale della voce con `primary=true` nella CalendarList dell'utente
+ * (Google usa l'email del possessore come id del principale).
+ *
+ * L'elenco è quello già letto dall'app (lista live o cache esistente, stessa forma):
+ * nessuna chiamata aggiuntiva. Senza elenco è riconosciuto solo l'alias.
+ */
+export const isPrimaryCalendarId = (
+  calendarId: string | null | undefined,
+  calendars?: readonly Pick<GoogleCalendarListEntry, "id" | "primary">[] | null,
+): boolean => {
+  if (!calendarId) return false;
+  if (calendarId === PRIMARY_CALENDAR_ID) return true;
+  return (calendars ?? []).some(entry => entry.primary && entry.id === calendarId);
+};
+
+/** Id reale (tipicamente l'email) del principale, se l'elenco CalendarList è disponibile. */
+export const primaryCalendarIdFromList = (
+  calendars?: readonly Pick<GoogleCalendarListEntry, "id" | "primary">[] | null,
+): string | undefined => (calendars ?? []).find(entry => entry.primary)?.id;
+
+/**
+ * Id da salvare in `googleCalendarId` per un impegno inviato a Google: per il
+ * principale è sempre l'alias "primary" (così l'import del principale lo riconosce
+ * subito e non lo rimporta come nuovo); i calendari condivisi restano col proprio id.
+ */
+export const savedGoogleCalendarId = (
+  calendarId: string,
+  calendars?: readonly Pick<GoogleCalendarListEntry, "id" | "primary">[] | null,
+): string => (isPrimaryCalendarId(calendarId, calendars) ? PRIMARY_CALENDAR_ID : calendarId);
+
+/**
  * G1.2.4 — access roles that really allow reading event data through
  * `listCalendarEvents` (GET /calendars/{id}/events).
  *
