@@ -442,12 +442,9 @@ test('15. category scadenza auto-attiva deadline', async () => {
     }));
   });
 
-  // Find Scadenza Istituzionale chip
-  const buttons = renderer.root.findAll((n: any) => n.type === 'button');
-  const scadenzaBtn = buttons.find((b: any) => textOf(b).includes('Scadenza Istituzionale'));
-  assert.ok(scadenzaBtn, 'pulsante Scadenza Istituzionale trovato');
-
-  await act(async () => { scadenzaBtn.props.onClick(); });
+  // Seleziona "Scadenza Istituzionale" dal menu Tipologia Impegno
+  const categorySelect = renderer.root.find((n: any) => n.type === 'select' && n.props.id === 'event-category');
+  await act(async () => { categorySelect.props.onChange({ target: { value: 'scadenza' } }); });
 
   const deadlineCheckbox = renderer.root.find((n: any) => n.type === 'input' && n.props.type === 'checkbox' && n.props.className?.includes('text-rose-700'));
   assert.equal(deadlineCheckbox.props.checked, true, 'selezionare category scadenza abilita automaticamente deadline');
@@ -545,11 +542,10 @@ test('18. EventModal: category=scadenza mantiene la checkbox checked e disabilit
     }));
   });
 
-  const buttons = renderer.root.findAll((n: any) => n.type === 'button');
-  const scadenzaBtn = buttons.find((b: any) => textOf(b).includes('Scadenza Istituzionale'));
-  assert.ok(scadenzaBtn);
+  const categorySelect = renderer.root.find((n: any) => n.type === 'select' && n.props.id === 'event-category');
+  assert.ok(categorySelect, 'menu Tipologia Impegno trovato');
 
-  await act(async () => { scadenzaBtn.props.onClick(); });
+  await act(async () => { categorySelect.props.onChange({ target: { value: 'scadenza' } }); });
 
   const deadlineCheckbox = renderer.root.find((n: any) => n.type === 'input' && n.props.type === 'checkbox' && n.props.className?.includes('text-rose-700'));
   assert.equal(deadlineCheckbox.props.checked, true);
@@ -575,21 +571,19 @@ test('19. EventModal: cambio da scadenza a GLO riabilita la checkbox e mantiene 
     }));
   });
 
-  const buttons = renderer.root.findAll((n: any) => n.type === 'button');
-  const scadenzaBtn = buttons.find((b: any) => textOf(b).includes('Scadenza Istituzionale'));
-  const gloBtn = buttons.find((b: any) => textOf(b).includes('G.L.O.'));
-  assert.ok(scadenzaBtn);
-  assert.ok(gloBtn);
+  const categorySelect = renderer.root.find((n: any) => n.type === 'select' && n.props.id === 'event-category');
+  assert.ok(categorySelect, 'menu Tipologia Impegno trovato');
+  assert.ok(categorySelect, 'menu Tipologia Impegno trovato');
 
   // Seleziona prima Scadenza
-  await act(async () => { scadenzaBtn.props.onClick(); });
+  await act(async () => { categorySelect.props.onChange({ target: { value: 'scadenza' } }); });
 
   let deadlineCheckbox = renderer.root.find((n: any) => n.type === 'input' && n.props.type === 'checkbox' && n.props.className?.includes('text-rose-700'));
   assert.equal(deadlineCheckbox.props.checked, true);
   assert.equal(deadlineCheckbox.props.disabled, true);
 
   // Passa a GLO
-  await act(async () => { gloBtn.props.onClick(); });
+  await act(async () => { categorySelect.props.onChange({ target: { value: 'glo' } }); });
 
   deadlineCheckbox = renderer.root.find((n: any) => n.type === 'input' && n.props.type === 'checkbox' && n.props.className?.includes('text-rose-700'));
   assert.equal(deadlineCheckbox.props.checked, true, 'la deadline rimane attiva al passaggio a GLO');
@@ -613,13 +607,11 @@ test('20. EventModal: GLO può disattivare la deadline e salvare senza deadlineD
     }));
   });
 
-  const buttons = renderer.root.findAll((n: any) => n.type === 'button');
-  const scadenzaBtn = buttons.find((b: any) => textOf(b).includes('Scadenza Istituzionale'));
-  const gloBtn = buttons.find((b: any) => textOf(b).includes('G.L.O.'));
+  const categorySelect = renderer.root.find((n: any) => n.type === 'select' && n.props.id === 'event-category');
 
   // Scadenza -> poi GLO
-  await act(async () => { scadenzaBtn.props.onClick(); });
-  await act(async () => { gloBtn.props.onClick(); });
+  await act(async () => { categorySelect.props.onChange({ target: { value: 'scadenza' } }); });
+  await act(async () => { categorySelect.props.onChange({ target: { value: 'glo' } }); });
 
   const deadlineCheckbox = renderer.root.find((n: any) => n.type === 'input' && n.props.type === 'checkbox' && n.props.className?.includes('text-rose-700'));
   assert.equal(deadlineCheckbox.props.checked, true);
@@ -655,9 +647,8 @@ test('21. EventModal: salvataggio category=scadenza produce sempre deadlineDate 
     }));
   });
 
-  const buttons = renderer.root.findAll((n: any) => n.type === 'button');
-  const scadenzaBtn = buttons.find((b: any) => textOf(b).includes('Scadenza Istituzionale'));
-  await act(async () => { scadenzaBtn.props.onClick(); });
+  const categorySelect = renderer.root.find((n: any) => n.type === 'select' && n.props.id === 'event-category');
+  await act(async () => { categorySelect.props.onChange({ target: { value: 'scadenza' } }); });
 
   const titleInput = renderer.root.find((n: any) => n.type === 'input' && n.props.placeholder?.includes('Consiglio di Classe'));
   await act(async () => { titleInput.props.onChange({ target: { value: 'Invio Relazione Finale' } }); });

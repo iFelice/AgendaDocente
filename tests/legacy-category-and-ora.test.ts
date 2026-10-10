@@ -17,7 +17,7 @@ import type { CalendarEvent, TeacherProfile, TimetableSlot } from '../src/types'
  * Pulizia UI: due sole correzioni, con compatibilità legacy verificata.
  *
  * A. "Dipartimento disciplinare" NON è più fra le categorie offerte per i
- *    nuovi eventi (EVENT_CATEGORIES + chip del modale), MA:
+ *    nuovi eventi (EVENT_CATEGORIES + opzioni del menu del modale), MA:
  *    - l'identificatore resta valido (tipi, formatter, parser): i dati salvati
  *      e quelli estratti dalle circolari continuano a caricarsi, vedersi,
  *      modificarsi, salvarsi ed esportarsi;
@@ -67,14 +67,14 @@ test('A1. EVENT_CATEGORIES non offre più "dipartimento"; le altre categorie res
   assert.ok(LEGACY_DIPARTIMENTO_CATEGORY.label.includes('legacy'));
 });
 
-test('A2. nuovo evento: nessun chip "Dipartimento Disciplinare" nel modale', async () => {
+test('A2. nuovo evento: nessuna opzione "Dipartimento Disciplinare" nel modale', async () => {
   let renderer: any;
   await act(async () => {
     renderer = create(React.createElement(EventModal, {
       isOpen: true, onClose: () => {}, eventToEdit: null, profile, onSave: () => {},
     }));
   });
-  const texts = renderer.root.findAll((el: any) => el.type === 'button').map((b: any) => flatText(b));
+  const texts = renderer.root.findAll((el: any) => el.type === 'option').map((o: any) => flatText(o));
   assert.ok(!texts.some((t: string) => t.startsWith('Dipartimento Disciplinare')), 'nessuna variante della categoria offerta');
   assert.ok(texts.includes('Consiglio di Classe'), 'le categorie normali ci sono');
 });
@@ -90,10 +90,12 @@ test('A3. evento legacy "dipartimento": si apre senza crash, opzione legacy visi
       isOpen: true, onClose: () => {}, eventToEdit: legacyEvent, profile, onSave: () => {},
     }));
   });
-  const legacyChips = buttonsWithText(renderer, 'Dipartimento Disciplinare (legacy)');
-  assert.equal(legacyChips.length, 1, 'l\'opzione legacy è visibile SOLO per l\'evento che la possiede');
-  assert.ok(String(legacyChips[0].props.className).includes('bg-emerald-700'), 'la categoria è selezionata, non persa');
-  assert.ok(!buttonsWithText(renderer, 'Dipartimento Disciplinare').length, 'nessun doppio chip non marcato');
+  const select = renderer.root.find((n: any) => n.type === 'select' && n.props.id === 'event-category');
+  assert.equal(select.props.value, 'dipartimento', 'la categoria legacy è selezionata, non persa');
+  const legacyOptions = renderer.root.findAll((n: any) => n.type === 'option' && flatText(n) === 'Dipartimento Disciplinare (legacy)');
+  assert.equal(legacyOptions.length, 1, 'l\'opzione legacy è visibile SOLO per l\'evento che la possiede');
+  assert.equal(legacyOptions[0].props.value, 'dipartimento');
+  assert.equal(renderer.root.findAll((n: any) => n.type === 'option' && flatText(n) === 'Dipartimento Disciplinare').length, 0, 'nessun doppio non marcato');
 });
 
 test('A4. salvataggio: la categoria legacy NON viene convertita né perduta', async () => {
@@ -109,8 +111,7 @@ test('A4. salvataggio: la categoria legacy NON viene convertita né perduta', as
       onSave: (ev) => { saved.push(ev); },
     }));
   });
-  // Ri-seleziona esplicitamente il chip legacy (resta disponibile per tutta la modifica) e salva.
-  await act(async () => { buttonsWithText(renderer, 'Dipartimento Disciplinare (legacy)')[0].props.onClick(); });
+  // Salvataggio SENZA toccare il menu: la categoria legacy deve restare quella di prima.
   const form = renderer.root.findByType('form');
   await act(async () => { await form.props.onSubmit({ preventDefault: () => {} }); });
   assert.equal(saved.length, 1);
