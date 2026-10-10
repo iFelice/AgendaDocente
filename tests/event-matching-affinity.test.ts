@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import React from "react";
+import { create, act } from "react-test-renderer";
 import type { CalendarEvent, ExtractedItem } from "../src/types";
 import type { GoogleCalendarApiEvent } from "../src/services/googleCalendarService";
 import {
@@ -23,6 +25,17 @@ import {
   planMerge,
 } from "../src/utils/googleCalendarMerge";
 import { mergeGoogleCalendarEvents } from "../src/utils/googleCalendarImport";
+import { EventMergeModal } from "../src/components/EventMergeModal";
+
+(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+
+/** Accetta sia un renderer (radice) sia un'istanza già trovata. */
+function findAll(renderer: any, predicate: (node: any) => boolean): any[] {
+  return (renderer.root ?? renderer).findAll(predicate);
+}
+
+/** Riga breve richiesta nell'anteprima per il caso reale A/B. */
+const HINT_TEXT = "Il titolo dell'evento Google indica 16:30–17:15: proposto questo orario.";
 
 /**
  * Affinità fra impegni: il criterio in più usato SOLO per suggerire "Possibile
@@ -319,10 +332,7 @@ test("anteprima unione: preselezionato l'orario coerente col titolo di Google", 
   const app = appB();
   const plan = planMerge(app, google);
 
-  assert.equal(
-    plan.hint?.text,
-    "Il titolo dell'evento Google indica 16:30–17:15: proposto questo orario."
-  );
+  assert.equal(plan.hint?.text, HINT_TEXT);
   const timing = plan.fields.find((field) => field.field === "timing");
   assert.equal(timing?.defaultChoice, "base");
   assert.equal(plan.merged.startTime, "16:30");
@@ -367,4 +377,30 @@ test("findAffinityMatch restituisce il tipo affinita, solo come suggerimento", (
   // Nessun titolo di riunione condiviso: nessun match.
   assert.equal(findAffinityMatch(asCandidate(googleA({ title: "Evento personale" })), [appB()]), null);
   assert.equal(findAffinityMatch(asCandidate(googleA()), []), null);
+});
+
+test("anteprima a schermo: riga breve sulla proposta di orario e radio già selezionata", async () => {
+  let renderer: any;
+  await act(async () => {
+    renderer = create(
+      React.createElement(EventMergeModal, {
+        base: appB(),
+        other: googleA(),
+        categoryLabel: (category: string) => category,
+        onCancel: () => {},
+        onConfirm: () => {},
+      })
+    );
+  });
+
+  const hint = findAll(renderer, (node: any) => node.props?.["data-merge-timing-hint"] !== undefined)[0];
+  assert.ok(hint, "l'anteprima spiega perché propone quell'orario");
+  const rendered = JSON.stringify(renderer.toJSON());
+  assert.ok(rendered.includes(HINT_TEXT), rendered.slice(0, 400));
+
+  const timing = findAll(renderer, (node: any) => node.props?.["data-merge-field"] === "timing")[0];
+  assert.ok(timing, "l'orario resta una scelta dell'utente");
+  const selected = findAll(timing, (node: any) => node.props?.["aria-checked"] === true);
+  assert.equal(selected.length, 1);
+  assert.equal(selected[0].props["data-merge-option"], "base");
 });
