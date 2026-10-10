@@ -250,8 +250,8 @@ export interface TitleTimes {
  */
 const FULL_TIME_IN_TITLE_RE = /(?<![\d:])(\d{1,2})[.:](\d{2})(?!\d)/g;
 
-/** Ora sola, priva di minuti: credibile SOLO dopo "ore", "dalle", "alle" (o "ora"). */
-const BARE_HOUR_IN_TITLE_RE = /(?:\bore|\bora|\bdalle|\balle)\s+(\d{1,2})\b(?!\s*[.:]\s*\d)/g;
+/** Ora sola, priva di minuti: credibile SOLO dopo "ore", "dalle", "alle". */
+const BARE_HOUR_IN_TITLE_RE = /(?:\bore|\bdalle|\balle)\s+(\d{1,2})\b(?!\s*[.:]\s*\d)/g;
 
 /**
  * Testo ammesso fra due orari dello stesso titolo: un trattino, una barra, una

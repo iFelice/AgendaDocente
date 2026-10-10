@@ -274,9 +274,11 @@ test("assignDocumentMatches: A/B non è un aggiornamento automatico né un doppi
   assert.equal(entries[0].match, null);
   assert.deepEqual(entries[0].overlaps, []);
 
-  // Nessun criterio storico produce un match per A/B, in nessuno dei due versi.
+  // Nessun criterio storico produce un match per A/B, in nessuno dei due versi:
+  // l'affinità non arriva mai qui, quindi nulla viene "aggiornato" da solo.
   assert.equal(findEventMatch(item, [google]), null);
-  assert.equal(findEventMatch(asCandidate(google), [item]), null);
+  assert.equal(findEventMatch(asCandidate(appB()), [google]), null);
+  assert.equal(findEventMatch(asCandidate(google), [appB()]), null);
 });
 
 test("assignDocumentMatches: i criteri veri di titolo e orario restano attivi", () => {
