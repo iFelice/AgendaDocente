@@ -10,6 +10,7 @@ import { FutureCommitmentsView } from '../src/components/FutureCommitmentsView';
 import { EventModal } from '../src/components/EventModal';
 import { EventMergeModal } from '../src/components/EventMergeModal';
 import { EventMergeContext } from '../src/components/GoogleMergeControls';
+import { findPossibleDuplicates } from '../src/utils/googleCalendarMerge';
 import type { CalendarEvent, TeacherProfile } from '../src/types';
 import { localDateISO } from '../src/utils/dates';
 
@@ -314,4 +315,34 @@ test('Settimana e Mese: etichetta Google Calendar su importato e su unito, avvis
   });
   assert.ok(textOf(month).includes('Google Calendar'), 'mese: etichetta Google');
   assert.equal(findAll(month, node => node.props['data-possible-duplicate'] !== undefined).length, 2, 'mese: avviso su importato e doppione dell’app');
+});
+
+test('Oggi e Note e impegni: coppia affine (orari contigui + orario nel titolo) avvisa su entrambe le schede', async () => {
+  const app = event({
+    id: 'aff-app', title: 'Consiglio di Classe 1C, 1N', sourceType: 'circolare', sourceCircularTitle: 'Circolare 7',
+    category: 'consiglio_classe', className: '1C, 1N', location: 'Telematica', startTime: '16:30', endTime: '17:15',
+  });
+  const google = importedEvent({
+    id: 'aff-gcal', title: 'Consiglio 1 C del 13 Ottobre ore 16:30/17:15',
+    startTime: '15:30', endTime: '16:30', meetingUrl: MEET,
+  });
+
+  for (const render of [renderToday, renderCommitments]) {
+    const calls: [CalendarEvent, CalendarEvent][] = [];
+    const renderer = await render([app, google], (a, b) => calls.push([a, b]));
+    const notices = findAll(renderer, node => node.props['data-possible-duplicate'] !== undefined && node.type === 'div');
+    assert.equal(notices.length, 2, 'avviso sulle due schede');
+    assert.ok(textOf(renderer).includes('Possibile doppione'));
+
+    const unisci = findAll(notices[0], node => node.type === 'button' && node.props.children === 'Unisci')[0];
+    assert.ok(unisci, 'il suggerimento offre la scelta, non fonde nulla');
+    await act(async () => { unisci.props.onClick({ preventDefault: () => {}, stopPropagation: () => {} }); });
+    assert.deepEqual(calls.map(pair => pair.map(item => item.id).sort())[0], [app.id, google.id].sort());
+    await act(async () => { renderer.unmount(); });
+  }
+
+  // Nessun impegno modificato da solo: la coppia resta separata finché non si conferma.
+  assert.equal(findPossibleDuplicates([app, google]).size, 2);
+  assert.equal(app.startTime, '16:30');
+  assert.equal(google.startTime, '15:30');
 });
