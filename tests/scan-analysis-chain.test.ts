@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { app } from '../server';
 import { createAnalysisErrorHandler, createAnalysisGuards, validateTeacherProfile } from '../server/analysisGuards';
 import { analysisAuthHeaders, installAnalysisAuthFixture } from './helpers/analysisAuthFixture';
+import { installSignedInAnalysisClient } from './helpers/analysisClientSession';
 import { validateTimetableAnalysisPayload } from '../server/timetableAnalysis';
 import { DEFAULT_PROFILE } from '../src/services/storage';
 import { normalizeTeacherProfile } from '../src/utils/multiSchool';
