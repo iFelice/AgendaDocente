@@ -4,6 +4,9 @@ import React from 'react';
 import { create, act } from 'react-test-renderer';
 import { DocumentScannerModal } from '../src/components/DocumentScannerModal';
 import type { TeacherProfile, TimeSlotConfig, TimetableSlot } from '../src/types';
+import { installSignedInAnalysisClient } from './helpers/analysisClientSession';
+installSignedInAnalysisClient();
+
 
 /**
  * ANTEPRIMA DEGLI ELEMENTI ESCLUSI DALL'IMPORT (micro-passo D1).

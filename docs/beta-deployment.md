@@ -6,7 +6,7 @@ Questa preparazione parte da main `a00fbd3841912469a244423215527869e6b5ffc1`, su
 
 Un **Render Web Service**, runtime **Node**, serve React/Vite/PWA e Express dalla stessa origine. Nessun database o disco persistente Render: eventi, profilo, studenti, note e circolari rimangono nell'IndexedDB del browser. Cambiare dominio/browser non trasferisce i dati: esporta il backup sul vecchio indirizzo e importalo sul nuovo.
 
-Configurazione manuale, senza render.yaml: il nome definitivo, il piano e l'eventuale controllo di accesso sono da scegliere. Un Web Service con URL raggiungibile è pubblico; Firebase qui collega Google, **non protegge l'accesso al sito o all'endpoint AI**. Una beta riservata richiede un controllo d'accesso esterno da valutare separatamente, non implementato da questo branch.
+Configurazione manuale, senza render.yaml: il nome definitivo, il piano e l'eventuale controllo di accesso al sito sono da scegliere. Un Web Service con URL raggiungibile resta pubblico per l'agenda locale. Gli endpoint di analisi (`/api/analyze-circular`, `/api/analyze-timetable`, `/api/analyze-student-document`) accettano solo un ID token Firebase di un'email verificata presente in `ANALYSIS_ALLOWED_EMAILS`. Il resto dell'app funziona senza accesso.
 
 ## Passi su Render
 
@@ -42,8 +42,12 @@ Configurazione manuale, senza render.yaml: il nome definitivo, il piano e l'even
 | `VITE_FIREBASE_AUTH_DOMAIN` | Client, build Vite | No | Dominio Auth Firebase, normalmente `<project-id>.firebaseapp.com`. |
 | `VITE_FIREBASE_PROJECT_ID` | Client, build Vite | No | ID del progetto Firebase scelto. |
 | `VITE_FIREBASE_APP_ID` | Client, build Vite | No | App ID della web app Firebase. |
+| `FIREBASE_PROJECT_ID` | Express, runtime | No | ID progetto per verificare `aud`/`iss` degli ID token. Preferita rispetto a `VITE_FIREBASE_PROJECT_ID`; se assente si usa quella. Entrambe vuote → 503 «Analisi non configurata». |
+| `ANALYSIS_ALLOWED_EMAILS` | Express, runtime | No (elenco email, non un segreto di API) | Email autorizzate all'analisi, separate da virgole, confronto senza maiuscole, solo se `email_verified`. Vuota o assente → 503, l'accesso non si apre a tutti. |
 
 Le quattro variabili Firebase vanno configurate insieme: se incomplete Google è disabilitato e il pulsante restituisce un messaggio controllato; l'app locale parte comunque. Ogni modifica `VITE_*` richiede **una nuova build**, non basta riavviare il processo. Non esiste un client secret nel frontend.
+
+Per l'analisi documenti su Render imposta anche `FIREBASE_PROJECT_ID` (lo stesso project id della web app) e `ANALYSIS_ALLOWED_EMAILS` con le email Google verificate dei tester. Senza l'elenco gli endpoint di analisi rispondono 503 e non chiamano Gemini/Groq. Non impostare `ANALYSIS_AUTH_TEST_HOOK` né `ANALYSIS_AUTH_TEST_CERTS_FILE`: servono solo ai test locali. Non serve un service account né firebase-admin: il server verifica la firma RS256 con le chiavi pubbliche di `securetoken@system.gserviceaccount.com`.
 
 `.env.example` contiene solo valori di sviluppo non sensibili e campi vuoti. `.gitignore` esclude `.env*`, eccetto questo esempio: include .env, .env.local, .env.production e relative varianti. Non usare `git add -f` per eludere l'esclusione.
 
@@ -63,7 +67,7 @@ Il metodo effettivo è **Firebase Auth `GoogleAuthProvider` + `signInWithPopup`*
 6. Nella consent screen configura nome applicazione, contatto di supporto, audience e account tester. Richiediamo email, profilo e `https://www.googleapis.com/auth/calendar.events.owned` (scritture sul calendario primario di proprietà). Eventuali restrizioni Workspace e requisiti di verifica dipendono dal progetto/account: vanno verificati prima di estendere la beta.
 7. Esegui una nuova build dopo le variabili client; prova popup, consenso Calendar, evento opt-in, sync, disattivazione e logout con un account tester. I token Calendar restano in memoria e una nuova autorizzazione può essere necessaria dopo reload/scadenza.
 
-Non sono richiesti Firebase Admin, service account JSON, Firestore o database Firebase. Le chiavi web Firebase sono pubbliche ma vanno limitate/configurate secondo le indicazioni Firebase; non concedono un controllo accessi all'endpoint Express.
+Non sono richiesti Firebase Admin, service account JSON, Firestore o database Firebase. Le chiavi web Firebase sono pubbliche ma vanno limitate/configurate secondo le indicazioni Firebase. Il controllo degli endpoint di analisi non usa quelle chiavi: usa l'ID token dell'utente e l'elenco `ANALYSIS_ALLOWED_EMAILS`.
 
 ## PWA su Android e offline
 
@@ -77,7 +81,7 @@ Non cancellare i dati del sito per aggiornare la PWA: perderesti IndexedDB. Espo
 
 Rimuovi o svuota `GEMINI_API_KEY` in Environment, salva e riavvia/ridistribuisci il servizio. Il processo riparte senza AI; non serve cambiare il codice. Il testo viene elaborato dal parser locale/server quando previsto; PDF/immagini ricevono il messaggio controllato di indisponibilità. Health resta identico. Non usare una chiave fittizia per disabilitare: causerebbe tentativi cloud inutili.
 
-L'endpoint conserva limiti payload, rate limiting e errori sanitizzati, senza upload persistente. Il limite per IP usa la connessione socket: dietro Render più utenti possono condividere il budget del proxy (10 richieste/minuto), oltre ai limiti globali. Non abbiamo abilitato fiducia indiscriminata in X-Forwarded-For. È un limite conservativo da misurare nella piccola beta; non è un sistema di autenticazione o protezione completa dei costi AI.
+L'endpoint conserva limiti payload, rate limiting e errori sanitizzati, senza upload persistente. Il limite di 10 richieste/minuto è per uid dell'ID token già verificato, non per IP: dietro Render gli utenti non condividono più il budget del proxy. Restano i tetti globali e di concorrenza. Non usiamo `X-Forwarded-For`. L'autenticazione protegge il costo AI; non è un controllo di accesso all'intera agenda.
 
 ## Diagnostica analisi documenti (Render)
 

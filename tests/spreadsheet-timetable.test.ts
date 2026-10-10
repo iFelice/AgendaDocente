@@ -18,6 +18,9 @@ import {
 import { personalCellsToCandidates } from '../src/utils/timetableAnalysis';
 import { crossrefTimetables } from '../src/utils/timetableCrossref';
 import { partitionReconstructedSlots } from '../src/utils/reconstructTimetable';
+import { installSignedInAnalysisClient } from './helpers/analysisClientSession';
+installSignedInAnalysisClient();
+
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 

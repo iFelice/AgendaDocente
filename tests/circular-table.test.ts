@@ -5,6 +5,9 @@ import { parseCircularText, normalizeExtractedItems, extractedItemError } from '
 import { evaluateItemRelevance } from '../src/utils/circularRelevance';
 import { convertExtractedItemToEvent } from '../src/services/storage';
 import type { TeacherProfile } from '../src/types';
+import { installSignedInAnalysisClient } from './helpers/analysisClientSession';
+installSignedInAnalysisClient();
+
 const profile: TeacherProfile = {id:'test',fullName:'Test',schoolName:'Test',schoolYear:'2026/2027',schoolLevel:'ssig',primarySubjects:['Italiano'],classes:['1A'],campuses:[],roles:[]};
 const title='PREDISPOSIZIONE AMBIENTI DIDATTICI, PROGRAMMAZIONE GENERALE PER MATERIA';
 // Minimal synthetic rows, no school document or personal data.

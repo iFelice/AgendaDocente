@@ -14,6 +14,9 @@ import { recoverBackupRestore } from '../src/services/backup';
 import { linkLegacyCircularEvents } from '../src/utils/circularLinks';
 import { createGoogleCalendarEvent, updateGoogleCalendarEvent, toGoogleCalendarPayload, getGoogleCalendarWebUrl, downloadIcsCalendar } from '../src/services/googleCalendarService';
 import type { TeacherProfile, ExtractedItem, CalendarEvent, TimetableSlot, CircularDocument } from '../src/types';
+import { installSignedInAnalysisClient } from './helpers/analysisClientSession';
+installSignedInAnalysisClient();
+
 
 const profile: TeacherProfile = { id:'teacher', fullName:'Docente test', schoolName:'Scuola test', schoolYear:'2027/2028', schoolLevel:'ssig', primarySubjects:['Scienze motorie'], classes:['1A','2E','3B'], campuses:['Centrale'], roles:[] };
 const item: ExtractedItem = { tempId:'item-1', title:'Consiglio 1A', category:'consiglio_classe', date:'2027-09-14', startTime:'15:00', endTime:'16:00', className:'1A', relevance:'VERDE', relevanceReason:'Classe assegnata', selectedForImport:true };

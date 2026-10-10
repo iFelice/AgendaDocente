@@ -14,6 +14,9 @@ import { derivePersonalScannerPeriodsByDay } from '../src/utils/scannerWeekGeome
 import { legacyPrimarySchoolId, schoolByIdOrPrimary, normalizeTeacherProfile } from '../src/utils/multiSchool';
 import type { ReconstructedSlot } from '../src/utils/timetableCrossref';
 import type { SchoolProfile, TeacherProfile, TimeSlotConfig, TimetableSlot } from '../src/types';
+import { installSignedInAnalysisClient } from './helpers/analysisClientSession';
+installSignedInAnalysisClient();
+
 
 /**
  * MICRO-PASSO F5 — SCANSIONE SULLA SCUOLA SELEZIONATA.

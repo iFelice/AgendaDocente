@@ -4,6 +4,9 @@ import React from 'react';
 import { act, create } from 'react-test-renderer';
 import { CircularAnalyzerModal } from '../src/components/CircularAnalyzerModal';
 import type { TeacherProfile } from '../src/types';
+import { installSignedInAnalysisClient } from './helpers/analysisClientSession';
+installSignedInAnalysisClient();
+
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 const originalFetch = globalThis.fetch;

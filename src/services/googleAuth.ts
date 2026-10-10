@@ -136,6 +136,14 @@ export const getCachedUser = (): User | null => {
   return cachedUser || auth?.currentUser || null;
 };
 
+/**
+ * Solo test: simula l'utente Firebase collegato, senza popup e senza persistere
+ * token. Il percorso di produzione continua a chiamare `user.getIdToken()`.
+ */
+export function setCachedUserForTests(user: { getIdToken: (forceRefresh?: boolean) => Promise<string> } | null): void {
+  cachedUser = user as User | null;
+}
+
 export const signOutFromGoogle = async (): Promise<void> => {
   try {
     if (auth) await firebaseSignOut(auth);

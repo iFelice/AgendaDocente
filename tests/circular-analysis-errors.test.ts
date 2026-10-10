@@ -28,7 +28,9 @@ import {
 } from '../src/services/aiService';
 import type { TeacherProfile } from '../src/types';
 import { analysisAuthHeaders, installAnalysisAuthFixture } from './helpers/analysisAuthFixture';
+import { installSignedInAnalysisClient } from './helpers/analysisClientSession';
 
+installSignedInAnalysisClient();
 installAnalysisAuthFixture();
 
 const profile: TeacherProfile = {

@@ -1,4 +1,5 @@
 import type { ExtractedItem, TeacherProfile } from "../types";
+import { analysisHttpAuthMessage, resolveAnalysisAuthorization } from "./analysisSession";
 import { withoutSensitiveProfile } from "./sensitiveData";
 import { parseCircularText, normalizeExtractedItems } from "../utils/circularParser";
 export { parseCircularText as clientSideLocalParser } from "../utils/circularParser";
@@ -267,6 +268,10 @@ function finishFailure(req: AnalyzeRequest, code: CircularAnalysisErrorCode, ser
 }
 
 export async function analyzeCircular(req: AnalyzeRequest, options: AnalyzeCircularOptions = {}): Promise<AnalyzeResult> {
+  const auth = await resolveAnalysisAuthorization();
+  if (auth.ok === false) {
+    return { success: false, source: "unavailable", items: [], error: auth.message };
+  }
   // navigator.onLine non è una prova che il backend risponda: la POST parte sempre.
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   const timeout = createCircularTimeout(options.timeoutMs ?? CIRCULAR_REQUEST_TIMEOUT_MS);
@@ -285,7 +290,7 @@ export async function analyzeCircular(req: AnalyzeRequest, options: AnalyzeCircu
   try {
     response = await fetchImpl("/api/analyze-circular", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...auth.headers },
       // Il profilo parte senza `assignedStudents`: è testo libero che può
       // contenere sigle di alunni, ore e tipo di PEI (dati riservati).
       body: JSON.stringify({ ...req, profile: withoutSensitiveProfile(req.profile) }),
@@ -299,6 +304,10 @@ export async function analyzeCircular(req: AnalyzeRequest, options: AnalyzeCircu
   clearRequestSignals();
   // Risposta arrivata, anche se non è JSON: non è un errore di rete.
   const data = await response.json().catch(() => ({})) as Record<string, unknown>;
+  const authMessage = analysisHttpAuthMessage(response.status, data);
+  if (authMessage) {
+    return { success: false, source: "unavailable", items: [], error: authMessage };
+  }
   if (!response.ok || data.success !== true) {
     const code = circularErrorCodeForHttp(response.status, data.errorCode);
     const serverMessage = typeof data.error === "string" ? data.error : undefined;

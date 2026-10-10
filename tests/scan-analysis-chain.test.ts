@@ -20,6 +20,7 @@ import {
 import type { TeacherProfile } from '../src/types';
 
 installAnalysisAuthFixture();
+installSignedInAnalysisClient();
 
 /**
  * Regressione del bug post-merge "Scansiona documento" (iPhone/PWA).

@@ -26,6 +26,9 @@ import {
   CIRCULAR_AUTO_RESUME_MAX_ATTEMPTS,
 } from '../src/services/aiService';
 import type { ExtractedItem, TeacherProfile } from '../src/types';
+import { installSignedInAnalysisClient } from './helpers/analysisClientSession';
+installSignedInAnalysisClient();
+
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 const originalFetch = globalThis.fetch;

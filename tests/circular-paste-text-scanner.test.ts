@@ -5,6 +5,9 @@ import { create, act } from 'react-test-renderer';
 import { DocumentScannerModal, type CircularFileInfo } from '../src/components/DocumentScannerModal';
 import { CircularAnalyzerModal } from '../src/components/CircularAnalyzerModal';
 import type { TeacherProfile } from '../src/types';
+import { installSignedInAnalysisClient } from './helpers/analysisClientSession';
+installSignedInAnalysisClient();
+
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 

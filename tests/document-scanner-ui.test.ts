@@ -5,6 +5,9 @@ import { create, act } from 'react-test-renderer';
 import { CURRICULAR_SCOPE_EMPTY_MESSAGE, DocumentScannerModal, SCAN_MODAL_BODY_ID, SCAN_MERGE_CHOICE_ID, scrollModalBodyToTop, scrollSectionIntoView } from '../src/components/DocumentScannerModal';
 import { OFFLINE_ANALYSIS_MESSAGE, MAX_DOCUMENT_BYTES } from '../src/utils/documentScanner';
 import type { Student, TeacherProfile, TimetableSlot } from '../src/types';
+import { installSignedInAnalysisClient } from './helpers/analysisClientSession';
+installSignedInAnalysisClient();
+
 
 /**
  * "Scansiona documento" — test UI (componenti):
