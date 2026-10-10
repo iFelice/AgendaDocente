@@ -63,6 +63,15 @@ export const EventMergeModal: React.FC<EventMergeModalProps> = ({ base, other, c
           </div>
         </div>
 
+        {plan.hint && (
+          <p
+            data-merge-timing-hint
+            className="rounded-lg border border-blue-200 bg-blue-50/60 px-3 py-2 text-[11px] text-blue-900"
+          >
+            {plan.hint.text}
+          </p>
+        )}
+
         {plan.fields.length > 0 ? (
           <section aria-label="Scelte da fare" className="space-y-3">
             <h3 className="text-xs font-bold uppercase tracking-wide text-stone-500">Da scegliere</h3>

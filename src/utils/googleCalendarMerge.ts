@@ -1,6 +1,12 @@
 import type { CalendarEvent, EventCategory } from "../types";
 import { effectiveDeadlineDate } from "./dates";
-import { findEventMatch, type EventMatchCandidate } from "./eventMatching";
+import {
+  extractTimesFromTitle,
+  findAffinityMatch,
+  findEventMatch,
+  titleTimeAgreesWithEvent,
+  type EventMatchCandidate,
+} from "./eventMatching";
 
 /**
  * Unione di un impegno importato da Google Calendar con il suo doppione creato nell'app.
@@ -52,6 +58,11 @@ function toMatchCandidate(event: CalendarEvent): EventMatchCandidate {
  * nato nell'app è tale se ha orari sovrapposti o titoli equivalenti. La decisione è
  * quella di `findEventMatch` (la stessa dell'import da circolare), non una copia.
  *
+ * Quando quei criteri non bastano si aggiunge l'affinità (`findAffinityMatch`): un
+ * consiglio scritto male da una parte può avere l'orario nel titolo e un orario
+ * contiguo dall'altra. È un avviso in più, non una fusione: qui nulla viene
+ * modificato e l'unione resta una scelta esplicita del docente.
+ *
  * Ogni impegno compare in al più una coppia. Un impegno dell'app già collegato a Google
  * (`googleEventId`) non è candidato: è già un collegamento, non un doppione da unire.
  * Restituisce una mappa in entrambi i versi: id → impegno accoppiato.
@@ -69,7 +80,10 @@ export function findPossibleDuplicates(events: CalendarEvent[]): Map<string, Cal
   for (const dayEvents of byDay.values()) {
     let available = dayEvents.filter(event => !isGoogleImportedEvent(event) && !event.googleEventId);
     for (const google of dayEvents.filter(isGoogleImportedEvent)) {
-      const match = findEventMatch(toMatchCandidate(google), available);
+      const candidate = toMatchCandidate(google);
+      const direct = findEventMatch(candidate, available);
+      // Una sola sovrapposizione non è un doppione: si valuta comunque l'affinità.
+      const match = direct && direct.kind !== "sovrapposizione" ? direct : findAffinityMatch(candidate, available) ?? direct;
       if (!match) continue;
       pairs.set(google.id, match.event);
       pairs.set(match.event.id, google);
@@ -183,10 +197,59 @@ export interface MergeFieldPreview {
   otherValue?: string;
   /** Pieni e diversi: l'utente sceglie. Uguali e vuoti non compaiono qui (vedi `summary`). */
   status: "choice";
-  /** Preselezione: valore della base (per il link, quello presente: qui entrambi sono pieni, quindi la base). */
+  /** Preselezione: valore della base (per il link, quello presente; per l'orario, quello coerente col titolo). */
   defaultChoice: MergeChoice;
   /** Solo per le note. */
   allowBoth: boolean;
+}
+
+/**
+ * Riga breve dell'anteprima che spiega una preselezione: quale titolo dichiara
+ * quell'orario e che cosa si propone.
+ */
+export interface MergeFieldHint {
+  field: MergeField;
+  /** Lato proposto: è l'orario (o il campo) che il titolo rende coerente. */
+  choice: MergeChoice;
+  text: string;
+}
+
+/** Etichetta del lato dell'unione, per la riga di spiegazione. */
+function mergeSideLabel(event: CalendarEvent): string {
+  if (isGoogleImportedEvent(event) || event.googleEventId) return "evento Google";
+  return event.sourceType === "circolare" ? "impegno della circolare" : "impegno in agenda";
+}
+
+/** Orario "HH:MM–HH:MM" o "HH:MM" scritto nel titolo di un impegno, se c'è. */
+function titleTimeRangeText(event: CalendarEvent): string | undefined {
+  const declared = extractTimesFromTitle(event.title);
+  if (!declared.start) return undefined;
+  return declared.end ? `${declared.start}–${declared.end}` : declared.start;
+}
+
+/**
+ * Orario dell'unione già deciso dal titolo: se il titolo di un impegno dichiara un
+ * orario che coincide con l'orario effettivo dell'altro, nell'anteprima si
+ * preseleziona quell'orario (che è quello coerente col titolo) e lo si dice con una
+ * riga breve. Nessun campo viene cambiato da solo: resta una scelta dell'utente.
+ */
+export function mergeTimingHint(base: CalendarEvent, other: CalendarEvent): MergeFieldHint | undefined {
+  if (base.isAllDay || other.isAllDay) return undefined;
+  const sides: { titled: CalendarEvent; other: CalendarEvent; choice: MergeChoice }[] = [
+    { titled: other, other: base, choice: "base" },
+    { titled: base, other, choice: "other" },
+  ];
+  for (const side of sides) {
+    if (!titleTimeAgreesWithEvent(side.titled, side.other)) continue;
+    const range = titleTimeRangeText(side.titled);
+    if (!range) continue;
+    return {
+      field: "timing",
+      choice: side.choice,
+      text: `Il titolo dell'${mergeSideLabel(side.titled)} indica ${range}: proposto questo orario.`,
+    };
+  }
+  return undefined;
 }
 
 export interface MergePlan {
@@ -196,6 +259,8 @@ export interface MergePlan {
   summary: { field: MergeField; label: string; value: string }[];
   /** Impegno risultante: ha id, sourceType e collegamenti alla circolare della base. */
   merged: CalendarEvent;
+  /** Spiegazione della preselezione dell'orario, quando il titolo di un lato lo dichiara. */
+  hint?: MergeFieldHint;
 }
 
 export type MergeChoices = Partial<Record<MergeField, MergeChoice>>;
@@ -207,6 +272,7 @@ function sideFor(
   other: CalendarEvent,
   categoryLabel: (category: EventCategory) => string,
   choices: MergeChoices,
+  defaultChoice: MergeChoice,
 ): MergeChoice | null {
   const baseValue = mergeFieldValue(base, field, categoryLabel);
   const otherValue = mergeFieldValue(other, field, categoryLabel);
@@ -214,13 +280,15 @@ function sideFor(
   if (!otherValue) return "base";
   if (!baseValue) return "other";
   if (fold(baseValue) === fold(otherValue)) return "base";
-  return choices[field] ?? "base";
+  return choices[field] ?? defaultChoice;
 }
 
 /**
  * Anteprima e risultato dell'unione. Campo per campo:
- * - uguali → un solo valore; vuoto da una parte → quello pieno;
- * - pieni e diversi → scelta (preselezione: base, per il link quello presente);
+ * - uguali → un solo valore; vuoto da una parte → quello pieno (così il link Meet di
+ *   Google non si perde mai, nemmeno quando l'altro lato non ce l'ha);
+ * - pieni e diversi → scelta (preselezione: base, per il link quello presente, per
+ *   l'orario quello coerente col titolo di un impegno, vedi `mergeTimingHint`);
  * - per le note è disponibile anche "tieni entrambe".
  */
 export function planMerge(
@@ -231,8 +299,10 @@ export function planMerge(
 ): MergePlan {
   const fields: MergeFieldPreview[] = [];
   const picked: Partial<Record<MergeField, MergeChoice>> = {};
+  const hint = mergeTimingHint(base, other);
 
   for (const field of MERGE_FIELD_ORDER) {
+    const defaultChoice: MergeChoice = field === "timing" ? hint?.choice ?? "base" : "base";
     const baseValue = mergeFieldValue(base, field, categoryLabel);
     const otherValue = mergeFieldValue(other, field, categoryLabel);
     if (baseValue && otherValue && fold(baseValue) !== fold(otherValue)) {
@@ -242,11 +312,11 @@ export function planMerge(
         baseValue,
         otherValue,
         status: "choice",
-        defaultChoice: "base",
+        defaultChoice,
         allowBoth: field === "notes",
       });
     }
-    picked[field] = sideFor(field, base, other, categoryLabel, choices) ?? undefined;
+    picked[field] = sideFor(field, base, other, categoryLabel, choices, defaultChoice) ?? undefined;
   }
 
   const notesChoice = choices.notes;
@@ -302,5 +372,7 @@ export function planMerge(
     if (value) summary.push({ field, label: MERGE_FIELD_LABELS[field], value });
   }
 
-  return { fields, summary, merged };
+  // La riga di spiegazione ha senso solo se l'orario è davvero una scelta da fare.
+  const timingIsChoice = fields.some(field => field.field === "timing");
+  return { fields, summary, merged, ...(hint && timingIsChoice ? { hint } : {}) };
 }

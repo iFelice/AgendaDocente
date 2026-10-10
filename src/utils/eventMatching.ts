@@ -91,12 +91,52 @@ export function areCategoriesCompatible(catA?: EventCategory, catB?: EventCatego
   return true;
 }
 
+/**
+ * Sigla di classe in un testo libero: cifra dell'anno (1-5), eventuale decorazione
+ * ("^", "°", "ª") o spazio, lettera della sezione. Unica fonte per TUTTA
+ * l'estrazione di classi (singola e multipla), così le due letture non divergono.
+ * La lettera non può essere seguita da altre lettere o cifre: "1Cat" non è "1C".
+ */
+const CLASS_TEXT_RE = /\b([1-5])(?:\s*[\^°ª]\s*|\s+|\s*)([A-Za-z])(?![A-Za-z0-9])/gi;
+
+/**
+ * Tutte le classi scritte in un testo, normalizzate in "1C" e nell'ordine in cui
+ * compaiono, senza duplicati. Riconosce "1C", "1 C", "1^C", "1ªC", "1° C",
+ * "classe 1 C" e gli elenchi ("1C, 1N" -> ["1C", "1N"]).
+ */
+export function extractClassTokensFromText(text?: string | null): string[] {
+  if (!text) return [];
+  const found: string[] = [];
+  for (const match of text.matchAll(CLASS_TEXT_RE)) {
+    const sigla = `${match[1]}${match[2].toUpperCase()}`;
+    if (!found.includes(sigla)) found.push(sigla);
+  }
+  return found;
+}
+
 /** Estrae una possibile classe (es. "1A", "3D", "5B") da una stringa. */
 export function extractClassToken(text: string): string | null {
-  if (!text) return null;
-  const match = /\b([1-5]\s*[a-z]|[1-5]ª\s*[a-z])\b/i.exec(text);
-  if (!match) return null;
-  return match[1].toUpperCase().replace(/[\sª]/g, "");
+  return extractClassTokensFromText(text)[0] ?? null;
+}
+
+/**
+ * Classi di un impegno: quelle dichiarate nei campi classe (un campo può contenere
+ * un elenco: "1C, 1N") più quelle scritte nel titolo. Insieme, perché un impegno
+ * importato da Google non ha mai `className`: la classe c'è solo se il titolo la dice.
+ */
+export function getEventClassTokens(event: {
+  title?: string | null;
+  className?: string | null;
+  /** Elenco di classi in un campo diverso da `className` (es. "classi" di una circolare). */
+  classi?: string | null;
+}): string[] {
+  const found: string[] = [];
+  for (const source of [event.className, event.classi, event.title]) {
+    for (const sigla of extractClassTokensFromText(source)) {
+      if (!found.includes(sigla)) found.push(sigla);
+    }
+  }
+  return found;
 }
 
 /**
@@ -194,6 +234,97 @@ export function timeToMinutes(time?: string | null): number | null {
   if (!Number.isInteger(hours) || !Number.isInteger(minutes)) return null;
   if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
   return hours * 60 + minutes;
+}
+
+/** Orario scritto dentro un titolo, già normalizzato in "HH:MM". */
+export interface TitleTimes {
+  start?: string;
+  end?: string;
+}
+
+/**
+ * Orario completo in un titolo: "16:30" o "16.30". I due punti (o il punto) sono
+ * obbligatori: è quello che distingue un orario da una data ("13/10" non ne ha).
+ * - `(?<![\d:])` esclude i pezzi finali di un numero lungo o di un orario con i secondi;
+ * - `(?!\d)` esclude che i minuti siano troncati ("16.305" non è un orario).
+ */
+const FULL_TIME_IN_TITLE_RE = /(?<![\d:])(\d{1,2})[.:](\d{2})(?!\d)/g;
+
+/** Ora sola, priva di minuti: credibile SOLO dopo "ore", "dalle", "alle" (o "ora"). */
+const BARE_HOUR_IN_TITLE_RE = /(?:\bore|\bora|\bdalle|\balle)\s+(\d{1,2})\b(?!\s*[.:]\s*\d)/g;
+
+/**
+ * Testo ammesso fra due orari dello stesso titolo: un trattino, una barra, una
+ * virgola o le congiunzioni usate a scuola ("dalle 16 alle 17", "16:30-17:15",
+ * "16:30 e 17:15"). Un testo più lungo ("e recupero") NON è un intervallo, e
+ * "ore" non lo è nemmeno: separa un orario dalla data che lo precede.
+ */
+function isTitleTimeRangeGap(gap: string): boolean {
+  const cleaned = gap.toLowerCase().replace(/[^a-z]/g, " ").replace(/\s+/g, " ").trim();
+  if (!cleaned) return true;
+  return /^(?:e|ed|ad|alle|dalle)(?:\s+(?:e|ed|ad|alle|dalle))*$/.test(cleaned);
+}
+
+const padTime = (value: number): string => String(value).padStart(2, "0");
+
+/**
+ * Orari scritti nel titolo di un impegno: "Consiglio 1 C del 13 Ottobre ore
+ * 16:30/17:15", "dalle 16.30 alle 17.15", "ore 16:30 alle 17:15", "16:30-17:15".
+ *
+ * Restituisce al massimo una coppia (inizio, fine) in "HH:MM": il primo orario del
+ * titolo e, se legato da un separatore da intervallo, il secondo. Date ("13/10"),
+ * sigle di classe ("1C") e numeri isolati non producono alcun orario; un'ora senza
+ * minuti è ammessa solo dopo "ore"/"dalle"/"alle".
+ */
+export function extractTimesFromTitle(title?: string | null): TitleTimes {
+  if (!title) return {};
+  const text = String(title);
+
+  interface TimeToken {
+    from: number;
+    to: number;
+    hours: number;
+    minutes: number;
+    /** Preceduto da "ore"/"dalle"/"alle": è l'unico che dichiara davvero un orario. */
+    anchored: boolean;
+  }
+  const valid = (hours: number, minutes: number): boolean =>
+    Number.isInteger(hours) && Number.isInteger(minutes) && hours >= 0 && hours <= 23 && minutes >= 0 && minutes <= 59;
+
+  const found: TimeToken[] = [];
+  for (const match of text.matchAll(FULL_TIME_IN_TITLE_RE)) {
+    const hours = Number(match[1]);
+    const minutes = Number(match[2]);
+    if (!valid(hours, minutes)) continue;
+    const from = match.index ?? 0;
+    found.push({ from, to: from + match[0].length, hours, minutes, anchored: false });
+  }
+  for (const match of text.matchAll(BARE_HOUR_IN_TITLE_RE)) {
+    const hours = Number(match[1]);
+    if (!Number.isInteger(hours) || hours < 0 || hours > 23) continue;
+    const from = (match.index ?? 0) + match[0].lastIndexOf(match[1]);
+    if (found.some((token) => from >= token.from && from < token.to)) continue;
+    found.push({ from, to: from + match[1].length, hours, minutes: 0, anchored: true });
+  }
+  found.sort((a, b) => a.from - b.from);
+  if (found.length === 0) return {};
+
+  const format = (token: TimeToken): string => `${padTime(token.hours)}:${padTime(token.minutes)}`;
+
+  // La coppia è l'intervallo dichiarato dal titolo: la prima adiacente legata da
+  // un separatore da intervallo ("16:30/17:15", "dalle 16 alle 17").
+  for (let index = 0; index + 1 < found.length; index++) {
+    const from = found[index];
+    const to = found[index + 1];
+    if (isTitleTimeRangeGap(text.slice(from.to, to.from))) {
+      return { start: format(from), end: format(to) };
+    }
+  }
+
+  // Nessun intervallo: un orario solo, dando la precedenza a uno annunciato da
+  // "ore"/"dalle"/"alle" (in un titolo la data può essere scritta come "13.10").
+  const single = found.find((token) => token.anchored) ?? found[0];
+  return { start: format(single) };
 }
 
 /** Intervallo orario di un impegno, o null se non è confrontabile sugli orari. */
@@ -536,8 +667,12 @@ export function isIdenticalEventUpdate(existing: CalendarEvent, candidate: Event
   return describeEventDifferences(existing, candidate).length === 0;
 }
 
-/** Tipo di riconoscimento: per titolo (possibile aggiornamento) o per orario. */
-export type EventMatchKind = "titolo" | "orario" | "sovrapposizione";
+/**
+ * Tipo di riconoscimento: per titolo (possibile aggiornamento) o per orario.
+ * `"affinita"` è prodotto solo da `findAffinityMatch` e vale solo come SUGGERIMENTO
+ * di doppione: non aggiorna e non fonde nulla (vedi i vincoli in `findAffinityMatch`).
+ */
+export type EventMatchKind = "titolo" | "orario" | "sovrapposizione" | "affinita";
 
 export interface EventMatchResult {
   /** Impegno già in agenda riconosciuto. */
@@ -665,6 +800,173 @@ export function findEventMatch(
   return { event: best.existing, kind, others: overlapping.length - 1 };
 }
 
+/** Minuti massimi di distanza fra due impegni affini perché contino come vicini. */
+const AFFINITY_MAX_GAP_MINUTES = 60;
+
+/**
+ * Parole che annunciano una riunione collegiale. Si confrontano per RADICE con
+ * `titleWordStem` (già usata dal confronto dei titoli), così
+ * "consiglio/consigli", "colloquio/colloqui", "dipartimento/dipartimenti",
+ * "scrutinio/scrutini" e "assemblea/assemblee" coincidono.
+ */
+const MEETING_KEYWORD_STEMS: ReadonlySet<string> = new Set(
+  [
+    "consiglio", "collegio", "dipartimento", "scrutinio", "glo", "gli",
+    "colloqui", "ricevimento", "riunione", "incontro", "assemblea",
+  ].map(titleWordStem)
+);
+
+/**
+ * Parole di un testo ridotte alla radice, per cercare le parole "di riunione".
+ * Qui NON si usa `normalizeEventTitle`: gli articoli si tolgono lì, ma "GLI"
+ * (Gruppi di Lavoro per l'Inclusione) è anche un articolo e sparirebbe.
+ */
+function meetingWordsOf(text?: string | null): string[] {
+  if (!text) return [];
+  const folded = String(text)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\bcdc\b/g, "consiglio classe");
+  return folded
+    .split(/[^a-z0-9]+/)
+    .filter((word) => word.length > 0 && !CLASS_TOKEN_RE.test(word))
+    .map(titleWordStem);
+}
+
+/**
+ * Vera se i due testi condividono almeno una parola che annuncia una riunione
+ * (consiglio, collegio, dipartimento, scrutinio, GLO, GLI, colloqui,
+ * ricevimento, riunione, incontro, assemblea).
+ */
+export function sharesMeetingKeyword(textA?: string | null, textB?: string | null): boolean {
+  const stems = new Set(meetingWordsOf(textA).filter((word) => MEETING_KEYWORD_STEMS.has(word)));
+  if (stems.size === 0) return false;
+  return meetingWordsOf(textB).some((word) => stems.has(word));
+}
+
+/**
+ * Minuti che separano due finestre orarie: 0 quando si sovrappongono o si
+ * toccano (15:30–16:30 e 16:30–17:15), altrimenti la distanza più breve fra
+ * la fine di una e l'inizio dell'altra.
+ */
+function gapBetweenWindows(a: TimeWindow, b: TimeWindow): number {
+  const endA = a.end ?? a.start;
+  const endB = b.end ?? b.start;
+  if (a.start <= endB && b.start <= endA) return 0;
+  return Math.min(Math.abs(b.start - endA), Math.abs(a.start - endB));
+}
+
+/** Un impegno ridotto a ciò che serve per giudicare l'affinità. */
+export type AffinityCandidate = EventMatchCandidate & { id?: string; deadlineDate?: string };
+
+/** Lezioni, scadenze e tutto il giorno restano fuori dal giudizio di affinità. */
+function isExcludedFromAffinity(item: AffinityCandidate): boolean {
+  return isDeadlineLike(item) || isLessonLike(item) || !!cleanEventField(item.deadlineDate) || item.isAllDay === true;
+}
+
+/**
+ * L'orario scritto nel titolo di `titled` coincide con l'orario effettivo di
+ * `other`: basta l'inizio; se il titolo dichiara anche la fine, devono coincidere
+ * entrambi.
+ */
+export function titleTimeAgreesWithEvent(
+  titled: { title?: string | null },
+  other: { startTime?: string | null; endTime?: string | null; isAllDay?: boolean | null }
+): boolean {
+  const declared = extractTimesFromTitle(titled.title);
+  const declaredStart = timeToMinutes(declared.start);
+  const otherStart = timeToMinutes(other.startTime);
+  if (declaredStart === null || otherStart === null || declaredStart !== otherStart) return false;
+  const declaredEnd = timeToMinutes(declared.end);
+  const otherEnd = timeToMinutes(other.endTime);
+  if (declaredEnd !== null && otherEnd !== null) return declaredEnd === otherEnd;
+  return true;
+}
+
+export interface EventAffinity {
+  /** 0 = sovrapposti o contigui; altrimenti i minuti fra i due intervalli. */
+  gapMinutes: number;
+  /** L'orario del titolo di uno dei due coincide con l'orario reale dell'altro. */
+  titleTimeAgrees: boolean;
+}
+
+/**
+ * Giudizio di AFFINITÀ fra due impegni: stesso giorno, due riunioni dello stesso
+ * tipo sulla stessa classe, con orari vicini o dichiarati nel titolo. Restituisce
+ * null quando anche una sola delle condizioni manca.
+ *
+ * Condizioni (tutte necessarie):
+ * 1. stessa data;
+ * 2. nessuno dei due è lezione, scadenza o tutto il giorno;
+ * 3. entrambi hanno almeno una classe e gli insiemi di classi si intersecano;
+ * 4. condividono almeno una parola "di riunione" per radice;
+ * 5. e inoltre almeno una fra:
+ *    (i) orari sovrapposti, contigui o distanti al massimo 60 minuti;
+ *    (ii) l'orario del titolo di uno coincide con l'orario effettivo dell'altro.
+ */
+export function evaluateEventAffinity(a: AffinityCandidate, b: AffinityCandidate): EventAffinity | null {
+  if (!a.date || a.date !== b.date) return null;
+  if (!cleanEventField(a.title) || !cleanEventField(b.title)) return null;
+  if (isExcludedFromAffinity(a) || isExcludedFromAffinity(b)) return null;
+
+  const classesA = getEventClassTokens(a);
+  const classesB = getEventClassTokens(b);
+  if (classesA.length === 0 || classesB.length === 0) return null;
+  if (!classesA.some((sigla) => classesB.includes(sigla))) return null;
+
+  if (!sharesMeetingKeyword(a.title, b.title)) return null;
+
+  const windowA = timeWindowOf(a);
+  const windowB = timeWindowOf(b);
+  const gapMinutes = windowA && windowB ? gapBetweenWindows(windowA, windowB) : Number.POSITIVE_INFINITY;
+  const titleTimeAgrees = titleTimeAgreesWithEvent(a, b) || titleTimeAgreesWithEvent(b, a);
+  if (gapMinutes > AFFINITY_MAX_GAP_MINUTES && !titleTimeAgrees) return null;
+
+  return { gapMinutes, titleTimeAgrees };
+}
+
+/** Vera se i due impegni sono affini: possibile doppione da suggerire, mai da fondere. */
+export function areEventsAffine(a: AffinityCandidate, b: AffinityCandidate): boolean {
+  return evaluateEventAffinity(a, b) !== null;
+}
+
+/**
+ * Cerca fra gli impegni già in agenda quello più affine al candidato: il possibile
+ * doppione che gli altri criteri non riconoscono (orari contigui o titolo che
+ * dichiara l'orario dell'altro).
+ *
+ * È un SUGGERIMENTO e vale solo per l'avviso "Possibile doppione · Unisci"
+ * (`findPossibleDuplicates`): non aggiorna e non fonde nulla in automatico, quindi
+ * non è usato né da `findEventMatch` né da `assignDocumentMatches` (import da
+ * circolare) né dall'import Google.
+ */
+export function findAffinityMatch(
+  candidate: AffinityCandidate,
+  existingEvents: CalendarEvent[] | undefined | null
+): EventMatchResult | null {
+  if (!existingEvents || existingEvents.length === 0) return null;
+  if (!candidate.date || !candidate.title) return null;
+
+  const scored: { event: CalendarEvent; affinity: EventAffinity }[] = [];
+  for (const event of existingEvents) {
+    if (event.date !== candidate.date || event.id === candidate.id) continue;
+    const affinity = evaluateEventAffinity(candidate, event);
+    if (affinity) scored.push({ event, affinity });
+  }
+  if (scored.length === 0) return null;
+
+  // Spareggio: prima chi concorda con l'orario scritto nel titolo, poi l'intervallo
+  // più vicino, poi l'ordine in agenda.
+  scored.sort((a, b) => {
+    if (a.affinity.titleTimeAgrees !== b.affinity.titleTimeAgrees) return a.affinity.titleTimeAgrees ? -1 : 1;
+    if (a.affinity.gapMinutes !== b.affinity.gapMinutes) return a.affinity.gapMinutes - b.affinity.gapMinutes;
+    return 0;
+  });
+
+  return { event: scored[0].event, kind: "affinita", others: scored.length - 1 };
+}
+
 /** Abbinamento che OCCUPA un impegno già in agenda: la sola sovrapposizione non compare qui. */
 export interface OccupiedEventMatch {
   event: CalendarEvent;
@@ -762,7 +1064,7 @@ export function assignDocumentMatches(
       .map((row) => ({ row, match: findEventMatch(candidates[row], available) }))
       .filter(
         (entry): entry is { row: number; match: EventMatchResult & { kind: "titolo" | "orario" } } =>
-          !!entry.match && entry.match.kind !== "sovrapposizione"
+          !!entry.match && (entry.match.kind === "titolo" || entry.match.kind === "orario")
       );
     if (claims.length === 0) break;
 
