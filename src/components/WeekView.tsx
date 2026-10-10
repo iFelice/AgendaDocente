@@ -24,6 +24,8 @@ import {
 } from "../utils/schoolDayPeriods";
 import type { ScheduledAssessmentCalendarItem } from "../utils/scheduledAssessmentCalendar";
 import { scheduledAssessmentTypeLabel } from "../utils/scheduledAssessmentCalendar";
+import { GoogleCalendarBadge, PossibleDuplicateNotice } from "./GoogleMergeControls";
+import { findPossibleDuplicates, showsGoogleCalendarLabel } from "../utils/googleCalendarMerge";
 import { readWeeklyCollapse, writeWeeklyCollapse, type CollapseGroup } from "../utils/collapsePreferences";
 
 interface WeekViewProps {
@@ -171,6 +173,8 @@ export const WeekView: React.FC<WeekViewProps> = ({
   });
 
   const circularEventsCount = events.filter((e) => e.sourceType === "circolare").length;
+  /** Possibili doppioni Google ↔ app, per giorno. */
+  const duplicatePairs = React.useMemo(() => findPossibleDuplicates(events), [events]);
 
   // Tipo orario della richiesta di modifica: fonte autorevole da App
   // (timetableType = activeType dell'orario visualizzato). Per i chiamanti
@@ -539,6 +543,10 @@ export const WeekView: React.FC<WeekViewProps> = ({
                               <FileText className="w-3 h-3 flex-shrink-0 text-amber-600" />
                               <span className="truncate">Da Circolare</span>
                             </div>
+                          )}
+                          {showsGoogleCalendarLabel(ev) && <GoogleCalendarBadge variant="compact" />}
+                          {duplicatePairs.has(ev.id) && (
+                            <PossibleDuplicateNotice event={ev} partner={duplicatePairs.get(ev.id)!} className="text-[10px]" />
                           )}
 
                           <div className="flex items-center space-x-1 text-[10px] opacity-80">

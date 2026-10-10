@@ -152,6 +152,16 @@ export interface GoogleCalendarMergeResult {
   ignoredCancelled: number;
 }
 
+/**
+ * Unica modifica consentita a un impegno dell'app collegato a Google: se il suo link della
+ * videochiamata è vuoto e Google ne pubblica uno, il link viene aggiunto. Un link già
+ * presente non viene mai sostituito; tutti gli altri campi restano quelli dell'app.
+ */
+function withGoogleMeetingLinkIfEmpty(existing: CalendarEvent, mapped: CalendarEvent): CalendarEvent {
+  if (existing.meetingUrl || !mapped.meetingUrl) return existing;
+  return { ...existing, meetingUrl: mapped.meetingUrl };
+}
+
 /** Pure googleEventId-only merge. Agenda-origin records are never changed. */
 export function mergeGoogleCalendarEvents(
   localEvents: CalendarEvent[],
@@ -177,6 +187,7 @@ export function mergeGoogleCalendarEvents(
     }
     const existing = events[index];
     if (existing.sourceType !== "google_calendar") {
+      events[index] = withGoogleMeetingLinkIfEmpty(existing, mapped);
       linked++;
       continue;
     }
@@ -255,7 +266,8 @@ export function mergeGoogleCalendarGroups(
       }
       const existing = events[index];
       if (existing.sourceType !== "google_calendar") {
-        // Agenda → Google record already linked to this remote event: never touched here.
+        // Impegno dell'app collegato (unito o inviato): non viene mai duplicato né sovrascritto.
+        events[index] = withGoogleMeetingLinkIfEmpty(existing, mapped);
         linked++;
         continue;
       }

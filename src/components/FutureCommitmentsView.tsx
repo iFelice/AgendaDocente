@@ -15,6 +15,8 @@ import {
   type FutureCommitmentSource,
 } from "../utils/futureCommitments";
 import { getSchoolYearBoundaries } from "../utils/schoolYear";
+import { findPossibleDuplicates, showsGoogleCalendarLabel } from "../utils/googleCalendarMerge";
+import { GOOGLE_CALENDAR_LABEL, PossibleDuplicateNotice } from "./GoogleMergeControls";
 
 /**
  * "Note e impegni": proiezione read-only degli impegni operativi, con Archivio
@@ -57,10 +59,12 @@ const WEEKDAY_ABBREVIATIONS_IT = ["dom", "lun", "mar", "mer", "gio", "ven", "sab
 const CommitmentRow: React.FC<{
   item: FutureCommitmentItem;
   todayIso: string;
+  /** Possibili doppioni Google ↔ app (per id), calcolati dalla vista. */
+  duplicatePairs: Map<string, CalendarEvent>;
   onEditEvent?: (event: CalendarEvent) => void;
   onEditNote?: (event: CalendarEvent) => void;
   onToggleComplete?: (id: string) => void | Promise<void | false> | false;
-}> = ({ item, todayIso, onEditEvent, onEditNote, onToggleComplete }) => {
+}> = ({ item, todayIso, duplicatePairs, onEditEvent, onEditNote, onToggleComplete }) => {
   const editCallback = item.source === "nota" ? onEditNote : onEditEvent;
   const clickable = item.kind === "calendar-event" && !!editCallback && !!item.originalEvent;
   // Il completamento è offerto sulle note personali: restano CalendarEvent con `completed`.
@@ -90,6 +94,12 @@ const CommitmentRow: React.FC<{
           >
             {FUTURE_COMMITMENT_SOURCE_LABELS[item.source]}
           </span>
+          {/* Un impegno unito (es. circolare + Google) mostra entrambe le origini. */}
+          {item.source !== "google" && event && showsGoogleCalendarLabel(event) && (
+            <span data-commitment-google-label className="shrink-0 inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold border bg-blue-50 text-blue-800 border-blue-200">
+              {GOOGLE_CALENDAR_LABEL}
+            </span>
+          )}
         </div>
         <div data-commitment-details-row className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-stone-600">
           <span data-commitment-time className="shrink-0 whitespace-nowrap font-medium tabular-nums">{timeLabel}</span>
@@ -138,9 +148,16 @@ const CommitmentRow: React.FC<{
   // Il link è un FRATELLO della riga, non un discendente: la riga tappabile è un
   // <button>, e un <a> dentro un <button> non è HTML valido (il tap sul link
   // finirebbe per aprire anche l'editor).
-  if (!completable && !meetingUrl) return row;
+  // L'avviso di doppione è un FRATELLO della riga, come il link: la riga può essere un <button>.
+  const partner = event ? duplicatePairs.get(event.id) : undefined;
+  const duplicateNotice = event && partner
+    ? <PossibleDuplicateNotice event={event} partner={partner} className="mt-1" />
+    : null;
+
+  if (!completable && !meetingUrl) return <>{row}{duplicateNotice}</>;
 
   return (
+    <>
     <div className="flex items-start gap-2">
       {completable && (
         <button
@@ -158,6 +175,8 @@ const CommitmentRow: React.FC<{
       {row}
       {meetingUrl && <EventMeetingLink event={event} label={item.title} className="mt-0.5" />}
     </div>
+    {duplicateNotice}
+    </>
   );
 };
 
@@ -181,6 +200,7 @@ export const FutureCommitmentsView: React.FC<FutureCommitmentsViewProps> = ({
     isValidDate(todayIso) ? parseCivilDate(todayIso) : new Date(),
   ).end;
   const items = deriveFutureCommitments({ events, scheduledAssessments, students, todayIso });
+  const duplicatePairs = React.useMemo(() => findPossibleDuplicates(events), [events]);
   const { withinSchoolYear, beyondSchoolYear } = splitFutureCommitmentsBySchoolYearEnd(items, schoolYearEnd);
   const groups = groupFutureCommitments(withinSchoolYear, todayIso);
   const archiveItems = deriveArchiveCommitments({ events, scheduledAssessments, students, todayIso });
@@ -223,7 +243,7 @@ export const FutureCommitmentsView: React.FC<FutureCommitmentsViewProps> = ({
             </h3>
             <div className="space-y-2">
               {group.items.map(item => (
-                <CommitmentRow key={item.id} item={item} todayIso={todayIso} onEditEvent={onEditEvent} onEditNote={onEditNote} onToggleComplete={onToggleComplete} />
+                <CommitmentRow key={item.id} item={item} todayIso={todayIso} duplicatePairs={duplicatePairs} onEditEvent={onEditEvent} onEditNote={onEditNote} onToggleComplete={onToggleComplete} />
               ))}
             </div>
           </section>
@@ -265,7 +285,7 @@ export const FutureCommitmentsView: React.FC<FutureCommitmentsViewProps> = ({
           {showArchive && (
             <div id="archive-commitments-list" data-archive-commitments-list data-past-commitments-list className="mt-2 space-y-2">
               {archiveItems.map(item => (
-                <CommitmentRow key={item.id} item={item} todayIso={todayIso} onEditEvent={onEditEvent} onEditNote={onEditNote} />
+                <CommitmentRow key={item.id} item={item} todayIso={todayIso} duplicatePairs={duplicatePairs} onEditEvent={onEditEvent} onEditNote={onEditNote} />
               ))}
             </div>
           )}

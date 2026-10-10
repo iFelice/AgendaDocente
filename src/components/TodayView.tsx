@@ -18,6 +18,9 @@ import {
 } from "lucide-react";
 import { CalendarEvent, TeacherProfile, TimeSlotConfig, TimetableSlot, TimetableType } from "../types";
 import { EventMeetingLink } from "./EventMeetingLink";
+import { GoogleCalendarBadge, PossibleDuplicateNotice } from "./GoogleMergeControls";
+import { findPossibleDuplicates, showsGoogleCalendarLabel } from "../utils/googleCalendarMerge";
+import { isRelevanceReasonText } from "../utils/circularRelevance";
 import type { ScheduledAssessmentCalendarItem } from "../utils/scheduledAssessmentCalendar";
 import { scheduledAssessmentTypeLabel } from "../utils/scheduledAssessmentCalendar";
 import { readDailyCollapse, writeDailyCollapse, type CollapseGroup } from "../utils/collapsePreferences";
@@ -152,6 +155,8 @@ export const TodayView: React.FC<TodayViewProps> = ({
   /** Il badge istituto ha senso solo se ce n'è più di uno da distinguere. */
   const showSchoolBadge = schools.length > 1;
   const [confirmingDeleteEventId, setConfirmingDeleteEventId] = React.useState<string | null>(null);
+  /** Possibili doppioni Google ↔ app (per giorno), calcolati una volta per cambio di elenco. */
+  const duplicatePairs = React.useMemo(() => findPossibleDuplicates(events), [events]);
   // Selected civil date (defaults to the real today, or to initialDateIso when
   // the parent restores a previously viewed context). Navigation is day-by-day
   // and must survive month/year/weekend crossings because it works on local
@@ -713,6 +718,7 @@ export const TodayView: React.FC<TodayViewProps> = ({
                               Da Circolare
                             </span>
                           )}
+                          {showsGoogleCalendarLabel(ev) && <GoogleCalendarBadge />}
                         </div>
 
                         <div className="flex items-center gap-1">
@@ -760,6 +766,10 @@ export const TodayView: React.FC<TodayViewProps> = ({
 
                       <h3 className="text-sm font-semibold text-stone-900">{ev.title}</h3>
 
+                      {duplicatePairs.has(ev.id) && (
+                        <PossibleDuplicateNotice event={ev} partner={duplicatePairs.get(ev.id)!} />
+                      )}
+
                       <div className="flex flex-wrap items-center gap-3 text-xs text-stone-600">
                         <div className="flex items-center space-x-1">
                           <Clock className="w-3.5 h-3.5 text-stone-400" />
@@ -778,7 +788,10 @@ export const TodayView: React.FC<TodayViewProps> = ({
                         <EventMeetingLink event={ev} label={ev.title} className="-my-1.5" />
                       </div>
 
-                      {ev.notes && <p className="text-xs text-stone-500 bg-stone-50 p-2 rounded-md">{ev.notes}</p>}
+                      {/* Stessa regola di "Note e impegni": il motivo di pertinenza di una circolare non è una nota. */}
+                      {ev.notes && !(ev.sourceType === "circolare" && isRelevanceReasonText(ev.notes)) && (
+                        <p className="text-xs text-stone-500 bg-stone-50 p-2 rounded-md">{ev.notes}</p>
+                      )}
                     </div>
                   ))}
                 </div>

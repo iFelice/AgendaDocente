@@ -51,7 +51,7 @@ export const FUTURE_COMMITMENT_SOURCE_LABELS: Record<FutureCommitmentSource, str
   agenda: "Agenda",
   circolare: "Circolare",
   verifica: "Verifica",
-  google: "Google",
+  google: "Google Calendar",
   registro: "Registro",
   nota: "Nota",
 };

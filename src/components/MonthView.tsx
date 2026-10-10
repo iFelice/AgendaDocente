@@ -4,6 +4,8 @@ import { ChevronLeft, ChevronRight, Clock, MapPin, Plus, FileText, Trash2, Calen
 import { CalendarEvent } from "../types";
 import type { ScheduledAssessmentCalendarItem } from "../utils/scheduledAssessmentCalendar";
 import { scheduledAssessmentTypeLabel } from "../utils/scheduledAssessmentCalendar";
+import { PossibleDuplicateNotice } from "./GoogleMergeControls";
+import { findPossibleDuplicates, showsGoogleCalendarLabel } from "../utils/googleCalendarMerge";
 
 interface MonthViewProps {
   events: CalendarEvent[];
@@ -72,6 +74,8 @@ export const MonthView: React.FC<MonthViewProps> = ({
   };
 
   const circularEventsCount = events.filter((e) => e.sourceType === "circolare").length;
+  /** Possibili doppioni Google ↔ app, per giorno. */
+  const duplicatePairs = React.useMemo(() => findPossibleDuplicates(events), [events]);
 
   // Weekday headers (Lun, Mar, Mer, Gio, Ven, Sab, Dom)
   const weekdays = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"];
@@ -389,6 +393,14 @@ export const MonthView: React.FC<MonthViewProps> = ({
                       <FileText className="w-3.5 h-3.5 text-amber-600 flex-shrink-0" />
                       <span className="truncate">Da Circolare: {ev.sourceCircularTitle || "Scolastica"}</span>
                     </div>
+                  )}
+                  {showsGoogleCalendarLabel(ev) && (
+                    <div className="flex items-center space-x-1 text-[11px] text-blue-800 font-semibold">
+                      <span className="truncate">Google Calendar</span>
+                    </div>
+                  )}
+                  {duplicatePairs.has(ev.id) && (
+                    <PossibleDuplicateNotice event={ev} partner={duplicatePairs.get(ev.id)!} />
                   )}
 
                   <div className="flex items-center space-x-3 text-xs text-stone-500">
