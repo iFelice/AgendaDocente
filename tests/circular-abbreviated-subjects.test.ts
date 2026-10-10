@@ -5,6 +5,9 @@ import { detectSubjects, detectSubjectSigle, evaluateItemRelevance } from '../sr
 import { normalizeExtractedItems } from '../src/utils/circularParser';
 import { app } from '../server';
 import type { TeacherProfile } from '../src/types';
+import { analysisAuthHeaders, installAnalysisAuthFixture } from './helpers/analysisAuthFixture';
+
+installAnalysisAuthFixture();
 
 process.env.TEST_RATE_LIMIT = 'relaxed';
 
@@ -281,7 +284,7 @@ test('endpoint: prompt con formati orari/colonna DOCENTI, recupero orari e perti
   try {
     const res = await originalFetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders() },
       body: JSON.stringify({ text: [ROW_14_12, ROW_15_12, ROW_02_12].join('\n'), profile: supportProfile }),
     });
     assert.equal(res.status, 200);

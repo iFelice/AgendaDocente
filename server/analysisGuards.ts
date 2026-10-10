@@ -1,12 +1,12 @@
 import express, { type RequestHandler, type ErrorRequestHandler } from 'express';
-import { isIP } from 'node:net';
 import { TEACHER_ROLE_KINDS, type TeacherRoleKind } from '../src/types';
 import { isValidTime } from '../src/utils/dates';
+import { ANALYSIS_UNAUTHENTICATED_MESSAGE, createAnalysisAuthMiddleware } from './analysisAuth';
 
 /**
  * Guardia condivisa per gli endpoint di analisi documentale
- * (circolari, orari, registri): rate limiting, JSON, body limit,
- * validazione payload e errori generici.
+ * (circolari, orari, registri): autenticazione, rate limiting per uid,
+ * JSON, body limit, validazione payload e errori generici.
  *
  * L'endpoint circolare riutilizza questa stessa infrastruttura: la sua
  * configurazione (limiti, bucket, messaggi) non viene toccata.
@@ -174,44 +174,44 @@ export function validateTeacherProfile(p: unknown): void {
 
 export interface AnalysisGuardOptions {
   now?: () => number;
+  /** Limite per uid. `perIp` resta come alias per i test già scritti. */
+  perUid?: number;
   perIp?: number;
   global?: number;
   concurrent?: number;
 }
 
 /**
- * Costruisce la catena di middleware [rate-limit, require-json, json, validate]
- * per un endpoint di analisi. I limiti processuali (10 req/min per IP, 60
- * globali, 4 in-flight) sono gli stessi di analyze-circular.
+ * Catena [autenticazione, rate-limit per uid, require-json, json, validate].
+ * L'autenticazione precede la lettura del corpo. I limiti processuali restano
+ * quelli di analyze-circular (10 req/min, 60 globali, 4 in-flight), ma il
+ * bucket non è più l'IP: è l'uid del token già verificato. X-Forwarded-For e
+ * l'indirizzo del socket non spostano il contatore.
  */
 export function createAnalysisGuards(validator: (body: unknown) => void, options: AnalysisGuardOptions = {}): RequestHandler[] {
   const now = options.now || Date.now;
   const windowMs = 60_000;
   const buckets = new Map<string, { count: number; expires: number }>();
   let globalBucket = { count: 0, expires: 0 }, active = 0;
-  const limit: RequestHandler = (req, res, next) => {
+  const limit: RequestHandler = (_req, res, next) => {
     res.setHeader('Cache-Control', 'no-store');
+    const uid = res.locals.analysisUid;
+    if (typeof uid !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(uid)) {
+      return res.status(401).json({ success: false, error: ANALYSIS_UNAUTHENTICATED_MESSAGE });
+    }
     const time = now();
     for (const [key, bucket] of buckets) if (bucket.expires <= time) buckets.delete(key);
     if (globalBucket.expires <= time) globalBucket = { count: 0, expires: time + windowMs };
-    // Do not trust user-supplied X-Forwarded-For. Reverse proxies share this budget by default.
-    const address = req.socket.remoteAddress || 'unknown';
-    // Group IPv6 clients by /64 to avoid bypass by rotating addresses within one network.
-    const key = isIP(address) === 6 && !address.startsWith('::ffff:')
-      ? new URL(`http://[${address}]/`).hostname.replace(/[\[\]]/g, '').split('::').map((part, i, parts) => {
-        const words = part ? part.split(':') : [];
-        if (parts.length === 2 && i === 0) return [...words, ...Array(8 - parts.flatMap(p => p ? p.split(':') : []).length).fill('0')];
-        return words;
-      }).flat().slice(0, 4).join(':') : address;
+    const key = uid;
     let bucket = buckets.get(key);
     if (!bucket) {
       if (buckets.size >= 1000) { res.setHeader('Retry-After', '60'); return res.status(429).json({ success: false, error: 'Troppe richieste. Riprova tra un minuto.' }); }
       bucket = { count: 0, expires: time + windowMs }; buckets.set(key, bucket);
     }
     bucket.count++; globalBucket.count++;
-    const perIp = options.perIp ?? (process.env.TEST_RATE_LIMIT === 'relaxed' ? 10_000 : 10);
+    const perUid = options.perUid ?? options.perIp ?? (process.env.TEST_RATE_LIMIT === 'relaxed' ? 10_000 : 10);
     const globalLimit = options.global ?? (process.env.TEST_RATE_LIMIT === 'relaxed' ? 50_000 : 60);
-    if (bucket.count > perIp || globalBucket.count > globalLimit || active >= (options.concurrent ?? 4)) {
+    if (bucket.count > perUid || globalBucket.count > globalLimit || active >= (options.concurrent ?? 4)) {
       res.setHeader('Retry-After', '60'); return res.status(429).json({ success: false, error: 'Troppe richieste. Riprova tra un minuto.' });
     }
     active++;
@@ -229,7 +229,7 @@ export function createAnalysisGuards(validator: (body: unknown) => void, options
     try { validator(req.body); next(); }
     catch (error) { next(error); }
   };
-  return [limit, requireJson, express.json({ limit: ANALYSIS_LIMITS.jsonBytes, inflate: false }), validate];
+  return [createAnalysisAuthMiddleware(), limit, requireJson, express.json({ limit: ANALYSIS_LIMITS.jsonBytes, inflate: false }), validate];
 }
 
 /**

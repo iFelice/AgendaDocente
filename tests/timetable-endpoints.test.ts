@@ -5,6 +5,9 @@ import assert from 'node:assert/strict';
 import { app } from '../server';
 import { ANALYSIS_LIMITS, createAnalysisErrorHandler, createAnalysisGuards } from '../server/analysisGuards';
 import { validateTimetableAnalysisPayload, validateStudentDocumentPayload } from '../server/timetableAnalysis';
+import { analysisAuthHeaders, installAnalysisAuthFixture } from './helpers/analysisAuthFixture';
+
+installAnalysisAuthFixture();
 
 /**
  * Endpoint "Scansiona documento": gli stessi guard di analyze-circular
@@ -47,7 +50,7 @@ after(async () => {
 async function post(path: string, body: unknown, raw?: string, headers: Record<string, string> = {}) {
   return fetch(`${baseUrl}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...headers },
+    headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders(), ...headers },
     body: raw ?? JSON.stringify(body),
   });
 }
@@ -292,7 +295,7 @@ async function withIsolatedEndpoint(
     await run((body, raw, headers = {}) =>
       fetch(`${base}/api/analyze-timetable`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...headers },
+        headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders(), ...headers },
         body: raw ?? JSON.stringify(body),
       }));
   } finally {
@@ -330,7 +333,7 @@ test('guard condivisi: corpo non JSON -> 415 su entrambi gli endpoint', async ()
   try {
     const res = await fetch(`http://127.0.0.1:${(local.address() as { port: number }).port}/api/analyze-student-document`, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain' },
+      headers: { 'Content-Type': 'text/plain', ...analysisAuthHeaders() },
       body: 'plain text',
     });
     assert.equal(res.status, 415);

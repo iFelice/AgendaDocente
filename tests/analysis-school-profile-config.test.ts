@@ -5,6 +5,9 @@ import assert from 'node:assert/strict';
 import { AnalysisInputError, validateTeacherProfile } from '../server/analysisGuards';
 import { validateTimetableAnalysisPayload } from '../server/timetableAnalysis';
 import { app } from '../server';
+import { analysisAuthHeaders, installAnalysisAuthFixture } from './helpers/analysisAuthFixture';
+
+installAnalysisAuthFixture();
 
 /**
  * H2 — regressione reale: dopo aver configurato un istituto con la 7ª ora
@@ -222,7 +225,7 @@ after(async () => {
 test('endpoint POST /api/analyze-timetable: profilo con dayPeriods/timeSlotConfig NON dà più 400', async () => {
   const res = await fetch(`${baseUrl}/api/analyze-timetable`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders() },
     body: JSON.stringify({
       imageBase64: Buffer.from('%PDF-1.7\n%%EOF').toString('base64'),
       mimeType: 'application/pdf',

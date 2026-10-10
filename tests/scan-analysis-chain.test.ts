@@ -5,6 +5,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { app } from '../server';
 import { createAnalysisErrorHandler, createAnalysisGuards, validateTeacherProfile } from '../server/analysisGuards';
+import { analysisAuthHeaders, installAnalysisAuthFixture } from './helpers/analysisAuthFixture';
 import { validateTimetableAnalysisPayload } from '../server/timetableAnalysis';
 import { DEFAULT_PROFILE } from '../src/services/storage';
 import { normalizeTeacherProfile } from '../src/utils/multiSchool';
@@ -17,6 +18,8 @@ import {
   scanAnalysisErrorMessage,
 } from '../src/services/scanService';
 import type { TeacherProfile } from '../src/types';
+
+installAnalysisAuthFixture();
 
 /**
  * Regressione del bug post-merge "Scansiona documento" (iPhone/PWA).
@@ -71,7 +74,7 @@ after(async () => {
 async function post(path: string, body: unknown) {
   return fetch(`${baseUrl}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders() },
     body: JSON.stringify(body),
   });
 }
@@ -166,7 +169,7 @@ test('analyze-timetable: profilo con chiave sconosciuta -> ancora 400 generico (
   try {
     const res = await fetch(`http://127.0.0.1:${(local.address() as { port: number }).port}/api/analyze-timetable`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders() },
       body: JSON.stringify(timetableRequest({ ...realProfile, plan: 'premium' })),
     });
     assert.equal(res.status, 400);

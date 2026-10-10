@@ -53,6 +53,9 @@ import {
   validateTeacherRowLabelsPayload,
   matchTeacherRowLabel,
 } from '../src/utils/timetableAnalysis';
+import { analysisAuthHeaders, installAnalysisAuthFixture } from './helpers/analysisAuthFixture';
+
+installAnalysisAuthFixture();
 
 /**
  * Settimana RETTANGOLARE di comodo: `week(6)` = `[6, 6, 6, 6, 6]`.
@@ -521,16 +524,10 @@ let logLines: string[] = [];
 before(async () => {
   process.env.GEMINI_API_KEY = TEST_GEMINI_KEY;
   delete process.env.GROQ_API_KEY;
+  // Il budget di produzione è per uid (e globale). Questi test non verificano
+  // il rate limit: alzano solo il tetto, come gli altri file di endpoint.
+  process.env.TEST_RATE_LIMIT = 'relaxed';
   server = app.listen(0, '127.0.0.1');
-  // Il guard di /api/analyze-timetable concede 10 richieste/min per IP e questi
-  // test ne fanno di più di proposito: ogni connessione presenta un indirizzo
-  // sorgente distinto. È un gancio solo sul server DI TEST (nessun cambiamento
-  // al guard né alla produzione) e rende la suite indipendente dal numero di POST.
-  let sourceIndex = 0;
-  server.on('connection', (socket) => {
-    sourceIndex += 1;
-    Object.defineProperty(socket, 'remoteAddress', { value: `10.0.${Math.floor(sourceIndex / 250)}.${(sourceIndex % 250) + 1}`, configurable: true });
-  });
   await once(server, 'listening');
   baseUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 });
@@ -613,7 +610,7 @@ function captureLogs() {
 async function postTimetable(body: unknown) {
   return realFetch(`${baseUrl}/api/analyze-timetable`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders() },
     body: JSON.stringify(body),
   });
 }

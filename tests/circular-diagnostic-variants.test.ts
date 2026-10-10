@@ -2,6 +2,9 @@ import { once } from 'node:events';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { app, getCircularDiagnosticVariant, GROQ_CIRCULAR_RESPONSE_SCHEMA } from '../server';
+import { analysisAuthHeaders, installAnalysisAuthFixture } from './helpers/analysisAuthFixture';
+
+installAnalysisAuthFixture();
 
 process.env.TEST_RATE_LIMIT = 'relaxed';
 
@@ -196,7 +199,7 @@ test('3. JPEG default produzione -> Groq primario (1 sola chiamata), Gemini 0 ch
   try {
     const res = await originalFetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders() },
       body: JSON.stringify({
         imageBase64: jpegBase64,
         mimeType: 'image/jpeg',
@@ -266,7 +269,7 @@ test('4. PNG e WEBP default produzione -> Groq primario, Gemini 0 chiamate', asy
     // Prova con PNG
     const resPng = await originalFetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders() },
       body: JSON.stringify({
         imageBase64: pngBase64,
         mimeType: 'image/png',
@@ -281,7 +284,7 @@ test('4. PNG e WEBP default produzione -> Groq primario, Gemini 0 chiamate', asy
     // Prova con WEBP
     const resWebp = await originalFetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders() },
       body: JSON.stringify({
         imageBase64: webpBase64,
         mimeType: 'image/webp',
@@ -348,7 +351,7 @@ test('5. Groq 429 -> Fallback a Gemini (1 sola chiamata Groq, Gemini ha successo
   try {
     const res = await originalFetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders() },
       body: JSON.stringify({
         imageBase64: jpegBase64,
         mimeType: 'image/jpeg',
@@ -416,7 +419,7 @@ test('6. Groq 500/503 -> Fallback a Gemini', async () => {
   try {
     const res = await originalFetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders() },
       body: JSON.stringify({
         imageBase64: jpegBase64,
         mimeType: 'image/jpeg',
@@ -472,7 +475,7 @@ test('7. Groq network error -> Fallback a Gemini', async () => {
   try {
     const res = await originalFetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders() },
       body: JSON.stringify({
         imageBase64: jpegBase64,
         mimeType: 'image/jpeg',
@@ -528,7 +531,7 @@ test('8. Groq parse failure (HTTP 200 ma non json valido o mancante di items) ->
   try {
     const res = await originalFetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders() },
       body: JSON.stringify({
         imageBase64: jpegBase64,
         mimeType: 'image/jpeg',
@@ -593,7 +596,7 @@ test('9. Fallback Gemini economico: massimo 1 tentativo per modello candidato (G
   try {
     const res = await originalFetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders() },
       body: JSON.stringify({
         imageBase64: jpegBase64,
         mimeType: 'image/jpeg',
@@ -648,7 +651,7 @@ test('10. Fallimento Groq + Fallimento Gemini -> status 503 con AI_UNAVAILABLE c
   try {
     const res = await originalFetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders() },
       body: JSON.stringify({
         imageBase64: jpegBase64,
         mimeType: 'image/jpeg',
@@ -709,7 +712,7 @@ test('11. PDF in default produzione -> Groq 0 chiamate, Gemini diretto', async (
   try {
     const res = await originalFetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders() },
       body: JSON.stringify({
         imageBase64: pdfBase64,
         mimeType: 'application/pdf',
@@ -769,7 +772,7 @@ test('12. Testo incollato in default produzione -> Groq 0 chiamate, Gemini diret
     const textContent = 'Circolare n. 12: Convocazione Collegio Docenti il giorno 20/10/2026 ore 16:00 in Aula Magna.';
     const res = await originalFetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders() },
       body: JSON.stringify({
         text: textContent,
         profile: validProfile,
@@ -832,7 +835,7 @@ test('13. Variant=G esplicita -> Groq isolato senza Gemini fallback', async () =
   try {
     const res = await originalFetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders() },
       body: JSON.stringify({
         imageBase64: jpegBase64,
         mimeType: 'image/jpeg',
@@ -892,7 +895,7 @@ test('14. Varianti A, B, C restano invariate (chiamano Gemini direttamente)', as
     try {
       const res = await originalFetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders() },
         body: JSON.stringify({
           imageBase64: jpegBase64,
           mimeType: 'image/jpeg',
@@ -955,7 +958,7 @@ test('15. I log di routing e fallback non contengono mai base64, prompt, OCR, ch
     const secretSnippet = 'INFORMAZIONE_RISERVATA_DOCENTE_12345';
     await originalFetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders() },
       body: JSON.stringify({
         text: secretSnippet,
         imageBase64: jpegBase64,

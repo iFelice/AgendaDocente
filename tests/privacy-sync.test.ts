@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import express from 'express';
 import { once } from 'node:events';
 import { ANALYSIS_LIMITS, circularAnalysisGuards, analysisErrorHandler } from '../server/circularAnalysisGuard';
+import { analysisAuthHeaders, installAnalysisAuthFixture } from './helpers/analysisAuthFixture';
+
+installAnalysisAuthFixture();
 import { syncOptedInGoogleEvents } from '../src/services/googleCalendarService';
 import type { CalendarEvent } from '../src/types';
 
@@ -39,7 +42,7 @@ async function withEndpoint(run:(post:(body:unknown,raw?:boolean,headers?:Record
   app.use(analysisErrorHandler);
   const server=app.listen(0,'127.0.0.1'); await once(server,'listening');
   const address=server.address() as {port:number};
-  try { await run((body,raw=false,headers={})=>fetch(`http://127.0.0.1:${address.port}/api/analyze-circular`,{method:'POST',headers:{'Content-Type':'application/json',...headers},body:raw?String(body):JSON.stringify(body)})); }
+  try { await run((body,raw=false,headers={})=>fetch(`http://127.0.0.1:${address.port}/api/analyze-circular`,{method:'POST',headers:{'Content-Type':'application/json',...analysisAuthHeaders(),...headers},body:raw?String(body):JSON.stringify(body)})); }
   finally { await new Promise<void>((resolve,reject)=>server.close(e=>e?reject(e):resolve())); }
 }
 
@@ -62,10 +65,11 @@ test('malformed JSON and global body limit return sanitized errors',async()=>wit
 
 test('rate limit ignores forged forwarding headers and resets after its window',async()=>{
   let now=0;
+  const auth=analysisAuthHeaders({ uid: 'rate-limit-uid' });
   await withEndpoint(async post=>{
-    assert.equal((await post(payload)).status,200);
-    const blocked=await post(payload,false,{'X-Forwarded-For':'1.2.3.4'});assert.equal(blocked.status,429);assert.equal(blocked.headers.get('Retry-After'),'60');
-    now=60_001;assert.equal((await post(payload)).status,200);
+    assert.equal((await post(payload,false,auth)).status,200);
+    const blocked=await post(payload,false,{...auth,'X-Forwarded-For':'1.2.3.4'});assert.equal(blocked.status,429);assert.equal(blocked.headers.get('Retry-After'),'60');
+    now=60_001;assert.equal((await post(payload,false,auth)).status,200);
   },{perIp:1,now:()=>now});
 });
 
@@ -74,7 +78,7 @@ test('real endpoint retains text parser fallback without an API key',async()=>{
   const {app}=await import('../server');
   const server=app.listen(0,'127.0.0.1');await once(server,'listening');
   try{
-    const response=await fetch(`http://127.0.0.1:${(server.address() as {port:number}).port}/api/analyze-circular`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const response=await fetch(`http://127.0.0.1:${(server.address() as {port:number}).port}/api/analyze-circular`,{method:'POST',headers:{'Content-Type':'application/json',...analysisAuthHeaders()},body:JSON.stringify(payload)});
     assert.equal(response.status,200);const result=await response.json();assert.equal(result.source,'local-heuristic');assert.equal(result.items[0].date,'2027-09-14');assert.equal(result.items[0].startTime,'15:00');assert.equal(result.items[0].endTime,'17:00');
   }finally{if(previous!==undefined)process.env.GEMINI_API_KEY=previous;await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });

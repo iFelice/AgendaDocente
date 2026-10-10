@@ -3,6 +3,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { app, GEMINI_MIN_ATTEMPT_MS, runGeminiJson } from '../server';
 import { buildEmptyPdf, buildMinimalPdf } from './helpers/pdfFixtures';
+import { analysisAuthHeaders, installAnalysisAuthFixture } from './helpers/analysisAuthFixture';
+
+installAnalysisAuthFixture();
 
 process.env.TEST_RATE_LIMIT = 'relaxed';
 
@@ -62,7 +65,7 @@ async function withServer<T>(run: (url: string) => Promise<T>): Promise<T> {
 async function postPdf(base64: string): Promise<{ status: number; json: any }> {
   return withServer(async (url) => {
     const response = await fetch(url, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders() },
       body: JSON.stringify({ imageBase64: base64, mimeType: 'application/pdf', profile }),
     });
     return { status: response.status, json: await response.json() };
