@@ -124,7 +124,7 @@ test("nessun popup OAuth automatico: token assente ⇒ needs-auth", () => {
 test("import multi-calendar, cooldown e outbound primary-only invariati", () => {
   const app = readSource("src/App.tsx");
   assert.match(app, /if \(autoImportInFlight\.current\) return autoImportInFlight\.current;/);
-  assert.match(app, /importSelectedGoogleCalendars\(token, calendarIds, \{ schoolYear: profile\.schoolYear \}\)/);
+  assert.match(app, /importSelectedGoogleCalendars\(token, calendarIds, \{ schoolYear: profile\.schoolYear, primaryCalendarId \}\)/);
   assert.match(app, /GOOGLE_CALENDAR_AUTO_IMPORT_COOLDOWN_MS = 5 \* 60 \* 1000/);
   assert.match(app, /await runAutomaticGoogleImport\(true, undefined, undefined, unique\)/);
 
