@@ -22,6 +22,9 @@ import { deriveFutureCommitments } from '../src/utils/futureCommitments';
 import { storage, emptyInstallation } from '../src/services/storage';
 import { database } from '../src/services/db';
 import type { CalendarEvent, ExtractedItem, TeacherProfile } from '../src/types';
+import { installSignedInAnalysisClient } from './helpers/analysisClientSession';
+installSignedInAnalysisClient();
+
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 

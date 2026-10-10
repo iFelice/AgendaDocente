@@ -25,6 +25,9 @@ import {
 } from '../server';
 import { CIRCULAR_PDF_WAIT_MESSAGE, CIRCULAR_REQUEST_TIMEOUT_MS } from '../src/services/aiService';
 import { buildMinimalPdf } from './helpers/pdfFixtures';
+import { analysisAuthHeaders, installAnalysisAuthFixture } from './helpers/analysisAuthFixture';
+
+installAnalysisAuthFixture();
 
 process.env.TEST_RATE_LIMIT = 'relaxed';
 
@@ -106,7 +109,7 @@ async function withServer<T>(run: (url: string) => Promise<T>): Promise<T> {
 async function postPdf(base64: string, pages?: number[]): Promise<{ status: number; json: any }> {
   return withServer(async (url) => {
     const response = await fetch(url, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders() },
       body: JSON.stringify({
         imageBase64: base64, mimeType: 'application/pdf', profile,
         ...(pages === undefined ? {} : { pages }),
@@ -522,7 +525,7 @@ test('ripresa: il parametro pages è ammesso solo su un PDF', async () => {
     async (calls) => {
       const result = await withServer(async (url) => {
         const response = await fetch(url, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          method: 'POST', headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders() },
           body: JSON.stringify({ text: 'Collegio docenti 4 settembre 2026', profile, pages: [1] }),
         });
         return { status: response.status, json: await response.json() };

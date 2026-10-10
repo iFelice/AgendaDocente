@@ -13,6 +13,7 @@ import {
   type CircularPayloadSummary,
 } from "./server/circularAnalysisGuard";
 import { createAnalysisErrorHandler, createAnalysisGuards } from "./server/analysisGuards";
+import { analysisAuthConfigSummary } from "./server/analysisAuth";
 import {
   groqConfigured,
   groqFallbackDecision,
@@ -2162,6 +2163,7 @@ async function startServer() {
     console.log(`Agenda Docente server attivo su http://0.0.0.0:${PORT}`);
     // Diagnostica di avvio: solo forma della configurazione, mai la chiave.
     console.log(`[AI] Analisi documenti: chiave ${process.env.GEMINI_API_KEY ? "configurata" : "assente (servizio cloud disabilitato)"}, modelli candidati [${geminiCandidateModels().join(", ")}].`);
+    console.log(analysisAuthConfigSummary());
   });
 }
 

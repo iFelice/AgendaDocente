@@ -11,6 +11,9 @@ import { deriveFutureCommitments } from '../src/utils/futureCommitments';
 import { convertExtractedItemToEvent } from '../src/services/storage';
 import { findPossibleEventUpdate, getEventFieldDiff } from '../src/utils/eventMatching';
 import { CircularAnalyzerModal } from '../src/components/CircularAnalyzerModal';
+import { installSignedInAnalysisClient } from './helpers/analysisClientSession';
+installSignedInAnalysisClient();
+
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 

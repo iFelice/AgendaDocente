@@ -8,6 +8,7 @@
  */
 
 import type { TeacherProfile } from "../types";
+import { analysisHttpAuthMessage, resolveAnalysisAuthorization } from "./analysisSession";
 import { withoutSensitiveProfile } from "./sensitiveData";
 import { OFFLINE_ANALYSIS_MESSAGE, isOnline } from "../utils/documentScanner";
 import type { CurricularScopeCoordinate, PersonalTimetablePeriodsByDay } from "../utils/timetableAnalysis";
@@ -125,13 +126,15 @@ function withCleanProfile<T extends { profile: TeacherProfile }>(req: T): T {
 }
 
 async function postScan(endpoint: string, body: unknown): Promise<Record<string, unknown>> {
+  const auth = await resolveAnalysisAuthorization();
+  if (auth.ok === false) throw new Error(auth.message);
   if (!isOnline()) throw new OfflineAnalysisError();
   const timeout = createScanTimeout(SCAN_REQUEST_TIMEOUT_MS);
   let response: Response;
   try {
     response = await fetch(endpoint, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...auth.headers },
       body: JSON.stringify(body),
       signal: timeout.signal,
     });
@@ -145,6 +148,8 @@ async function postScan(endpoint: string, body: unknown): Promise<Record<string,
   timeout.clear();
   // Risposta non JSON (pagina di un proxy, errore HTML): mai "successo", mai un crash.
   const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+  const authMessage = analysisHttpAuthMessage(response.status, data);
+  if (authMessage) throw new Error(authMessage);
   if (!response.ok || data.success !== true) {
     // Diagnostica minima: solo lo stato HTTP, mai il contenuto del documento.
     console.warn(`Analisi documento: risposta ${response.status} da ${endpoint}.`);

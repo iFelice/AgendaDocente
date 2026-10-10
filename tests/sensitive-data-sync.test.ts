@@ -44,6 +44,9 @@ import { ClassesView } from '../src/components/ClassesView';
 import { database } from '../src/services/db';
 import { emptyInstallation, storage } from '../src/services/storage';
 import type { CalendarEvent, Student, TeacherProfile } from '../src/types';
+import { installSignedInAnalysisClient } from './helpers/analysisClientSession';
+installSignedInAnalysisClient();
+
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 

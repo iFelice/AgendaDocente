@@ -15,6 +15,9 @@ import { legacyPrimarySchoolId } from '../src/utils/multiSchool';
 import { OUT_OF_CONFIG_SLOT_BADGE } from '../src/utils/schoolDayPeriods';
 import type { ReconstructedSlot } from '../src/utils/timetableCrossref';
 import type { SchoolProfile, TeacherProfile, TimeSlotConfig, TimetableSlot } from '../src/types';
+import { installSignedInAnalysisClient } from './helpers/analysisClientSession';
+installSignedInAnalysisClient();
+
 
 /**
  * MICRO-PASSO G3 — LE CAMPANE DELL'ISTITUTO OVUNQUE, NON SOLO NELL'EDITOR.

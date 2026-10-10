@@ -27,6 +27,11 @@ import {
   isSafeCircularServerMessage,
 } from '../src/services/aiService';
 import type { TeacherProfile } from '../src/types';
+import { analysisAuthHeaders, installAnalysisAuthFixture } from './helpers/analysisAuthFixture';
+import { installSignedInAnalysisClient } from './helpers/analysisClientSession';
+
+installSignedInAnalysisClient();
+installAnalysisAuthFixture();
 
 const profile: TeacherProfile = {
   id: 't-1', fullName: 'Docente', schoolName: 'Scuola', schoolYear: '2027/2028',
@@ -276,7 +281,7 @@ test('guard circolari: 400/413 portano errorCode e non il documento nel corpo n√
     const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/analyze-circular`;
     const bad = await fetch(base, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders() },
       body: JSON.stringify({ text: SENTINEL, profile: { classes: 'no' } }),
     });
     assert.equal(bad.status, 400);
@@ -287,7 +292,7 @@ test('guard circolari: 400/413 portano errorCode e non il documento nel corpo n√
 
     const big = await fetch(base, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders() },
       body: JSON.stringify({ text: 'x'.repeat(100_001), profile }),
     });
     assert.equal(big.status, 413);
@@ -312,7 +317,7 @@ test('endpoint senza chiave: JPEG rifiutato con codice, log privacy-safe, frase 
   try {
     const response = await fetch(`http://127.0.0.1:${(server.address() as { port: number }).port}/api/analyze-circular`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...analysisAuthHeaders() },
       body: JSON.stringify({ text: SENTINEL, imageBase64, mimeType: 'image/jpeg', profile }),
     });
     assert.equal(response.status, 503);
