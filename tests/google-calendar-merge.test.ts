@@ -228,3 +228,29 @@ test("import: un impegno unito riceve il link Meet se è vuoto, ma non lo sostit
   assert.equal(legacyAddLink.events[0].meetingUrl, "https://meet.google.com/new-link-abc");
   assert.equal(legacyAddLink.events[0].sourceType, "circolare");
 });
+
+test("ciclo completo: dopo l'unione la sincronizzazione successiva non duplica (principale e condiviso)", () => {
+  // Principale: l'impegno Google si unisce alla circolare; il risultato porta googleCalendarId "primary".
+  const primaryImport = imported({ googleCalendarId: "primary", meetingUrl: "https://meet.google.com/aaa-bbbb-ccc" });
+  const primaryMerged = planMerge(base(), primaryImport).merged;
+  const afterPrimary = mergeGoogleCalendarGroups(
+    [primaryMerged],
+    [{ calendarId: "primary", isPrimary: true, events: [remote()] }],
+  );
+  assert.equal(afterPrimary.added, 0);
+  assert.equal(afterPrimary.linked, 1);
+  assert.equal(afterPrimary.events.length, 1);
+  assert.equal(afterPrimary.events[0].sourceType, "circolare");
+
+  // Condiviso: stesso ciclo, con googleCalendarId del calendario condiviso.
+  const sharedId = "team@group.calendar.google.com";
+  const sharedImport = imported({ id: "gcal-shared-g5", googleEventId: "g5", googleCalendarId: sharedId });
+  const sharedMerged = planMerge(base(), sharedImport).merged;
+  assert.equal(sharedMerged.googleCalendarId, sharedId);
+  const afterShared = mergeGoogleCalendarGroups(
+    [sharedMerged],
+    [{ calendarId: sharedId, isPrimary: false, events: [remote({ id: "g5" })] }],
+  );
+  assert.equal(afterShared.added, 0, "nessun doppione dal calendario condiviso");
+  assert.equal(afterShared.events.length, 1);
+});
