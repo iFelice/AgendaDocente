@@ -54,7 +54,11 @@ const ClassesView = lazy(() => import("./components/ClassesView").then(module =>
 const RegisterView = lazy(() => import("./components/RegisterView").then(module => ({default: module.RegisterView})));
 const CircularAnalyzerModal = lazy(() => import("./components/CircularAnalyzerModal").then(module => ({default: module.CircularAnalyzerModal})));
 const DocumentScannerModal = lazy(() => import("./components/DocumentScannerModal").then(module => ({default: module.DocumentScannerModal})));
-import { EventModal } from "./components/EventModal";
+import { EVENT_CATEGORIES, EventModal } from "./components/EventModal";
+import { EventMergeModal } from "./components/EventMergeModal";
+import { EventMergeContext } from "./components/GoogleMergeControls";
+import { commitEventMerge, restoreEventMerge, type EventMergeOriginals } from "./services/googleCalendarMergeService";
+import { mergeRolesFor } from "./utils/googleCalendarMerge";
 import { QuickNoteModal } from "./components/QuickNoteModal";
 const ProfileModal = lazy(() => import("./components/ProfileModal").then(module => ({default: module.ProfileModal})));
 const OnboardingModal = lazy(() => import("./components/OnboardingModal").then(module => ({default: module.OnboardingModal})));
@@ -222,6 +226,55 @@ export default function App({ initialData }: { initialData: LocalData }) {
     setTimeout(() => {
       setToastMessage((prev) => (prev === msg ? null : prev));
     }, 4500);
+  };
+
+  // Unione impegno Google ↔ doppione dell'app: anteprima aperta e annullamento per pochi secondi.
+  const [mergeDraft, setMergeDraft] = useState<{ base: CalendarEvent; secondary: CalendarEvent } | null>(null);
+  const [mergeUndo, setMergeUndo] = useState<{ originals: EventMergeOriginals; mergedId: string } | null>(null);
+  const MERGE_UNDO_WINDOW_MS = 8000;
+  const requestEventMerge = useCallback((first: CalendarEvent, second: CalendarEvent) => {
+    const roles = mergeRolesFor(first, second);
+    if (roles.ok === false) {
+      showToast(roles.reason);
+      return;
+    }
+    setMergeDraft({ base: roles.base, secondary: roles.secondary });
+  }, []);
+  useEffect(() => {
+    if (!mergeUndo) return;
+    const timer = setTimeout(() => setMergeUndo(null), MERGE_UNDO_WINDOW_MS);
+    return () => clearTimeout(timer);
+  }, [mergeUndo]);
+
+  /**
+   * Conferma: una sola scrittura locale. L'impegno Google esce dall'app; Google Calendar
+   * NON viene toccato (nessuna chiamata di cancellazione, vedi googleCalendarMergeService).
+   */
+  const handleConfirmEventMerge = async (merged: CalendarEvent) => {
+    const draft = mergeDraft;
+    if (!draft) return;
+    try {
+      const originals = await commitEventMerge(draft.base.id, draft.secondary.id, merged);
+      setMergeDraft(null);
+      setIsEventModalOpen(false);
+      setPrefilledEventData(null);
+      setMergeUndo({ originals, mergedId: draft.base.id });
+    } catch (error) {
+      setMergeDraft(null);
+      showToast(error instanceof Error ? error.message : "Unione non riuscita: nessuna modifica salvata.");
+    }
+  };
+
+  const handleUndoEventMerge = async () => {
+    const undo = mergeUndo;
+    if (!undo) return;
+    setMergeUndo(null);
+    try {
+      await restoreEventMerge(undo.originals);
+      showToast("Unione annullata: i due impegni sono di nuovo come prima.");
+    } catch {
+      showToast("Annullamento non riuscito. Controlla gli impegni del giorno.");
+    }
   };
 
   const [persistenceError, setPersistenceError] = useState<string | null>(null);
@@ -1107,6 +1160,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
 
   return (
     <Suspense fallback={<p role="status" className="p-6">Caricamento vista locale…</p>}>
+    <EventMergeContext.Provider value={requestEventMerge}>
     <div className="min-h-screen bg-stone-100/70 text-stone-900 flex flex-col font-sans selection:bg-emerald-100 selection:text-emerald-900">
       {persistenceError && <div role="alert" className="fixed top-0 inset-x-0 z-[10000] p-3 bg-rose-50 text-rose-800">{persistenceError}</div>}
       {/* Top Navigation */}
@@ -1137,6 +1191,31 @@ export default function App({ initialData }: { initialData: LocalData }) {
         onOpenUpdatePrompt={() => setUpdatePromptOpen(true)}
         onCheckUpdates={() => setUpdateCheckFeedback(true)}
       />
+
+      {mergeDraft && (
+        <EventMergeModal
+          base={mergeDraft.base}
+          other={mergeDraft.secondary}
+          categoryLabel={(category) => EVENT_CATEGORIES.find(item => item.id === category)?.label ?? category}
+          onCancel={() => setMergeDraft(null)}
+          onConfirm={handleConfirmEventMerge}
+        />
+      )}
+
+      {mergeUndo && (
+        <div role="status" data-merge-undo className="app-toast fixed left-3 right-3 md:left-auto md:right-5 bottom-36 md:bottom-20 z-50">
+          <div className="bg-stone-900 text-white px-4 py-3 rounded-xl shadow-xl border border-stone-700 flex items-center gap-3 text-xs font-medium">
+            <span className="flex-1 min-w-0">Impegni uniti. Google Calendar non è stato modificato.</span>
+            <button
+              type="button"
+              onClick={handleUndoEventMerge}
+              className="min-h-[44px] px-2 font-bold text-emerald-300 hover:text-emerald-200"
+            >
+              Annulla
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Floating notification toast (clears the mobile bottom navigation) */}
       {toastMessage && (
@@ -1413,6 +1492,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
         onLoadGoogleCalendars={() => loadGoogleCalendars()}
         onGoogleConnect={googleUser ? handleGoogleReconnect : handleGoogleLogin}
         onSendToGoogle={handleSendEventToGoogle}
+        sameDayEvents={editingEvent ? events.filter(other => other.date === editingEvent.date && other.id !== editingEvent.id) : []}
       />
       )}
 
@@ -1503,6 +1583,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
       )}
       <OfflineIndicator />
     </div>
+    </EventMergeContext.Provider>
     </Suspense>
   );
 }

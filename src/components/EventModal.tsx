@@ -3,6 +3,8 @@ import type { GoogleCalendarListEntry } from "../services/googleCalendarService"
 import { eventDateError, isValidDate, localDateISO } from "../utils/dates";
 import { isHttpsMeetingUrl, normalizeMeetingUrl } from "../utils/meetingLinks";
 import { EventMeetingLink } from "./EventMeetingLink";
+import { GoogleCalendarBadge, useRequestEventMerge } from "./GoogleMergeControls";
+import { mergeRolesFor, showsGoogleCalendarLabel } from "../utils/googleCalendarMerge";
 import React, { useState, useEffect } from "react";
 import { Clock, MapPin, X, Calendar, BookOpen, AlertCircle, Trash2, ChevronRight } from "lucide-react";
 import { CalendarEvent, EventCategory, TeacherProfile } from "../types";
@@ -23,6 +25,8 @@ interface EventModalProps {
   onLoadGoogleCalendars?: () => Promise<GoogleCalendarListEntry[]>;
   onGoogleConnect?: () => Promise<unknown>;
   onSendToGoogle?: (event: CalendarEvent, calendarId: string) => Promise<CalendarEvent | void>;
+  /** Altri impegni dello stesso giorno (esclusa la modifica corrente): candidati all'unione. */
+  sameDayEvents?: CalendarEvent[];
 }
 
 export const EVENT_CATEGORIES: { id: EventCategory; label: string }[] = [
@@ -76,8 +80,11 @@ export const EventModal: React.FC<EventModalProps> = ({
   onLoadGoogleCalendars,
   onGoogleConnect,
   onSendToGoogle,
+  sameDayEvents = [],
 }) => {
   const save = usePersistenceAction();
+  const requestMerge = useRequestEventMerge();
+  const [isMergeListOpen, setMergeListOpen] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [category, setCategory] = useState<EventCategory>("consiglio_classe");
@@ -292,6 +299,7 @@ export const EventModal: React.FC<EventModalProps> = ({
                 Da Circolare
               </span>
             )}
+            {eventToEdit && showsGoogleCalendarLabel(eventToEdit) && <GoogleCalendarBadge />}
           </div>
           <div className="flex items-center space-x-1 flex-shrink-0">
             {eventToEdit && onDelete && (
@@ -556,6 +564,56 @@ export const EventModal: React.FC<EventModalProps> = ({
               className="w-full p-2 border border-stone-300 rounded-lg text-xs"
             />
           </div>
+
+          {eventToEdit && (() => {
+            const candidates = sameDayEvents.filter(other => other.date === eventToEdit.date
+              && other.id !== eventToEdit.id && mergeRolesFor(eventToEdit, other).ok);
+            return (
+              <div data-merge-section className="p-3 rounded-xl border border-stone-200 bg-stone-50 space-y-2">
+                {!isMergeListOpen ? (
+                  <button
+                    type="button"
+                    onClick={() => setMergeListOpen(true)}
+                    className="min-h-[44px] w-full text-left text-sm font-semibold text-blue-800 hover:underline"
+                  >
+                    Unisci con un altro impegno dello stesso giorno
+                  </button>
+                ) : (
+                  <>
+                    <p className="text-xs font-semibold text-stone-700">
+                      {candidates.length > 0 ? "Scegli l’impegno da unire con questo:" : "Nessun altro impegno da unire in questo giorno."}
+                    </p>
+                    {candidates.length > 0 && (
+                      <ul className="space-y-1.5">
+                        {candidates.map(other => (
+                          <li key={other.id}>
+                            <button
+                              type="button"
+                              data-merge-candidate={other.id}
+                              onClick={() => {
+                                if (!validateCurrentEvent()) return;
+                                requestMerge(buildCurrentEvent(), other);
+                              }}
+                              className="min-h-[44px] w-full rounded-lg border border-stone-300 bg-white px-3 py-2 text-left text-sm hover:bg-stone-50"
+                            >
+                              <span className="block font-semibold text-stone-900 break-words">{other.title}</span>
+                              <span className="block text-xs text-stone-600">
+                                {other.isAllDay ? "Tutto il giorno" : other.startTime ? `${other.startTime}${other.endTime ? ` – ${other.endTime}` : ""}` : "Orario non indicato"}
+                                {showsGoogleCalendarLabel(other) ? " · Google Calendar" : ""}
+                              </span>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    <button type="button" onClick={() => setMergeListOpen(false)} className="min-h-[44px] text-xs font-semibold text-stone-600 hover:underline">
+                      Chiudi
+                    </button>
+                  </>
+                )}
+              </div>
+            );
+          })()}
 
           {!isGoogleSourcedEvent && (
             <div className="p-4 rounded-xl bg-blue-50/70 border border-blue-200 space-y-3" data-google-outbound>
