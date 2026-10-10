@@ -5,6 +5,7 @@ import { isHttpsMeetingUrl, normalizeMeetingUrl } from "../utils/meetingLinks";
 import { EventMeetingLink } from "./EventMeetingLink";
 import { GoogleCalendarBadge, useRequestEventMerge } from "./GoogleMergeControls";
 import { mergeRolesFor, showsGoogleCalendarLabel } from "../utils/googleCalendarMerge";
+import { buildCategoryOptions } from "../utils/eventCategoryMenu";
 import React, { useState, useEffect } from "react";
 import { Clock, MapPin, X, Calendar, BookOpen, AlertCircle, Trash2, ChevronRight } from "lucide-react";
 import { CalendarEvent, EventCategory, TeacherProfile } from "../types";
@@ -42,6 +43,18 @@ export const EVENT_CATEGORIES: { id: EventCategory; label: string }[] = [
   { id: "uscita_didattica", label: "Uscita didattica" },
   { id: "riunione", label: "Altra Riunione" },
   { id: "personale", label: "Personale" },
+];
+
+/**
+ * Raggruppamento del menu "Tipologia Impegno" (solo leggibilità).
+ * Ogni id di EVENT_CATEGORIES deve comparire in ESATTAMENTE un gruppo: lo verifica
+ * tests/event-category-menu.test.ts, così una categoria aggiunta in futuro non sparisce.
+ */
+export const EVENT_CATEGORY_GROUPS: { label: string; ids: EventCategory[] }[] = [
+  { label: "Riunioni", ids: ["consiglio_classe", "collegio_docenti", "dipartimento_sostegno", "glo", "riunione"] },
+  { label: "Scadenze e documenti", ids: ["scadenza", "pei"] },
+  { label: "Rapporti e attività", ids: ["ricevimento_genitori", "uscita_didattica", "formazione", "promemoria"] },
+  { label: "Altro", ids: ["personale"] },
 ];
 
 /**
@@ -325,26 +338,38 @@ export const EventModal: React.FC<EventModalProps> = ({
 
         <form onSubmit={handleSubmit} className="space-y-4 mt-4 px-4 sm:px-6 text-xs">
           {save.error && <p role="alert" className="p-3 text-sm text-rose-700">{save.error}</p>}
-        {/* Category Chips */}
-          <div>
-            <label className="block font-semibold text-stone-700 mb-1.5">Tipologia Impegno</label>
-            <div className="flex flex-wrap gap-1.5">
-              {(editingLegacyDipartimento ? [...EVENT_CATEGORIES, LEGACY_DIPARTIMENTO_CATEGORY] : EVENT_CATEGORIES).map((cat) => (
-                <button
-                  key={cat.id}
-                  type="button"
-                  onClick={() => handleSelectCategory(cat.id)}
-                  className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
-                    category === cat.id
-                      ? "bg-emerald-700 text-white border-emerald-700 shadow-2xs"
-                      : "bg-stone-50 text-stone-700 border-stone-200 hover:bg-stone-100"
-                  }`}
+          {/* Tipologia Impegno: menu a tendina (più compatto su mobile) */}
+          {(() => {
+            const categoryMenu = buildCategoryOptions({
+              currentCategory: category,
+              editingLegacyDipartimento,
+              categories: EVENT_CATEGORIES,
+              groups: EVENT_CATEGORY_GROUPS,
+              legacyOption: LEGACY_DIPARTIMENTO_CATEGORY,
+            });
+            return (
+              <div>
+                <label htmlFor="event-category" className="block font-semibold text-stone-700 mb-1">Tipologia Impegno</label>
+                <select
+                  id="event-category"
+                  value={category}
+                  onChange={(e) => handleSelectCategory(e.target.value as EventCategory)}
+                  className="w-full min-h-[44px] p-2.5 border border-stone-300 rounded-xl text-xs bg-white focus:ring-1 focus:ring-emerald-600 focus:border-emerald-600"
                 >
-                  {cat.label}
-                </button>
-              ))}
-            </div>
-          </div>
+                  {categoryMenu.extra.map((opt) => (
+                    <option key={opt.id} value={opt.id}>{opt.label}</option>
+                  ))}
+                  {categoryMenu.groups.map((group) => (
+                    <optgroup key={group.label} label={group.label}>
+                      {group.options.map((opt) => (
+                        <option key={opt.id} value={opt.id}>{opt.label}</option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+              </div>
+            );
+          })()}
 
           {/* Title */}
           <div>
