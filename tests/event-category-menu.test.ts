@@ -5,7 +5,7 @@ import {
   EVENT_CATEGORY_GROUPS,
   LEGACY_DIPARTIMENTO_CATEGORY,
 } from '../src/components/EventModal';
-import { buildCategoryOptions } from '../src/utils/eventCategoryMenu';
+import { buildCategoryOptions, type EventCategoryOption } from '../src/utils/eventCategoryMenu';
 
 /*
  * Menu "Tipologia Impegno" a tendina nel modale evento.
@@ -86,9 +86,11 @@ test('menu: categoria sconosciuta ("lezione") → opzione extra selezionata con 
 });
 
 test('menu: categoria standard non presente in nessun gruppo → finisce nel gruppo di riserva', () => {
+  // Simula una categoria "personale" non più presente in nessun gruppo.
+  const categories: EventCategoryOption[] = [...EVENT_CATEGORIES];
   const menu = build({
     currentCategory: 'glo',
-    categories: [...EVENT_CATEGORIES, { id: 'promemoria', label: 'Promemoria Didattico' }].filter((c, i, arr) => arr.findIndex(x => x.id === c.id) === i),
+    categories,
     groups: EVENT_CATEGORY_GROUPS.map(g => ({ ...g, ids: g.ids.filter(id => id !== 'personale') })),
   });
   const last = menu.groups[menu.groups.length - 1];
