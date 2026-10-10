@@ -276,8 +276,9 @@ test("elenco: nessuna riga di conteggio quando tutti gli impegni sono nell'anno"
 
 test("App: anno scolastico del profilo passato sia a Google sia a Note e impegni", () => {
   const app = readSource("src/App.tsx");
-  assert.match(app, /importSelectedGoogleCalendars\(token, calendarIds, \{ schoolYear: profile\.schoolYear \}\)/);
+  assert.match(app, /importSelectedGoogleCalendars\(token, calendarIds, \{ schoolYear: profile\.schoolYear, primaryCalendarId \}\)/);
   assert.match(app, /<FutureCommitmentsView[\s\S]*?schoolYear=\{profile\.schoolYear\}/);
-  // Il cambio di anno nel profilo ricrea la callback dell'import (nessun valore congelato).
-  assert.match(app, /\}, \[googleUser, googleAccessToken, isOnline, profile\.googleCalendarImportIds, profile\.schoolYear\]\);/);
+  // Il cambio di anno nel profilo ricrea la callback dell'import (nessun valore congelato);
+  // la CalendarList (live o cache) è anch'essa un'entrata, per l'id reale del principale.
+  assert.match(app, /\}, \[googleUser, googleAccessToken, isOnline, googleCalendars, profile\.googleCalendarImportIds, profile\.schoolYear, profile\.googleCalendarListCache\]\);/);
 });

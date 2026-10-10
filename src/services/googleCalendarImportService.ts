@@ -4,6 +4,7 @@ import {
   listCalendarEvents,
   listGoogleCalendarEvents,
   PRIMARY_CALENDAR_ID,
+  isPrimaryCalendarId,
   type GoogleCalendarApiEvent,
   type GoogleCalendarEventList,
 } from "./googleCalendarService";
@@ -155,6 +156,12 @@ interface MultiImportDependencies {
   now?: Date;
   /** Anno scolastico del profilo: governa la finestra e la pulizia oltre il 31 agosto. */
   schoolYear?: string | null;
+  /**
+   * Id reale del calendario principale (dalla CalendarList già letta dall'app,
+   * live o cache). Abilita la migrazione email → "primary" degli eventi locali
+   * e il riconoscimento degli impegni inviati al principale (difetto PR #76).
+   */
+  primaryCalendarId?: string;
 }
 
 /**
@@ -203,16 +210,28 @@ export async function importSelectedGoogleCalendars(
   let partial = false;
   let pagesRead = 0;
 
-  for (const calendarId of ids) {
+  for (const rawCalendarId of ids) {
+    // La selezione può esporre il principale col suo id reale (l'email): lo si
+    // riconosce con la stessa regola unica e si normalizza a "primary".
+    const primaryEntry = dependencies.primaryCalendarId
+      ? [{ id: dependencies.primaryCalendarId, primary: true }]
+      : undefined;
+    const isPrimary = isPrimaryCalendarId(rawCalendarId, primaryEntry);
+    const calendarId = isPrimary ? PRIMARY_CALENDAR_ID : rawCalendarId;
     try {
       const remote = await list(accessToken, calendarId, range.timeMin, range.timeMax);
       if ("partial" in remote && remote.partial) partial = true;
       pagesRead += "pagesRead" in remote && typeof remote.pagesRead === "number" ? remote.pagesRead : 1;
-      groups.push({ calendarId, isPrimary: calendarId === PRIMARY_CALENDAR_ID, events: [...remote] });
+      groups.push({
+        calendarId,
+        isPrimary,
+        primaryCalendarId: isPrimary ? dependencies.primaryCalendarId : undefined,
+        events: [...remote],
+      });
     } catch (error) {
       partial = true;
-      if (isInaccessibleCalendarError(error)) inaccessibleCalendarIds.push(calendarId);
-      else failedCalendarIds.push(calendarId);
+      if (isInaccessibleCalendarError(error)) inaccessibleCalendarIds.push(rawCalendarId);
+      else failedCalendarIds.push(rawCalendarId);
     }
   }
 

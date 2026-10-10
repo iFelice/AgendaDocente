@@ -76,6 +76,7 @@ import {
 } from "./services/googleAuth";
 import {
   createGoogleCalendarEvent, updateGoogleCalendarEvent, PRIMARY_CALENDAR_ID,
+  primaryCalendarIdFromList, savedGoogleCalendarId,
   syncOptedInGoogleEvents,
 } from "./services/googleCalendarService";
 import {
@@ -374,7 +375,12 @@ export default function App({ initialData }: { initialData: LocalData }) {
       try {
         // L'anno scolastico del profilo governa la finestra: se l'utente lo cambia,
         // questa callback si ricrea e la sincronizzazione successiva usa i nuovi confini.
-        const result = await importSelectedGoogleCalendars(token, calendarIds, { schoolYear: profile.schoolYear });
+        // L'id reale del principale (CalendarList già letta, live o cache) abilita
+        // la migrazione email → "primary" e il riconoscimento degli impegni inviati.
+        const primaryCalendarId = primaryCalendarIdFromList(
+          googleCalendars ?? cachedGoogleCalendarsToEntries(profile.googleCalendarListCache),
+        );
+        const result = await importSelectedGoogleCalendars(token, calendarIds, { schoolYear: profile.schoolYear, primaryCalendarId });
         sessionImportDone.current = true;
         lastSuccessfulImportAt.current = Date.now();
         setLastSuccessfulImportAtState(lastSuccessfulImportAt.current);
@@ -391,7 +397,7 @@ export default function App({ initialData }: { initialData: LocalData }) {
     })();
     autoImportInFlight.current = request;
     return request;
-  }, [googleUser, googleAccessToken, isOnline, profile.googleCalendarImportIds, profile.schoolYear]);
+  }, [googleUser, googleAccessToken, isOnline, googleCalendars, profile.googleCalendarImportIds, profile.schoolYear, profile.googleCalendarListCache]);
 
   // G1.2.4 — re-bootstrap from the persisted cache whenever no list is available in
   // memory: startup, backup restore and account-sync pulls all flow through `profile`.
@@ -839,7 +845,12 @@ export default function App({ initialData }: { initialData: LocalData }) {
       await storage.saveEvent(event);
       const token = googleAccessToken || getAccessToken();
       if (!token) throw new Error("Ricollega Google prima di inviare l’impegno.");
-      const calendarId = event.googleEventId ? (event.googleCalendarId || PRIMARY_CALENDAR_ID) : requestedCalendarId;
+      // L'invio verso il principale salva l'alias "primary" su googleCalendarId:
+      // Google usa l'email come id del principale e salvarla faceva rimportare
+      // l'impegno come nuovo alla sincronizzazione successiva (difetto PR #76).
+      const googleCalendarList = googleCalendars ?? cachedGoogleCalendarsToEntries(profile.googleCalendarListCache);
+      const rawCalendarId = event.googleEventId ? (event.googleCalendarId || PRIMARY_CALENDAR_ID) : requestedCalendarId;
+      const calendarId = savedGoogleCalendarId(rawCalendarId, googleCalendarList);
       try {
         let googleEventId = event.googleEventId;
         if (googleEventId) await updateGoogleCalendarEvent(token, googleEventId, event, calendarId);

@@ -141,7 +141,8 @@ test("unione: link di Meet da Google, classe e categoria dalla circolare", () =>
 });
 
 test("unione: campi pieni e diversi richiedono una scelta, preselezionata sulla base", () => {
-  const google = imported({ title: "Consiglio straordinario", location: "Aula 4", category: "personale" });
+  // "glo" è una categoria reale: il default "personale" dell'import Google non lo è.
+  const google = imported({ title: "Consiglio straordinario", location: "Aula 4", category: "glo" });
   const plan = planMerge(base({ location: "Aula Magna" }), google, {}, category => category);
   const titles = plan.fields.filter(field => field.status === "choice").map(field => field.field);
   assert.deepEqual(titles.sort(), ["category", "location", "title"]);
@@ -152,6 +153,31 @@ test("unione: campi pieni e diversi richiedono una scelta, preselezionata sulla 
   const chosen = planMerge(base({ location: "Aula Magna" }), google, { title: "other", location: "other" });
   assert.equal(chosen.merged.title, "Consiglio straordinario");
   assert.equal(chosen.merged.location, "Aula 4");
+});
+
+test("unione: categoria Google 'personale' vale come vuota: nessuna scelta, prende la categoria della circolare", () => {
+  const google = imported(); // categoria "personale": il default dell'import Google
+  const plan = planMerge(base(), google);
+  assert.equal(plan.fields.some(field => field.field === "category"), false, "nessuna scelta di categoria");
+  assert.equal(plan.merged.category, "consiglio_classe", "il risultato prende la categoria della circolare");
+  assert.equal(plan.merged.sourceType, "circolare");
+  assert.ok(plan.summary.some(line => line.field === "category" && line.value === "consiglio_classe"));
+  // "personale" su un impegno nato nell'app è reale: resta una scelta normale.
+  const realPersonal = planMerge(base({ category: "personale" }), imported({ category: "glo" }));
+  assert.ok(realPersonal.fields.some(field => field.field === "category"));
+});
+
+test("unione: categoria Google diversa da 'personale' resta una scelta normale", () => {
+  const google = imported({ category: "glo" });
+  const plan = planMerge(base(), google);
+  const category = plan.fields.find(field => field.field === "category");
+  assert.ok(category, "scelta categoria presente");
+  assert.equal(category!.baseValue, "consiglio_classe");
+  assert.equal(category!.otherValue, "glo");
+  assert.equal(category!.defaultChoice, "base");
+  assert.equal(plan.merged.category, "consiglio_classe", "preselezione sulla base");
+  const chosen = planMerge(base(), google, { category: "other" });
+  assert.equal(chosen.merged.category, "glo", "la scelta sull'evento Google resta valida");
 });
 
 test("unione: note 'tieni entrambe' e note vuote da una parte", () => {

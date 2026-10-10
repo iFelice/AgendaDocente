@@ -1,5 +1,5 @@
 import type { CalendarEvent } from "../types";
-import type { GoogleCalendarApiEvent } from "../services/googleCalendarService";
+import { PRIMARY_CALENDAR_ID, type GoogleCalendarApiEvent } from "../services/googleCalendarService";
 import { isValidDate } from "./dates";
 import { normalizeMeetingUrl } from "./meetingLinks";
 
@@ -218,6 +218,12 @@ export interface GoogleCalendarEventGroup {
   calendarId: string;
   /** The primary calendar enables legacy (G1) matching on googleEventId alone. */
   isPrimary?: boolean;
+  /**
+   * Real id of the primary calendar (typically its email), from the CalendarList
+   * the app already read. Lets the primary group recognize local events saved
+   * with that id and migrate them to the "primary" alias (defect of PR #76).
+   */
+  primaryCalendarId?: string;
   events: GoogleCalendarApiEvent[];
 }
 
@@ -230,6 +236,9 @@ export interface GoogleCalendarEventGroup {
  *   and `completed`, and simply acquires `googleCalendarId` on first refresh.
  * - primary: an Agenda-born event already linked to Google (`sourceType !== "google_calendar"`)
  *   counts as linked and is never duplicated nor overwritten.
+ * - primary: a local record saved with the REAL primary id (the email, used by Google as the
+ *   primary calendar id — defect of PR #76) is the SAME calendar: it is migrated to the
+ *   "primary" alias and recognized as owned by the primary group.
  * - shared calendars: never match on `googleEventId` alone, so a shared event can never
  *   collide with an Agenda event or with the same event id coming from another calendar.
  */
@@ -237,7 +246,20 @@ export function mergeGoogleCalendarGroups(
   localEvents: CalendarEvent[],
   groups: GoogleCalendarEventGroup[],
 ): GoogleCalendarMergeResult {
-  const events = [...localEvents];
+  let events = [...localEvents];
+
+  // Migrazione una tantum, idempotente: gli eventi locali salvati con l'id reale del
+  // principale (l'email) passano all'alias "primary". Non tocca nessun altro campo e
+  // nessuna altra identità: al passaggio successivo non trova più nulla da convertire.
+  for (const group of groups) {
+    if (!group.isPrimary || !group.primaryCalendarId || group.primaryCalendarId === PRIMARY_CALENDAR_ID) continue;
+    const primaryId = group.primaryCalendarId;
+    if (!events.some(event => event.googleCalendarId === primaryId)) continue;
+    events = events.map(event =>
+      event.googleCalendarId === primaryId ? { ...event, googleCalendarId: PRIMARY_CALENDAR_ID } : event,
+    );
+  }
+
   let added = 0;
   let updated = 0;
   let linked = 0;
@@ -245,19 +267,29 @@ export function mergeGoogleCalendarGroups(
 
   for (const group of groups) {
     const { calendarId } = group;
+    // Identità "di casa" per il gruppo: stessa identità remota. Sul principale
+    // contano anche l'import legacy senza googleCalendarId e l'id reale del
+    // principale, riconosciuto anche al primo ciclo (prima della migrazione).
+    const isOwnEvent = (event: CalendarEvent, eventId: string): boolean => {
+      if (event.googleEventId !== eventId) return false;
+      if (event.googleCalendarId === calendarId) return true;
+      if (!group.isPrimary) return false;
+      return event.googleCalendarId == null
+        || (group.primaryCalendarId != null && event.googleCalendarId === group.primaryCalendarId);
+    };
     for (const remote of group.events) {
       if (remote.status === "cancelled") {
         ignoredCancelled++;
         continue;
       }
       const mapped = googleEventToCalendarEvent(remote, calendarId);
+      // Un impegno nato nell'app ha sempre la precedenza sull'eventuale copia
+      // importata con la stessa identità (caso del difetto PR #76).
       let index = events.findIndex(
-        event => event.googleCalendarId === calendarId && event.googleEventId === remote.id,
+        event => event.sourceType !== "google_calendar" && isOwnEvent(event, remote.id),
       );
-      if (index < 0 && group.isPrimary) {
-        index = events.findIndex(
-          event => event.googleCalendarId == null && event.googleEventId === remote.id,
-        );
+      if (index < 0) {
+        index = events.findIndex(event => isOwnEvent(event, remote.id));
       }
       if (index < 0) {
         events.push(mapped);
@@ -269,6 +301,21 @@ export function mergeGoogleCalendarGroups(
         // Impegno dell'app collegato (unito o inviato): non viene mai duplicato né sovrascritto.
         events[index] = withGoogleMeetingLinkIfEmpty(existing, mapped);
         linked++;
+        // Doppione residuo del difetto PR #76: stesso googleEventId, uno nato
+        // nell'app e uno importato dal principale. La copia importata esce SOLO
+        // dall'app: nessuna chiamata di cancellazione verso Google.
+        if (group.isPrimary) {
+          for (let i = events.length - 1; i >= 0; i--) {
+            const other = events[i];
+            if (other.id === existing.id) continue;
+            if (other.sourceType !== "google_calendar" || other.googleEventId !== remote.id) continue;
+            if (other.googleCalendarId === PRIMARY_CALENDAR_ID
+              || other.googleCalendarId == null
+              || (group.primaryCalendarId != null && other.googleCalendarId === group.primaryCalendarId)) {
+              events.splice(i, 1);
+            }
+          }
+        }
         continue;
       }
       // Stesso contratto del merge G1: la riga è ricostruita a ogni ciclo, così meetingUrl

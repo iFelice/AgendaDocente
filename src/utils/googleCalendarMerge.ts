@@ -154,10 +154,26 @@ export function mergeFieldValue(
     case "location": return clean(event.location) || undefined;
     case "className": return clean(event.className) || undefined;
     case "subject": return clean(event.subject) || undefined;
-    case "category": return event.category ? categoryLabel(event.category) : undefined;
+    case "category": return mergeCategoryValue(event, categoryLabel);
     case "notes": return clean(event.notes) || undefined;
     case "meetingUrl": return clean(event.meetingUrl) || undefined;
   }
+}
+
+/**
+ * Valore di categoria ai fini dell'unione. La categoria "personale" è il default
+ * assegnato in importazione a ogni evento Google: non è un dato reale, quindi su un
+ * impegno con `sourceType "google_calendar"` vale come vuota (non genera una scelta e
+ * il risultato prende la categoria dell'altro impegno). Una categoria diversa da
+ * "personale" su un evento Google resta reale; su un impegno nato nell'app
+ * "personale" è una scelta legittima e non viene mai azzerata.
+ */
+export function mergeCategoryValue(
+  event: Pick<CalendarEvent, "sourceType" | "category">,
+  categoryLabel: (category: EventCategory) => string = category => category,
+): string | undefined {
+  if (event.sourceType === "google_calendar" && event.category === "personale") return undefined;
+  return event.category ? categoryLabel(event.category) : undefined;
 }
 
 export interface MergeFieldPreview {
