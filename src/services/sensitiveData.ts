@@ -25,7 +25,7 @@ import { isSensitiveEncryptedBlob } from "./sensitiveCrypto";
 
 export type { RemoteConflictArchive };
 
-/** Campi riservati di `Student` (src/types.ts): sostegno, PEI, BES/DSA, équipe. */
+/** Campi riservati di `Student` (src/types.ts): sostegno, PEI, BES/DSA, équipe, contatti extra. */
 export const SENSITIVE_STUDENT_FIELDS = [
   "isSupportStudent",
   "peiType",
@@ -35,6 +35,7 @@ export const SENSITIVE_STUDENT_FIELDS = [
   "diagnosticSummary",
   "specialists",
   "gloDate",
+  "extraContacts",
 ] as const;
 
 export type SensitiveStudentField = (typeof SENSITIVE_STUDENT_FIELDS)[number];
@@ -153,7 +154,14 @@ export function pickSensitiveStudentFields(student: unknown): DecryptedStudentFi
   const picked: DecryptedStudentFields = {};
   for (const field of SENSITIVE_STUDENT_FIELDS) {
     const value = student[field];
-    if (value !== undefined) picked[field] = value;
+    if (value === undefined) continue;
+    // extraContacts: non cifriamo MAI un array vuoto (sarebbe rumore crittografico
+    // e farebbe pensare che esistano dati riservati).
+    if (field === "extraContacts") {
+      if (Array.isArray(value) && value.length > 0) picked[field] = value;
+      continue;
+    }
+    picked[field] = value;
   }
   return picked;
 }
@@ -350,7 +358,15 @@ export function preserveSensitiveEncPayload(
 /** Vero se l'alunno ha almeno un campo sensibile compilato. */
 export function hasSensitiveStudentData(student: unknown): boolean {
   if (!isRecord(student)) return false;
-  return SENSITIVE_STUDENT_FIELDS.some(field => student[field] !== undefined);
+  return SENSITIVE_STUDENT_FIELDS.some(field => {
+    const value = student[field];
+    if (value === undefined) return false;
+    // extraContacts: un array vuoto (o che dopo normalizzazione resta vuoto)
+    // NON conta come "dato presente". A salvataggio normalizziamo a undefined,
+    // ma qui siamo tolleranti a [] che può arrivare da import/versioni intermedie.
+    if (field === "extraContacts") return Array.isArray(value) && value.length > 0;
+    return true;
+  });
 }
 
 /** Vero se il profilo ha `assignedStudents` compilato. */

@@ -37,12 +37,14 @@ import {
 import { classifyRemoteStateDoc } from "./sync/remoteSchema";
 import {
   SENSITIVE_STUDENT_FIELDS,
+  hasSensitiveStudentData,
   pickSensitiveStudentFields,
   stripSensitiveTransportProfile,
   stripSensitiveTransportStudent,
   type DecryptedSensitive,
   type DecryptedStudentFields,
 } from "./sensitiveData";
+import { normalizeStudentContacts } from "../utils/studentContacts";
 import type { SyncableSnapshot } from "./sync/types";
 import type { Student, TeacherProfile } from "../types";
 
@@ -307,7 +309,7 @@ export async function decryptLocalStudents(students: Student[], key: CryptoKey):
     const blob = row?.sensitiveEnc;
     if (!blob || !isSensitiveEncryptedBlob(blob)) { out.push(row); continue; }
     // La riga ha già valori in chiaro: sono la verità locale, il blob è vecchio.
-    if (SENSITIVE_STUDENT_FIELDS.some(field => row[field] !== undefined)) { out.push(row); continue; }
+    if (hasSensitiveStudentData(row)) { out.push(row); continue; }
     try {
       const fields = sanitizeDecryptedStudentFields(await decryptJson(key, blob));
       const { sensitiveEnc: _dropped, ...rest } = row;
@@ -449,13 +451,21 @@ export function createSensitiveSyncAdapter(keystore: EncryptionKeystore): Sensit
   };
 }
 
-/** Input non fidato: dal blob decifrato si tengono SOLO i campi dell'elenco unico. */
+/** Input non fidato: dal blob decifrato si tengono SOLO i campi dell'elenco unico, validati. */
 function sanitizeDecryptedStudentFields(value: unknown): DecryptedStudentFields {
   const out: DecryptedStudentFields = {};
   if (!isRecord(value)) return out;
   for (const field of SENSITIVE_STUDENT_FIELDS) {
     const entry = value[field];
-    if (entry !== undefined) out[field] = entry;
+    if (entry === undefined) continue;
+    if (field === "extraContacts") {
+      // Array di contatti: validazione rigorosa, elementi non validi scartati,
+      // nessun fallimento dell'intera scheda. Se tutto è invalido -> undefined.
+      const cleaned = normalizeStudentContacts(entry);
+      if (cleaned) out[field] = cleaned;
+      continue;
+    }
+    out[field] = entry;
   }
   return out;
 }
