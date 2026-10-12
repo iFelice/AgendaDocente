@@ -37,9 +37,18 @@ import {
   Student,
   StudentNote,
   StudentNoteCategory,
+  StudentContact,
+  STUDENT_CONTACT_ROLE_LABELS,
   TeacherProfile,
   CalendarEvent,
 } from "../types";
+import {
+  isValidEmail,
+  isContactCompletelyEmpty,
+  newEmptyContact,
+  normalizeStudentContacts,
+  MAX_EXTRA_CONTACTS,
+} from "../utils/studentContacts";
 
 interface ClassesViewProps {
   profile: TeacherProfile;
@@ -135,6 +144,8 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
   // field behave like a normal numeric input: the model value (number | undefined) is only
   // derived on blur/save, never by re-inserting the previous/default value while typing.
   const [supportHoursDraft, setSupportHoursDraft] = useState<string>("");
+  // Errori email per contatto extra (id contatto -> messaggio), per la validazione al salvataggio.
+  const [extraContactEmailErrors, setExtraContactEmailErrors] = useState<Record<string, string>>({});
 
   // In-App Deletion confirmation states (prevents iframe confirm() blocking)
   const [studentToDelete, setStudentToDelete] = useState<Student | null>(null);
@@ -215,6 +226,9 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
         const matchesDiagnosis = (s.diagnosticSummary || "").toLowerCase().includes(q);
         const matchesSpecialists = (s.specialists || "").toLowerCase().includes(q);
         const matchesParents = (s.contactParents?.parentNames || "").toLowerCase().includes(q);
+        const matchesExtraContacts = (s.extraContacts || []).some(
+          (c) => (c.name || "").toLowerCase().includes(q) || (c.roleDetail || "").toLowerCase().includes(q)
+        );
         const matchesNotes = s.notes?.some(
           (n) => n.title.toLowerCase().includes(q) || n.content.toLowerCase().includes(q)
         );
@@ -224,6 +238,7 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
           matchesDiagnosis ||
           matchesSpecialists ||
           matchesParents ||
+          matchesExtraContacts ||
           matchesNotes
         );
       }
@@ -277,13 +292,18 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
       notes: [],
     });
     setSupportHoursDraft("9");
+    setExtraContactEmailErrors({});
     setIsEditModalOpen(true);
   };
 
   const handleOpenEditStudent = (student: Student) => {
     editBaseline.current = student;
-    setStudentToEdit({ ...student });
+    const extra = student.extraContacts && student.extraContacts.length > 0
+      ? student.extraContacts.map(c => ({ ...c }))
+      : undefined;
+    setStudentToEdit({ ...student, extraContacts: extra });
     setSupportHoursDraft(student.supportHoursPerWeek !== undefined ? String(student.supportHoursPerWeek) : "");
+    setExtraContactEmailErrors({});
     setIsEditModalOpen(true);
   };
 
@@ -316,7 +336,40 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
     e.preventDefault();
     if (!studentToEdit || !studentToEdit.fullName.trim()) return;
     // Flush the raw draft even if the blur handler did not run (e.g. keyboard submit).
-    const studentToSave = withCommittedSupportHours(studentToEdit);
+    let studentToSave = withCommittedSupportHours(studentToEdit);
+
+    // Normalizza extraContacts: rimuovi completamente vuoti, trim, e [] -> undefined.
+    // Valida le email: se una è compilata ma non valida, blocca il salvataggio e mostra errore.
+    const draftContacts = (studentToSave.extraContacts || []).filter(c => !isContactCompletelyEmpty(c));
+    const emailErrors: Record<string, string> = {};
+    for (const c of draftContacts) {
+      const email = (c.email || "").trim();
+      if (email && !isValidEmail(email)) {
+        emailErrors[c.id] = "Email non valida (manca @ o dominio).";
+      }
+    }
+    if (Object.keys(emailErrors).length > 0) {
+      setExtraContactEmailErrors(emailErrors);
+      return;
+    }
+    // Applica trim ai campi e ricostruisci l'array.
+    const cleaned: StudentContact[] = draftContacts.map(c => ({
+      id: c.id,
+      role: c.role,
+      ...(c.roleDetail?.trim() ? { roleDetail: c.roleDetail.trim() } : {}),
+      ...(c.name?.trim() ? { name: c.name.trim() } : {}),
+      ...(c.phone?.trim() ? { phone: c.phone.trim() } : {}),
+      ...(c.email?.trim() ? { email: c.email.trim() } : {}),
+      ...(c.notes?.trim() ? { notes: c.notes.trim() } : {}),
+    }));
+    const normalized = normalizeStudentContacts(cleaned);
+    if (normalized) {
+      studentToSave = { ...studentToSave, extraContacts: normalized };
+    } else {
+      const { extraContacts: _removed, ...rest } = studentToSave;
+      studentToSave = rest as Student;
+    }
+    setExtraContactEmailErrors({});
     setStudentToEdit(studentToSave);
 
     if (!await save.run(() => onSaveStudent(studentToSave, editBaseline.current))) return;
@@ -1053,6 +1106,46 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
                   </div>
                 )}
 
+                {/* Altri Contatti (tutor, terapisti, educatori) */}
+                {activeDetailStudent.extraContacts && activeDetailStudent.extraContacts.length > 0 && (() => {
+                  const isLocked = !hasSensitiveStudentData(activeDetailStudent) && hasEncryptedSensitiveBlob(activeDetailStudent);
+                  if (isLocked) {
+                    return (
+                      <div className="pt-2 border-t border-stone-200/60">
+                        <p className="text-xs text-stone-500 italic">{LOCKED_SENSITIVE_NOTICE}</p>
+                      </div>
+                    );
+                  }
+                  return (
+                    <div className="pt-2 border-t border-stone-200/60 space-y-2">
+                      <p className="text-[11px] font-bold text-stone-500 uppercase tracking-wider">Altri contatti</p>
+                      {activeDetailStudent.extraContacts.map((c) => {
+                        const label = c.roleDetail || STUDENT_CONTACT_ROLE_LABELS[c.role];
+                        return (
+                          <div key={c.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-stone-700">
+                            <span className="font-semibold text-stone-900">
+                              {label}{c.name ? ` — ${c.name}` : ""}
+                            </span>
+                            {c.phone && (
+                              <a href={`tel:${c.phone}`} className="inline-flex items-center text-emerald-700 font-medium hover:underline">
+                                <Phone className="w-3 h-3 mr-1" />{c.phone}
+                              </a>
+                            )}
+                            {c.email && (
+                              <a href={`mailto:${c.email}`} className="inline-flex items-center text-purple-700 font-medium hover:underline">
+                                <Mail className="w-3 h-3 mr-1" />{c.email}
+                              </a>
+                            )}
+                            {c.notes && (
+                              <span className="text-[11px] text-stone-500 italic w-full">({c.notes})</span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
+
                 {/* Quick Calendar Schedulers */}
                 <div className="pt-2 flex flex-wrap gap-2">
                   <button
@@ -1552,6 +1645,180 @@ export const ClassesView: React.FC<ClassesViewProps> = ({
                   </div>
                 </div>
               </div>
+
+              {/* ALTRI CONTATTI (tutor, terapisti, educatori) — sezione riservata cifrata */}
+              {(() => {
+                // Un alunno esistente con blob cifrato ma senza campi in chiaro => dispositivo bloccato.
+                const lockedForEdit =
+                  students.some((s) => s.id === studentToEdit.id) &&
+                  !hasSensitiveStudentData(studentToEdit) &&
+                  hasEncryptedSensitiveBlob(editBaseline.current ?? studentToEdit);
+                const contacts: StudentContact[] = studentToEdit.extraContacts ?? [];
+                return (
+                  <div className="pt-3 border-t border-stone-100 space-y-3">
+                    <h3 className="text-xs font-bold text-stone-400 uppercase tracking-wider">
+                      Altri contatti (tutor, terapisti, educatori)
+                    </h3>
+                    <p className="text-[11px] text-stone-500">
+                      Dati riservati: cifrati come PEI ed équipe.
+                    </p>
+                    {lockedForEdit ? (
+                      <div className="rounded-xl bg-amber-50 border border-amber-200 p-3 text-xs text-amber-900">
+                        {LOCKED_SENSITIVE_NOTICE}
+                      </div>
+                    ) : (
+                      <>
+                        {contacts.map((contact, idx) => (
+                          <div key={contact.id} className="rounded-xl border border-stone-200 bg-stone-50/60 p-3 space-y-3">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                              <div>
+                                <label className="block text-[11px] font-semibold text-stone-600 mb-1">Ruolo</label>
+                                <select
+                                  value={contact.role}
+                                  onChange={(e) => {
+                                    const updated = [...contacts];
+                                    updated[idx] = { ...contact, role: e.target.value as StudentContact["role"] };
+                                    setStudentToEdit({ ...studentToEdit, extraContacts: updated });
+                                  }}
+                                  className="w-full min-h-[44px] px-3 py-2 bg-white border border-stone-200 rounded-xl text-xs focus:ring-2 focus:ring-purple-500 focus:outline-none"
+                                >
+                                  {(Object.keys(STUDENT_CONTACT_ROLE_LABELS) as Array<keyof typeof STUDENT_CONTACT_ROLE_LABELS>).map((r) => (
+                                    <option key={r} value={r}>{STUDENT_CONTACT_ROLE_LABELS[r]}</option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="block text-[11px] font-semibold text-stone-600 mb-1">Specifica (facoltativo)</label>
+                                <input
+                                  type="text"
+                                  value={contact.roleDetail || ""}
+                                  maxLength={200}
+                                  onChange={(e) => {
+                                    const updated = [...contacts];
+                                    updated[idx] = { ...contact, roleDetail: e.target.value };
+                                    setStudentToEdit({ ...studentToEdit, extraContacts: updated });
+                                  }}
+                                  placeholder="Es: Logopedista, Tutor DSA, AEC comunale"
+                                  className="w-full min-h-[44px] px-3 py-2 bg-white border border-stone-200 rounded-xl text-xs focus:ring-2 focus:ring-purple-500 focus:bg-white focus:outline-none"
+                                />
+                              </div>
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                              <div>
+                                <label className="block text-[11px] font-semibold text-stone-600 mb-1">Nome</label>
+                                <input
+                                  type="text"
+                                  value={contact.name || ""}
+                                  maxLength={200}
+                                  onChange={(e) => {
+                                    const updated = [...contacts];
+                                    updated[idx] = { ...contact, name: e.target.value };
+                                    setStudentToEdit({ ...studentToEdit, extraContacts: updated });
+                                  }}
+                                  placeholder="Es: Dott.ssa Maria Bianchi"
+                                  className="w-full min-h-[44px] px-3 py-2 bg-white border border-stone-200 rounded-xl text-xs focus:ring-2 focus:ring-purple-500 focus:bg-white focus:outline-none"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[11px] font-semibold text-stone-600 mb-1">Telefono</label>
+                                <input
+                                  type="tel"
+                                  value={contact.phone || ""}
+                                  maxLength={200}
+                                  onChange={(e) => {
+                                    const updated = [...contacts];
+                                    updated[idx] = { ...contact, phone: e.target.value };
+                                    setStudentToEdit({ ...studentToEdit, extraContacts: updated });
+                                  }}
+                                  placeholder="Es: 333 1234567"
+                                  className="w-full min-h-[44px] px-3 py-2 bg-white border border-stone-200 rounded-xl text-xs focus:ring-2 focus:ring-purple-500 focus:bg-white focus:outline-none"
+                                />
+                              </div>
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                              <div>
+                                <label className="block text-[11px] font-semibold text-stone-600 mb-1">Email</label>
+                                <input
+                                  type="email"
+                                  value={contact.email || ""}
+                                  maxLength={200}
+                                  onChange={(e) => {
+                                    const updated = [...contacts];
+                                    updated[idx] = { ...contact, email: e.target.value };
+                                    setStudentToEdit({ ...studentToEdit, extraContacts: updated });
+                                    if (extraContactEmailErrors[contact.id]) {
+                                      const n = { ...extraContactEmailErrors };
+                                      delete n[contact.id];
+                                      setExtraContactEmailErrors(n);
+                                    }
+                                  }}
+                                  placeholder="Es: m.bianchi@asl.it"
+                                  className={`w-full min-h-[44px] px-3 py-2 bg-white border rounded-xl text-xs focus:ring-2 focus:ring-purple-500 focus:bg-white focus:outline-none ${extraContactEmailErrors[contact.id] ? "border-rose-400" : "border-stone-200"}`}
+                                />
+                                {extraContactEmailErrors[contact.id] && (
+                                  <p className="mt-1 text-[11px] text-rose-600">{extraContactEmailErrors[contact.id]}</p>
+                                )}
+                              </div>
+                              <div>
+                                <label className="block text-[11px] font-semibold text-stone-600 mb-1">Note</label>
+                                <input
+                                  type="text"
+                                  value={contact.notes || ""}
+                                  maxLength={500}
+                                  onChange={(e) => {
+                                    const updated = [...contacts];
+                                    updated[idx] = { ...contact, notes: e.target.value };
+                                    setStudentToEdit({ ...studentToEdit, extraContacts: updated });
+                                  }}
+                                  placeholder="Es: reperibile il martedì pomeriggio"
+                                  className="w-full min-h-[44px] px-3 py-2 bg-white border border-stone-200 rounded-xl text-xs focus:ring-2 focus:ring-purple-500 focus:bg-white focus:outline-none"
+                                />
+                              </div>
+                            </div>
+                            <div className="flex justify-end">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const updated = contacts.filter((_, i) => i !== idx);
+                                  setStudentToEdit({
+                                    ...studentToEdit,
+                                    extraContacts: updated.length ? updated : undefined,
+                                  });
+                                  if (extraContactEmailErrors[contact.id]) {
+                                    const n = { ...extraContactEmailErrors };
+                                    delete n[contact.id];
+                                    setExtraContactEmailErrors(n);
+                                  }
+                                }}
+                                className="min-h-[44px] inline-flex items-center px-3 py-2 text-xs font-semibold text-rose-700 hover:bg-rose-50 rounded-lg border border-rose-200 transition-colors"
+                              >
+                                <Trash2 className="w-3.5 h-3.5 mr-1" />
+                                Rimuovi
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                        <button
+                          type="button"
+                          disabled={contacts.length >= MAX_EXTRA_CONTACTS}
+                          onClick={() => {
+                            const next = [...contacts, newEmptyContact()];
+                            setStudentToEdit({ ...studentToEdit, extraContacts: next });
+                          }}
+                          className={`min-h-[44px] inline-flex items-center px-3 py-2 rounded-xl text-xs font-semibold border transition-colors ${
+                            contacts.length >= MAX_EXTRA_CONTACTS
+                              ? "bg-stone-100 text-stone-400 border-stone-200 cursor-not-allowed"
+                              : "bg-purple-50 text-purple-800 border-purple-200 hover:bg-purple-100"
+                          }`}
+                        >
+                          <Plus className="w-3.5 h-3.5 mr-1.5" />
+                          {contacts.length >= MAX_EXTRA_CONTACTS ? "Massimo 20 contatti" : "Aggiungi contatto"}
+                        </button>
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* Submit / Cancel buttons */}
               <div className="pt-4 border-t border-stone-100 flex items-center justify-end space-x-2">

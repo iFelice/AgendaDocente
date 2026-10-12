@@ -3,6 +3,18 @@ import { isHttpsMeetingUrl } from '../utils/meetingLinks';
 import { TEACHER_ROLE_KINDS, type StudentAssessment, type StudentScheduledAssessment } from '../types';
 import { normalizeTeacherProfile } from '../utils/multiSchool';
 
+const VALID_CONTACT_ROLES = new Set(['tutore_legale','tutor','terapista','educatore','medico','altro']);
+const contactString = (v: unknown) => typeof v === 'string' && v.length <= 200;
+const contactNotes = (v: unknown) => typeof v === 'string' && v.length <= 500;
+function extraContactsValidator(v: unknown): boolean {
+  if (!Array.isArray(v)) return false;
+  if (v.length > 20) return false;
+  return v.every(c => record(c) && typeof c.id === 'string' && c.id.trim().length > 0
+    && typeof c.role === 'string' && VALID_CONTACT_ROLES.has(c.role)
+    && ['roleDetail','name','phone','email'].every(k => c[k] === undefined || contactString(c[k]))
+    && (c.notes === undefined || contactNotes(c.notes)));
+}
+
 const record = (v: unknown): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v);
 const strings = (v: unknown) => Array.isArray(v) && v.every(x => typeof x === 'string');
 const text = (v: unknown) => typeof v === 'string';
@@ -133,7 +145,8 @@ export function validateBackup(data: unknown): asserts data is Record<string, an
     && optional(s.archivedAt, timestamp)
     && optional(s.archivedReason, boundedText(500))
     && ['isSupportStudent','hasBesDsa','pdpApproved'].every(k => optional(s[k],bool)) && optional(s.supportHoursPerWeek,number)
-    && optional(s.contactParents,v => record(v) && ['parentNames','phone','email','notes'].every(k => optional(v[k],text))))) throw new Error('Alunni nel backup non validi.');
+    && optional(s.contactParents,v => record(v) && ['parentNames','phone','email','notes'].every(k => optional(v[k],text)))
+    && optional(s.extraContacts, extraContactsValidator))) throw new Error('Alunni nel backup non validi.');
   const assessments = data.assessments ?? [];
   if (!Array.isArray(assessments) || new Set(assessments.map((assessment: any) => assessment?.id)).size !== assessments.length || !assessments.every(isValidStudentAssessment)) {
     throw new Error('Valutazioni nel backup non valide.');

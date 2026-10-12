@@ -321,6 +321,33 @@ export interface StudentParentContact {
   notes?: string;
 }
 
+export type StudentContactRole =
+  | "tutore_legale"
+  | "tutor"
+  | "terapista"
+  | "educatore"
+  | "medico"
+  | "altro";
+
+export const STUDENT_CONTACT_ROLE_LABELS: Record<StudentContactRole, string> = {
+  tutore_legale: "Tutore legale",
+  tutor: "Tutor (scolastico / DSA)",
+  terapista: "Terapista",
+  educatore: "Educatore / AEC",
+  medico: "Medico / NPI",
+  altro: "Altro",
+};
+
+export interface StudentContact {
+  id: string;            // generato lato client
+  role: StudentContactRole;
+  roleDetail?: string;   // es. "Logopedista", "Tutor DSA", "AEC comunale"
+  name?: string;
+  phone?: string;
+  email?: string;
+  notes?: string;        // es. "reperibile il martedì pomeriggio"
+}
+
 export type StudentAssessmentType = "oral" | "written" | "practical" | "other";
 export type StudentAssessmentValueKind = "numeric" | "judgement";
 export type StudentScheduledAssessmentStatus = "scheduled" | "completed" | "cancelled";
@@ -397,6 +424,8 @@ export interface Student {
   gloDate?: string; // Data programmata o svolta GLO
   // Contatti Famiglia
   contactParents?: StudentParentContact;
+  // Altri contatti riservati (tutor, terapisti, educatori, ecc.) — cifrati in sensitiveEnc
+  extraContacts?: StudentContact[];
   // Diario Note
   notes: StudentNote[];
   updatedAt?: string;
