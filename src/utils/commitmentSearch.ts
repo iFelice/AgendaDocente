@@ -112,11 +112,27 @@ function queryWordMatchesItemWord(itemWords: readonly string[], queryWord: strin
 /**
  * Le parole di un solo carattere generano solo rumore e vengono ignorate. Le
  * classi già normalizzate ("2c") hanno almeno 2 caratteri e restano sempre
- * significative. Se la query non ha più nessuna parola significativa non resta
- * alcun vincolo: l'AND vuoto vale per tutti gli impegni.
+ * significative. Una query che dopo la normalizzazione non ha NESSUNA parola
+ * significativa (solo doppie che collassano, punteggiatura, spazi o caratteri
+ * singoli) non deve mai arrivare all'AND su una lista vuota di parole: l'AND
+ * vuoto varrebbe per tutti gli impegni e mostrerebbe l'intero elenco.
  */
 function isSignificantQueryWord(word: string): boolean {
   return word.length >= 2;
+}
+
+/** Parole significative (≥ 2 caratteri) della query dopo la normalizzazione. */
+function significantQueryWords(query: string): string[] {
+  return splitNormalizedWords(normalizeSearchText(query)).filter(isSignificantQueryWord);
+}
+
+/**
+ * Vero se la query contiene almeno una parola utile (≥ 2 caratteri dopo la
+ * normalizzazione: doppie ridotte, punteggiatura e spazi non contano). La vista
+ * la usa per decidere se la ricerca può partire.
+ */
+export function hasSearchableTerms(query: string): boolean {
+  return significantQueryWords(query).length > 0;
 }
 
 export type CommitmentCategoryLabel = (category: EventCategory) => string;
@@ -180,6 +196,12 @@ export interface CommitmentSearchResult {
   upcoming: FutureCommitmentItem[];
   /** Impegni passati, dal più recente al più vecchio. */
   past: FutureCommitmentItem[];
+  /**
+   * Vero quando la query non contiene nessuna parola utile (es. "aa", "..",
+   * "c d"): in quel caso entrambe le liste sono vuote e la ricerca non viene
+   * nemmeno eseguita, invece di restituire l'intero elenco.
+   */
+  tooShort: boolean;
 }
 
 function isCommitmentSearchIndex(items: readonly FutureCommitmentItem[] | CommitmentSearchIndex): items is CommitmentSearchIndex {
@@ -207,8 +229,14 @@ export function searchCommitments(
   query: string,
   { todayIso, categoryLabel }: CommitmentSearchOptions,
 ): CommitmentSearchResult {
+  const queryWords = significantQueryWords(query);
+  // Nessuna parola utile (solo doppie, punteggiatura, spazi o caratteri singoli):
+  // nessun risultato, mai l'intero elenco. L'AND su una lista vuota di parole
+  // non viene nemmeno tentato.
+  if (queryWords.length === 0) {
+    return { upcoming: [], past: [], tooShort: true };
+  }
   const index = toIndex(items, categoryLabel);
-  const queryWords = splitNormalizedWords(normalizeSearchText(query)).filter(isSignificantQueryWord);
   const upcoming: FutureCommitmentItem[] = [];
   const past: FutureCommitmentItem[] = [];
   for (const { item, words } of index.entries) {
@@ -217,5 +245,5 @@ export function searchCommitments(
   }
   upcoming.sort(compareFutureCommitments);
   past.sort(comparePastCommitments);
-  return { upcoming, past };
+  return { upcoming, past, tooShort: false };
 }

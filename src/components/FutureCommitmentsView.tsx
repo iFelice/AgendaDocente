@@ -2,7 +2,7 @@ import React from "react";
 import { CalendarClock, CheckCircle2, ChevronDown, ChevronRight, Circle, ListTodo, MapPin, Plus, Search, Users, X } from "lucide-react";
 import type { CalendarEvent, EventCategory, Student, StudentScheduledAssessment } from "../types";
 import { EVENT_CATEGORIES } from "./EventModal";
-import { buildCommitmentSearchIndex, searchCommitments } from "../utils/commitmentSearch";
+import { buildCommitmentSearchIndex, hasSearchableTerms, searchCommitments } from "../utils/commitmentSearch";
 import { civilDayOfWeek, formatCivilDateIt, isValidDate, localDateISO, parseCivilDate } from "../utils/dates";
 import { isRelevanceReasonText } from "../utils/circularRelevance";
 import { getEventMeetingUrl } from "../utils/meetingLinks";
@@ -235,8 +235,14 @@ export const FutureCommitmentsView: React.FC<FutureCommitmentsViewProps> = ({
   );
 
   const trimmedQuery = searchQuery.trim();
-  // Meno di 2 caratteri: la vista resta identica a oggi (nessun risultato, nessun conteggio).
-  const searchActive = searchOpen && trimmedQuery.length >= 2;
+  // La ricerca parte solo se la query ha almeno una parola utile (≥ 2 caratteri non
+  // annientati da doppie, punteggiatura o spazi). Con meno di 2 caratteri la vista
+  // resta identica a oggi; con almeno 2 caratteri ma nessuna parola utile (es. "aa",
+  // "..", "c d") compare il suggerimento, mai l'intero elenco né un conteggio.
+  const queryWritten = trimmedQuery.length >= 2;
+  const queryHasTerms = hasSearchableTerms(trimmedQuery);
+  const searchActive = searchOpen && queryWritten && queryHasTerms;
+  const showSearchHint = searchOpen && queryWritten && !queryHasTerms;
   const searchResult = React.useMemo(
     () => (searchActive ? searchCommitments(searchIndex, trimmedQuery, { todayIso, categoryLabel: SEARCH_CATEGORY_LABEL }) : null),
     [searchActive, searchIndex, trimmedQuery, todayIso],
@@ -319,7 +325,14 @@ export const FutureCommitmentsView: React.FC<FutureCommitmentsViewProps> = ({
         </div>
       )}
 
-      {searchActive && searchResult ? (
+      {showSearchHint ? (
+        /* Almeno 2 caratteri scritti ma nessuna parola utile (solo doppie,
+           punteggiatura, spazi, lettere singole): suggerimento al posto dei
+           risultati, senza mostrare la vista normale né "N risultati". */
+        <p data-search-hint role="status" className="px-1 text-sm text-stone-600">
+          Scrivi almeno una parola di 2 lettere.
+        </p>
+      ) : searchActive && searchResult ? (
         /* Modalità ricerca: al posto dei gruppi normali e dell'Archivio mostra il
            riepilogo, gli impegni in programma (oggi incluso, oltre il 31 agosto
            compreso) e quelli passati, ciascuno solo se non vuoto. */

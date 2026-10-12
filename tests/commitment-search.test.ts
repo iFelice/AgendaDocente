@@ -7,6 +7,7 @@ import React from 'react';
 import { create, act } from 'react-test-renderer';
 import {
   buildCommitmentSearchIndex,
+  hasSearchableTerms,
   normalizeSearchText,
   searchCommitments,
 } from '../src/utils/commitmentSearch';
@@ -168,15 +169,20 @@ test('AND: "consiglio 2c" trova "Consiglio di Classe 2C" e non "Consiglio di Cla
   assert.deepEqual(ids(search(events, 'consiglio 2^C')), { upcoming: ['event:ok'], past: [] });
 });
 
-test('le parole di 1 carattere sono ignorate; "2c" (classe normalizzata) resta significativa', () => {
+test('le parole di 1 carattere sono ignorate; senza parole utili la ricerca non restituisce nulla', () => {
   const events = [event({ id: 'glo', date: addDaysISO(TODAY, 1), category: 'glo', title: 'GLO 2C' })];
-  // "g" da sola è rumore e viene ignorata: non esclude nulla.
-  assert.deepEqual(ids(search(events, 'g')), { upcoming: ['event:glo'], past: [] });
+  // "g" da sola è rumore: non è una parola utile, non trova l'intero elenco.
+  const soloRumore = search(events, 'g');
+  assert.equal(soloRumore.tooShort, true);
+  assert.deepEqual(ids(soloRumore), { upcoming: [], past: [] });
   // "2c" invece è una classe normalizzata e filtra davvero.
   assert.deepEqual(ids(search(events, '2c')), { upcoming: ['event:glo'], past: [] });
   assert.deepEqual(ids(search(events, '3c')), { upcoming: [], past: [] });
-  // Query senza più parole significative: nessun vincolo rimasto, AND vuoto ⇒ tutti.
-  assert.deepEqual(ids(search(events, 'g 3')), { upcoming: ['event:glo'], past: [] });
+  // Query fatta solo di parole da 1 carattere: nessuna parola utile ⇒ NESSUN
+  // risultato (mai l'intero elenco: l'AND su lista vuota non viene eseguito).
+  const soloRumore2 = search(events, 'g 3');
+  assert.equal(soloRumore2.tooShort, true);
+  assert.deepEqual(ids(soloRumore2), { upcoming: [], past: [] });
 });
 
 test('le verifiche programmate sono ricercabili per argomento e materia', () => {
@@ -253,11 +259,14 @@ test('l\'indice precalcolato produce gli stessi risultati dell\'elenco grezzo', 
 test('la ricerca resta locale: la utility non importa componenti React né servizi, la vista memoizza l\'indice', () => {
   assert.ok(!/from "\.\.\/(components|services)/.test(searchUtilSource), 'nessun import di componenti o servizi');
   assert.match(searchUtilSource, /isRelevanceReasonText/);
-  // La vista costruisce l'etichetta da EVENT_CATEGORIES e memoizza l'indice (useMemo).
+  // La vista costruisce l'etichetta da EVENT_CATEGORIES, memoizza l'indice (useMemo)
+  // e non fa partire la ricerca senza parole utili.
   assert.match(viewSource, /SEARCH_CATEGORY_LABEL = \(category: EventCategory\): string =>/);
   assert.match(viewSource, /EVENT_CATEGORIES\.find/);
   assert.match(viewSource, /buildCommitmentSearchIndex\(searchItems, SEARCH_CATEGORY_LABEL\)/);
   assert.match(viewSource, /useMemo\(/);
+  assert.match(viewSource, /hasSearchableTerms/);
+  assert.match(searchUtilSource, /hasSearchableTerms/);
 });
 
 // --- UI ----------------------------------------------------------------------
@@ -391,6 +400,70 @@ test('UI: nessun risultato → messaggio dedicato, senza sezioni vuote', async (
   assert.equal(renderer.root.findAllByProps({ 'data-search-results': true }).length, 0);
   assert.equal(renderer.root.findAllByProps({ 'data-search-section': 'in-programma' }).length, 0);
   assert.equal(renderer.root.findAllByProps({ 'data-search-section': 'passati' }).length, 0);
+  await act(async () => renderer.unmount());
+});
+
+test('query senza parole utili ("aa", "zz", "..", "c d", "   "): risultati vuoti e tooShort coerente', () => {
+  // Il difetto: queste query mostravano l'intero elenco con "N risultati".
+  for (const query of ['aa', 'zz', '..', 'c d', '   ']) {
+    const result = search(COLLEGIO, query);
+    assert.deepEqual(ids(result), { upcoming: [], past: [] }, `query: ${query}`);
+    assert.equal(result.tooShort, true, `query: ${query}`);
+    assert.equal(hasSearchableTerms(query), false, `query: ${query}`);
+    assert.equal(result.upcoming.length + result.past.length, 0, `query: ${query}`);
+  }
+});
+
+test('hasSearchableTerms: "2c" (classe) e "glo" (sigla) restano parole utili e funzionano come prima', () => {
+  assert.equal(hasSearchableTerms('2c'), true);
+  assert.equal(hasSearchableTerms('glo'), true);
+  assert.equal(hasSearchableTerms('collegio'), true);
+  const events = [event({ id: 'glo', date: addDaysISO(TODAY, 1), category: 'glo', title: 'GLO 2C' })];
+  const byClass = search(events, '2c');
+  assert.equal(byClass.tooShort, false);
+  assert.deepEqual(ids(byClass), { upcoming: ['event:glo'], past: [] });
+  const bySigla = search(events, 'glo');
+  assert.equal(bySigla.tooShort, false);
+  assert.deepEqual(ids(bySigla), { upcoming: ['event:glo'], past: [] });
+  // Parola utile mescolata al rumore: filtra per la parola utile, senza tooShort.
+  const mista = search(events, 'aa 2c');
+  assert.equal(mista.tooShort, false);
+  assert.deepEqual(ids(mista), { upcoming: ['event:glo'], past: [] });
+});
+
+test('UI: query fatta di sole doppie ("zzzzzz") → suggerimento, non "Nessun impegno trovato"', async () => {
+  const renderer = await renderView(COLLEGIO);
+  await openSearch(renderer);
+  // Le doppie collassano ("zzzzzz" → "z"): nessuna parola utile.
+  await typeQuery(renderer, 'zzzzzz');
+  assert.equal(renderer.root.findAllByProps({ 'data-search-empty': true }).length, 0);
+  assert.equal(renderer.root.findAllByProps({ 'data-search-results-summary': true }).length, 0);
+  assert.ok(renderer.root.findAllByProps({ 'data-search-hint': true }).length > 0);
+  await act(async () => renderer.unmount());
+});
+
+test('UI: "aa" mostra il suggerimento, non la vista normale né "N risultati"', async () => {
+  const renderer = await renderView([
+    event({ id: 'future', date: addDaysISO(TODAY, 1), title: 'Collegio dei docenti' }),
+    event({ id: 'past', date: addDaysISO(TODAY, -2), title: 'Vecchio collegio' }),
+  ]);
+  await openSearch(renderer);
+  await typeQuery(renderer, 'aa');
+  const hint = renderer.root.findByProps({ 'data-search-hint': true });
+  assert.equal(renderedText(hint), 'Scrivi almeno una parola di 2 lettere.');
+  // Né risultati, né conteggio, né messaggio "nessun risultato".
+  assert.equal(renderer.root.findAllByProps({ 'data-search-results': true }).length, 0);
+  assert.equal(renderer.root.findAllByProps({ 'data-search-results-summary': true }).length, 0);
+  assert.equal(renderer.root.findAllByProps({ 'data-search-empty': true }).length, 0);
+  // Nemmeno la vista normale (gruppi, conteggio oltre anno, Archivio) sotto il suggerimento.
+  assert.equal(renderer.root.findAll(el => el.props?.['data-commitment-group'] !== undefined).length, 0);
+  assert.equal(renderer.root.findAllByProps({ 'data-archive-commitments': true }).length, 0);
+  // Appena arriva una parola utile i risultati tornano, come prima.
+  await typeQuery(renderer, 'collegio');
+  assert.equal(renderer.root.findAllByProps({ 'data-search-hint': true }).length, 0);
+  assert.ok(renderer.root.findAllByProps({ 'data-search-results': true }).length > 0);
+  await typeQuery(renderer, 'c d');
+  assert.ok(renderer.root.findAllByProps({ 'data-search-hint': true }).length > 0, 'solo lettere singole ⇒ suggerimento');
   await act(async () => renderer.unmount());
 });
 
